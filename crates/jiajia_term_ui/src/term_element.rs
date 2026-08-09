@@ -75,13 +75,18 @@ impl BatchedTextRun {
             origin.x + self.start.column as f32 * dimensions.cell_width,
             origin.y + self.start.line as f32 * dimensions.line_height,
         );
-        let _ = window
+        let force_width = if dimensions.cell_width > px(0.) {
+            Some(dimensions.cell_width)
+        } else {
+            None
+        };
+        if let Err(err) = window
             .text_system()
             .shape_line(
                 self.text.clone().into(),
                 self.font_size,
                 std::slice::from_ref(&self.style),
-                Some(dimensions.cell_width),
+                force_width,
             )
             .paint(
                 pos,
@@ -90,7 +95,10 @@ impl BatchedTextRun {
                 None,
                 window,
                 cx,
-            );
+            )
+        {
+            log::error!("terminal text paint failed: {err:?}");
+        }
     }
 }
 
@@ -170,8 +178,8 @@ impl Element for TermElement {
                     .font_family
                     .clone()
                     .unwrap_or_else(|| "Menlo".into());
-                let font_size = settings.font_size.unwrap_or(px(14.));
-                let line_height_factor = settings.line_height.value();
+                let font_size = settings.font_size.unwrap_or(px(14.)).max(px(8.));
+                let line_height_factor = settings.line_height.value().max(1.0);
 
                 let text_style = TextStyle {
                     font_family: font_family.into(),
@@ -190,8 +198,9 @@ impl Element for TermElement {
                     .text_system()
                     .advance(font_id, font_size, 'm')
                     .map(|a| a.width)
-                    .unwrap_or(px(8.));
-                let line_height = px(f32::from(font_size) * line_height_factor);
+                    .unwrap_or(px(8.))
+                    .max(px(4.));
+                let line_height = px(f32::from(font_size) * line_height_factor).max(px(10.));
 
                 let mut grid_size = bounds.size;
                 if grid_size.width < cell_width * 2.0 {
@@ -218,6 +227,16 @@ impl Element for TermElement {
 
                 let (batches, backgrounds) =
                     layout_grid(&content.cells, &text_style, font_size, palette.as_ref());
+
+                log::debug!(
+                    "term prepaint: cells={} batches={} cell_w={:?} font={:?} cursor=({},{})",
+                    content.cells.len(),
+                    batches.len(),
+                    cell_width,
+                    text_style.font_family,
+                    content.cursor.point.line,
+                    content.cursor.point.column,
+                );
 
                 let selection = content
                     .selection

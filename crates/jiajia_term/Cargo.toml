@@ -14,8 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 env_logger.workspace = true
-gpui.workspace = true
-gpui_platform.workspace = true
+gpui = { workspace = true, features = ["font-kit"] }
+gpui_platform = { workspace = true, features = ["font-kit"] }
 jiajia_settings.workspace = true
 jiajia_term_ui.workspace = true
 release_channel.workspace = true

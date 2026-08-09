@@ -173,7 +173,12 @@ impl TermView {
     }
 
     pub fn title(&self) -> &str {
-        self.title.as_ref()
+        let title = self.title.as_ref();
+        if title.is_empty() {
+            "shell"
+        } else {
+            title
+        }
     }
 
     pub fn terminal_entity(&self) -> Option<&Entity<Terminal>> {

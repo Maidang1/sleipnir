@@ -48,10 +48,11 @@ task_types = { path = "crates/task_types" }
 jiajia_term_ui = { path = "crates/jiajia_term_ui" }
 collections = { path = "crates/collections", version = "0.1.0" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
-gpui = { path = "crates/gpui", default-features = false }
-gpui_macos = { path = "crates/gpui_macos", default-features = false }
+# font-kit is required on macOS; without it gpui_macos uses NoopTextSystem (blank text).
+gpui = { path = "crates/gpui", default-features = false, features = ["font-kit"] }
+gpui_macos = { path = "crates/gpui_macos", default-features = false, features = ["font-kit"] }
 gpui_macros = { path = "crates/gpui_macros" }
-gpui_platform = { path = "crates/gpui_platform", default-features = false }
+gpui_platform = { path = "crates/gpui_platform", default-features = false, features = ["font-kit"] }
 gpui_shared_string = { path = "crates/gpui_shared_string" }
 gpui_util = { path = "crates/gpui_util" }
 http_client = { path = "crates/http_client" }

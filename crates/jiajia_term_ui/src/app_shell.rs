@@ -254,6 +254,7 @@ impl Render for AppShell {
             .child(tab_bar)
             .child(
                 div()
+                    .flex_1()
                     .size_full()
                     .min_h_0()
                     .child(if let Some(tab) = self.tabs.get(active) {
