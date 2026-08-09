@@ -3,7 +3,7 @@
 Standalone terminal emulator for **macOS**, built on a copied [GPUI](https://gpui.rs) stack
 and (soon) Zed's terminal backend.
 
-**Status:** M4 complete — themes + settings polish.
+**Status:** M5 complete — upstream sync process.
 
 ## Credits & license
 
@@ -43,8 +43,12 @@ cargo run -p jiajia_term
 | **M2** | Real PTY + IME + selection/clipboard ✅ |
 | **M3** | Multi-tab + http(s) open ✅ |
 | **M4** | Theme/font settings polish ✅ |
-| **M5** | Upstream port checklist (`UPSTREAM.md`) |
+| **M5** | Upstream port checklist (`UPSTREAM.md`) ✅ |
 
 ## Upstream
 
 No git submodule of Zed. See `UPSTREAM.md` for ad-hoc porting.
+
+```bash
+./scripts/upstream-diff.sh /path/to/zed
+```
