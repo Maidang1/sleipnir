@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/jiajia_term_ui",
+    "crates/task_types",
+    "crates/release_channel",
+    "crates/jiajia_settings",
+    "crates/terminal",
     "crates/http_client_tls",
     "crates/gpui_wgpu",
     "crates/gpui_web",
@@ -35,6 +40,12 @@ edition = "2024"
 [workspace.dependencies]
 
 # path
+
+terminal = { path = "crates/terminal" }
+jiajia_settings = { path = "crates/jiajia_settings" }
+release_channel = { path = "crates/release_channel" }
+task_types = { path = "crates/task_types" }
+jiajia_term_ui = { path = "crates/jiajia_term_ui" }
 collections = { path = "crates/collections", version = "0.1.0" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
 gpui = { path = "crates/gpui", default-features = false }

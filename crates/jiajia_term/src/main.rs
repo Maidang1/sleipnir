@@ -1,39 +1,18 @@
-//! jiajia-term — standalone terminal (M0: empty window).
+//! jiajia-term — standalone terminal (M1: display-only ANSI grid).
 
 use gpui::{
-    App, Bounds, Context, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
 use gpui_platform::application;
-
-struct RootView {
-    title: SharedString,
-}
-
-impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .bg(rgb(0x1e1e2e))
-            .size_full()
-            .justify_center()
-            .items_center()
-            .text_color(rgb(0xcdd6f4))
-            .text_xl()
-            .child(self.title.clone())
-            .child(
-                div()
-                    .mt_4()
-                    .text_sm()
-                    .text_color(rgb(0x6c7086))
-                    .child("M0: GPUI window — terminal arrives in M1+"),
-            )
-    }
-}
+use jiajia_settings;
+use jiajia_term_ui::TermView;
+use release_channel::AppVersion;
 
 fn main() {
     application().run(|cx: &mut App| {
+        AppVersion::init(cx);
+        jiajia_settings::init(cx);
+
         let bounds = Bounds::centered(None, size(px(960.0), px(640.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -45,9 +24,11 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|_| RootView {
-                    title: "jiajia-term".into(),
+            |window, cx| {
+                cx.new(|cx| {
+                    let view = TermView::new_display_only(window, cx);
+                    view.write_demo_ansi(cx);
+                    view
                 })
             },
         )

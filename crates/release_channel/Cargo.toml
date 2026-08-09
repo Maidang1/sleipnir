@@ -1,0 +1,15 @@
+[package]
+name = "release_channel"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/release_channel.rs"
+
+[dependencies]
+gpui.workspace = true

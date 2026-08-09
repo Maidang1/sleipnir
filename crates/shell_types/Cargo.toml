@@ -1,0 +1,17 @@
+[package]
+name = "shell_types"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/shell_types.rs"
+
+[dependencies]
+serde.workspace = true
+schemars.workspace = true
+util.workspace = true
