@@ -3,9 +3,9 @@
 use gpui::{
     AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, actions, div, rgb,
+    Styled as _, Window, actions, div,
 };
-use jiajia_settings::TerminalPalette;
+use jiajia_settings::{TerminalPalette, TerminalSettings, ThemeName};
 
 use crate::TermView;
 
@@ -20,6 +20,10 @@ actions!(
         NextTab,
         /// Activate the previous tab.
         PrevTab,
+        /// Reload `~/.config/jiajia-term/settings.json`.
+        ReloadSettings,
+        /// Cycle built-in theme (mocha → macchiato → frappe → latte).
+        CycleTheme,
     ]
 );
 
@@ -154,12 +158,41 @@ impl AppShell {
     fn on_prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
         self.prev_tab(window, cx);
     }
+
+    fn on_reload_settings(
+        &mut self,
+        _: &ReloadSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        TerminalSettings::reload(cx);
+        cx.notify();
+    }
+
+    fn on_cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
+        let mut settings = TerminalSettings::get_global(cx).clone();
+        settings.theme = match settings.theme {
+            ThemeName::Mocha => ThemeName::Macchiato,
+            ThemeName::Macchiato => ThemeName::Frappe,
+            ThemeName::Frappe => ThemeName::Latte,
+            ThemeName::Latte => ThemeName::Mocha,
+        };
+        log::info!("theme -> {:?}", settings.theme);
+        TerminalSettings::apply(settings, cx);
+        cx.notify();
+    }
 }
 
 impl Render for AppShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
         let active = self.active;
+        let bar_bg = palette.background.opacity(0.92);
+        let border = palette.ansi[8];
+        let muted = palette.ansi[8];
+        let active_bg = palette.selection.opacity(0.55);
+        let active_fg = palette.foreground;
+        let inactive_fg = muted;
 
         let tab_bar = div()
             .flex()
@@ -168,22 +201,14 @@ impl Render for AppShell {
             .gap_1()
             .px_2()
             .py_1()
-            .bg(rgb(0x181825))
+            .bg(bar_bg)
             .border_b_1()
-            .border_color(rgb(0x313244))
+            .border_color(border)
             .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
                 let title: SharedString = tab.view.read(cx).title().into();
                 let is_active = ix == active;
-                let bg = if is_active {
-                    rgb(0x313244)
-                } else {
-                    rgb(0x181825)
-                };
-                let fg = if is_active {
-                    rgb(0xcdd6f4)
-                } else {
-                    rgb(0x6c7086)
-                };
+                let bg = if is_active { active_bg } else { bar_bg };
+                let fg = if is_active { active_fg } else { inactive_fg };
                 div()
                     .id(("tab", tab.id))
                     .px_3()
@@ -204,7 +229,7 @@ impl Render for AppShell {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .text_color(rgb(0xa6adc8))
+                    .text_color(inactive_fg)
                     .text_sm()
                     .cursor_pointer()
                     .child("+")
@@ -224,6 +249,8 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_prev_tab))
+            .on_action(cx.listener(Self::on_reload_settings))
+            .on_action(cx.listener(Self::on_cycle_theme))
             .child(tab_bar)
             .child(
                 div()

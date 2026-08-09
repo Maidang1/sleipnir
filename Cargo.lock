@@ -3015,6 +3015,7 @@ dependencies = [
 name = "jiajia_term"
 version = "0.1.0"
 dependencies = [
+ "env_logger",
  "gpui",
  "gpui_platform",
  "jiajia_settings",

@@ -13,6 +13,7 @@ name = "jiajia-term"
 path = "src/main.rs"
 
 [dependencies]
+env_logger.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 jiajia_settings.workspace = true

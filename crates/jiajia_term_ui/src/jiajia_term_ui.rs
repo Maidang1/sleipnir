@@ -3,7 +3,9 @@
 mod app_shell;
 mod term_element;
 
-pub use app_shell::{AppShell, CloseTab, NewTab, NextTab, PrevTab};
+pub use app_shell::{
+    AppShell, CloseTab, CycleTheme, NewTab, NextTab, PrevTab, ReloadSettings,
+};
 pub use term_element::TermElement;
 
 use collections::HashMap;
@@ -265,6 +267,23 @@ impl TermView {
             let _ = shell.update(cx, |shell, cx| shell.prev_tab_public(window, cx));
         }
     }
+
+    fn reload_settings(&mut self, _: &ReloadSettings, _window: &mut Window, cx: &mut Context<Self>) {
+        TerminalSettings::reload(cx);
+        cx.notify();
+    }
+
+    fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
+        let mut settings = TerminalSettings::get_global(cx).clone();
+        settings.theme = match settings.theme {
+            jiajia_settings::ThemeName::Mocha => jiajia_settings::ThemeName::Macchiato,
+            jiajia_settings::ThemeName::Macchiato => jiajia_settings::ThemeName::Frappe,
+            jiajia_settings::ThemeName::Frappe => jiajia_settings::ThemeName::Latte,
+            jiajia_settings::ThemeName::Latte => jiajia_settings::ThemeName::Mocha,
+        };
+        TerminalSettings::apply(settings, cx);
+        cx.notify();
+    }
 }
 
 impl Render for TermView {
@@ -286,6 +305,8 @@ impl Render for TermView {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::reload_settings))
+            .on_action(cx.listener(Self::cycle_theme))
             .on_key_down(cx.listener(Self::on_key_down))
             .child(match &self.terminal {
                 TerminalSlot::Loading => div()

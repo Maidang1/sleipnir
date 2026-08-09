@@ -222,12 +222,7 @@ impl Element for TermElement {
                 let selection = content
                     .selection
                     .map(|sel| {
-                        selection_rects(
-                            sel.point_range(),
-                            content.display_offset,
-                            &dimensions,
-                            palette.as_ref(),
-                        )
+                        selection_rects(sel.point_range(), content.display_offset, palette.as_ref())
                     })
                     .unwrap_or_default();
 
@@ -431,7 +426,6 @@ fn paint_bg(origin: GpuiPoint<Pixels>, bg: &BgRect, dimensions: &TerminalBounds,
 fn selection_rects(
     range: TerminalRange,
     display_offset: usize,
-    _dimensions: &TerminalBounds,
     palette: &TerminalPalette,
 ) -> Vec<BgRect> {
     let mut rects = Vec::new();
@@ -439,34 +433,35 @@ fn selection_rects(
     let end_line = range.end().line + display_offset as i32;
     let start_col = range.start().column as i32;
     let end_col = range.end().column as i32;
+    let color = palette.selection.opacity(0.55);
     // Simple single/multi-line selection blocks (approximate).
     if start_line == end_line {
         rects.push(BgRect {
             line: start_line,
             start_col: start_col.min(end_col),
             end_col: start_col.max(end_col),
-            color: palette.cursor.opacity(0.35),
+            color,
         });
     } else {
         rects.push(BgRect {
             line: start_line,
             start_col,
             end_col: 500,
-            color: palette.cursor.opacity(0.35),
+            color,
         });
         for line in (start_line + 1)..end_line {
             rects.push(BgRect {
                 line,
                 start_col: 0,
                 end_col: 500,
-                color: palette.cursor.opacity(0.35),
+                color,
             });
         }
         rects.push(BgRect {
             line: end_line,
             start_col: 0,
             end_col,
-            color: palette.cursor.opacity(0.35),
+            color,
         });
     }
     rects

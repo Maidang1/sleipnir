@@ -3,7 +3,7 @@
 Standalone terminal emulator for **macOS**, built on a copied [GPUI](https://gpui.rs) stack
 and (soon) Zed's terminal backend.
 
-**Status:** M3 complete — multi-tab + http(s) open.
+**Status:** M4 complete — themes + settings polish.
 
 ## Credits & license
 
@@ -32,7 +32,7 @@ cargo run -p jiajia_term
 
 ## Config (planned)
 
-`~/.config/jiajia-term/settings.json` — JSON keys compatible with Zed terminal/theme schema.
+`~/.config/jiajia-term/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`mocha`/`macchiato`/`frappe`/`latte`). See `docs/settings.example.json`. Reload with `⌘⇧R`.
 
 ## Roadmap (milestones)
 
@@ -42,7 +42,7 @@ cargo run -p jiajia_term
 | **M1** | Display-only terminal grid paint ✅ |
 | **M2** | Real PTY + IME + selection/clipboard ✅ |
 | **M3** | Multi-tab + http(s) open ✅ |
-| **M4** | Theme/font settings polish |
+| **M4** | Theme/font settings polish ✅ |
 | **M5** | Upstream port checklist (`UPSTREAM.md`) |
 
 ## Upstream

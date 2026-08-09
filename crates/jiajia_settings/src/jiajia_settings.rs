@@ -1,17 +1,22 @@
 //! Thin settings for jiajia-term.
 //!
-//! JSON keys are intentionally aligned with Zed's `terminal` / font schema where possible.
-//! Storage path: `~/.config/jiajia-term/settings.json` (not Zed's path).
+//! JSON keys align with Zed's `terminal` segment where practical.
+//! Path: `~/.config/jiajia-term/settings.json` (not Zed's config path).
+
+mod themes;
+
+pub use themes::{ThemeName, TerminalPalette, get_color_at_index, palette_for_theme};
 
 use collections::HashMap;
-use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Hsla, Pixels, Rgba, px, rgb};
+use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels, px};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use util::shell::Shell;
 
-/// Re-export for terminal crate compatibility.
+// ── enums (schema-compatible) ───────────────────────────────────────────────
+
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AlternateScroll {
@@ -47,10 +52,12 @@ pub enum WorkingDirectory {
     Always { directory: String },
 }
 
+/// Line height: bare number (Zed also accepts objects; we accept `f32` or `{"custom": n}`).
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
 pub enum TerminalLineHeight {
     Custom(f32),
+    Named { custom: f32 },
 }
 
 impl Default for TerminalLineHeight {
@@ -63,6 +70,7 @@ impl TerminalLineHeight {
     pub fn value(&self) -> f32 {
         match self {
             Self::Custom(v) => *v,
+            Self::Named { custom } => *custom,
         }
     }
 }
@@ -88,7 +96,8 @@ impl Default for Toolbar {
     }
 }
 
-/// Runtime terminal settings (schema-compatible subset).
+// ── runtime settings ────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug)]
 pub struct TerminalSettings {
     pub shell: Shell,
@@ -114,6 +123,8 @@ pub struct TerminalSettings {
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
     pub bell: TerminalBell,
+    /// Active color theme name (jiajia extension; also top-level `theme` key).
+    pub theme: ThemeName,
 }
 
 impl Default for TerminalSettings {
@@ -136,19 +147,22 @@ impl Default for TerminalSettings {
             keep_selection_on_copy: true,
             open_links_in_mouse_mode: true,
             max_scroll_history_lines: Some(10_000),
-            scroll_multiplier: 1.0,
+            scroll_multiplier: 3.0,
             toolbar: Toolbar::default(),
-            minimum_contrast: 0.0,
+            minimum_contrast: 45.0,
             path_hyperlink_regexes: Vec::new(),
             path_hyperlink_timeout_ms: 50,
             bell: TerminalBell::Off,
+            theme: ThemeName::Mocha,
         }
     }
 }
 
 struct TerminalSettingsGlobal(TerminalSettings);
-
 impl Global for TerminalSettingsGlobal {}
+
+struct TerminalPaletteGlobal(Arc<TerminalPalette>);
+impl Global for TerminalPaletteGlobal {}
 
 impl TerminalSettings {
     pub fn get_global(cx: &App) -> &TerminalSettings {
@@ -156,152 +170,77 @@ impl TerminalSettings {
     }
 
     pub fn init(cx: &mut App) {
-        let settings = load_or_default();
-        cx.set_global(TerminalSettingsGlobal(settings));
+        apply_loaded(load_or_default(), cx);
     }
 
+    /// Re-read `settings.json` and refresh globals.
     pub fn reload(cx: &mut App) {
         let settings = load_or_default();
-        cx.set_global(TerminalSettingsGlobal(settings));
+        log::info!(
+            "reloaded settings: theme={:?} font={:?} size={:?}",
+            settings.theme,
+            settings.font_family,
+            settings.font_size
+        );
+        apply_loaded(settings, cx);
+    }
+
+    /// Apply an in-memory settings snapshot (e.g. session theme cycle).
+    pub fn apply(settings: TerminalSettings, cx: &mut App) {
+        apply_loaded(settings, cx);
     }
 }
-
-/// Catppuccin-ish dark ANSI palette used for terminal cell colors.
-#[derive(Clone, Debug)]
-pub struct TerminalPalette {
-    pub background: Hsla,
-    pub foreground: Hsla,
-    pub bright_foreground: Hsla,
-    pub cursor: Hsla,
-    pub ansi: [Hsla; 16],
-    pub dim: [Hsla; 8],
-}
-
-impl Default for TerminalPalette {
-    fn default() -> Self {
-        // Catppuccin Mocha-inspired
-        fn hex(c: u32) -> Hsla {
-            rgb(c).into()
-        }
-        Self {
-            background: hex(0x1e1e2e),
-            foreground: hex(0xcdd6f4),
-            bright_foreground: hex(0xcdd6f4),
-            cursor: hex(0xf5e0dc),
-            ansi: [
-                hex(0x45475a), // black
-                hex(0xf38ba8), // red
-                hex(0xa6e3a1), // green
-                hex(0xf9e2af), // yellow
-                hex(0x89b4fa), // blue
-                hex(0xf5c2e7), // magenta
-                hex(0x94e2d5), // cyan
-                hex(0xbac2de), // white
-                hex(0x585b70), // bright black
-                hex(0xf38ba8),
-                hex(0xa6e3a1),
-                hex(0xf9e2af),
-                hex(0x89b4fa),
-                hex(0xf5c2e7),
-                hex(0x94e2d5),
-                hex(0xa6adc8), // bright white
-            ],
-            dim: [
-                hex(0x45475a),
-                hex(0xf38ba8),
-                hex(0xa6e3a1),
-                hex(0xf9e2af),
-                hex(0x89b4fa),
-                hex(0xf5c2e7),
-                hex(0x94e2d5),
-                hex(0xbac2de),
-            ],
-        }
-    }
-}
-
-struct TerminalPaletteGlobal(Arc<TerminalPalette>);
-impl Global for TerminalPaletteGlobal {}
 
 impl TerminalPalette {
     pub fn get_global(cx: &App) -> Arc<TerminalPalette> {
         cx.global::<TerminalPaletteGlobal>().0.clone()
     }
-
-    pub fn init(cx: &mut App) {
-        cx.set_global(TerminalPaletteGlobal(Arc::new(TerminalPalette::default())));
-    }
 }
 
-/// Convert an 8-bit ANSI color index to HSLA (alacritty-compatible indices).
-pub fn get_color_at_index(index: usize, palette: &TerminalPalette) -> Hsla {
-    match index {
-        0..=15 => palette.ansi[index],
-        16..=231 => {
-            let (r, g, b) = rgb_for_index(index as u8);
-            rgba_color(
-                if r == 0 { 0 } else { r * 40 + 55 },
-                if g == 0 { 0 } else { g * 40 + 55 },
-                if b == 0 { 0 } else { b * 40 + 55 },
-            )
-        }
-        232..=255 => {
-            let i = index as u8 - 232;
-            let value = i * 10 + 8;
-            rgba_color(value, value, value)
-        }
-        256 => palette.foreground,
-        257 => palette.background,
-        258 => palette.cursor,
-        259..=266 => palette.dim[(index - 259).min(7)],
-        267 => palette.bright_foreground,
-        268 => palette.ansi[0],
-        _ => Hsla::black(),
-    }
+fn apply_loaded(settings: TerminalSettings, cx: &mut App) {
+    let palette = Arc::new(palette_for_theme(settings.theme));
+    cx.set_global(TerminalPaletteGlobal(palette));
+    cx.set_global(TerminalSettingsGlobal(settings));
 }
 
-fn rgb_for_index(i: u8) -> (u8, u8, u8) {
-    debug_assert!((16..=231).contains(&i));
-    let i = i - 16;
-    let r = (i - (i % 36)) / 36;
-    let g = ((i % 36) - (i % 6)) / 6;
-    let b = (i % 36) % 6;
-    (r, g, b)
-}
-
-fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
-    Rgba {
-        r: r as f32 / 255.,
-        g: g as f32 / 255.,
-        b: b as f32 / 255.,
-        a: 1.,
-    }
-    .into()
-}
+// ── file schema ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct SettingsFile {
-    /// Font size in pixels (Zed-compatible top-level convenience).
+    /// Theme name: mocha | macchiato | frappe | latte
+    #[serde(default)]
+    theme: Option<ThemeName>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
 
+/// Zed-compatible terminal block (subset).
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct TerminalSettingsFile {
     font_size: Option<f32>,
     font_family: Option<String>,
-    line_height: Option<f32>,
+    font_fallbacks: Option<Vec<String>>,
+    /// Font weight 100–900 (optional).
+    font_weight: Option<f32>,
+    line_height: Option<TerminalLineHeight>,
     option_as_meta: Option<bool>,
     copy_on_select: Option<bool>,
+    keep_selection_on_copy: Option<bool>,
     max_scroll_history_lines: Option<usize>,
     scroll_multiplier: Option<f32>,
     minimum_contrast: Option<f32>,
     cursor_shape: Option<CursorShape>,
+    blinking: Option<TerminalBlink>,
+    alternate_scroll: Option<AlternateScroll>,
+    bell: Option<TerminalBell>,
+    env: Option<HashMap<String, String>>,
+    /// Optional nested theme override.
+    theme: Option<ThemeName>,
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config/jiajia-term/settings.json")
@@ -310,44 +249,73 @@ fn config_path() -> PathBuf {
 fn load_or_default() -> TerminalSettings {
     let mut settings = TerminalSettings::default();
     let path = config_path();
-    if let Ok(bytes) = std::fs::read(&path) {
-        match serde_json::from_slice::<SettingsFile>(&bytes) {
-            Ok(file) => {
-                if let Some(size) = file.terminal.font_size {
-                    settings.font_size = Some(px(size));
-                }
-                if let Some(family) = file.terminal.font_family {
-                    settings.font_family = Some(family);
-                }
-                if let Some(lh) = file.terminal.line_height {
-                    settings.line_height = TerminalLineHeight::Custom(lh);
-                }
-                if let Some(v) = file.terminal.option_as_meta {
-                    settings.option_as_meta = v;
-                }
-                if let Some(v) = file.terminal.copy_on_select {
-                    settings.copy_on_select = v;
-                }
-                if let Some(v) = file.terminal.max_scroll_history_lines {
-                    settings.max_scroll_history_lines = Some(v);
-                }
-                if let Some(v) = file.terminal.scroll_multiplier {
-                    settings.scroll_multiplier = v;
-                }
-                if let Some(v) = file.terminal.minimum_contrast {
-                    settings.minimum_contrast = v;
-                }
-                if let Some(v) = file.terminal.cursor_shape {
-                    settings.cursor_shape = v;
-                }
-            }
+    match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<SettingsFile>(&bytes) {
+            Ok(file) => merge_file(&mut settings, file),
             Err(err) => log::warn!("failed to parse {}: {err}", path.display()),
-        }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => log::warn!("failed to read {}: {err}", path.display()),
     }
     settings
 }
 
-/// Ensure config directory exists and write a default file if missing.
+fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
+    if let Some(theme) = file.theme.or(file.terminal.theme) {
+        settings.theme = theme;
+    }
+    let t = file.terminal;
+    if let Some(size) = t.font_size {
+        settings.font_size = Some(px(size));
+    }
+    if let Some(family) = t.font_family {
+        settings.font_family = Some(family);
+    }
+    if let Some(fallbacks) = t.font_fallbacks {
+        settings.font_fallbacks = Some(FontFallbacks::from_fonts(fallbacks));
+    }
+    if let Some(w) = t.font_weight {
+        settings.font_weight = Some(FontWeight(w));
+    }
+    if let Some(lh) = t.line_height {
+        settings.line_height = lh;
+    }
+    if let Some(v) = t.option_as_meta {
+        settings.option_as_meta = v;
+    }
+    if let Some(v) = t.copy_on_select {
+        settings.copy_on_select = v;
+    }
+    if let Some(v) = t.keep_selection_on_copy {
+        settings.keep_selection_on_copy = v;
+    }
+    if let Some(v) = t.max_scroll_history_lines {
+        settings.max_scroll_history_lines = Some(v);
+    }
+    if let Some(v) = t.scroll_multiplier {
+        settings.scroll_multiplier = v;
+    }
+    if let Some(v) = t.minimum_contrast {
+        settings.minimum_contrast = v;
+    }
+    if let Some(v) = t.cursor_shape {
+        settings.cursor_shape = v;
+    }
+    if let Some(v) = t.blinking {
+        settings.blinking = v;
+    }
+    if let Some(v) = t.alternate_scroll {
+        settings.alternate_scroll = v;
+    }
+    if let Some(v) = t.bell {
+        settings.bell = v;
+    }
+    if let Some(env) = t.env {
+        settings.env = env;
+    }
+}
+
+/// Write a default settings file if missing.
 pub fn ensure_default_config_file() -> anyhow::Result<()> {
     let path = config_path();
     if path.exists() {
@@ -357,20 +325,27 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let default = SettingsFile {
+        theme: Some(ThemeName::Mocha),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some("Menlo".into()),
-            line_height: Some(1.3),
+            line_height: Some(TerminalLineHeight::Custom(1.3)),
+            option_as_meta: Some(true),
+            copy_on_select: Some(false),
+            max_scroll_history_lines: Some(10_000),
+            scroll_multiplier: Some(3.0),
+            minimum_contrast: Some(45.0),
+            cursor_shape: Some(CursorShape::Block),
             ..Default::default()
         },
     };
     let json = serde_json::to_string_pretty(&default)?;
-    std::fs::write(path, json)?;
+    std::fs::write(&path, format!("{json}\n"))?;
+    log::info!("wrote default settings to {}", path.display());
     Ok(())
 }
 
 pub fn init(cx: &mut App) {
     let _ = ensure_default_config_file();
     TerminalSettings::init(cx);
-    TerminalPalette::init(cx);
 }
