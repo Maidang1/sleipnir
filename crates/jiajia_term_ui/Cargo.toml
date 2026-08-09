@@ -12,6 +12,8 @@ workspace = true
 path = "src/jiajia_term_ui.rs"
 
 [dependencies]
+collections.workspace = true
+dirs.workspace = true
 gpui.workspace = true
 terminal.workspace = true
 jiajia_settings.workspace = true

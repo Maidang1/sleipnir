@@ -18,4 +18,5 @@ gpui_platform.workspace = true
 jiajia_settings.workspace = true
 jiajia_term_ui.workspace = true
 release_channel.workspace = true
+terminal.workspace = true
 log.workspace = true

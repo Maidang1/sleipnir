@@ -1,15 +1,18 @@
-//! Minimal terminal grid painter (M1), adapted from Zed `terminal_element` batching ideas.
+//! Terminal grid painter + input (M2).
 
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, Entity, FocusHandle, GlobalElementId,
-    InteractiveElement, IntoElement, LayoutId, Pixels, Point as GpuiPoint, StatefulInteractiveElement,
-    Styled as _, TextRun, TextStyle, Window, fill, point, px, relative, size,
+    App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
+    GlobalElementId, InputHandler, InteractiveElement, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ScrollWheelEvent,
+    StatefulInteractiveElement, TextRun, TextStyle, UTF16Selection, Window, fill, point, px,
+    relative, size,
 };
 use itertools::Itertools;
 use jiajia_settings::{TerminalPalette, TerminalSettings, get_color_at_index};
-use std::time::Instant;
+use std::ops::Range as StdRange;
 use terminal::{
-    Cell, Color, IndexedCell, NamedColor, Terminal, TerminalBounds, is_default_background_color,
+    Cell, Color, IndexedCell, NamedColor, Range as TerminalRange, Terminal, TerminalBounds,
+    is_default_background_color,
 };
 
 pub struct TermElement {
@@ -103,8 +106,10 @@ pub struct LayoutState {
     dimensions: TerminalBounds,
     batches: Vec<BatchedTextRun>,
     backgrounds: Vec<BgRect>,
+    selection: Vec<BgRect>,
     background_color: gpui::Hsla,
-    cursor: Option<(usize, usize, char)>,
+    cursor: Option<(usize, i32, char)>,
+    ime_cursor_bounds: Option<Bounds<Pixels>>,
 }
 
 impl Element for TermElement {
@@ -188,17 +193,22 @@ impl Element for TermElement {
                     .unwrap_or(px(8.));
                 let line_height = px(f32::from(font_size) * line_height_factor);
 
-                let mut size = bounds.size;
-                // Keep at least 2 columns for wide-char safety.
-                if size.width < cell_width * 2.0 {
-                    size.width = cell_width * 2.0;
+                let mut grid_size = bounds.size;
+                if grid_size.width < cell_width * 2.0 {
+                    grid_size.width = cell_width * 2.0;
                 }
 
                 let scale = window.scale_factor();
                 let snap = |v: Pixels| Pixels::from((f32::from(v) * scale).floor() / scale);
                 let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
-
-                let dimensions = TerminalBounds::new(line_height, cell_width, Bounds { origin, size });
+                let dimensions = TerminalBounds::new(
+                    line_height,
+                    cell_width,
+                    Bounds {
+                        origin,
+                        size: grid_size,
+                    },
+                );
 
                 let content = self.terminal.update(cx, |terminal, cx| {
                     terminal.set_size(dimensions);
@@ -207,22 +217,39 @@ impl Element for TermElement {
                 });
 
                 let (batches, backgrounds) =
-                    layout_grid(&content.cells, &text_style, font_size, palette.as_ref(), cx);
+                    layout_grid(&content.cells, &text_style, font_size, palette.as_ref());
 
-                let cursor = content.cursor.point;
-                let cursor_char = content.cursor_char;
+                let selection = content
+                    .selection
+                    .map(|sel| {
+                        selection_rects(
+                            sel.point_range(),
+                            content.display_offset,
+                            &dimensions,
+                            palette.as_ref(),
+                        )
+                    })
+                    .unwrap_or_default();
+
+                let cursor_point = content.cursor.point;
+                let display_line = cursor_point.line + content.display_offset as i32;
+                let ime_cursor_bounds = Some(Bounds::new(
+                    point(
+                        origin.x + cursor_point.column as f32 * cell_width,
+                        origin.y + display_line as f32 * line_height,
+                    ),
+                    size(cell_width, line_height),
+                ));
 
                 LayoutState {
                     hitbox,
                     dimensions,
                     batches,
                     backgrounds,
+                    selection,
                     background_color: palette.background,
-                    cursor: Some((
-                        cursor.column,
-                        (cursor.line + content.display_offset as i32).max(0) as usize,
-                        cursor_char,
-                    )),
+                    cursor: Some((cursor_point.column, display_line, content.cursor_char)),
+                    ime_cursor_bounds,
                 }
             },
         )
@@ -238,10 +265,16 @@ impl Element for TermElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let _t0 = Instant::now();
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, layout.background_color));
             let origin = layout.dimensions.bounds.origin;
+
+            self.register_mouse_listeners(window);
+
+            let input_handler = TerminalInputHandler {
+                terminal: self.terminal.clone(),
+                cursor_bounds: layout.ime_cursor_bounds,
+            };
 
             self.interactivity.paint(
                 global_id,
@@ -251,21 +284,15 @@ impl Element for TermElement {
                 window,
                 cx,
                 |_, window, cx| {
-                    for bg in &layout.backgrounds {
-                        let rect = Bounds::new(
-                            point(
-                                origin.x + bg.start_col as f32 * layout.dimensions.cell_width,
-                                origin.y + bg.line as f32 * layout.dimensions.line_height,
-                            ),
-                            size(
-                                ((bg.end_col - bg.start_col + 1) as f32)
-                                    * layout.dimensions.cell_width,
-                                layout.dimensions.line_height,
-                            ),
-                        );
-                        window.paint_quad(fill(rect, bg.color));
-                    }
+                    window.handle_input(&self.focus, input_handler, cx);
+                    window.set_cursor_style(gpui::CursorStyle::IBeam, &layout.hitbox);
 
+                    for bg in &layout.selection {
+                        paint_bg(origin, bg, &layout.dimensions, window);
+                    }
+                    for bg in &layout.backgrounds {
+                        paint_bg(origin, bg, &layout.dimensions, window);
+                    }
                     for batch in &layout.batches {
                         batch.paint(origin, &layout.dimensions, window, cx);
                     }
@@ -282,7 +309,6 @@ impl Element for TermElement {
                             size(layout.dimensions.cell_width, layout.dimensions.line_height),
                         );
                         window.paint_quad(fill(cursor_bounds, palette.cursor));
-                        // invert-ish glyph
                         let style = TextRun {
                             len: ch.len_utf8(),
                             font: window.text_style().font(),
@@ -291,11 +317,14 @@ impl Element for TermElement {
                             underline: None,
                             strikethrough: None,
                         };
+                        let font_size = TerminalSettings::get_global(cx)
+                            .font_size
+                            .unwrap_or(px(14.));
                         let _ = window
                             .text_system()
                             .shape_line(
                                 ch.to_string().into(),
-                                layout.dimensions.line_height * 0.75, // approx font size
+                                font_size,
                                 &[style],
                                 Some(layout.dimensions.cell_width),
                             )
@@ -314,6 +343,70 @@ impl Element for TermElement {
     }
 }
 
+impl TermElement {
+    fn register_mouse_listeners(&mut self, window: &mut Window) {
+        let terminal = self.terminal.clone();
+        let focus = self.focus.clone();
+
+        self.interactivity.on_mouse_down(MouseButton::Left, {
+            let terminal = terminal.clone();
+            let focus = focus.clone();
+            move |e: &MouseDownEvent, window, cx| {
+                window.focus(&focus, cx);
+                terminal.update(cx, |terminal, cx| {
+                    terminal.mouse_down(e, cx);
+                    cx.notify();
+                });
+            }
+        });
+
+        window.on_mouse_event({
+            let terminal = terminal.clone();
+            let hitbox = (); // hitbox checked inside via focus
+            let focus = focus.clone();
+            move |e: &MouseMoveEvent, phase, window, cx| {
+                let _ = hitbox;
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                if e.pressed_button.is_some() && focus.is_focused(window) {
+                    // bounds filled by terminal from last content during drag
+                    let bounds = terminal.read(cx).last_content().terminal_bounds.bounds;
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.mouse_drag(e, bounds, cx);
+                        cx.notify();
+                    });
+                }
+                terminal.update(cx, |terminal, cx| {
+                    terminal.mouse_move(e, cx);
+                });
+            }
+        });
+
+        self.interactivity.on_mouse_up(MouseButton::Left, {
+            let terminal = terminal.clone();
+            move |e: &MouseUpEvent, _window, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.mouse_up(e, cx);
+                    cx.notify();
+                });
+            }
+        });
+
+        self.interactivity.on_scroll_wheel({
+            let terminal = terminal.clone();
+            move |e: &ScrollWheelEvent, _window, cx| {
+                let multiplier = TerminalSettings::get_global(cx).scroll_multiplier;
+                terminal.update(cx, |terminal, cx| {
+                    terminal.scroll_wheel(e, multiplier);
+                    // scroll events queue InternalEvent; need notify after next sync
+                    cx.notify();
+                });
+            }
+        });
+    }
+}
+
 impl IntoElement for TermElement {
     type Element = Self;
     fn into_element(self) -> Self::Element {
@@ -321,12 +414,69 @@ impl IntoElement for TermElement {
     }
 }
 
+fn paint_bg(origin: GpuiPoint<Pixels>, bg: &BgRect, dimensions: &TerminalBounds, window: &mut Window) {
+    let rect = Bounds::new(
+        point(
+            origin.x + bg.start_col as f32 * dimensions.cell_width,
+            origin.y + bg.line as f32 * dimensions.line_height,
+        ),
+        size(
+            ((bg.end_col - bg.start_col + 1) as f32) * dimensions.cell_width,
+            dimensions.line_height,
+        ),
+    );
+    window.paint_quad(fill(rect, bg.color));
+}
+
+fn selection_rects(
+    range: TerminalRange,
+    display_offset: usize,
+    _dimensions: &TerminalBounds,
+    palette: &TerminalPalette,
+) -> Vec<BgRect> {
+    let mut rects = Vec::new();
+    let start_line = range.start().line + display_offset as i32;
+    let end_line = range.end().line + display_offset as i32;
+    let start_col = range.start().column as i32;
+    let end_col = range.end().column as i32;
+    // Simple single/multi-line selection blocks (approximate).
+    if start_line == end_line {
+        rects.push(BgRect {
+            line: start_line,
+            start_col: start_col.min(end_col),
+            end_col: start_col.max(end_col),
+            color: palette.cursor.opacity(0.35),
+        });
+    } else {
+        rects.push(BgRect {
+            line: start_line,
+            start_col,
+            end_col: 500,
+            color: palette.cursor.opacity(0.35),
+        });
+        for line in (start_line + 1)..end_line {
+            rects.push(BgRect {
+                line,
+                start_col: 0,
+                end_col: 500,
+                color: palette.cursor.opacity(0.35),
+            });
+        }
+        rects.push(BgRect {
+            line: end_line,
+            start_col: 0,
+            end_col,
+            color: palette.cursor.opacity(0.35),
+        });
+    }
+    rects
+}
+
 fn layout_grid(
     cells: &[IndexedCell],
     text_style: &TextStyle,
     font_size: Pixels,
     palette: &TerminalPalette,
-    _cx: &App,
 ) -> (Vec<BatchedTextRun>, Vec<BgRect>) {
     let mut batches: Vec<BatchedTextRun> = Vec::new();
     let mut backgrounds: Vec<BgRect> = Vec::new();
@@ -366,10 +516,7 @@ fn layout_grid(
                 }
             }
 
-            if cell.is_wide_char_spacer() {
-                continue;
-            }
-            if is_blank(cell) {
+            if cell.is_wide_char_spacer() || is_blank(cell) {
                 continue;
             }
 
@@ -477,4 +624,95 @@ fn is_blank(cell: &Cell) -> bool {
         && cell.zerowidth().map(|z| z.is_empty()).unwrap_or(true)
         && !cell.has_underline()
         && !cell.has_strikeout()
+}
+
+struct TerminalInputHandler {
+    terminal: Entity<Terminal>,
+    cursor_bounds: Option<Bounds<Pixels>>,
+}
+
+impl InputHandler for TerminalInputHandler {
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut App) -> Option<StdRange<usize>> {
+        None
+    }
+
+    fn text_for_range(
+        &mut self,
+        _: StdRange<usize>,
+        _: &mut Option<StdRange<usize>>,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Option<String> {
+        None
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _replacement_range: Option<StdRange<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        self.terminal.update(cx, |term, _| {
+            term.input(text.as_bytes().to_vec());
+        });
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range_utf16: Option<StdRange<usize>>,
+        _new_text: &str,
+        _new_marked_range: Option<StdRange<usize>>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+        // Marked IME text overlay can be painted later; commit still arrives via replace_text.
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {}
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: StdRange<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        let mut bounds = self.cursor_bounds?;
+        let cell_width = self
+            .terminal
+            .read(cx)
+            .last_content()
+            .terminal_bounds
+            .cell_width;
+        bounds.origin.x += cell_width * range_utf16.start as f32;
+        Some(bounds)
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: GpuiPoint<Pixels>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<usize> {
+        Some(0)
+    }
 }

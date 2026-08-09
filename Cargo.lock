@@ -3021,12 +3021,15 @@ dependencies = [
  "jiajia_term_ui",
  "log",
  "release_channel",
+ "terminal",
 ]
 
 [[package]]
 name = "jiajia_term_ui"
 version = "0.1.0"
 dependencies = [
+ "collections",
+ "dirs",
  "gpui",
  "itertools 0.14.0",
  "jiajia_settings",
