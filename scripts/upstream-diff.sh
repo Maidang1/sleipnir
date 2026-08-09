@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Dry-run: summarize diffs between this repo's copied crates and a Zed checkout.
+# Dry-run: compare local forks against a Zed checkout; print pinned revs.
 # Usage: ./scripts/upstream-diff.sh [ZED_ROOT]
-# Default ZED_ROOT: $ZED_ROOT env, else ../open-source/zed relative to this monorepo layout.
 
 set -euo pipefail
 
@@ -34,6 +33,10 @@ mkdir -p "${ROOT}/docs"
   echo "zed_root: ${ZED_ROOT}"
   echo
 
+  echo "== pinned revs in jiajia Cargo.toml =="
+  rg -N 'rev = "' "${ROOT}/Cargo.toml" || true
+  echo
+
   echo "== alacritty_terminal rev =="
   echo -n "jiajia: "
   rg -N 'alacritty_terminal = \{ git' "${ROOT}/Cargo.toml" || true
@@ -41,14 +44,15 @@ mkdir -p "${ROOT}/docs"
   rg -N 'alacritty_terminal = \{ git' "${ZED_ROOT}/Cargo.toml" || true
   echo
 
-  # Paths relative to crates/
+  echo "== GPUI stack =="
+  echo "Not vendored. Consumed via git pin from zed-industries/zed (see Cargo.toml)."
+  echo "Local checkout tip vs pin is informational only."
+  echo
+
+  # Local forks only
   PATHS=(
     terminal/src
-    gpui/src
-    gpui_macos/src
     gpui_platform/src
-    collections/src
-    util/src
   )
 
   for rel in "${PATHS[@]}"; do
@@ -61,20 +65,17 @@ mkdir -p "${ROOT}/docs"
       continue
     fi
     if [[ ! -d "${zed_p}" ]]; then
-      echo "(missing in Zed)"
+      echo "(missing in Zed — expected for jiajia-only paths)"
       echo
       continue
     fi
-    # stat-only summary + short stat
     if diff -rq "${local_p}" "${zed_p}" >/tmp/jiajia-upstream-rq.txt 2>/dev/null; then
       echo "identical"
     else
-      # count differing files
       changed=$(grep -c ' differ$' /tmp/jiajia-upstream-rq.txt || true)
       only_local=$(grep -c "^Only in ${local_p}" /tmp/jiajia-upstream-rq.txt || true)
       only_zed=$(grep -c "^Only in ${zed_p}" /tmp/jiajia-upstream-rq.txt || true)
       echo "files differ: ${changed:-0}  only-local: ${only_local:-0}  only-zed: ${only_zed:-0}"
-      # top of rq list (cap)
       head -40 /tmp/jiajia-upstream-rq.txt | sed 's|^|  |'
       if [[ $(wc -l </tmp/jiajia-upstream-rq.txt) -gt 40 ]]; then
         echo "  ... (truncated)"
@@ -83,14 +84,14 @@ mkdir -p "${ROOT}/docs"
     echo
   done
 
-  echo "== jiajia-only crates (not from Zed wholesale) =="
+  echo "== jiajia-only crates =="
   for c in jiajia_settings jiajia_term jiajia_term_ui task_types release_channel; do
     if [[ -d "${ROOT}/crates/${c}" ]]; then
       echo "  crates/${c}"
     fi
   done
   echo
-  echo "Done. Review this file; apply ports manually per UPSTREAM.md."
+  echo "Done. To upgrade GPUI: bump all Zed rev= pins in Cargo.toml (see UPSTREAM.md)."
 } | tee "${OUT}"
 
 echo "wrote ${OUT}"

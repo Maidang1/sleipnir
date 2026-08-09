@@ -1,70 +1,72 @@
-# Upstream sync (ad-hoc)
+# Upstream sync (git pin + local forks)
 
-jiajia-term **copies** selected code from [Zed](https://github.com/zed-industries/zed).
-There is **no** git submodule, subtree, or path dependency on the Zed monorepo.
+jiajia-term **does not copy** the GPUI stack into this repo.
 
-Policy: **no fixed calendar**. Port when a bug is fixed upstream or you intentionally refresh GPUI/terminal.
+GPUI and shared Zed utilities come from the [Zed monorepo](https://github.com/zed-industries/zed) via **Cargo git dependencies** pinned to a single commit (`rev` in root `Cargo.toml`).
+
+What stays **local** (forked or original):
+
+| Crate | Why local |
+|-------|-----------|
+| `terminal` | Heavily forked: settings/theme/task rewired to `jiajia_settings` / `task_types` |
+| `gpui_platform` | Slim macOS-only application entry |
+| `jiajia_term`, `jiajia_term_ui`, `jiajia_settings`, `task_types`, `release_channel` | Product code |
 
 ---
 
-## Baseline pins (record at fork / last sync)
+## Baseline pins
 
 | Item | Value |
 |------|--------|
-| Source | Zed monorepo (local or clone) |
-| Approx. Zed commit at M0 copy | `371a7d4` (2026-08-09) — update when you re-copy |
+| Source | `https://github.com/zed-industries/zed` |
+| **Zed `rev`** | `371a7d4ba2fd0064b79a0bc67d28e57a906779dc` (2026-08-09) |
+| Packages from that rev | `gpui`, `gpui_macos`, `collections`, `util`, `util_macros` (+ their transitive Zed crates) |
 | `alacritty_terminal` | `git = "https://github.com/zed-industries/alacritty"` **rev `4c129667ce56611becdc82de6e28218c80e2e88f`** |
 | Rust toolchain | `1.95.0` (`rust-toolchain.toml`, match Zed) |
 | License | GPUI stack Apache-2.0; terminal path GPL-3.0-or-later |
 
-After each successful port, update this table and mention pins in the commit message.
+After each successful upgrade, update this table and the `rev` values in root `Cargo.toml` (keep every Zed package on the **same** `rev`).
 
 ---
 
-## What we track
+## How dependency works
 
-### High value (port carefully)
+```toml
+# root Cargo.toml (pattern)
+gpui = { git = "https://github.com/zed-industries/zed", rev = "<SAME>", default-features = false, features = ["font-kit"] }
+gpui_macos = { git = "https://github.com/zed-industries/zed", rev = "<SAME>", ... }
+collections = { git = "https://github.com/zed-industries/zed", rev = "<SAME>" }
+util = { git = "https://github.com/zed-industries/zed", rev = "<SAME>" }
+```
 
-| Path in Zed | Path here | Notes |
-|-------------|-----------|--------|
-| `crates/terminal/src/**` | `crates/terminal/src/**` | **Heavily forked**: settings/theme/task rewired to `jiajia_settings` / `task_types`. Do **not** wholesale overwrite `terminal_settings.rs` or settings `use` lines. |
-| `crates/gpui/**` | `crates/gpui/**` | Prefer small patches; watch workspace deps. |
-| `crates/gpui_macos/**` | `crates/gpui_macos/**` | Metal shaders / macOS platform. |
-| `crates/gpui_platform/**` | `crates/gpui_platform/**` | Here: **macOS-only** slim `gpui_platform.rs`. |
+Cargo clones the monorepo once per rev and resolves workspace/path deps inside Zed. You do **not** need to list every transitive crate (`scheduler`, `sum_tree`, `media`, …) in jiajia’s workspace unless a **local** crate depends on it via `workspace = true`.
 
-### Medium (as needed)
-
-`collections`, `util`, `sum_tree`, `scheduler`, `http_client`, `refineable`, `gpui_*` helpers.
-
-### Do **not** re-import
-
-`workspace`, `editor`, `project`, full `settings` / `settings_content`, `theme` IDE stack, agent/collab.
+Required `[patch.crates-io]` entries (aligned with Zed) live in root `Cargo.toml` (`async-process`, `async-task`, …).
 
 ---
 
-## Port checklist
+## Upgrade checklist
 
-1. **Locate Zed checkout** (outside this repo), e.g.  
-   `export ZED_ROOT=~/codes/open-source/zed`
-2. **Record versions**  
-   `git -C "$ZED_ROOT" rev-parse HEAD`  
-   Compare Zed’s `alacritty_terminal` rev in `$ZED_ROOT/Cargo.toml` with ours.
-3. **Dry-run diffs** (no edits):  
-   `./scripts/upstream-diff.sh "$ZED_ROOT"`
-4. **Read the diff**. For each interesting hunk:
-   - Apply by hand into `crates/…`
-   - Preserve jiajia forks (`terminal_settings`, palette colors, `task_types`, slim platform).
-5. **Build**  
-   `cargo build -p jiajia_term`  
-   `cargo build -p jiajia_term --release` (optional)
-6. **Smoke**  
+1. Pick a new Zed commit:  
+   `git -C /path/to/zed rev-parse HEAD`
+2. Compare Zed’s `alacritty_terminal` rev with ours; bump if needed.
+3. In root `Cargo.toml`, replace **all** Zed `rev = "…"` with the new commit (same string everywhere).
+4. Build:  
+   `cargo build -p jiajia_term`
+5. Fix **local** breaks only (`terminal`, `jiajia_term_ui`, `gpui_platform`, settings). Do not vendor GPUI back unless you must patch upstream.
+6. Smoke:  
    `cargo run -p jiajia_term` — shell, tabs (`⌘T`), settings reload (`⌘⇧R`).
-7. **Commit** with Zed commit + alacritty rev in the message.  
-   Update the pin table above.
+7. Commit with Zed rev + alacritty rev in the message; update this table.
+
+Optional dry-run against a local Zed checkout (forks only):
+
+```bash
+./scripts/upstream-diff.sh /path/to/zed
+```
 
 ---
 
-## Known jiajia-specific forks (merge conflict hotspots)
+## Known jiajia-specific forks (API break hotspots)
 
 | Area | Why different |
 |------|----------------|
@@ -72,28 +74,17 @@ After each successful port, update this table and mention pins in the commit mes
 | `terminal/src/terminal.rs` imports | `task_types`, `jiajia_settings::TerminalPalette` instead of `task`/`theme` |
 | `get_color_at_index` | Takes palette, not full `Theme` |
 | Integration tests in terminal | Stubbed / disabled |
-| `gpui_platform` | macOS-only application entry |
-| UI | `jiajia_term_ui` is original; do not expect Zed `terminal_view` drop-in |
+| `gpui_platform` | macOS-only application entry (not multi-platform Zed crate) |
+| UI | `jiajia_term_ui` is original; not Zed `terminal_view` |
+
+---
+
+## When to re-vendor (exception)
+
+Prefer git pin. Copy a crate into `crates/` only if you need a long-lived private patch to GPUI that cannot live upstream or in a personal Zed fork + alternate `git` URL.
 
 ---
 
 ## Alacritty rev change
 
-If Zed bumps `alacritty_terminal`:
-
-1. Copy the new `rev` into root `Cargo.toml` (`workspace.dependencies.alacritty_terminal`).
-2. `cargo update -p alacritty_terminal` (or rebuild and let lock refresh).
-3. Fix compile breaks in `crates/terminal` (API drift is rare but real).
-4. Smoke PTY + scrollback + colors.
-
----
-
-## Dry-run
-
-```bash
-# from jiajia-term root
-./scripts/upstream-diff.sh /path/to/zed
-# writes summary under docs/upstream-last-diff.txt
-```
-
-A dry-run with **no code port** still counts as a successful M5 exercise if the script runs and pins are recorded.
+If PTY/behavior bugs track alacritty, bump `alacritty_terminal` rev independently (still record both pins). Prefer matching whatever Zed uses at the GPUI `rev` you choose.

@@ -1,7 +1,8 @@
 # jiajia-term
 
-Standalone terminal emulator for **macOS**, built on a copied [GPUI](https://gpui.rs) stack
-and (soon) Zed's terminal backend.
+Standalone terminal emulator for **macOS**, built on [GPUI](https://gpui.rs) from the
+[Zed](https://github.com/zed-industries/zed) monorepo (Cargo **git pin** by commit) plus a
+forked terminal backend.
 
 **Status:** M5 complete — upstream sync process.
 
@@ -47,7 +48,9 @@ cargo run -p jiajia_term
 
 ## Upstream
 
-No git submodule of Zed. See `UPSTREAM.md` for ad-hoc porting.
+GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a fixed `rev`
+(`gpui`, `gpui_macos`, `collections`, `util`, …). Local forks: `terminal`, slim `gpui_platform`,
+and jiajia app crates. See `UPSTREAM.md` to bump the pin.
 
 ```bash
 ./scripts/upstream-diff.sh /path/to/zed
