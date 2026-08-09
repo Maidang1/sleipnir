@@ -3,7 +3,7 @@
 Standalone terminal emulator for **macOS**, built on a copied [GPUI](https://gpui.rs) stack
 and (soon) Zed's terminal backend.
 
-**Status:** M2 complete — local PTY shell + input.
+**Status:** M3 complete — multi-tab + http(s) open.
 
 ## Credits & license
 
@@ -41,7 +41,7 @@ cargo run -p jiajia_term
 | **M0** | GPUI empty window ✅ |
 | **M1** | Display-only terminal grid paint ✅ |
 | **M2** | Real PTY + IME + selection/clipboard ✅ |
-| **M3** | Multi-tab + http(s) open |
+| **M3** | Multi-tab + http(s) open ✅ |
 | **M4** | Theme/font settings polish |
 | **M5** | Upstream port checklist (`UPSTREAM.md`) |
 

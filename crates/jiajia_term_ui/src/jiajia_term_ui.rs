@@ -1,18 +1,28 @@
-//! Terminal UI for jiajia-term (M2: local PTY + input).
+//! Terminal UI for jiajia-term (M2 PTY input, M3 tabs + URL open).
 
+mod app_shell;
 mod term_element;
 
+pub use app_shell::{AppShell, CloseTab, NewTab, NextTab, PrevTab};
 pub use term_element::TermElement;
 
 use collections::HashMap;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, Styled as _, Task,
-    Window, div, rgb,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    Styled as _, Task, WeakEntity, Window, div, rgb,
 };
 use jiajia_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
-use terminal::{Copy, Event, Paste, Terminal, TerminalBuilder};
+use terminal::{Copy, Event, MaybeNavigationTarget, Paste, Terminal, TerminalBuilder};
 use util::paths::PathStyle;
+
+/// Bubbled from a tab so the shell can refresh titles.
+#[derive(Clone, Debug)]
+pub enum TermViewEvent {
+    TitleChanged,
+}
+
+impl EventEmitter<TermViewEvent> for TermView {}
 
 enum TerminalSlot {
     Loading,
@@ -25,6 +35,7 @@ pub struct TermView {
     terminal: TerminalSlot,
     focus_handle: FocusHandle,
     title: SharedString,
+    shell: Option<WeakEntity<AppShell>>,
     _spawn: Task<()>,
 }
 
@@ -37,6 +48,14 @@ impl Focusable for TermView {
 impl TermView {
     /// Spawn a local interactive shell PTY and attach UI when ready.
     pub fn new_local(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_local_in_shell(None, window, cx)
+    }
+
+    pub(crate) fn new_local_in_shell(
+        shell: Option<WeakEntity<AppShell>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings = TerminalSettings::get_global(cx).clone();
         let window_id = window.window_handle().window_id().as_u64();
         let cwd = dirs::home_dir();
@@ -71,7 +90,8 @@ impl TermView {
                     this.attach_terminal(terminal, window, cx);
                 }
                 Err(err) => {
-                    this.terminal = TerminalSlot::Failed(format!("failed to open PTY: {err:#}").into());
+                    this.terminal =
+                        TerminalSlot::Failed(format!("failed to open PTY: {err:#}").into());
                     cx.notify();
                 }
             })
@@ -82,6 +102,7 @@ impl TermView {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
             title: "jiajia-term".into(),
+            shell,
             _spawn: spawn,
         }
     }
@@ -104,6 +125,7 @@ impl TermView {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
             title: "jiajia-term (display)".into(),
+            shell: None,
             _spawn: Task::ready(()),
         };
         this.attach_terminal(terminal, window, cx);
@@ -116,26 +138,29 @@ impl TermView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe_in(&terminal, window, |this, terminal, event, window, cx| {
+        cx.subscribe_in(&terminal, window, |this, terminal, event, _window, cx| {
             match event {
                 Event::Wakeup | Event::SelectionsChanged | Event::BlinkChanged(_) => {
                     cx.notify();
                 }
                 Event::TitleChanged | Event::BreadcrumbsChanged => {
                     this.title = terminal.read(cx).title(true).into();
+                    cx.emit(TermViewEvent::TitleChanged);
                     cx.notify();
                 }
                 Event::Bell => {
-                    // Optional: system bell later.
                     cx.notify();
                 }
                 Event::CloseTerminal => {
                     this.title = "exited".into();
+                    cx.emit(TermViewEvent::TitleChanged);
                     cx.notify();
                 }
-                Event::NewNavigationTarget(_) | Event::Open(_) => {}
+                Event::NewNavigationTarget(_) => {}
+                Event::Open(target) => {
+                    open_navigation_target(target, cx);
+                }
             }
-            let _ = window;
         })
         .detach();
 
@@ -143,6 +168,10 @@ impl TermView {
         self.terminal = TerminalSlot::Ready(terminal);
         window.focus(&self.focus_handle, cx);
         cx.notify();
+    }
+
+    pub fn title(&self) -> &str {
+        self.title.as_ref()
     }
 
     pub fn terminal_entity(&self) -> Option<&Entity<Terminal>> {
@@ -212,6 +241,30 @@ impl TermView {
             cx.notify();
         }
     }
+
+    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.clone() {
+            let _ = shell.update(cx, |shell, cx| shell.add_tab_public(window, cx));
+        }
+    }
+
+    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.clone() {
+            let _ = shell.update(cx, |shell, cx| shell.close_active_tab_public(window, cx));
+        }
+    }
+
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.clone() {
+            let _ = shell.update(cx, |shell, cx| shell.next_tab_public(window, cx));
+        }
+    }
+
+    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.clone() {
+            let _ = shell.update(cx, |shell, cx| shell.prev_tab_public(window, cx));
+        }
+    }
 }
 
 impl Render for TermView {
@@ -229,17 +282,11 @@ impl Render for TermView {
             .key_context("Terminal")
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::prev_tab))
             .on_key_down(cx.listener(Self::on_key_down))
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(rgb(0x313244))
-                    .text_sm()
-                    .text_color(rgb(0xa6adc8))
-                    .child(self.title.clone()),
-            )
             .child(match &self.terminal {
                 TerminalSlot::Loading => div()
                     .id("term-loading")
@@ -269,4 +316,28 @@ impl Render for TermView {
                     .into_any_element(),
             })
     }
+}
+
+/// Open only web URLs (M3 scope). Paths are ignored for now.
+fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
+    match target {
+        MaybeNavigationTarget::Url(url) if is_web_url(url) => {
+            log::info!("opening url: {url}");
+            cx.open_url(url);
+        }
+        MaybeNavigationTarget::Url(url) => {
+            log::debug!("ignoring non-web url: {url}");
+        }
+        MaybeNavigationTarget::PathLike(path) => {
+            log::debug!("ignoring path-like target in M3: {}", path.maybe_path);
+        }
+    }
+}
+
+fn is_web_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("ftp://")
 }
