@@ -1,22 +1,41 @@
+<div align="center">
+
+<img src="resources/appicon_preview.png" alt="Sleipnir app icon" width="160" height="160" />
+
 # Sleipnir
 
-Standalone terminal emulator for **macOS**, built on [GPUI](https://gpui.rs) from the
-[Zed](https://github.com/zed-industries/zed) monorepo (Cargo **git pin** by commit) plus a
-forked terminal backend.
+**A fast, native terminal emulator for macOS — GPU-rendered, tab- and split-aware.**
 
-**Status:** M5 complete — upstream sync process.
+Built on [GPUI](https://gpui.rs) (the UI framework behind [Zed](https://github.com/zed-industries/zed))
+with a forked terminal backend.
 
-## Credits & license
+[Features](#features) · [Install](#build--run) · [Config](#config) · [Shortcuts](#shortcuts) · [Roadmap](#roadmap)
 
-This project reuses and adapts code from [Zed](https://github.com/zed-industries/zed):
+</div>
 
-| Component | License |
-|-----------|---------|
-| GPUI and related UI crates | Apache-2.0 |
-| Terminal crates (M1+) | GPL-3.0-or-later |
+---
 
-Once GPL terminal code is included, **distribution of the combined work is GPL-3.0-or-later**.
-See `LICENSE-GPL` and per-crate license files under `crates/`.
+## About
+
+Sleipnir is a standalone terminal for macOS that renders on the GPU through GPUI, so
+scrolling and redraw stay smooth even under heavy output. It ships with a real PTY,
+IME support, multi-tab and split panes, adaptive theming that follows the system
+appearance, and a Finder-friendly clipboard that turns pasted images into file paths.
+
+The name comes from Norse myth — Odin's eight-legged steed, the fastest horse in the
+nine worlds. The app icon abstracts that into a minimal horse-head mark over a terminal
+prompt.
+
+## Features
+
+- **GPU rendering** — smooth scrollback and redraw via GPUI + Metal.
+- **Tabs, splits & panes** — split right/down, move focus between panes, jump to any tab.
+- **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized;
+  `auto` follows the system light/dark appearance.
+- **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder
+  selections as quoted paths; force text-only paste when you need it.
+- **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R`.
+- **vi mode** — keyboard-driven selection and navigation.
 
 ## Requirements
 
@@ -33,7 +52,10 @@ cargo run -p sleipnir
 
 ## Config
 
-`~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`auto`/`mocha`/`macchiato`/`frappe`/`latte`/`tokyo_night`/`nord`/`gruvbox_dark`/`solarized_light`). `auto` follows the system light/dark appearance. See `docs/settings.example.json`. Reload with `⌘⇧R`.
+`~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys plus a `theme`
+key (`auto` / `mocha` / `macchiato` / `frappe` / `latte` / `tokyo_night` / `nord` /
+`gruvbox_dark` / `solarized_light`). `auto` follows the system light/dark appearance.
+See [`docs/settings.example.json`](docs/settings.example.json). Reload with `⌘⇧R`.
 
 ## Paste
 
@@ -69,31 +91,40 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌘⌫` | Clear line |
 | `⌃⇧Space` | Toggle vi mode |
 
-See `docs/M6.md` for the full list.
+See [`docs/M6.md`](docs/M6.md) for the full list.
 
-## Roadmap (milestones)
+## Roadmap
 
-| Milestone | Goal |
-|-----------|------|
-| **M0** | GPUI empty window ✅ |
-| **M1** | Display-only terminal grid paint ✅ |
-| **M2** | Real PTY + IME + selection/clipboard ✅ |
-| **M3** | Multi-tab + http(s) open ✅ |
-| **M4** | Theme/font settings polish ✅ |
-| **M5** | Upstream port checklist (`UPSTREAM.md`) ✅ |
-| **M6** | Image paste-as-path + Zed Terminal shortcuts ✅ |
+**Status:** M6 complete — image paste-as-path + Zed Terminal shortcuts.
+
+| Milestone | Goal | Status |
+|-----------|------|:------:|
+| **M0** | GPUI empty window | ✅ |
+| **M1** | Display-only terminal grid paint | ✅ |
+| **M2** | Real PTY + IME + selection/clipboard | ✅ |
+| **M3** | Multi-tab + http(s) open | ✅ |
+| **M4** | Theme/font settings polish | ✅ |
+| **M5** | Upstream port checklist (`UPSTREAM.md`) | ✅ |
+| **M6** | Image paste-as-path + Zed Terminal shortcuts | ✅ |
+| **M7** | Signed & notarized release builds + auto-update | 🔜 |
+| **M8** | Session persistence (restore tabs/splits on launch) | 🔜 |
+| **M9** | Configurable keymap + command palette | 🧭 |
+| **M10** | Ligatures, per-pane fonts, search-in-scrollback | 🧭 |
+
+Legend: ✅ done · 🔜 next · 🧭 planned.
 
 ## Upstream
 
-GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a fixed `rev`
-(`gpui`, `gpui_macos`, `collections`, `util`, …). Local forks: `terminal`, slim `gpui_platform`,
-and sleipnir app crates. See `UPSTREAM.md` to bump the pin.
+The GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a
+fixed `rev` (`gpui`, `gpui_macos`, `collections`, `util`, …). Local forks: `terminal`,
+a slim `gpui_platform`, and the Sleipnir app crates. See [`UPSTREAM.md`](UPSTREAM.md) to
+bump the pin.
 
 ```bash
 ./scripts/upstream-diff.sh /path/to/zed
 ```
 
-## Packaging & Release
+## Packaging & release
 
 ### Local build
 
@@ -107,6 +138,9 @@ and sleipnir app crates. See `UPSTREAM.md` to bump the pin.
 # Create a .dmg (requires signing)
 ./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --dmg
 ```
+
+The bundle uses [`resources/AppIcon.icns`](resources/AppIcon.icns), generated from
+[`resources/appicon.svg`](resources/appicon.svg).
 
 ### Publish to GitHub Releases (via `gh` CLI)
 
@@ -130,7 +164,7 @@ gh workflow run build-and-release.yml \
   -f draft=false
 ```
 
-**Required GitHub Secrets** (set in repo Settings → Secrets and variables → Actions):
+**Required GitHub Secrets** (repo Settings → Secrets and variables → Actions):
 
 | Secret | Description |
 |--------|-------------|
@@ -140,4 +174,18 @@ gh workflow run build-and-release.yml \
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for notarization |
 | `APPLE_TEAM_ID` | Apple Developer team ID |
 
-See `.github/workflows/build-and-release.yml` for the full pipeline.
+See [`.github/workflows/build-and-release.yml`](.github/workflows/build-and-release.yml)
+for the full pipeline.
+
+## Credits & license
+
+Sleipnir reuses and adapts code from [Zed](https://github.com/zed-industries/zed):
+
+| Component | License |
+|-----------|---------|
+| GPUI and related UI crates | Apache-2.0 |
+| Terminal crates (M1+) | GPL-3.0-or-later |
+
+Because GPL terminal code is included, **distribution of the combined work is
+GPL-3.0-or-later**. See [`LICENSE-GPL`](LICENSE-GPL) and per-crate license files under
+`crates/`.
