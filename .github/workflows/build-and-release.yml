@@ -1,0 +1,175 @@
+name: Build & Release (macOS)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0)'
+        required: true
+        type: string
+      draft:
+        description: 'Create as draft release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: Harbor
+  RUST_TOOLCHAIN: 1.95.0
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || '692T845H5K' }}
+
+jobs:
+  build-and-release:
+    name: Build & Publish
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-action@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+          cache: true
+
+      - name: Install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Import signing certificate
+        if: secrets.CODE_SIGNING_CERT_P12 != ''
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-data: ${{ secrets.CODE_SIGNING_CERT_P12 }}
+          p12-password: ${{ secrets.CODE_SIGNING_CERT_PASSWORD }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VER="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VER="${GITHUB_REF#refs/tags/}"
+          else
+            VER=$(grep '^version' crates/harbor/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --release -p harbor
+
+      - name: Assemble .app bundle
+        run: |
+          APP="Harbor.app"
+          VER="${{ steps.version.outputs.version }}"
+          rm -rf "${APP}" build
+          mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" build
+          cp target/release/harbor "${APP}/Contents/MacOS/Harbor"
+          sed "s|0.1.0|${VER}|g" resources/Info.plist > "${APP}/Contents/Info.plist"
+          echo "  app bundle: ${APP}"
+
+      - name: Code sign
+        run: |
+          # Prefer developer cert if available, fall back to ad-hoc (unsigned distributable)
+          if security find-identity -v -p codesigning | grep -q "Apple Development"; then
+            IDENTITY=$(security find-identity -v -p codesigning \
+              | grep "Apple Development" | head -1 \
+              | awk -F'"' '{print $2}')
+            echo "  signing with dev cert: ${IDENTITY}"
+            codesign --sign "${IDENTITY}" \
+              --entitlements resources/harbor.entitlements \
+              --deep --force --options runtime \
+              Harbor.app
+          else
+            echo "  no dev cert — applying ad-hoc sign (Gatekeeper will show warning)"
+            codesign -s - --deep --force Harbor.app
+          fi
+          codesign --verify --deep --strict Harbor.app
+          echo "  signed: $(codesign -d --verbose=4 Harbor.app 2>&1 | head -3)"
+
+      - name: Package .zip
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          ditto -c -k --sequesterRsrc --keepParent Harbor.app \
+            "build/Harbor-${VER}-macos.zip"
+          du -sh "build/Harbor-${VER}-macos.zip"
+          echo "zip=build/Harbor-${VER}-macos.zip" >> "$GITHUB_ENV"
+
+      - name: Gatekeeper bypass (ad-hoc signed apps)
+        run: |
+          # Remove quarantine attribute so macOS doesn't block the app on first launch
+          xattr -cr Harbor.app
+          echo "  quarantine cleared"
+          spctl --assess --type execute --verbose=4 Harbor.app/Contents/MacOS/Harbor 2>&1 \
+            || echo "  (spctl: app not notarized — Gatekeeper will show warning on first run, right-click → Open to bypass)"
+
+      - name: Package .dmg
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          hdiutil create -volname "Harbor-${VER}" \
+            -srcfolder build \
+            -ov -format UDZO \
+            "build/Harbor-${VER}-macos.dmg"
+          du -sh "build/Harbor-${VER}-macos.dmg"
+          echo "dmg=build/Harbor-${VER}-macos.dmg" >> "$GITHUB_ENV"
+
+      - name: Notarize
+        if: secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != ''
+        run: |
+          xcrun notarytool submit "${{ env.zip }}" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+            --team-id "${{ env.APPLE_TEAM_ID }}" \
+            --wait
+          xcrun stapler staple Harbor.app
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DRAFT: ${{ github.event.inputs.draft || 'false' }}
+        run: |
+          TAG="v${VERSION}"
+          ZIP="Harbor-${VERSION}-macos.zip"
+          DMG="Harbor-${VERSION}-macos.dmg"
+
+          cat > release-notes.md <<EOF
+          ## Harbor v${VERSION}
+
+          ### Install
+          Download \`${DMG}\` (recommended) or \`${ZIP}\`.
+          Open the .dmg and drag Harbor to Applications.
+
+          > **Note:** This build is ad-hoc signed (no Apple Developer certificate in CI).
+          > On first launch macOS Gatekeeper will show "Harbor is an unidentified developer".
+          > Right-click the app and choose **Open** to bypass, or run:
+          > \`xattr -cr \$(mdfind "kMDItemDisplayName == 'Harbor.app'")\`
+
+          ### Requirements
+          - macOS 14.0+ (Sonoma)
+          - Rust 1.95+ (only needed for building from source)
+
+          ### Source
+          https://github.com/Maidang1/harbor
+          EOF
+
+          GH_ARGS="--title 'Harbor v${VERSION}' --notes-file release-notes.md"
+          if [[ "${DRAFT}" == "true" ]]; then
+            GH_ARGS="${GH_ARGS} --draft"
+          fi
+
+          gh release create "${TAG}" ${GH_ARGS} \
+            "zip=${ZIP}" \
+            "dmg=${DMG}"
+
+          echo "Published: $(gh release view "${TAG}" --json url --jq -r '.url')"

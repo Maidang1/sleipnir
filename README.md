@@ -89,3 +89,52 @@ and harbor app crates. See `UPSTREAM.md` to bump the pin.
 ```bash
 ./scripts/upstream-diff.sh /path/to/zed
 ```
+
+## Packaging & Release
+
+### Local build
+
+```bash
+# Build and package as .app + .zip
+./scripts/make-app.sh
+
+# With developer certificate signing
+./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)"
+
+# Create a .dmg (requires signing)
+./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --dmg
+```
+
+### Publish to GitHub Releases (via `gh` CLI)
+
+```bash
+# Tag a release and publish
+git tag v0.2.0
+git push origin v0.2.0
+
+# Or manually: build then publish
+./scripts/make-app.sh --sign "..." --dmg
+./scripts/publish-release.sh 0.2.0 ./build
+```
+
+### CI (GitHub Actions)
+
+Triggered automatically on git tags (`v*`). Also supports manual dispatch:
+
+```bash
+gh workflow run build-and-release.yml \
+  -f version=0.2.0 \
+  -f draft=false
+```
+
+**Required GitHub Secrets** (set in repo Settings → Secrets and variables → Actions):
+
+| Secret | Description |
+|--------|-------------|
+| `CODE_SIGNING_CERT_P12` | Base64-encoded `.p12` certificate file |
+| `CODE_SIGNING_CERT_PASSWORD` | Password for the `.p12` file |
+| `APPLE_ID` | Apple ID email for notarization |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for notarization |
+| `APPLE_TEAM_ID` | Apple Developer team ID |
+
+See `.github/workflows/build-and-release.yml` for the full pipeline.

@@ -3,3 +3,7 @@
 .DS_Store
 .idea
 .vscode
+build/
+*.app
+*.dmg
+*.zip
