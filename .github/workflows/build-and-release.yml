@@ -79,8 +79,9 @@ jobs:
           VER="${{ steps.version.outputs.version }}"
           rm -rf "${APP}" build
           mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" build
-          cp target/release/sleipnir "${APP}/Contents/MacOS/Sleipnir"
+          cp target/release/sleipnir "${APP}/Contents/MacOS/sleipnir"
           sed "s|0.1.0|${VER}|g" resources/Info.plist > "${APP}/Contents/Info.plist"
+          cp resources/AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
           echo "  app bundle: ${APP}"
 
       - name: Code sign
@@ -95,11 +96,12 @@ jobs:
               --entitlements resources/sleipnir.entitlements \
               --deep --force --options runtime \
               Sleipnir.app
+            codesign --verify --deep --strict Sleipnir.app
           else
             echo "  no dev cert — applying ad-hoc sign (Gatekeeper will show warning)"
             codesign -s - --deep --force Sleipnir.app
+            codesign --verify --deep Sleipnir.app
           fi
-          codesign --verify --deep --strict Sleipnir.app
           echo "  signed: $(codesign -d --verbose=4 Sleipnir.app 2>&1 | head -3)"
 
       - name: Package .zip
