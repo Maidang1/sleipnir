@@ -1,4 +1,4 @@
-# jiajia-term
+# Harbor
 
 Standalone terminal emulator for **macOS**, built on [GPUI](https://gpui.rs) from the
 [Zed](https://github.com/zed-industries/zed) monorepo (Cargo **git pin** by commit) plus a
@@ -27,13 +27,13 @@ See `LICENSE-GPL` and per-crate license files under `crates/`.
 ## Build & run
 
 ```bash
-cd ~/codes/jiajia-term
-cargo run -p jiajia_term
+cargo run -p harbor
+# binary: target/debug/harbor
 ```
 
-## Config (planned)
+## Config
 
-`~/.config/jiajia-term/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`mocha`/`macchiato`/`frappe`/`latte`). See `docs/settings.example.json`. Reload with `⌘⇧R`.
+`~/.config/harbor/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`mocha`/`macchiato`/`frappe`/`latte`). See `docs/settings.example.json`. Reload with `⌘⇧R`.
 
 ## Roadmap (milestones)
 
@@ -50,7 +50,7 @@ cargo run -p jiajia_term
 
 GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a fixed `rev`
 (`gpui`, `gpui_macos`, `collections`, `util`, …). Local forks: `terminal`, slim `gpui_platform`,
-and jiajia app crates. See `UPSTREAM.md` to bump the pin.
+and harbor app crates. See `UPSTREAM.md` to bump the pin.
 
 ```bash
 ./scripts/upstream-diff.sh /path/to/zed

@@ -1,5 +1,5 @@
 [package]
-name = "jiajia_term_ui"
+name = "harbor_settings"
 version = "0.1.0"
 edition.workspace = true
 publish = false
@@ -9,14 +9,15 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/jiajia_term_ui.rs"
+path = "src/harbor_settings.rs"
 
 [dependencies]
-collections.workspace = true
-dirs.workspace = true
 gpui.workspace = true
-terminal.workspace = true
-jiajia_settings.workspace = true
-itertools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+collections.workspace = true
 log.workspace = true
 util.workspace = true
+anyhow.workspace = true
+dirs.workspace = true

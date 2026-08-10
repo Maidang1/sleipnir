@@ -1,4 +1,4 @@
-//! macOS-only platform entry for jiajia-term (forked/simplified from Zed gpui_platform).
+//! macOS-only platform entry for harbor (forked/simplified from Zed gpui_platform).
 
 pub use gpui::Platform;
 

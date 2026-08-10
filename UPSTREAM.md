@@ -1,6 +1,6 @@
 # Upstream sync (git pin + local forks)
 
-jiajia-term **does not copy** the GPUI stack into this repo.
+harbor **does not copy** the GPUI stack into this repo.
 
 GPUI and shared Zed utilities come from the [Zed monorepo](https://github.com/zed-industries/zed) via **Cargo git dependencies** pinned to a single commit (`rev` in root `Cargo.toml`).
 
@@ -8,9 +8,9 @@ What stays **local** (forked or original):
 
 | Crate | Why local |
 |-------|-----------|
-| `terminal` | Heavily forked: settings/theme/task rewired to `jiajia_settings` / `task_types` |
+| `terminal` | Heavily forked: settings/theme/task rewired to `harbor_settings` / `task_types` |
 | `gpui_platform` | Slim macOS-only application entry |
-| `jiajia_term`, `jiajia_term_ui`, `jiajia_settings`, `task_types`, `release_channel` | Product code |
+| `harbor`, `harbor_ui`, `harbor_settings`, `task_types`, `release_channel` | Product code |
 
 ---
 
@@ -39,7 +39,7 @@ collections = { git = "https://github.com/zed-industries/zed", rev = "<SAME>" }
 util = { git = "https://github.com/zed-industries/zed", rev = "<SAME>" }
 ```
 
-Cargo clones the monorepo once per rev and resolves workspace/path deps inside Zed. You do **not** need to list every transitive crate (`scheduler`, `sum_tree`, `media`, …) in jiajia’s workspace unless a **local** crate depends on it via `workspace = true`.
+Cargo clones the monorepo once per rev and resolves workspace/path deps inside Zed. You do **not** need to list every transitive crate (`scheduler`, `sum_tree`, `media`, …) in harbor’s workspace unless a **local** crate depends on it via `workspace = true`.
 
 Required `[patch.crates-io]` entries (aligned with Zed) live in root `Cargo.toml` (`async-process`, `async-task`, …).
 
@@ -52,10 +52,10 @@ Required `[patch.crates-io]` entries (aligned with Zed) live in root `Cargo.toml
 2. Compare Zed’s `alacritty_terminal` rev with ours; bump if needed.
 3. In root `Cargo.toml`, replace **all** Zed `rev = "…"` with the new commit (same string everywhere).
 4. Build:  
-   `cargo build -p jiajia_term`
-5. Fix **local** breaks only (`terminal`, `jiajia_term_ui`, `gpui_platform`, settings). Do not vendor GPUI back unless you must patch upstream.
+   `cargo build -p harbor`
+5. Fix **local** breaks only (`terminal`, `harbor_ui`, `gpui_platform`, settings). Do not vendor GPUI back unless you must patch upstream.
 6. Smoke:  
-   `cargo run -p jiajia_term` — shell, tabs (`⌘T`), settings reload (`⌘⇧R`).
+   `cargo run -p harbor` — shell, tabs (`⌘T`), settings reload (`⌘⇧R`).
 7. Commit with Zed rev + alacritty rev in the message; update this table.
 
 Optional dry-run against a local Zed checkout (forks only):
@@ -66,16 +66,16 @@ Optional dry-run against a local Zed checkout (forks only):
 
 ---
 
-## Known jiajia-specific forks (API break hotspots)
+## Known harbor-specific forks (API break hotspots)
 
 | Area | Why different |
 |------|----------------|
-| `terminal/src/terminal_settings.rs` | Thin re-export of `jiajia_settings`, not Zed `Settings` trait |
-| `terminal/src/terminal.rs` imports | `task_types`, `jiajia_settings::TerminalPalette` instead of `task`/`theme` |
+| `terminal/src/terminal_settings.rs` | Thin re-export of `harbor_settings`, not Zed `Settings` trait |
+| `terminal/src/terminal.rs` imports | `task_types`, `harbor_settings::TerminalPalette` instead of `task`/`theme` |
 | `get_color_at_index` | Takes palette, not full `Theme` |
 | Integration tests in terminal | Stubbed / disabled |
 | `gpui_platform` | macOS-only application entry (not multi-platform Zed crate) |
-| UI | `jiajia_term_ui` is original; not Zed `terminal_view` |
+| UI | `harbor_ui` is original; not Zed `terminal_view` |
 
 ---
 

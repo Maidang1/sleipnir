@@ -1,13 +1,13 @@
-//! jiajia-term — standalone terminal (M4: themes + settings polish).
+//! Harbor — standalone macOS terminal (HIG-aligned window chrome).
 
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px,
-    size,
+    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, px, size,
 };
 use gpui_platform::application;
-use jiajia_settings;
-use jiajia_term_ui::{
-    AppShell, CloseTab, CycleTheme, NewTab, NextTab, PrevTab, ReloadSettings,
+use harbor_settings;
+use harbor_ui::{
+    AppShell, ChromeGeometry, CloseTab, CycleTheme, NewTab, NextTab, PrevTab, ReloadSettings,
 };
 use release_channel::AppVersion;
 use terminal::{Copy, Paste};
@@ -17,7 +17,7 @@ fn main() {
 
     application().run(|cx: &mut App| {
         AppVersion::init(cx);
-        jiajia_settings::init(cx);
+        harbor_settings::init(cx);
 
         cx.bind_keys([
             // Clipboard
@@ -45,15 +45,19 @@ fn main() {
             KeyBinding::new("cmd-shift-t", CycleTheme, Some("Terminal")),
         ]);
 
+        let geo = ChromeGeometry::standard();
         let bounds = Bounds::centered(None, size(px(1024.0), px(680.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("jiajia-term".into()),
-                    appears_transparent: false,
-                    traffic_light_position: None,
+                    title: Some("Harbor".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(geo.traffic_light_position),
                 }),
+                app_owns_titlebar_drag: true,
+                window_background: WindowBackgroundAppearance::Opaque,
+                window_min_size: Some(size(px(360.0), px(240.0))),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| AppShell::new(window, cx)),

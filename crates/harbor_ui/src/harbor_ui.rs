@@ -1,11 +1,13 @@
-//! Terminal UI for jiajia-term (M2 PTY input, M3 tabs + URL open).
+//! Terminal UI for harbor (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
 mod app_shell;
+mod chrome;
 mod term_element;
 
 pub use app_shell::{
     AppShell, CloseTab, CycleTheme, NewTab, NextTab, PrevTab, ReloadSettings,
 };
+pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use term_element::TermElement;
 
 use collections::HashMap;
@@ -14,7 +16,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
     Styled as _, Task, WeakEntity, Window, div, rgb,
 };
-use jiajia_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
+use harbor_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
 use terminal::{Copy, Event, MaybeNavigationTarget, Paste, Terminal, TerminalBuilder};
 use util::paths::PathStyle;
 
@@ -103,7 +105,7 @@ impl TermView {
         Self {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
-            title: "jiajia-term".into(),
+            title: "Harbor".into(),
             shell,
             _spawn: spawn,
         }
@@ -126,7 +128,7 @@ impl TermView {
         let mut this = Self {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
-            title: "jiajia-term (display)".into(),
+            title: "harbor (display)".into(),
             shell: None,
             _spawn: Task::ready(()),
         };
@@ -281,10 +283,10 @@ impl TermView {
     fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
         let mut settings = TerminalSettings::get_global(cx).clone();
         settings.theme = match settings.theme {
-            jiajia_settings::ThemeName::Mocha => jiajia_settings::ThemeName::Macchiato,
-            jiajia_settings::ThemeName::Macchiato => jiajia_settings::ThemeName::Frappe,
-            jiajia_settings::ThemeName::Frappe => jiajia_settings::ThemeName::Latte,
-            jiajia_settings::ThemeName::Latte => jiajia_settings::ThemeName::Mocha,
+            harbor_settings::ThemeName::Mocha => harbor_settings::ThemeName::Macchiato,
+            harbor_settings::ThemeName::Macchiato => harbor_settings::ThemeName::Frappe,
+            harbor_settings::ThemeName::Frappe => harbor_settings::ThemeName::Latte,
+            harbor_settings::ThemeName::Latte => harbor_settings::ThemeName::Mocha,
         };
         TerminalSettings::apply(settings, cx);
         cx.notify();

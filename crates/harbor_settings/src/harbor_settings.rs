@@ -1,7 +1,7 @@
-//! Thin settings for jiajia-term.
+//! Thin settings for harbor.
 //!
 //! JSON keys align with Zed's `terminal` segment where practical.
-//! Path: `~/.config/jiajia-term/settings.json` (not Zed's config path).
+//! Path: `~/.config/harbor/settings.json` (not Zed's config path).
 
 mod themes;
 
@@ -123,7 +123,7 @@ pub struct TerminalSettings {
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
     pub bell: TerminalBell,
-    /// Active color theme name (jiajia extension; also top-level `theme` key).
+    /// Active color theme name (harbor extension; also top-level `theme` key).
     pub theme: ThemeName,
 }
 
@@ -243,7 +243,7 @@ struct TerminalSettingsFile {
 pub fn config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/jiajia-term/settings.json")
+        .join(".config/harbor/settings.json")
 }
 
 fn load_or_default() -> TerminalSettings {

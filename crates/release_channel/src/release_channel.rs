@@ -1,4 +1,4 @@
-//! Minimal release_channel stub for jiajia-term (not the full Zed crate).
+//! Minimal release_channel stub for harbor (not the full Zed crate).
 
 use gpui::{App, Global};
 use std::fmt;
