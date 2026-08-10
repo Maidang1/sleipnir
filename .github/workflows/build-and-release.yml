@@ -67,6 +67,7 @@ jobs:
           else
             VER=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
           fi
+          VER="${VER#v}"   # normalize: strip any leading 'v'
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
@@ -117,7 +118,7 @@ jobs:
           # Remove quarantine attribute so macOS doesn't block the app on first launch
           xattr -cr Sleipnir.app
           echo "  quarantine cleared"
-          spctl --assess --type execute --verbose=4 Sleipnir.app/Contents/MacOS/Sleipnir 2>&1 \
+          spctl --assess --type execute --verbose=4 Sleipnir.app/Contents/MacOS/sleipnir 2>&1 \
             || echo "  (spctl: app not notarized — Gatekeeper will show warning on first run, right-click → Open to bypass)"
 
       - name: Package .dmg
@@ -147,36 +148,38 @@ jobs:
           DRAFT: ${{ github.event.inputs.draft || 'false' }}
         run: |
           TAG="v${VERSION}"
-          ZIP="Sleipnir-${VERSION}-macos.zip"
-          DMG="Sleipnir-${VERSION}-macos.dmg"
+          ZIP="build/Sleipnir-${VERSION}-macos.zip"
+          DMG="build/Sleipnir-${VERSION}-macos.dmg"
 
-          cat > release-notes.md <<EOF
-          ## Sleipnir v${VERSION}
+          {
+            echo "## Sleipnir v${VERSION}"
+            echo ""
+            echo "### Install"
+            echo "Download \`Sleipnir-${VERSION}-macos.dmg\` (recommended) or \`Sleipnir-${VERSION}-macos.zip\`."
+            echo "Open the .dmg and drag Sleipnir to Applications."
+            echo ""
+            echo "> **Note:** This build is ad-hoc signed (no Apple Developer certificate in CI)."
+            echo "> On first launch macOS Gatekeeper will show \"Sleipnir is an unidentified developer\"."
+            echo "> Right-click the app and choose **Open** to bypass."
+            echo ""
+            echo "### Requirements"
+            echo "- macOS 14.0+ (Sonoma)"
+            echo "- Rust 1.95+ (only needed for building from source)"
+            echo ""
+            echo "### Source"
+            echo "https://github.com/Maidang1/sleipnir"
+          } > release-notes.md
 
-          ### Install
-          Download \`${DMG}\` (recommended) or \`${ZIP}\`.
-          Open the .dmg and drag Sleipnir to Applications.
-
-          > **Note:** This build is ad-hoc signed (no Apple Developer certificate in CI).
-          > On first launch macOS Gatekeeper will show "Sleipnir is an unidentified developer".
-          > Right-click the app and choose **Open** to bypass, or run:
-          > \`xattr -cr \$(mdfind "kMDItemDisplayName == 'Sleipnir.app'")\`
-
-          ### Requirements
-          - macOS 14.0+ (Sonoma)
-          - Rust 1.95+ (only needed for building from source)
-
-          ### Source
-          https://github.com/Maidang1/sleipnir
-          EOF
-
-          GH_ARGS="--title 'Sleipnir v${VERSION}' --notes-file release-notes.md"
+          DRAFT_FLAG=()
           if [[ "${DRAFT}" == "true" ]]; then
-            GH_ARGS="${GH_ARGS} --draft"
+            DRAFT_FLAG=(--draft)
           fi
 
-          gh release create "${TAG}" ${GH_ARGS} \
-            "zip=${ZIP}" \
-            "dmg=${DMG}"
+          gh release create "${TAG}" \
+            --title "Sleipnir v${VERSION}" \
+            --notes-file release-notes.md \
+            "${DRAFT_FLAG[@]}" \
+            "${ZIP}" \
+            "${DMG}"
 
-          echo "Published: $(gh release view "${TAG}" --json url --jq -r '.url')"
+          echo "Published: $(gh release view "${TAG}" --json url --jq '.url')"
