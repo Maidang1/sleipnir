@@ -39,11 +39,13 @@ jobs:
           submodules: true
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-action@master
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
-          cache: true
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
 
       - name: Install Metal Toolchain
         run: xcodebuild -downloadComponent MetalToolchain
