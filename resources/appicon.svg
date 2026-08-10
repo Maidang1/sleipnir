@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sleipnir app icon v4 — smooth chess-knight + terminal prompt -->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="sq">
+      <path d="M512 84 C 296 84 84 296 84 512 C 84 728 296 940 512 940 C 728 940 940 728 940 512 C 940 296 728 84 512 84 Z"/>
+    </clipPath>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#243154"/>
+      <stop offset="0.5" stop-color="#141f3a"/>
+      <stop offset="1" stop-color="#080e1c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.34" r="0.72">
+      <stop offset="0" stop-color="#4f8cff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#4f8cff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#8ff3ff"/>
+      <stop offset="0.5" stop-color="#57a0ff"/>
+      <stop offset="1" stop-color="#7a6bff"/>
+    </linearGradient>
+    <linearGradient id="topsheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.20"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#sq)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <rect width="1024" height="1024" fill="url(#glow)"/>
+
+    <!-- Horse head, muzzle lower-left, ears upper-right, mane sweeping down right side.
+         Coordinates in a 0..340 local box, scaled/translated into the safe area. -->
+    <g transform="translate(300 232) scale(1.28)">
+      <path fill="url(#accent)" d="
+        M 60 360
+        C 60 300 84 258 132 232
+        C 96 224 74 200 74 168
+        C 74 150 82 134 98 124
+        C 78 128 60 122 50 104
+        C 70 98 92 104 108 118
+        C 96 88 104 52 140 28
+        C 132 40 132 54 140 66
+        C 150 44 168 30 190 30
+        C 178 42 176 58 184 74
+        C 200 52 230 48 254 66
+        C 292 94 314 150 320 214
+        C 326 276 314 330 286 372
+        C 300 372 312 382 316 398
+        L 316 412
+        L 60 412
+        Z"/>
+      <!-- eye -->
+      <circle cx="150" cy="150" r="15" fill="#0c1428"/>
+      <!-- nostril hint -->
+      <circle cx="96" cy="300" r="9" fill="#0c1428" opacity="0.5"/>
+      <!-- mane flow lines -->
+      <g fill="none" stroke="#0c1428" stroke-width="9" opacity="0.15" stroke-linecap="round">
+        <path d="M232 70 C 276 108 300 176 300 252 C 300 300 292 342 276 372"/>
+        <path d="M206 66 C 250 104 272 168 272 244"/>
+      </g>
+    </g>
+
+    <!-- Terminal prompt: chevron + block cursor -->
+    <path d="M340 806 L 412 840 L 340 874"
+      fill="none" stroke="#8ff3ff" stroke-width="30"
+      stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="462" y="824" width="150" height="34" rx="16" fill="#8ff3ff"/>
+
+    <rect width="1024" height="1024" fill="url(#topsheen)"/>
+  </g>
+</svg>
