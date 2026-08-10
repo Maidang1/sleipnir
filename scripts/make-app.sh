@@ -79,10 +79,12 @@ cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
 plist="${ROOT}/resources/Info.plist"
 sed -e "s|0.1.0|${VERSION}|g" "${plist}" > "${APP}/Contents/Info.plist"
 
-# Copy resources (icons, etc.)
-# If an AppIcon.iconset exists, convert it; otherwise leave placeholder.
-if [[ -d "${ROOT}/resources/AppIcon.iconset" ]]; then
-    cp -R "${ROOT}/resources/AppIcon.iconset" "${APP}/Contents/Resources/AppIcon.iconset"
+# Copy app icon (.icns preferred; fall back to building from iconset)
+if [[ -f "${ROOT}/resources/AppIcon.icns" ]]; then
+    cp "${ROOT}/resources/AppIcon.icns" "${APP}/Contents/Resources/AppIcon.icns"
+elif [[ -d "${ROOT}/resources/AppIcon.iconset" ]]; then
+    iconutil -c icns "${ROOT}/resources/AppIcon.iconset" \
+        -o "${APP}/Contents/Resources/AppIcon.icns"
 fi
 
 echo "  bundle: ${APP}"
