@@ -657,6 +657,16 @@ actions!(
     ]
 );
 
+/// Sends the specified text directly to the terminal (e.g. escape sequences).
+#[derive(Clone, Debug, Default, PartialEq, gpui::Action)]
+#[action(namespace = terminal, no_json)]
+pub struct SendText(pub String);
+
+/// Sends a keystroke sequence to the terminal (parsed via `Keystroke::parse`).
+#[derive(Clone, Debug, Default, PartialEq, gpui::Action)]
+#[action(namespace = terminal, no_json)]
+pub struct SendKeystroke(pub String);
+
 const DEBUG_TERMINAL_WIDTH: Pixels = px(500.);
 const DEBUG_TERMINAL_HEIGHT: Pixels = px(30.);
 const DEBUG_CELL_WIDTH: Pixels = px(5.);

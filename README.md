@@ -35,6 +35,39 @@ cargo run -p harbor
 
 `~/.config/harbor/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`mocha`/`macchiato`/`frappe`/`latte`). See `docs/settings.example.json`. Reload with `⌘⇧R`.
 
+## Paste
+
+| Clipboard | `⌘V` behavior |
+|-----------|----------------|
+| Image (screenshot, etc.) | Write to a temp file; paste shell-quoted absolute path |
+| Finder file paths | Paste space-separated quoted paths |
+| Text | Normal paste (bracketed paste when the app enables it) |
+
+Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
+
+## Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `⌘C` / `⌃⇧C` | Copy |
+| `⌘V` / `⌃⇧V` | Paste (image → path) |
+| `⌃⌘V` | Paste text only |
+| `⌘A` | Select all |
+| `⌘K` | Clear |
+| `⌘T` / `⌘W` | New / close tab |
+| `⌃Tab` / `⌃⇧Tab` | Next / previous tab |
+| `⌘⇧]` / `⌘⇧[` | Next / previous tab |
+| `⌘⇧R` | Reload settings |
+| `⌘⇧T` | Cycle theme (session) |
+| `⌘↑` / `⌘↓` | Scroll page |
+| `⇧↑` / `⇧↓` | Scroll line |
+| `⌘←` / `⌘→` | Line start / end |
+| `⌥←` / `⌥→` | Word back / forward |
+| `⌘⌫` | Clear line |
+| `⌃⇧Space` | Toggle vi mode |
+
+See `docs/M6.md` for the full list.
+
 ## Roadmap (milestones)
 
 | Milestone | Goal |
@@ -45,6 +78,7 @@ cargo run -p harbor
 | **M3** | Multi-tab + http(s) open ✅ |
 | **M4** | Theme/font settings polish ✅ |
 | **M5** | Upstream port checklist (`UPSTREAM.md`) ✅ |
+| **M6** | Image paste-as-path + Zed Terminal shortcuts ✅ |
 
 ## Upstream
 

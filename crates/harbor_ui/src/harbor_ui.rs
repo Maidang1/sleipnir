@@ -12,12 +12,18 @@ pub use term_element::TermElement;
 
 use collections::HashMap;
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
-    Styled as _, Task, WeakEntity, Window, div, rgb,
+    App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
+    SharedString, Styled as _, Task, WeakEntity, Window, div, rgb,
 };
 use harbor_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
-use terminal::{Copy, Event, MaybeNavigationTarget, Paste, Terminal, TerminalBuilder};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+use terminal::{
+    Clear, Copy, Event, MaybeNavigationTarget, Modes, Paste, PasteText, ScrollLineDown,
+    ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
+    SendKeystroke, SendText, ShowCharacterPalette, Terminal, TerminalBuilder, ToggleViMode,
+};
 use util::paths::PathStyle;
 
 /// Bubbled from a tab so the shell can refresh titles.
@@ -218,9 +224,11 @@ impl TermView {
             }
         }
         if (mods.platform || mods.control) && event.keystroke.key.eq_ignore_ascii_case("v") {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                terminal.update(cx, |term, _| term.paste(&text));
-                cx.notify();
+            // ctrl-cmd-v is PasteText (text-only); plain cmd/ctrl-v is full paste.
+            if mods.platform && mods.control {
+                self.paste_text_from_clipboard(cx);
+            } else {
+                self.paste_from_clipboard(cx);
             }
             return;
         }
@@ -242,6 +250,53 @@ impl TermView {
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        self.paste_from_clipboard(cx);
+    }
+
+    fn paste_text(&mut self, _: &PasteText, _window: &mut Window, cx: &mut Context<Self>) {
+        self.paste_text_from_clipboard(cx);
+    }
+
+    /// Full paste: image → temp path, file paths → quoted paths, else text.
+    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        let Some(terminal) = self.terminal_entity().cloned() else {
+            return;
+        };
+
+        match clipboard.entries().first() {
+            Some(ClipboardEntry::Image(image)) if !image.bytes().is_empty() => {
+                match write_clipboard_image_to_temp(image) {
+                    Ok(path) => {
+                        let text = format!("{} ", shell_quote_path(&path));
+                        terminal.update(cx, |term, _| term.paste(&text));
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        log::error!("failed to write clipboard image to temp file: {err}");
+                    }
+                }
+            }
+            Some(ClipboardEntry::ExternalPaths(paths)) => {
+                let text = format_external_paths(paths.paths());
+                if !text.trim().is_empty() {
+                    terminal.update(cx, |term, _| term.paste(&text));
+                    cx.notify();
+                }
+            }
+            _ => {
+                if let Some(text) = clipboard.text() {
+                    terminal.update(cx, |term, _| term.paste(&text));
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Text-only paste (never images or file-path conversion).
+    fn paste_text_from_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -249,6 +304,139 @@ impl TermView {
             terminal.update(cx, |term, _| term.paste(&text));
             cx.notify();
         }
+    }
+
+    fn clear(&mut self, _: &Clear, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.clear());
+            cx.notify();
+        }
+    }
+
+    fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.select_all());
+            cx.notify();
+        }
+    }
+
+    fn scroll_line_up(&mut self, _: &ScrollLineUp, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_alt_screen(cx) {
+            return;
+        }
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.scroll_line_up());
+            cx.notify();
+        }
+    }
+
+    fn scroll_line_down(&mut self, _: &ScrollLineDown, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_alt_screen(cx) {
+            return;
+        }
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.scroll_line_down());
+            cx.notify();
+        }
+    }
+
+    fn scroll_page_up(&mut self, _: &ScrollPageUp, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_alt_screen(cx) {
+            return;
+        }
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.scroll_page_up());
+            cx.notify();
+        }
+    }
+
+    fn scroll_page_down(&mut self, _: &ScrollPageDown, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_alt_screen(cx) {
+            return;
+        }
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.scroll_page_down());
+            cx.notify();
+        }
+    }
+
+    fn scroll_to_top(&mut self, _: &ScrollToTop, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_alt_screen(cx) {
+            return;
+        }
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.scroll_to_top());
+            cx.notify();
+        }
+    }
+
+    fn scroll_to_bottom(
+        &mut self,
+        _: &ScrollToBottom,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_alt_screen(cx) {
+            return;
+        }
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.scroll_to_bottom());
+            cx.notify();
+        }
+    }
+
+    fn toggle_vi_mode(&mut self, _: &ToggleViMode, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.toggle_vi_mode());
+            cx.notify();
+        }
+    }
+
+    fn show_character_palette(
+        &mut self,
+        _: &ShowCharacterPalette,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        window.show_character_palette();
+    }
+
+    fn send_text(&mut self, text: &SendText, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.input(text.0.as_bytes().to_vec()));
+            cx.notify();
+        }
+    }
+
+    fn send_keystroke(
+        &mut self,
+        key: &SendKeystroke,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(keystroke) = Keystroke::parse(&key.0) else {
+            log::warn!("invalid SendKeystroke payload: {}", key.0);
+            return;
+        };
+        let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            let handled =
+                terminal.update(cx, |term, _| term.try_keystroke(&keystroke, option_as_meta));
+            if handled {
+                cx.notify();
+            }
+        }
+    }
+
+    fn is_alt_screen(&self, cx: &App) -> bool {
+        self.terminal_entity()
+            .map(|t| {
+                t.read(cx)
+                    .last_content()
+                    .mode
+                    .contains(Modes::ALT_SCREEN)
+            })
+            .unwrap_or(false)
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -308,6 +496,19 @@ impl Render for TermView {
             .key_context("Terminal")
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::paste_text))
+            .on_action(cx.listener(Self::clear))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::scroll_line_up))
+            .on_action(cx.listener(Self::scroll_line_down))
+            .on_action(cx.listener(Self::scroll_page_up))
+            .on_action(cx.listener(Self::scroll_page_down))
+            .on_action(cx.listener(Self::scroll_to_top))
+            .on_action(cx.listener(Self::scroll_to_bottom))
+            .on_action(cx.listener(Self::toggle_vi_mode))
+            .on_action(cx.listener(Self::show_character_palette))
+            .on_action(cx.listener(Self::send_text))
+            .on_action(cx.listener(Self::send_keystroke))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -368,4 +569,49 @@ fn is_web_url(url: &str) -> bool {
         || lower.starts_with("https://")
         || lower.starts_with("mailto:")
         || lower.starts_with("ftp://")
+}
+
+/// Write a clipboard image to a unique temp file and return its absolute path.
+fn write_clipboard_image_to_temp(image: &gpui::Image) -> Result<PathBuf, String> {
+    let ext = image.format().extension();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Low bits of the image id keep concurrent pastes unique within the same nanosecond.
+    let path = std::env::temp_dir().join(format!("harbor-paste-{nanos}-{:x}.{ext}", image.id()));
+    std::fs::write(&path, image.bytes()).map_err(|e| e.to_string())?;
+    log::info!("pasted clipboard image to {}", path.display());
+    Ok(path)
+}
+
+/// Quote a filesystem path for safe insertion into a shell command line.
+fn shell_quote_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    // Unquoted only when clearly safe for common shells.
+    let safe = s.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
+    });
+    if safe {
+        s.into_owned()
+    } else {
+        // POSIX single-quote: wrap and escape embedded ' as '\''
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// Format Finder/file-manager paths for paste: leading space, quoted paths, trailing space.
+fn format_external_paths(paths: &[PathBuf]) -> String {
+    let mut out = String::new();
+    for path in paths {
+        out.push(' ');
+        out.push_str(&shell_quote_path(path));
+    }
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out
 }

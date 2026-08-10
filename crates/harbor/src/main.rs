@@ -10,7 +10,11 @@ use harbor_ui::{
     AppShell, ChromeGeometry, CloseTab, CycleTheme, NewTab, NextTab, PrevTab, ReloadSettings,
 };
 use release_channel::AppVersion;
-use terminal::{Copy, Paste};
+use terminal::{
+    Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, SelectAll, SendKeystroke, SendText, ShowCharacterPalette,
+    ToggleViMode,
+};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -25,6 +29,46 @@ fn main() {
             KeyBinding::new("cmd-v", Paste, Some("Terminal")),
             KeyBinding::new("ctrl-shift-c", Copy, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", Paste, Some("Terminal")),
+            KeyBinding::new("ctrl-cmd-v", PasteText, Some("Terminal")),
+            // Select / clear / character palette / vi mode
+            KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
+            KeyBinding::new("cmd-k", Clear, Some("Terminal")),
+            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-space", ToggleViMode, Some("Terminal")),
+            // Scrollback (disabled for alt-screen apps in the handlers)
+            KeyBinding::new("shift-up", ScrollLineUp, Some("Terminal")),
+            KeyBinding::new("shift-down", ScrollLineDown, Some("Terminal")),
+            KeyBinding::new("shift-pageup", ScrollPageUp, Some("Terminal")),
+            KeyBinding::new("shift-pagedown", ScrollPageDown, Some("Terminal")),
+            KeyBinding::new("cmd-up", ScrollPageUp, Some("Terminal")),
+            KeyBinding::new("cmd-down", ScrollPageDown, Some("Terminal")),
+            KeyBinding::new("shift-home", ScrollToTop, Some("Terminal")),
+            KeyBinding::new("shift-end", ScrollToBottom, Some("Terminal")),
+            KeyBinding::new("cmd-home", ScrollToTop, Some("Terminal")),
+            KeyBinding::new("cmd-end", ScrollToBottom, Some("Terminal")),
+            // Shell line editing conveniences (Zed Terminal parity)
+            KeyBinding::new(
+                "cmd-backspace",
+                SendKeystroke("ctrl-u".into()),
+                Some("Terminal"),
+            ),
+            KeyBinding::new(
+                "cmd-delete",
+                SendKeystroke("ctrl-k".into()),
+                Some("Terminal"),
+            ),
+            KeyBinding::new("cmd-left", SendKeystroke("ctrl-a".into()), Some("Terminal")),
+            KeyBinding::new("cmd-right", SendKeystroke("ctrl-e".into()), Some("Terminal")),
+            KeyBinding::new("alt-left", SendText("\u{1b}b".into()), Some("Terminal")),
+            KeyBinding::new("alt-right", SendText("\u{1b}f".into()), Some("Terminal")),
+            KeyBinding::new("alt-b", SendText("\u{1b}b".into()), Some("Terminal")),
+            KeyBinding::new("alt-f", SendText("\u{1b}f".into()), Some("Terminal")),
+            KeyBinding::new("alt-delete", SendText("\u{1b}d".into()), Some("Terminal")),
+            KeyBinding::new(
+                "ctrl-delete",
+                SendText("\u{1b}[3;5~".into()),
+                Some("Terminal"),
+            ),
             // Tabs
             KeyBinding::new("cmd-t", NewTab, Some("AppShell")),
             KeyBinding::new("cmd-w", CloseTab, Some("AppShell")),
