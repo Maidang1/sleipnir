@@ -1944,49 +1944,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "harbor"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "gpui",
- "gpui_platform",
- "harbor_settings",
- "harbor_ui",
- "log",
- "release_channel",
- "terminal",
-]
-
-[[package]]
-name = "harbor_settings"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "collections",
- "dirs",
- "gpui",
- "log",
- "schemars",
- "serde",
- "serde_json",
- "util",
-]
-
-[[package]]
-name = "harbor_ui"
-version = "0.1.0"
-dependencies = [
- "collections",
- "dirs",
- "gpui",
- "harbor_settings",
- "itertools 0.14.0",
- "log",
- "terminal",
- "util",
-]
-
-[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4271,6 +4228,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "sleipnir"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "gpui",
+ "gpui_platform",
+ "log",
+ "release_channel",
+ "sleipnir_settings",
+ "sleipnir_ui",
+ "terminal",
+]
+
+[[package]]
+name = "sleipnir_settings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "dirs",
+ "gpui",
+ "log",
+ "schemars",
+ "serde",
+ "serde_json",
+ "util",
+]
+
+[[package]]
+name = "sleipnir_ui"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "dirs",
+ "gpui",
+ "itertools 0.14.0",
+ "log",
+ "sleipnir_settings",
+ "terminal",
+ "util",
+]
+
+[[package]]
 name = "slotmap"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4649,7 +4649,6 @@ dependencies = [
  "futures",
  "futures-lite 1.13.0",
  "gpui",
- "harbor_settings",
  "itertools 0.14.0",
  "libc",
  "log",
@@ -4660,6 +4659,7 @@ dependencies = [
  "release_channel",
  "schemars",
  "serde",
+ "sleipnir_settings",
  "sysinfo 0.37.2",
  "task_types",
  "thiserror 2.0.20",

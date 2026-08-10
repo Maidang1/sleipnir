@@ -26,19 +26,19 @@ OUT="${ROOT}/docs/upstream-last-diff.txt"
 mkdir -p "${ROOT}/docs"
 
 {
-  echo "harbor upstream dry-run"
+  echo "sleipnir upstream dry-run"
   echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "harbor: $(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "sleipnir: $(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "zed:    $(git -C "${ZED_ROOT}" rev-parse --short HEAD) $(git -C "${ZED_ROOT}" log -1 --format='%ci')"
   echo "zed_root: ${ZED_ROOT}"
   echo
 
-  echo "== pinned revs in harbor Cargo.toml =="
+  echo "== pinned revs in sleipnir Cargo.toml =="
   rg -N 'rev = "' "${ROOT}/Cargo.toml" || true
   echo
 
   echo "== alacritty_terminal rev =="
-  echo -n "harbor: "
+  echo -n "sleipnir: "
   rg -N 'alacritty_terminal = \{ git' "${ROOT}/Cargo.toml" || true
   echo -n "zed:    "
   rg -N 'alacritty_terminal = \{ git' "${ZED_ROOT}/Cargo.toml" || true
@@ -65,27 +65,27 @@ mkdir -p "${ROOT}/docs"
       continue
     fi
     if [[ ! -d "${zed_p}" ]]; then
-      echo "(missing in Zed — expected for harbor-only paths)"
+      echo "(missing in Zed — expected for sleipnir-only paths)"
       echo
       continue
     fi
-    if diff -rq "${local_p}" "${zed_p}" >/tmp/harbor-upstream-rq.txt 2>/dev/null; then
+    if diff -rq "${local_p}" "${zed_p}" >/tmp/sleipnir-upstream-rq.txt 2>/dev/null; then
       echo "identical"
     else
-      changed=$(grep -c ' differ$' /tmp/harbor-upstream-rq.txt || true)
-      only_local=$(grep -c "^Only in ${local_p}" /tmp/harbor-upstream-rq.txt || true)
-      only_zed=$(grep -c "^Only in ${zed_p}" /tmp/harbor-upstream-rq.txt || true)
+      changed=$(grep -c ' differ$' /tmp/sleipnir-upstream-rq.txt || true)
+      only_local=$(grep -c "^Only in ${local_p}" /tmp/sleipnir-upstream-rq.txt || true)
+      only_zed=$(grep -c "^Only in ${zed_p}" /tmp/sleipnir-upstream-rq.txt || true)
       echo "files differ: ${changed:-0}  only-local: ${only_local:-0}  only-zed: ${only_zed:-0}"
-      head -40 /tmp/harbor-upstream-rq.txt | sed 's|^|  |'
-      if [[ $(wc -l </tmp/harbor-upstream-rq.txt) -gt 40 ]]; then
+      head -40 /tmp/sleipnir-upstream-rq.txt | sed 's|^|  |'
+      if [[ $(wc -l </tmp/sleipnir-upstream-rq.txt) -gt 40 ]]; then
         echo "  ... (truncated)"
       fi
     fi
     echo
   done
 
-  echo "== harbor-only crates =="
-  for c in harbor_settings harbor harbor_ui task_types release_channel; do
+  echo "== sleipnir-only crates =="
+  for c in sleipnir_settings sleipnir sleipnir_ui task_types release_channel; do
     if [[ -d "${ROOT}/crates/${c}" ]]; then
       echo "  crates/${c}"
     fi

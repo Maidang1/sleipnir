@@ -1,4 +1,4 @@
-//! Single-window multi-tab shell for harbor (HIG-aligned chrome).
+//! Single-window multi-tab shell for sleipnir (HIG-aligned chrome).
 
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter,
@@ -7,7 +7,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, actions, canvas, deferred, div, point,
     prelude::FluentBuilder as _, px,
 };
-use harbor_settings::{Appearance, TerminalPalette, TerminalSettings, ThemeName};
+use sleipnir_settings::{Appearance, TerminalPalette, TerminalSettings, ThemeName};
 
 use crate::TermView;
 use crate::chrome::{ChromeGeometry, ChromeTokens, active_after_close};
@@ -25,7 +25,7 @@ fn appearance_of(a: gpui::WindowAppearance) -> Appearance {
 }
 
 actions!(
-    harbor,
+    sleipnir,
     [
         /// Open a new terminal tab.
         NewTab,
@@ -35,7 +35,7 @@ actions!(
         NextTab,
         /// Activate the previous tab.
         PrevTab,
-        /// Reload `~/.config/harbor/settings.json`.
+        /// Reload `~/.config/sleipnir/settings.json`.
         ReloadSettings,
         /// Cycle built-in theme (mocha → macchiato → frappe → latte).
         CycleTheme,
@@ -56,7 +56,7 @@ actions!(
 
 /// Activate the tab at the given 1-based index (⌘1..⌘9).
 #[derive(Clone, Debug, Default, PartialEq, gpui::Action)]
-#[action(namespace = harbor, no_json)]
+#[action(namespace = sleipnir, no_json)]
 pub struct ActivateTab(pub usize);
 
 struct Tab {
@@ -191,7 +191,7 @@ impl AppShell {
             .tabs
             .get(self.active)
             .map(|t| t.title(cx).to_string())
-            .unwrap_or_else(|| "Harbor".to_string());
+            .unwrap_or_else(|| "Sleipnir".to_string());
         window.set_window_title(&title);
     }
 

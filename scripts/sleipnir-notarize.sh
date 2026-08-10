@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# harbor-notarize.sh — Notarize a harbor .app bundle using xcrun notarytool.
+# sleipnir-notarize.sh — Notarize a sleipnir .app bundle using xcrun notarytool.
 #
 # Usage:
-#   ./scripts/harbor-notarize.sh <path/to/Harbor.app>
+#   ./scripts/sleipnir-notarize.sh <path/to/Sleipnir.app>
 #
 # Environment variables (all required):
 #   APPLE_ID                    Your Apple ID email
@@ -13,7 +13,7 @@ set -euo pipefail
 
 APP_PATH="${1:-}"
 if [[ -z "${APP_PATH}" ]]; then
-    echo "usage: $0 <path/to/Harbor.app>" >&2
+    echo "usage: $0 <path/to/Sleipnir.app>" >&2
     exit 2
 fi
 if [[ ! -d "${APP_PATH}" ]]; then
@@ -33,7 +33,7 @@ echo "  stapling..."
 xcrun stapler staple "${APP_PATH}" || true
 
 # Package as zip (notarytool needs a zip, not a .app directly)
-ZIP="/tmp/harbor-notarize-$(basename "${APP_PATH}" .app).zip"
+ZIP="/tmp/sleipnir-notarize-$(basename "${APP_PATH}" .app).zip"
 rm -f "${ZIP}"
 ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP}"
 

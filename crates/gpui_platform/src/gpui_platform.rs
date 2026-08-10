@@ -1,4 +1,4 @@
-//! macOS-only platform entry for harbor (forked/simplified from Zed gpui_platform).
+//! macOS-only platform entry for sleipnir (forked/simplified from Zed gpui_platform).
 
 pub use gpui::Platform;
 

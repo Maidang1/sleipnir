@@ -1,18 +1,18 @@
-harbor upstream dry-run
+sleipnir upstream dry-run
 date: 2026-08-09T16:05:38Z
-harbor: 8391e5e
+sleipnir: 8391e5e
 zed:    371a7d4 2026-08-09 13:58:30 +0000
 zed_root: /Users/felixwliu/codes/open-source/zed
 
 == alacritty_terminal rev ==
-harbor: alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+sleipnir: alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 zed:    alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 
 == diff: crates/terminal/src ==
 files differ: 3  only-local: 0  only-zed: 0
-  Files /Users/felixwliu/codes/harbor/crates/terminal/src/alacritty/hyperlinks.rs and /Users/felixwliu/codes/open-source/zed/crates/terminal/src/alacritty/hyperlinks.rs differ
-  Files /Users/felixwliu/codes/harbor/crates/terminal/src/terminal.rs and /Users/felixwliu/codes/open-source/zed/crates/terminal/src/terminal.rs differ
-  Files /Users/felixwliu/codes/harbor/crates/terminal/src/terminal_settings.rs and /Users/felixwliu/codes/open-source/zed/crates/terminal/src/terminal_settings.rs differ
+  Files /Users/felixwliu/codes/sleipnir/crates/terminal/src/alacritty/hyperlinks.rs and /Users/felixwliu/codes/open-source/zed/crates/terminal/src/alacritty/hyperlinks.rs differ
+  Files /Users/felixwliu/codes/sleipnir/crates/terminal/src/terminal.rs and /Users/felixwliu/codes/open-source/zed/crates/terminal/src/terminal.rs differ
+  Files /Users/felixwliu/codes/sleipnir/crates/terminal/src/terminal_settings.rs and /Users/felixwliu/codes/open-source/zed/crates/terminal/src/terminal_settings.rs differ
 
 == diff: crates/gpui/src ==
 identical
@@ -22,7 +22,7 @@ identical
 
 == diff: crates/gpui_platform/src ==
 files differ: 1  only-local: 0  only-zed: 0
-  Files /Users/felixwliu/codes/harbor/crates/gpui_platform/src/gpui_platform.rs and /Users/felixwliu/codes/open-source/zed/crates/gpui_platform/src/gpui_platform.rs differ
+  Files /Users/felixwliu/codes/sleipnir/crates/gpui_platform/src/gpui_platform.rs and /Users/felixwliu/codes/open-source/zed/crates/gpui_platform/src/gpui_platform.rs differ
 
 == diff: crates/collections/src ==
 identical
@@ -30,10 +30,10 @@ identical
 == diff: crates/util/src ==
 identical
 
-== harbor-only crates (not from Zed wholesale) ==
-  crates/harbor_settings
-  crates/harbor
-  crates/harbor_ui
+== sleipnir-only crates (not from Zed wholesale) ==
+  crates/sleipnir_settings
+  crates/sleipnir
+  crates/sleipnir_ui
   crates/task_types
   crates/release_channel
 

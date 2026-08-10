@@ -19,7 +19,7 @@ permissions:
   contents: write
 
 env:
-  APP_NAME: Harbor
+  APP_NAME: Sleipnir
   RUST_TOOLCHAIN: 1.95.0
   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || '692T845H5K' }}
 
@@ -60,21 +60,21 @@ jobs:
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             VER="${GITHUB_REF#refs/tags/}"
           else
-            VER=$(grep '^version' crates/harbor/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+            VER=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Build release binary
-        run: cargo build --release -p harbor
+        run: cargo build --release -p sleipnir
 
       - name: Assemble .app bundle
         run: |
-          APP="Harbor.app"
+          APP="Sleipnir.app"
           VER="${{ steps.version.outputs.version }}"
           rm -rf "${APP}" build
           mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" build
-          cp target/release/harbor "${APP}/Contents/MacOS/Harbor"
+          cp target/release/sleipnir "${APP}/Contents/MacOS/Sleipnir"
           sed "s|0.1.0|${VER}|g" resources/Info.plist > "${APP}/Contents/Info.plist"
           echo "  app bundle: ${APP}"
 
@@ -87,41 +87,41 @@ jobs:
               | awk -F'"' '{print $2}')
             echo "  signing with dev cert: ${IDENTITY}"
             codesign --sign "${IDENTITY}" \
-              --entitlements resources/harbor.entitlements \
+              --entitlements resources/sleipnir.entitlements \
               --deep --force --options runtime \
-              Harbor.app
+              Sleipnir.app
           else
             echo "  no dev cert — applying ad-hoc sign (Gatekeeper will show warning)"
-            codesign -s - --deep --force Harbor.app
+            codesign -s - --deep --force Sleipnir.app
           fi
-          codesign --verify --deep --strict Harbor.app
-          echo "  signed: $(codesign -d --verbose=4 Harbor.app 2>&1 | head -3)"
+          codesign --verify --deep --strict Sleipnir.app
+          echo "  signed: $(codesign -d --verbose=4 Sleipnir.app 2>&1 | head -3)"
 
       - name: Package .zip
         run: |
           VER="${{ steps.version.outputs.version }}"
-          ditto -c -k --sequesterRsrc --keepParent Harbor.app \
-            "build/Harbor-${VER}-macos.zip"
-          du -sh "build/Harbor-${VER}-macos.zip"
-          echo "zip=build/Harbor-${VER}-macos.zip" >> "$GITHUB_ENV"
+          ditto -c -k --sequesterRsrc --keepParent Sleipnir.app \
+            "build/Sleipnir-${VER}-macos.zip"
+          du -sh "build/Sleipnir-${VER}-macos.zip"
+          echo "zip=build/Sleipnir-${VER}-macos.zip" >> "$GITHUB_ENV"
 
       - name: Gatekeeper bypass (ad-hoc signed apps)
         run: |
           # Remove quarantine attribute so macOS doesn't block the app on first launch
-          xattr -cr Harbor.app
+          xattr -cr Sleipnir.app
           echo "  quarantine cleared"
-          spctl --assess --type execute --verbose=4 Harbor.app/Contents/MacOS/Harbor 2>&1 \
+          spctl --assess --type execute --verbose=4 Sleipnir.app/Contents/MacOS/Sleipnir 2>&1 \
             || echo "  (spctl: app not notarized — Gatekeeper will show warning on first run, right-click → Open to bypass)"
 
       - name: Package .dmg
         run: |
           VER="${{ steps.version.outputs.version }}"
-          hdiutil create -volname "Harbor-${VER}" \
+          hdiutil create -volname "Sleipnir-${VER}" \
             -srcfolder build \
             -ov -format UDZO \
-            "build/Harbor-${VER}-macos.dmg"
-          du -sh "build/Harbor-${VER}-macos.dmg"
-          echo "dmg=build/Harbor-${VER}-macos.dmg" >> "$GITHUB_ENV"
+            "build/Sleipnir-${VER}-macos.dmg"
+          du -sh "build/Sleipnir-${VER}-macos.dmg"
+          echo "dmg=build/Sleipnir-${VER}-macos.dmg" >> "$GITHUB_ENV"
 
       - name: Notarize
         if: secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != ''
@@ -131,7 +131,7 @@ jobs:
             --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
             --team-id "${{ env.APPLE_TEAM_ID }}" \
             --wait
-          xcrun stapler staple Harbor.app
+          xcrun stapler staple Sleipnir.app
 
       - name: Create GitHub Release
         env:
@@ -140,30 +140,30 @@ jobs:
           DRAFT: ${{ github.event.inputs.draft || 'false' }}
         run: |
           TAG="v${VERSION}"
-          ZIP="Harbor-${VERSION}-macos.zip"
-          DMG="Harbor-${VERSION}-macos.dmg"
+          ZIP="Sleipnir-${VERSION}-macos.zip"
+          DMG="Sleipnir-${VERSION}-macos.dmg"
 
           cat > release-notes.md <<EOF
-          ## Harbor v${VERSION}
+          ## Sleipnir v${VERSION}
 
           ### Install
           Download \`${DMG}\` (recommended) or \`${ZIP}\`.
-          Open the .dmg and drag Harbor to Applications.
+          Open the .dmg and drag Sleipnir to Applications.
 
           > **Note:** This build is ad-hoc signed (no Apple Developer certificate in CI).
-          > On first launch macOS Gatekeeper will show "Harbor is an unidentified developer".
+          > On first launch macOS Gatekeeper will show "Sleipnir is an unidentified developer".
           > Right-click the app and choose **Open** to bypass, or run:
-          > \`xattr -cr \$(mdfind "kMDItemDisplayName == 'Harbor.app'")\`
+          > \`xattr -cr \$(mdfind "kMDItemDisplayName == 'Sleipnir.app'")\`
 
           ### Requirements
           - macOS 14.0+ (Sonoma)
           - Rust 1.95+ (only needed for building from source)
 
           ### Source
-          https://github.com/Maidang1/harbor
+          https://github.com/Maidang1/sleipnir
           EOF
 
-          GH_ARGS="--title 'Harbor v${VERSION}' --notes-file release-notes.md"
+          GH_ARGS="--title 'Sleipnir v${VERSION}' --notes-file release-notes.md"
           if [[ "${DRAFT}" == "true" ]]; then
             GH_ARGS="${GH_ARGS} --draft"
           fi

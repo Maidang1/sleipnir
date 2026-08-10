@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# publish-release.sh — Create or update a GitHub Release and upload harbor artifacts.
+# publish-release.sh — Create or update a GitHub Release and upload sleipnir artifacts.
 #
 # Usage:
 #   ./scripts/publish-release.sh [VERSION] [ARTIFACT_DIR]
@@ -28,7 +28,7 @@ if [[ -z "${VERSION}" ]]; then
 fi
 if [[ -z "${VERSION}" ]]; then
     # Fallback: Cargo.toml
-    VERSION=$(grep '^version' crates/harbor/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+    VERSION=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
 fi
 
 if [[ -z "${VERSION}" ]]; then
@@ -39,8 +39,8 @@ fi
 echo "=== publish-release  v${VERSION} ==="
 
 # ── Validate artifacts ────────────────────────────────────────────────────────
-ZIP="${ARTIFACT_DIR}/${APP_NAME:-Harbor}-${VERSION}-macos.zip"
-DMG="${ARTIFACT_DIR}/${APP_NAME:-Harbor}-${VERSION}-macos.dmg"
+ZIP="${ARTIFACT_DIR}/${APP_NAME:-Sleipnir}-${VERSION}-macos.zip"
+DMG="${ARTIFACT_DIR}/${APP_NAME:-Sleipnir}-${VERSION}-macos.dmg"
 
 if [[ ! -f "${ZIP}" ]]; then
     echo "ERROR: zip not found at ${ZIP}" >&2
@@ -73,27 +73,27 @@ fi
 
 if [[ ! -s "${NOTES_FILE}" ]]; then
     cat > "${NOTES_FILE}" <<EOF
-## Harbor v${VERSION}
+## Sleipnir v${VERSION}
 
 ### What's new
 - Initial macOS release build.
 
 ### Install
-Download \`Harbor-${VERSION}-macos.dmg\` (recommended) or \`Harbor-${VERSION}-macos.zip\`.
-Open the .dmg and drag Harbor to Applications.
+Download \`Sleipnir-${VERSION}-macos.dmg\` (recommended) or \`Sleipnir-${VERSION}-macos.zip\`.
+Open the .dmg and drag Sleipnir to Applications.
 
 ### Requirements
 - macOS 14.0+ (Sonoma)
 - Rust 1.95+ (only needed for building from source)
 
 ### Source
-https://github.com/Maidang1/harbor
+https://github.com/Maidang1/sleipnir
 EOF
 fi
 
 gh release create "${TAG}" \
     --target main \
-    --title "Harbor v${VERSION}" \
+    --title "Sleipnir v${VERSION}" \
     --notes-file "${NOTES_FILE}" \
     ${RELEASE_ARGS:-} \
     --draft=false \
@@ -104,6 +104,6 @@ echo ""
 echo "=== Published ==="
 gh release view "${TAG}" --json url --jq '.url'
 echo "  artifacts:"
-gh release download "${TAG}" --dir /tmp/harbor-release-${VERSION} 2>/dev/null || true
-ls -lh /tmp/harbor-release-${VERSION}/ 2>/dev/null || true
-rm -rf /tmp/harbor-release-${VERSION}
+gh release download "${TAG}" --dir /tmp/sleipnir-release-${VERSION} 2>/dev/null || true
+ls -lh /tmp/sleipnir-release-${VERSION}/ 2>/dev/null || true
+rm -rf /tmp/sleipnir-release-${VERSION}

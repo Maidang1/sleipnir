@@ -29,7 +29,7 @@ use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
 use task_types::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
-use harbor_settings::{TerminalPalette, get_color_at_index as palette_get_color};
+use sleipnir_settings::{TerminalPalette, get_color_at_index as palette_get_color};
 use urlencoding;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 

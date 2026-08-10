@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# make-app.sh — Build harbor and package it as a macOS .app bundle.
+# make-app.sh — Build sleipnir and package it as a macOS .app bundle.
 #
 # Usage:
 #   ./scripts/make-app.sh [OPTIONS]
@@ -11,8 +11,8 @@
 #   --release           Build in release mode (default: release)
 #
 # Environment:
-#   HARBOR_APP_NAME    App bundle name (default: Harbor)
-#   HARBOR_VERSION     CFBundleVersion override (default: from Cargo.toml)
+#   SLEIPNIR_APP_NAME    App bundle name (default: Sleipnir)
+#   SLEIPNIR_VERSION     CFBundleVersion override (default: from Cargo.toml)
 #   APPLE_ID           Apple ID for notarization
 #   APPLE_APP_SPECIFIC_PASSWORD  App-specific password for notarization
 #   GH_TOKEN           GitHub token (needed for --dmg with gh upload)
@@ -22,7 +22,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
-APP_NAME="${HARBOR_APP_NAME:-Harbor}"
+APP_NAME="${SLEIPNIR_APP_NAME:-Sleipnir}"
 APP_BUNDLE="${APP_NAME}.app"
 BUILD_DIR="${ROOT}/build"
 SIGN_IDENTITY=""
@@ -42,22 +42,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Determine version ─────────────────────────────────────────────────────────
-if [[ -n "${HARBOR_VERSION:-}" ]]; then
-    VERSION="${HARBOR_VERSION}"
+if [[ -n "${SLEIPNIR_VERSION:-}" ]]; then
+    VERSION="${SLEIPNIR_VERSION}"
 else
-    VERSION=$(grep '^version' crates/harbor/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+    VERSION=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
 fi
 
-echo "=== harbor make-app  v${VERSION} ==="
+echo "=== sleipnir make-app  v${VERSION} ==="
 echo "  release=${RELEASE}  sign=${SIGN_IDENTITY:-'(ad-hoc)'}  notarize=${NOTARIZE}  dmg=${MAKE_DMG}"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 if [[ "${RELEASE}" == "true" ]]; then
-    cargo build --release -p harbor 2>&1 | tail -5
-    BIN="${ROOT}/target/release/harbor"
+    cargo build --release -p sleipnir 2>&1 | tail -5
+    BIN="${ROOT}/target/release/sleipnir"
 else
-    cargo build -p harbor 2>&1 | tail -5
-    BIN="${ROOT}/target/debug/harbor"
+    cargo build -p sleipnir 2>&1 | tail -5
+    BIN="${ROOT}/target/debug/sleipnir"
 fi
 
 if [[ ! -x "${BIN}" ]]; then
@@ -92,7 +92,7 @@ ls -la "${APP}/Contents/"
 if [[ -n "${SIGN_IDENTITY}" ]]; then
     echo "  signing with: ${SIGN_IDENTITY}"
     codesign --sign "${SIGN_IDENTITY}" \
-        --entitlements "${ROOT}/resources/harbor.entitlements" \
+        --entitlements "${ROOT}/resources/sleipnir.entitlements" \
         --deep --force --options runtime \
         "${APP}"
 elif [[ "${MAKE_DMG}" == "true" ]]; then

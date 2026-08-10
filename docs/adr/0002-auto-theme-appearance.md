@@ -2,7 +2,7 @@
 
 **Status:** accepted
 
-Users want Harbor to follow the macOS system Appearance. Rather than making every
+Users want Sleipnir to follow the macOS system Appearance. Rather than making every
 Theme internally appearance-aware, we introduce an **Auto Theme**: a user choice
 that binds one dark Theme and one light Theme as a pair and swaps between them
 when the system Appearance changes. Selecting a fixed Theme (e.g. `mocha`)

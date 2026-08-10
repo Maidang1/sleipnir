@@ -1,5 +1,5 @@
 [package]
-name = "harbor"
+name = "sleipnir"
 version = "0.1.0"
 edition.workspace = true
 publish = false
@@ -9,15 +9,15 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [[bin]]
-name = "harbor"
+name = "sleipnir"
 path = "src/main.rs"
 
 [dependencies]
 env_logger.workspace = true
 gpui = { workspace = true, features = ["font-kit"] }
 gpui_platform = { workspace = true, features = ["font-kit"] }
-harbor_settings.workspace = true
-harbor_ui.workspace = true
+sleipnir_settings.workspace = true
+sleipnir_ui.workspace = true
 release_channel.workspace = true
 terminal.workspace = true
 log.workspace = true

@@ -1,7 +1,7 @@
-//! Terminal settings surface for harbor.
-//! Backed by `harbor_settings` instead of Zed's full settings stack.
+//! Terminal settings surface for sleipnir.
+//! Backed by `sleipnir_settings` instead of Zed's full settings stack.
 
-pub use harbor_settings::{
+pub use sleipnir_settings::{
     AlternateScroll, CursorShape, TerminalBell, TerminalBlink, TerminalLineHeight, TerminalSettings,
     Toolbar, WorkingDirectory,
 };

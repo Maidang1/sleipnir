@@ -1,12 +1,12 @@
-//! Harbor — standalone macOS terminal (HIG-aligned window chrome).
+//! Sleipnir — standalone macOS terminal (HIG-aligned window chrome).
 
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance,
     WindowBounds, WindowOptions, px, size,
 };
 use gpui_platform::application;
-use harbor_settings;
-use harbor_ui::{
+use sleipnir_settings;
+use sleipnir_ui::{
     ActivateTab, AppShell, ChromeGeometry, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, NewTab, NextTab, PrevTab, ReloadSettings, SplitDown, SplitRight,
 };
@@ -22,7 +22,7 @@ fn main() {
 
     application().run(|cx: &mut App| {
         AppVersion::init(cx);
-        harbor_settings::init(cx);
+        sleipnir_settings::init(cx);
 
         cx.bind_keys([
             // Clipboard
@@ -131,7 +131,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Harbor".into()),
+                    title: Some("Sleipnir".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(geo.traffic_light_position),
                 }),

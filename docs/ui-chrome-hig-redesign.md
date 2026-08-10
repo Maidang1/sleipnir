@@ -1,20 +1,20 @@
-# harbor: macOS HIG-Aligned Window Chrome & Tab UI Redesign
+# sleipnir: macOS HIG-Aligned Window Chrome & Tab UI Redesign
 
 | Field | Value |
 |-------|--------|
 | **Status** | Implemented (rev 3 design; chrome landed in tree) |
 | **Author** | (TBD) |
 | **Date** | 2026-08-10 |
-| **Product** | harbor (macOS-only terminal emulator) |
+| **Product** | sleipnir (macOS-only terminal emulator) |
 | **Scope** | Window chrome, title bar, tab strip, shell layout — not terminal cell painting or themes |
-| **Related crates** | `harbor`, `harbor_ui`, `harbor_settings` (optional chrome tokens) |
+| **Related crates** | `sleipnir`, `sleipnir_ui`, `sleipnir_settings` (optional chrome tokens) |
 | **Upstream GPUI pin** | Zed `371a7d4ba2fd0064b79a0bc67d28e57a906779dc` |
 
 ---
 
 ## Overview
 
-harbor’s current shell stacks a **native macOS title bar** above a **custom, theme-colored pill tab strip**. That produces double chrome: system gray title material, then a floating Catppuccin chip row, then the terminal. The result reads as “Zed-like custom UI bolted under AppKit,” not as Terminal.app / Safari / Finder-style cohesion.
+sleipnir’s current shell stacks a **native macOS title bar** above a **custom, theme-colored pill tab strip**. That produces double chrome: system gray title material, then a floating Catppuccin chip row, then the terminal. The result reads as “Zed-like custom UI bolted under AppKit,” not as Terminal.app / Safari / Finder-style cohesion.
 
 This design unifies window chrome and tabs into a **single custom title-region** using GPUI’s transparent titlebar APIs (already used by Zed, without pulling Zed editor chrome crates). Terminal content themes (Catppuccin mocha/macchiato/frappe/latte) remain; only shell/chrome presentation and hierarchy change. Implementation stays in local crates via a **4-PR** incremental plan.
 
@@ -29,7 +29,7 @@ This design unifies window chrome and tabs into a **single custom title-region**
 ```mermaid
 flowchart TB
   subgraph Window["NSWindow"]
-    TB["System titlebar<br/>appears_transparent: false<br/>title: harbor"]
+    TB["System titlebar<br/>appears_transparent: false<br/>title: sleipnir"]
     AB["AppShell tab bar<br/>bg: palette.background @ 0.92<br/>border_b, rounded_md pills"]
     TV["TermView / TermElement<br/>palette.background<br/>body padding p_2 on TermView ready branch"]
   end
@@ -38,11 +38,11 @@ flowchart TB
 
 | Layer | Source | Behavior today |
 |-------|--------|----------------|
-| Window open | [`crates/harbor/src/main.rs`](crates/harbor/src/main.rs) | `TitlebarOptions { appears_transparent: false, traffic_light_position: None }` |
-| Shell | [`crates/harbor_ui/src/app_shell.rs`](crates/harbor_ui/src/app_shell.rs) | Flex column: tab bar (`px_2`/`py_1`, gap, selection pills) + active `TermView` |
+| Window open | [`crates/sleipnir/src/main.rs`](crates/sleipnir/src/main.rs) | `TitlebarOptions { appears_transparent: false, traffic_light_position: None }` |
+| Shell | [`crates/sleipnir_ui/src/app_shell.rs`](crates/sleipnir_ui/src/app_shell.rs) | Flex column: tab bar (`px_2`/`py_1`, gap, selection pills) + active `TermView` |
 | Tabs | same | Active: `selection.opacity(0.55)`; inactive: bar bg; titles from `TermView::title()` |
-| Terminal | [`harbor_ui.rs`](crates/harbor_ui/src/harbor_ui.rs) `TermView::render` + [`term_element.rs`](crates/harbor_ui/src/term_element.rs) | Cell paint via palette; **`p_2` padding is on `TermView` ready branch**, not on `AppShell` chrome |
-| Colors | [`harbor_settings` themes](crates/harbor_settings/src/themes.rs) | Full palette for cells; chrome reuses `background` / `selection` / `ansi[8]` ad hoc |
+| Terminal | [`sleipnir_ui.rs`](crates/sleipnir_ui/src/sleipnir_ui.rs) `TermView::render` + [`term_element.rs`](crates/sleipnir_ui/src/term_element.rs) | Cell paint via palette; **`p_2` padding is on `TermView` ready branch**, not on `AppShell` chrome |
+| Colors | [`sleipnir_settings` themes](crates/sleipnir_settings/src/themes.rs) | Full palette for cells; chrome reuses `background` / `selection` / `ansi[8]` ad hoc |
 
 ### Pain points (mapped to screenshot / HIG)
 
@@ -50,7 +50,7 @@ flowchart TB
 2. **Pill tabs as “floating chips”** — `rounded_md` selection on a near-full-opacity bar does not read as macOS tabs (Safari continuous strip, Terminal segmented/system tabs).
 3. **Traffic-light / content collision risk** if we only recolor without redesign — Today traffic lights sit in system chrome; after transparent titlebar we must reserve clearance (**71 / 78 px**, Zed baseline) and drag regions explicitly.
 4. **Inactive window state ignored** — No dimming of chrome when `!window.is_window_active()`, which macOS users expect. (GPUI refreshes the window on activation changes, so `is_window_active()` in `Render` is sufficient; optional `observe_window_activation` not required.)
-5. **Title redundancy** — Window title fixed to `"harbor"` while tabs already show shell titles (`felixwliu — zsh`). Current `AppShell` tab subscription only `cx.notify()` and **discards** `TermViewEvent` with no `Window` handle, so it cannot set the title today.
+5. **Title redundancy** — Window title fixed to `"sleipnir"` while tabs already show shell titles (`felixwliu — zsh`). Current `AppShell` tab subscription only `cx.notify()` and **discards** `TermViewEvent` with no `Window` handle, so it cannot set the title today.
 
 ### Why change now
 
@@ -88,7 +88,7 @@ flowchart TB
 
 ### Design principles (Apple HIG → product rules)
 
-| HIG idea | Application in harbor |
+| HIG idea | Application in sleipnir |
 |----------|----------------------------|
 | **Clarity** | One chrome band; legible ~13 pt tab labels; active tab obvious via **connection to content**, not neon fill. |
 | **Deference** | Chrome quieter than terminal content; low-contrast hairline; no second “app skin” above content. |
@@ -202,7 +202,7 @@ impl ChromeGeometry {
 fn traffic_light_leading_pad() -> Pixels {
     // Match Zed ui::TRAFFIC_LIGHT_PADDING without depending on ui.
     // Magic +1px vs pure button span: Zed notes 1px border on macOS apps.
-    // Requires harbor_ui/build.rs (below); without it cfg is always false → 71.
+    // Requires sleipnir_ui/build.rs (below); without it cfg is always false → 71.
     if cfg!(macos_sdk_26_or_later) {
         px(78.0)
     } else {
@@ -213,12 +213,12 @@ fn traffic_light_leading_pad() -> Pixels {
 
 #### Enabling `macos_sdk_26_or_later` (required for 78 px pad)
 
-`cfg!(macos_sdk_26_or_later)` is **not** set by GPUI or the workspace. In Zed it is emitted only by **`crates/ui/build.rs`**, and Cargo cfgs are **package-local**. harbor currently has **no** such script, so without PR1 wiring the `78` branch is dead and pad is always **71** (acceptable historic baseline).
+`cfg!(macos_sdk_26_or_later)` is **not** set by GPUI or the workspace. In Zed it is emitted only by **`crates/ui/build.rs`**, and Cargo cfgs are **package-local**. sleipnir currently has **no** such script, so without PR1 wiring the `78` branch is dead and pad is always **71** (acceptable historic baseline).
 
-**PR1 must add** [`crates/harbor_ui/build.rs`](crates/harbor_ui/build.rs) — copy of Zed `ui/build.rs` at pin `371a7d4` (adapted only as needed for clippy/allow):
+**PR1 must add** [`crates/sleipnir_ui/build.rs`](crates/sleipnir_ui/build.rs) — copy of Zed `ui/build.rs` at pin `371a7d4` (adapted only as needed for clippy/allow):
 
 ```rust
-// crates/harbor_ui/build.rs — copy pattern from Zed crates/ui/build.rs
+// crates/sleipnir_ui/build.rs — copy pattern from Zed crates/ui/build.rs
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
 fn main() {
@@ -269,7 +269,7 @@ and **early-returns / restores** traffic lights when `is_fullscreen()`. Therefor
 
 ### Window configuration (entry point)
 
-Update [`crates/harbor/src/main.rs`](crates/harbor/src/main.rs):
+Update [`crates/sleipnir/src/main.rs`](crates/sleipnir/src/main.rs):
 
 ```rust
 use gpui::{
@@ -281,7 +281,7 @@ let geo = ChromeGeometry::standard(); // or inline same numbers if chrome crate 
 WindowOptions {
     window_bounds: Some(WindowBounds::Windowed(bounds)),
     titlebar: Some(TitlebarOptions {
-        title: Some("harbor".into()), // replaced at runtime by sync_window_title
+        title: Some("sleipnir".into()), // replaced at runtime by sync_window_title
         appears_transparent: true,
         traffic_light_position: Some(geo.traffic_light_position),
     }),
@@ -312,7 +312,7 @@ Mirror these **upstream files at pin `371a7d4`** when implementing PR1 — do no
 | WindowOptions | `crates/zed/src/zed.rs` — `appears_transparent: true`, `traffic_light_position`, `app_owns_titlebar_drag: true` |
 | Drag / double-click state machine | `crates/platform_title_bar/src/platform_title_bar.rs` — `should_move`, `start_window_move`, `titlebar_double_click` |
 | Leading pad constants | `crates/ui/src/utils/constants.rs` — `TRAFFIC_LIGHT_PADDING` 71 / 78 |
-| SDK cfg for 78 px pad | `crates/ui/build.rs` — copy into `harbor_ui/build.rs` (package-local cfg) |
+| SDK cfg for 78 px pad | `crates/ui/build.rs` — copy into `sleipnir_ui/build.rs` (package-local cfg) |
 | Traffic layout / fullscreen restore | `crates/gpui_macos/src/window.rs` — `MacWindowState::move_traffic_light` |
 | Color ops | `crates/gpui/src/color.rs` — `Hsla::{blend, opacity, alpha, to_rgb}` |
 | Title API | `Window::set_window_title` |
@@ -321,7 +321,7 @@ Mirror these **upstream files at pin `371a7d4`** when implementing PR1 — do no
 ### Component structure
 
 ```
-harbor_ui/
+sleipnir_ui/
   build.rs              # PR1: copy Zed ui/build.rs → macos_sdk_26_or_later cfg
   app_shell.rs          # Tab model, actions, drag flag, ScrollHandle, sync_window_title
   chrome/                 # optional extract by PR2; OK to start inline in app_shell.rs
@@ -475,7 +475,7 @@ chrome-band (bg surface, border_b_1, NO parent drag handlers)
 
 #### Alternative (not default): parent-wide handlers (Zed-style)
 
-Zed’s `PlatformTitleBar` sets `should_move` on the full title bar and relies on child hit absorption. That is **higher risk** for harbor (tabs are dense click targets). Use only if empty-region layout is insufficient after QA, and still verify:
+Zed’s `PlatformTitleBar` sets `should_move` on the full title bar and relies on child hit absorption. That is **higher risk** for sleipnir (tabs are dense click targets). Use only if empty-region layout is insufficient after QA, and still verify:
 
 - Click tab never drags
 - Double-click tab never zooms (parent `on_click` must not fire for tab double-clicks — child absorption or stop propagation)
@@ -669,7 +669,7 @@ impl ChromeTokens {
 
 **Do not** use `background.opacity(0.92)` for chrome over opaque content — muddy non-blurred strip. Prefer **opaque** `blend` results (`alpha(1.0)`).
 
-**Placement:** implement `ChromeTokens` in `harbor_ui` (or `harbor_settings` if shared); pure functions unit-tested without a window.
+**Placement:** implement `ChromeTokens` in `sleipnir_ui` (or `sleipnir_settings` if shared); pure functions unit-tested without a window.
 
 #### Typography
 
@@ -736,7 +736,7 @@ impl AppShell {
             .tabs
             .get(self.active)
             .map(|t| t.view.read(cx).title()) // already falls back to "shell" if empty
-            .unwrap_or("harbor");
+            .unwrap_or("sleipnir");
         window.set_window_title(title);
     }
 
@@ -769,7 +769,7 @@ cx.subscribe_in(&view, window, |this, _view, event: &crate::TermViewEvent, windo
 .detach();
 ```
 
-`TermView::title()` already returns `"shell"` when the stored title is empty — use that for the window title; only use `"harbor"` if there is no active tab (should not happen).
+`TermView::title()` already returns `"shell"` when the stored title is empty — use that for the window title; only use `"sleipnir"` if there is no active tab (should not happen).
 
 **Ships in PR1** (not a separate PR) because activate/add/close already have `&mut Window`.
 
@@ -950,7 +950,7 @@ Resolved items moved to **Key Decisions**. Remaining true unknowns:
 | 2 | **Keep in-window multi-PTY tabs; not NSWindow tabbing primary** | Preserves M3 model |
 | 3 | **Derive opaque chrome colors from `TerminalPalette` via `Hsla::blend` / `opacity`** | Cohesive hierarchy; no AppKit gray |
 | 4 | **`app_owns_titlebar_drag: true` + empty-region-only drag (`should_move` on leading/trailing strips only)** | AppKit does not own drag; avoids click-tab-starts-drag; parent-wide handlers are non-default |
-| 5 | **`ChromeGeometry` with leading_pad 71/78 (Zed parity), height 40, traffic (12,12); `harbor_ui/build.rs` enables cfg** | Coupled system; package-local cfg required for 78; no invented `72` |
+| 5 | **`ChromeGeometry` with leading_pad 71/78 (Zed parity), height 40, traffic (12,12); `sleipnir_ui/build.rs` enables cfg** | Coupled system; package-local cfg required for 78; no invented `72` |
 | 6 | **Preserve terminal themes and `AppShell` tab state machine** | Presentation-only redesign |
 | 7 | **Window title tracks active tab via `sync_window_title` + `subscribe_in`** | Mission Control clarity; wires in PR1 |
 | 8 | **Opaque window background** | Readability |
@@ -966,10 +966,10 @@ Resolved items moved to **Key Decisions**. Remaining true unknowns:
 ## References
 
 - Local:
-  - [`crates/harbor/src/main.rs`](crates/harbor/src/main.rs)
-  - [`crates/harbor_ui/src/app_shell.rs`](crates/harbor_ui/src/app_shell.rs)
-  - [`crates/harbor_ui/src/harbor_ui.rs`](crates/harbor_ui/src/harbor_ui.rs) — `TermView` / `p_2` / titles
-  - [`crates/harbor_settings/src/themes.rs`](crates/harbor_settings/src/themes.rs)
+  - [`crates/sleipnir/src/main.rs`](crates/sleipnir/src/main.rs)
+  - [`crates/sleipnir_ui/src/app_shell.rs`](crates/sleipnir_ui/src/app_shell.rs)
+  - [`crates/sleipnir_ui/src/sleipnir_ui.rs`](crates/sleipnir_ui/src/sleipnir_ui.rs) — `TermView` / `p_2` / titles
+  - [`crates/sleipnir_settings/src/themes.rs`](crates/sleipnir_settings/src/themes.rs)
   - [`docs/M3.md`](docs/M3.md)
 - Upstream GPUI (Zed pin `371a7d4…`): see Implementation notes table
 - Apple HIG (macOS): [Windows](https://developer.apple.com/design/human-interface-guidelines/windows), [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Tabs](https://developer.apple.com/design/human-interface-guidelines/tabs) — standard window controls, content deference, clear selection
@@ -986,7 +986,7 @@ Four independently reviewable PRs. Each leaves the app buildable.
 | | |
 |--|--|
 | **Title** | `ui: unified chrome shell — transparent titlebar, drag, window title` |
-| **Files** | `crates/harbor/src/main.rs`; `crates/harbor_ui/src/app_shell.rs`; **`crates/harbor_ui/build.rs`** (new); optional `chrome/geometry.rs` |
+| **Files** | `crates/sleipnir/src/main.rs`; `crates/sleipnir_ui/src/app_shell.rs`; **`crates/sleipnir_ui/build.rs`** (new); optional `chrome/geometry.rs` |
 | **Depends on** | — |
 | **Changes** | `WindowOptions` transparent titlebar + `ChromeGeometry` traffic/leading pad + `app_owns_titlebar_drag` + min size. Add **`build.rs`** copying Zed `ui/build.rs` so `macos_sdk_26_or_later` can enable 78 px pad. Fixed-height chrome band with fullscreen pad branch. Implement **empty-region-only** drag contract (`should_move` / `start_window_move` / `titlebar_double_click` on leading + trailing strips only; `.border_b_1()`). Keep existing pill tabs inside the band temporarily. Add `sync_window_title`; switch tab subscription to `subscribe_in`; call from activate/add/close (**no** `scroll_to_item` yet). |
 | **Accept criteria** | Drag contract QA list green; traffic lights clear (71, or 78 with SDK ≥ 26 + build.rs); Mission Control title follows active tab; tabs still switch. |

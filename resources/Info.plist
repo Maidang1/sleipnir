@@ -5,13 +5,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>harbor</string>
+	<string>sleipnir</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.maidang1.harbor</string>
+	<string>com.maidang1.sleipnir</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Harbor</string>
+	<string>Sleipnir</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -27,9 +27,9 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Harbor needs AppleScript access to read clipboard content for paste operations.</string>
+	<string>Sleipnir needs AppleScript access to read clipboard content for paste operations.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Harbor can capture screenshots for paste-as-image.</string>
+	<string>Sleipnir can capture screenshots for paste-as-image.</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>CFBundleIconFile</key>

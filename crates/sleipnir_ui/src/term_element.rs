@@ -8,7 +8,7 @@ use gpui::{
     relative, size,
 };
 use itertools::Itertools;
-use harbor_settings::{TerminalPalette, TerminalSettings, get_color_at_index};
+use sleipnir_settings::{TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
 use terminal::{
     Cell, Color, IndexedCell, NamedColor, Range as TerminalRange, Terminal, TerminalBounds,

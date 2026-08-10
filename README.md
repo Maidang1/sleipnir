@@ -1,4 +1,4 @@
-# Harbor
+# Sleipnir
 
 Standalone terminal emulator for **macOS**, built on [GPUI](https://gpui.rs) from the
 [Zed](https://github.com/zed-industries/zed) monorepo (Cargo **git pin** by commit) plus a
@@ -27,13 +27,13 @@ See `LICENSE-GPL` and per-crate license files under `crates/`.
 ## Build & run
 
 ```bash
-cargo run -p harbor
-# binary: target/debug/harbor
+cargo run -p sleipnir
+# binary: target/debug/sleipnir
 ```
 
 ## Config
 
-`~/.config/harbor/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`auto`/`mocha`/`macchiato`/`frappe`/`latte`/`tokyo_night`/`nord`/`gruvbox_dark`/`solarized_light`). `auto` follows the system light/dark appearance. See `docs/settings.example.json`. Reload with `⌘⇧R`.
+`~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`auto`/`mocha`/`macchiato`/`frappe`/`latte`/`tokyo_night`/`nord`/`gruvbox_dark`/`solarized_light`). `auto` follows the system light/dark appearance. See `docs/settings.example.json`. Reload with `⌘⇧R`.
 
 ## Paste
 
@@ -87,7 +87,7 @@ See `docs/M6.md` for the full list.
 
 GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a fixed `rev`
 (`gpui`, `gpui_macos`, `collections`, `util`, …). Local forks: `terminal`, slim `gpui_platform`,
-and harbor app crates. See `UPSTREAM.md` to bump the pin.
+and sleipnir app crates. See `UPSTREAM.md` to bump the pin.
 
 ```bash
 ./scripts/upstream-diff.sh /path/to/zed

@@ -1,7 +1,7 @@
 //! Palette-derived opaque chrome colors for the unified title-tab band.
 
 use gpui::Hsla;
-use harbor_settings::TerminalPalette;
+use sleipnir_settings::TerminalPalette;
 
 /// Window chrome colors derived from the active terminal palette.
 /// Terminal cell colors stay on [`TerminalPalette`]; this is shell-only.
@@ -112,7 +112,7 @@ pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harbor_settings::{Appearance, ThemeName, palette_for_theme};
+    use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
 
     #[test]
     fn dark_themes_lift_surface_above_content() {

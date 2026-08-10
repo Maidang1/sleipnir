@@ -1,4 +1,4 @@
-//! Terminal UI for harbor (M2 PTY input, M3 tabs + URL open, HIG chrome).
+//! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
 mod app_shell;
 mod chrome;
@@ -22,7 +22,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
     SharedString, Styled as _, Task, WeakEntity, Window, div, rgb,
 };
-use harbor_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
+use sleipnir_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal::{
@@ -117,7 +117,7 @@ impl TermView {
         Self {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
-            title: "Harbor".into(),
+            title: "Sleipnir".into(),
             shell,
             _spawn: spawn,
         }
@@ -140,7 +140,7 @@ impl TermView {
         let mut this = Self {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
-            title: "harbor (display)".into(),
+            title: "sleipnir (display)".into(),
             shell: None,
             _spawn: Task::ready(()),
         };
@@ -477,15 +477,15 @@ impl TermView {
     fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
         let mut settings = TerminalSettings::get_global(cx).clone();
         settings.theme = match settings.theme {
-            harbor_settings::ThemeName::Auto => harbor_settings::ThemeName::Mocha,
-            harbor_settings::ThemeName::Mocha => harbor_settings::ThemeName::Macchiato,
-            harbor_settings::ThemeName::Macchiato => harbor_settings::ThemeName::Frappe,
-            harbor_settings::ThemeName::Frappe => harbor_settings::ThemeName::Latte,
-            harbor_settings::ThemeName::Latte => harbor_settings::ThemeName::TokyoNight,
-            harbor_settings::ThemeName::TokyoNight => harbor_settings::ThemeName::Nord,
-            harbor_settings::ThemeName::Nord => harbor_settings::ThemeName::GruvboxDark,
-            harbor_settings::ThemeName::GruvboxDark => harbor_settings::ThemeName::SolarizedLight,
-            harbor_settings::ThemeName::SolarizedLight => harbor_settings::ThemeName::Auto,
+            sleipnir_settings::ThemeName::Auto => sleipnir_settings::ThemeName::Mocha,
+            sleipnir_settings::ThemeName::Mocha => sleipnir_settings::ThemeName::Macchiato,
+            sleipnir_settings::ThemeName::Macchiato => sleipnir_settings::ThemeName::Frappe,
+            sleipnir_settings::ThemeName::Frappe => sleipnir_settings::ThemeName::Latte,
+            sleipnir_settings::ThemeName::Latte => sleipnir_settings::ThemeName::TokyoNight,
+            sleipnir_settings::ThemeName::TokyoNight => sleipnir_settings::ThemeName::Nord,
+            sleipnir_settings::ThemeName::Nord => sleipnir_settings::ThemeName::GruvboxDark,
+            sleipnir_settings::ThemeName::GruvboxDark => sleipnir_settings::ThemeName::SolarizedLight,
+            sleipnir_settings::ThemeName::SolarizedLight => sleipnir_settings::ThemeName::Auto,
         };
         TerminalSettings::apply(settings, cx);
         cx.notify();
@@ -590,7 +590,7 @@ fn write_clipboard_image_to_temp(image: &gpui::Image) -> Result<PathBuf, String>
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     // Low bits of the image id keep concurrent pastes unique within the same nanosecond.
-    let path = std::env::temp_dir().join(format!("harbor-paste-{nanos}-{:x}.{ext}", image.id()));
+    let path = std::env::temp_dir().join(format!("sleipnir-paste-{nanos}-{:x}.{ext}", image.id()));
     std::fs::write(&path, image.bytes()).map_err(|e| e.to_string())?;
     log::info!("pasted clipboard image to {}", path.display());
     Ok(path)

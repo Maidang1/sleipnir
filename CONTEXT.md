@@ -1,4 +1,4 @@
-# Harbor
+# Sleipnir
 
 A standalone macOS terminal emulator built on GPUI. This glossary fixes the
 language for the window/tab/pane model and its interaction surface.
@@ -6,7 +6,7 @@ language for the window/tab/pane model and its interaction surface.
 ## Window & layout
 
 **Window**:
-One macOS `NSWindow`. Harbor may open several. Each hosts one chrome band and
+One macOS `NSWindow`. Sleipnir may open several. Each hosts one chrome band and
 one content area.
 _Avoid_: App, screen.
 
@@ -54,7 +54,7 @@ _Avoid_: Palette (a Palette is the concrete resolved color set of a Theme),
 color scheme, skin.
 
 **Appearance**:
-Whether the system (and therefore Harbor) is in dark or light mode. A value of
+Whether the system (and therefore Sleipnir) is in dark or light mode. A value of
 `dark` or `light`.
 _Avoid_: Mode, dark mode (as a noun).
 
