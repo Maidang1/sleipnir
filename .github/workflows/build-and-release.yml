@@ -28,6 +28,9 @@ jobs:
     name: Build & Publish
     runs-on: macos-latest
     timeout-minutes: 30
+    env:
+      HAS_SIGNING_CERT: ${{ secrets.CODE_SIGNING_CERT_P12 != '' }}
+      HAS_NOTARIZATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
 
     steps:
       - name: Checkout
@@ -46,7 +49,7 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain
 
       - name: Import signing certificate
-        if: secrets.CODE_SIGNING_CERT_P12 != ''
+        if: env.HAS_SIGNING_CERT == 'true'
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-data: ${{ secrets.CODE_SIGNING_CERT_P12 }}
@@ -124,7 +127,7 @@ jobs:
           echo "dmg=build/Sleipnir-${VER}-macos.dmg" >> "$GITHUB_ENV"
 
       - name: Notarize
-        if: secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != ''
+        if: env.HAS_NOTARIZATION == 'true'
         run: |
           xcrun notarytool submit "${{ env.zip }}" \
             --apple-id "${{ secrets.APPLE_ID }}" \
