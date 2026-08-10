@@ -18,6 +18,9 @@ pub struct ChromeGeometry {
     pub after_lights_gap: Pixels,
     pub new_tab_hit: Pixels,
     pub close_hit: Pixels,
+    /// Radius of the macOS window's rounded corners; the content is clipped to
+    /// this so the opaque terminal background does not square off the corners.
+    pub window_radius: Pixels,
 }
 
 impl ChromeGeometry {
@@ -35,6 +38,7 @@ impl ChromeGeometry {
             after_lights_gap: px(8.0),
             new_tab_hit: px(28.0),
             close_hit: px(24.0),
+            window_radius: px(10.0),
         }
     }
 

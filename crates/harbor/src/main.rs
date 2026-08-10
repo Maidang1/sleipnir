@@ -7,7 +7,8 @@ use gpui::{
 use gpui_platform::application;
 use harbor_settings;
 use harbor_ui::{
-    AppShell, ChromeGeometry, CloseTab, CycleTheme, NewTab, NextTab, PrevTab, ReloadSettings,
+    ActivateTab, AppShell, ChromeGeometry, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, NewTab, NextTab, PrevTab, ReloadSettings, SplitDown, SplitRight,
 };
 use release_channel::AppVersion;
 use terminal::{
@@ -82,11 +83,46 @@ fn main() {
             KeyBinding::new("cmd-shift-[", PrevTab, Some("Terminal")),
             KeyBinding::new("ctrl-tab", NextTab, Some("Terminal")),
             KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Terminal")),
+            // Jump directly to tab N (⌘1..⌘9); 1-based, out-of-range is a no-op.
+            KeyBinding::new("cmd-1", ActivateTab(1), Some("AppShell")),
+            KeyBinding::new("cmd-2", ActivateTab(2), Some("AppShell")),
+            KeyBinding::new("cmd-3", ActivateTab(3), Some("AppShell")),
+            KeyBinding::new("cmd-4", ActivateTab(4), Some("AppShell")),
+            KeyBinding::new("cmd-5", ActivateTab(5), Some("AppShell")),
+            KeyBinding::new("cmd-6", ActivateTab(6), Some("AppShell")),
+            KeyBinding::new("cmd-7", ActivateTab(7), Some("AppShell")),
+            KeyBinding::new("cmd-8", ActivateTab(8), Some("AppShell")),
+            KeyBinding::new("cmd-9", ActivateTab(9), Some("AppShell")),
+            KeyBinding::new("cmd-1", ActivateTab(1), Some("Terminal")),
+            KeyBinding::new("cmd-2", ActivateTab(2), Some("Terminal")),
+            KeyBinding::new("cmd-3", ActivateTab(3), Some("Terminal")),
+            KeyBinding::new("cmd-4", ActivateTab(4), Some("Terminal")),
+            KeyBinding::new("cmd-5", ActivateTab(5), Some("Terminal")),
+            KeyBinding::new("cmd-6", ActivateTab(6), Some("Terminal")),
+            KeyBinding::new("cmd-7", ActivateTab(7), Some("Terminal")),
+            KeyBinding::new("cmd-8", ActivateTab(8), Some("Terminal")),
+            KeyBinding::new("cmd-9", ActivateTab(9), Some("Terminal")),
             // Settings / theme
             KeyBinding::new("cmd-shift-r", ReloadSettings, Some("AppShell")),
             KeyBinding::new("cmd-shift-r", ReloadSettings, Some("Terminal")),
-            KeyBinding::new("cmd-shift-t", CycleTheme, Some("AppShell")),
-            KeyBinding::new("cmd-shift-t", CycleTheme, Some("Terminal")),
+            // Theme cycling lives on ⌘⇧P for now; ⌘⇧T is reserved for the
+            // conventional "reopen closed tab" (Phase 3 replaces this with a picker).
+            KeyBinding::new("cmd-shift-p", CycleTheme, Some("AppShell")),
+            KeyBinding::new("cmd-shift-p", CycleTheme, Some("Terminal")),
+            // Splits (iTerm2 keymap): ⌘D splits right, ⌘⇧D splits down.
+            KeyBinding::new("cmd-d", SplitRight, Some("AppShell")),
+            KeyBinding::new("cmd-shift-d", SplitDown, Some("AppShell")),
+            KeyBinding::new("cmd-d", SplitRight, Some("Terminal")),
+            KeyBinding::new("cmd-shift-d", SplitDown, Some("Terminal")),
+            // Pane focus navigation on ⌘⌥+arrows (⌘+arrows are scroll/line binds).
+            KeyBinding::new("cmd-alt-left", FocusPaneLeft, Some("AppShell")),
+            KeyBinding::new("cmd-alt-right", FocusPaneRight, Some("AppShell")),
+            KeyBinding::new("cmd-alt-up", FocusPaneUp, Some("AppShell")),
+            KeyBinding::new("cmd-alt-down", FocusPaneDown, Some("AppShell")),
+            KeyBinding::new("cmd-alt-left", FocusPaneLeft, Some("Terminal")),
+            KeyBinding::new("cmd-alt-right", FocusPaneRight, Some("Terminal")),
+            KeyBinding::new("cmd-alt-up", FocusPaneUp, Some("Terminal")),
+            KeyBinding::new("cmd-alt-down", FocusPaneDown, Some("Terminal")),
         ]);
 
         let geo = ChromeGeometry::standard();

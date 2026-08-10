@@ -5,7 +5,9 @@
 
 mod themes;
 
-pub use themes::{ThemeName, TerminalPalette, get_color_at_index, palette_for_theme};
+pub use themes::{
+    Appearance, TerminalPalette, ThemeName, get_color_at_index, palette_for_theme,
+};
 
 use collections::HashMap;
 use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels, px};
@@ -164,6 +166,10 @@ impl Global for TerminalSettingsGlobal {}
 struct TerminalPaletteGlobal(Arc<TerminalPalette>);
 impl Global for TerminalPaletteGlobal {}
 
+/// Last-known system appearance, used to resolve the `Auto` theme.
+struct AppearanceGlobal(Appearance);
+impl Global for AppearanceGlobal {}
+
 impl TerminalSettings {
     pub fn get_global(cx: &App) -> &TerminalSettings {
         &cx.global::<TerminalSettingsGlobal>().0
@@ -189,6 +195,14 @@ impl TerminalSettings {
     pub fn apply(settings: TerminalSettings, cx: &mut App) {
         apply_loaded(settings, cx);
     }
+
+    /// Record a new system appearance and re-resolve the palette (for `Auto`).
+    pub fn set_appearance(appearance: Appearance, cx: &mut App) {
+        cx.set_global(AppearanceGlobal(appearance));
+        let settings = Self::get_global(cx).clone();
+        let palette = Arc::new(palette_for_theme(settings.theme, appearance));
+        cx.set_global(TerminalPaletteGlobal(palette));
+    }
 }
 
 impl TerminalPalette {
@@ -197,8 +211,15 @@ impl TerminalPalette {
     }
 }
 
+fn current_appearance(cx: &App) -> Appearance {
+    cx.try_global::<AppearanceGlobal>()
+        .map(|g| g.0)
+        .unwrap_or_default()
+}
+
 fn apply_loaded(settings: TerminalSettings, cx: &mut App) {
-    let palette = Arc::new(palette_for_theme(settings.theme));
+    let appearance = current_appearance(cx);
+    let palette = Arc::new(palette_for_theme(settings.theme, appearance));
     cx.set_global(TerminalPaletteGlobal(palette));
     cx.set_global(TerminalSettingsGlobal(settings));
 }

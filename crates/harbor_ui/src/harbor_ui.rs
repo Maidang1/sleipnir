@@ -2,12 +2,18 @@
 
 mod app_shell;
 mod chrome;
+mod pane_tree;
 mod term_element;
 
 pub use app_shell::{
-    AppShell, CloseTab, CycleTheme, NewTab, NextTab, PrevTab, ReloadSettings,
+    ActivateTab, AppShell, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, NewTab, NextTab, PrevTab, ReloadSettings, SplitDown, SplitRight,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
+pub use pane_tree::{
+    Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
+    neighbor,
+};
 pub use term_element::TermElement;
 
 use collections::HashMap;
@@ -471,10 +477,15 @@ impl TermView {
     fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
         let mut settings = TerminalSettings::get_global(cx).clone();
         settings.theme = match settings.theme {
+            harbor_settings::ThemeName::Auto => harbor_settings::ThemeName::Mocha,
             harbor_settings::ThemeName::Mocha => harbor_settings::ThemeName::Macchiato,
             harbor_settings::ThemeName::Macchiato => harbor_settings::ThemeName::Frappe,
             harbor_settings::ThemeName::Frappe => harbor_settings::ThemeName::Latte,
-            harbor_settings::ThemeName::Latte => harbor_settings::ThemeName::Mocha,
+            harbor_settings::ThemeName::Latte => harbor_settings::ThemeName::TokyoNight,
+            harbor_settings::ThemeName::TokyoNight => harbor_settings::ThemeName::Nord,
+            harbor_settings::ThemeName::Nord => harbor_settings::ThemeName::GruvboxDark,
+            harbor_settings::ThemeName::GruvboxDark => harbor_settings::ThemeName::SolarizedLight,
+            harbor_settings::ThemeName::SolarizedLight => harbor_settings::ThemeName::Auto,
         };
         TerminalSettings::apply(settings, cx);
         cx.notify();

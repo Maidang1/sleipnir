@@ -33,7 +33,7 @@ cargo run -p harbor
 
 ## Config
 
-`~/.config/harbor/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`mocha`/`macchiato`/`frappe`/`latte`). See `docs/settings.example.json`. Reload with `⌘⇧R`.
+`~/.config/harbor/settings.json` — Zed-compatible `terminal.*` keys + `theme` (`auto`/`mocha`/`macchiato`/`frappe`/`latte`/`tokyo_night`/`nord`/`gruvbox_dark`/`solarized_light`). `auto` follows the system light/dark appearance. See `docs/settings.example.json`. Reload with `⌘⇧R`.
 
 ## Paste
 
@@ -54,11 +54,14 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌃⌘V` | Paste text only |
 | `⌘A` | Select all |
 | `⌘K` | Clear |
-| `⌘T` / `⌘W` | New / close tab |
+| `⌘T` / `⌘W` | New tab / close active pane (then tab) |
+| `⌘1`…`⌘9` | Jump to tab N |
+| `⌘D` / `⌘⇧D` | Split pane right / down |
+| `⌘⌥←↑↓→` | Move focus between panes |
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab |
 | `⌘⇧]` / `⌘⇧[` | Next / previous tab |
 | `⌘⇧R` | Reload settings |
-| `⌘⇧T` | Cycle theme (session) |
+| `⌘⇧P` | Cycle theme (session) |
 | `⌘↑` / `⌘↓` | Scroll page |
 | `⇧↑` / `⇧↓` | Scroll line |
 | `⌘←` / `⌘→` | Line start / end |

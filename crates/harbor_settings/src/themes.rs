@@ -1,4 +1,5 @@
-//! Built-in terminal palettes (Catppuccin-inspired).
+//! Built-in terminal palettes (Catppuccin-inspired) plus a few extras, and an
+//! `Auto` theme that follows the system light/dark Appearance (ADR-0002).
 
 use gpui::{Hsla, Rgba, rgb};
 use schemars::JsonSchema;
@@ -7,11 +8,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
+    /// Follows the system Appearance: dark → Mocha, light → Latte.
+    Auto,
     #[default]
     Mocha,
     Macchiato,
     Frappe,
     Latte,
+    TokyoNight,
+    Nord,
+    GruvboxDark,
+    SolarizedLight,
+}
+
+/// System light/dark appearance, used to resolve the `Auto` theme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    Light,
+    #[default]
+    Dark,
 }
 
 /// Catppuccin-style ANSI palette used for terminal cell colors.
@@ -31,12 +46,22 @@ fn hex(c: u32) -> Hsla {
     rgb(c).into()
 }
 
-pub fn palette_for_theme(name: ThemeName) -> TerminalPalette {
+/// Resolve a theme name to a concrete palette. `Auto` picks a dark/light pair
+/// from the supplied system `appearance`.
+pub fn palette_for_theme(name: ThemeName, appearance: Appearance) -> TerminalPalette {
     match name {
+        ThemeName::Auto => match appearance {
+            Appearance::Dark => mocha(),
+            Appearance::Light => latte(),
+        },
         ThemeName::Mocha => mocha(),
         ThemeName::Macchiato => macchiato(),
         ThemeName::Frappe => frappe(),
         ThemeName::Latte => latte(),
+        ThemeName::TokyoNight => tokyo_night(),
+        ThemeName::Nord => nord(),
+        ThemeName::GruvboxDark => gruvbox_dark(),
+        ThemeName::SolarizedLight => solarized_light(),
     }
 }
 
@@ -192,6 +217,162 @@ fn latte() -> TerminalPalette {
             hex(0xea76cb),
             hex(0x179299),
             hex(0xacb0be),
+        ],
+    }
+}
+
+fn tokyo_night() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::TokyoNight,
+        background: hex(0x1a1b26),
+        foreground: hex(0xc0caf5),
+        bright_foreground: hex(0xc0caf5),
+        cursor: hex(0xc0caf5),
+        selection: hex(0x33467c),
+        ansi: [
+            hex(0x15161e),
+            hex(0xf7768e),
+            hex(0x9ece6a),
+            hex(0xe0af68),
+            hex(0x7aa2f7),
+            hex(0xbb9af7),
+            hex(0x7dcfff),
+            hex(0xa9b1d6),
+            hex(0x414868),
+            hex(0xf7768e),
+            hex(0x9ece6a),
+            hex(0xe0af68),
+            hex(0x7aa2f7),
+            hex(0xbb9af7),
+            hex(0x7dcfff),
+            hex(0xc0caf5),
+        ],
+        dim: [
+            hex(0x15161e),
+            hex(0xf7768e),
+            hex(0x9ece6a),
+            hex(0xe0af68),
+            hex(0x7aa2f7),
+            hex(0xbb9af7),
+            hex(0x7dcfff),
+            hex(0xa9b1d6),
+        ],
+    }
+}
+
+fn nord() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::Nord,
+        background: hex(0x2e3440),
+        foreground: hex(0xd8dee9),
+        bright_foreground: hex(0xeceff4),
+        cursor: hex(0xd8dee9),
+        selection: hex(0x434c5e),
+        ansi: [
+            hex(0x3b4252),
+            hex(0xbf616a),
+            hex(0xa3be8c),
+            hex(0xebcb8b),
+            hex(0x81a1c1),
+            hex(0xb48ead),
+            hex(0x88c0d0),
+            hex(0xe5e9f0),
+            hex(0x4c566a),
+            hex(0xbf616a),
+            hex(0xa3be8c),
+            hex(0xebcb8b),
+            hex(0x81a1c1),
+            hex(0xb48ead),
+            hex(0x8fbcbb),
+            hex(0xeceff4),
+        ],
+        dim: [
+            hex(0x3b4252),
+            hex(0xbf616a),
+            hex(0xa3be8c),
+            hex(0xebcb8b),
+            hex(0x81a1c1),
+            hex(0xb48ead),
+            hex(0x88c0d0),
+            hex(0xe5e9f0),
+        ],
+    }
+}
+
+fn gruvbox_dark() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::GruvboxDark,
+        background: hex(0x282828),
+        foreground: hex(0xebdbb2),
+        bright_foreground: hex(0xfbf1c7),
+        cursor: hex(0xebdbb2),
+        selection: hex(0x504945),
+        ansi: [
+            hex(0x282828),
+            hex(0xcc241d),
+            hex(0x98971a),
+            hex(0xd79921),
+            hex(0x458588),
+            hex(0xb16286),
+            hex(0x689d6a),
+            hex(0xa89984),
+            hex(0x928374),
+            hex(0xfb4934),
+            hex(0xb8bb26),
+            hex(0xfabd2f),
+            hex(0x83a598),
+            hex(0xd3869b),
+            hex(0x8ec07c),
+            hex(0xebdbb2),
+        ],
+        dim: [
+            hex(0x282828),
+            hex(0xcc241d),
+            hex(0x98971a),
+            hex(0xd79921),
+            hex(0x458588),
+            hex(0xb16286),
+            hex(0x689d6a),
+            hex(0xa89984),
+        ],
+    }
+}
+
+fn solarized_light() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::SolarizedLight,
+        background: hex(0xfdf6e3),
+        foreground: hex(0x657b83),
+        bright_foreground: hex(0x586e75),
+        cursor: hex(0x657b83),
+        selection: hex(0xeee8d5),
+        ansi: [
+            hex(0x073642),
+            hex(0xdc322f),
+            hex(0x859900),
+            hex(0xb58900),
+            hex(0x268bd2),
+            hex(0xd33682),
+            hex(0x2aa198),
+            hex(0xeee8d5),
+            hex(0x002b36),
+            hex(0xcb4b16),
+            hex(0x586e75),
+            hex(0x657b83),
+            hex(0x839496),
+            hex(0x6c71c4),
+            hex(0x93a1a1),
+            hex(0xfdf6e3),
+        ],
+        dim: [
+            hex(0x073642),
+            hex(0xdc322f),
+            hex(0x859900),
+            hex(0xb58900),
+            hex(0x268bd2),
+            hex(0xd33682),
+            hex(0x2aa198),
+            hex(0xeee8d5),
         ],
     }
 }

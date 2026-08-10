@@ -112,12 +112,12 @@ pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harbor_settings::{ThemeName, palette_for_theme};
+    use harbor_settings::{Appearance, ThemeName, palette_for_theme};
 
     #[test]
     fn dark_themes_lift_surface_above_content() {
         for name in [ThemeName::Mocha, ThemeName::Macchiato, ThemeName::Frappe] {
-            let p = palette_for_theme(name);
+            let p = palette_for_theme(name, Appearance::Dark);
             let t = ChromeTokens::from_palette(&p, true);
             assert!(
                 t.surface.l > t.content_bg.l,
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn latte_sinks_surface_below_content() {
-        let p = palette_for_theme(ThemeName::Latte);
+        let p = palette_for_theme(ThemeName::Latte, Appearance::Light);
         let t = ChromeTokens::from_palette(&p, true);
         assert!(
             t.surface.l < t.content_bg.l,
@@ -151,7 +151,7 @@ mod tests {
             ThemeName::Frappe,
             ThemeName::Latte,
         ] {
-            let p = palette_for_theme(name);
+            let p = palette_for_theme(name, Appearance::Dark);
             let t = ChromeTokens::from_palette(&p, true);
             let active = contrast_ratio(t.fg, t.content_bg);
             let inactive = contrast_ratio(t.fg_muted, t.surface);
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn inactive_window_dims_foreground() {
-        let p = palette_for_theme(ThemeName::Mocha);
+        let p = palette_for_theme(ThemeName::Mocha, Appearance::Dark);
         let active = ChromeTokens::from_palette(&p, true);
         let inactive = ChromeTokens::from_palette(&p, false);
         // Inactive chrome uses disabled fg (lower contrast vs content).
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn from_palette_is_pure_over_real_palettes() {
         // Drives the shipped entry point — not a reimplementation.
-        let p = palette_for_theme(ThemeName::Mocha);
+        let p = palette_for_theme(ThemeName::Mocha, Appearance::Dark);
         let t1 = ChromeTokens::from_palette(&p, true);
         let t2 = ChromeTokens::from_palette(&p, true);
         assert_eq!(t1.content_bg.l, t2.content_bg.l);
