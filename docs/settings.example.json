@@ -1,8 +1,16 @@
 {
   "theme": "auto",
+  "restore_session": true,
+  "key_bindings": [
+    {
+      "key": "cmd-alt-t",
+      "action": "new_tab"
+    }
+  ],
   "terminal": {
     "font_size": 14,
     "font_family": "Menlo",
+    "font_ligatures": false,
     "line_height": 1.3,
     "cursor_shape": "block",
     "option_as_meta": true,

@@ -4411,7 +4411,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sleipnir"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "env_logger",
  "gpui",
@@ -4448,6 +4448,8 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "release_channel",
+ "serde",
+ "serde_json",
  "sleipnir_settings",
  "terminal",
  "updater",

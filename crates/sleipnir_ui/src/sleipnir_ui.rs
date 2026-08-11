@@ -2,19 +2,23 @@
 
 mod app_shell;
 mod chrome;
+mod command_palette;
 mod pane_tree;
+mod session;
 mod term_element;
 
 pub use app_shell::{
-    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown,
-    SplitRight, UpdateUiState,
+    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, Find, FindNext, FindPrev,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings,
+    PrevTab, ReloadSettings, SplitDown, SplitRight, ToggleCommandPalette, UpdateUiState,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
+pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
 pub use pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
     neighbor,
 };
+pub use session::{SessionFile, SessionNode, SessionTab, load_session, save_session, session_path};
 pub use term_element::TermElement;
 
 use collections::HashMap;
@@ -65,17 +69,18 @@ impl Focusable for TermView {
 impl TermView {
     /// Spawn a local interactive shell PTY and attach UI when ready.
     pub fn new_local(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::new_local_in_shell(None, window, cx)
+        Self::new_local_in_shell(None, None, window, cx)
     }
 
     pub(crate) fn new_local_in_shell(
         shell: Option<WeakEntity<AppShell>>,
+        cwd: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = TerminalSettings::get_global(cx).clone();
         let window_id = window.window_handle().window_id().as_u64();
-        let cwd = dirs::home_dir();
+        let cwd = cwd.or_else(dirs::home_dir);
         let mut env: HashMap<String, String> = std::env::vars().collect();
         for (k, v) in &settings.env {
             env.insert(k.clone(), v.clone());
@@ -122,6 +127,12 @@ impl TermView {
             shell,
             _spawn: spawn,
         }
+    }
+
+    /// Working directory of the attached PTY, if known.
+    pub fn working_directory(&self, cx: &App) -> Option<PathBuf> {
+        self.terminal_entity()
+            .and_then(|t| t.read(cx).working_directory())
     }
 
     /// Keep display-only path for tests/demos.

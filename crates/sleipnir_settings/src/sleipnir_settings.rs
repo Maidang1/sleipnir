@@ -127,6 +127,24 @@ pub struct TerminalSettings {
     pub bell: TerminalBell,
     /// Active color theme name (sleipnir extension; also top-level `theme` key).
     pub theme: ThemeName,
+    /// Restore tabs/splits/cwd from the last session on launch (M8).
+    pub restore_session: bool,
+    /// Enable OpenType ligatures (`calt`) when the font supports them (M10).
+    pub font_ligatures: bool,
+    /// Optional key binding overrides loaded from settings (M9).
+    pub key_bindings: Vec<KeyBindingSpec>,
+}
+
+/// One user-defined key binding: GPUI keystroke string + action name.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct KeyBindingSpec {
+    /// GPUI keystroke, e.g. `"cmd-t"`, `"ctrl-shift-f"`.
+    pub key: String,
+    /// Action id: `new_tab`, `close_tab`, `find`, `toggle_command_palette`, …
+    pub action: String,
+    /// Optional GPUI context: `AppShell`, `Terminal`, or omit for global.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
 }
 
 impl Default for TerminalSettings {
@@ -156,6 +174,9 @@ impl Default for TerminalSettings {
             path_hyperlink_timeout_ms: 50,
             bell: TerminalBell::Off,
             theme: ThemeName::Mocha,
+            restore_session: true,
+            font_ligatures: false,
+            key_bindings: Vec::new(),
         }
     }
 }
@@ -208,6 +229,35 @@ impl TerminalSettings {
         }
     }
 
+    /// Toggle session restore and persist to settings.json.
+    pub fn set_restore_session(enabled: bool, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.restore_session = enabled;
+        apply_loaded(settings, cx);
+        if let Err(err) = persist_bool_key("restore_session", enabled) {
+            log::warn!("failed to persist restore_session={enabled}: {err}");
+        } else {
+            log::info!("restore_session -> {enabled} (persisted)");
+        }
+    }
+
+    /// Toggle font ligatures and persist under `terminal.font_ligatures`.
+    pub fn set_font_ligatures(enabled: bool, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.font_ligatures = enabled;
+        settings.font_features = Some(if enabled {
+            FontFeatures::default()
+        } else {
+            FontFeatures::disable_ligatures()
+        });
+        apply_loaded(settings, cx);
+        if let Err(err) = persist_terminal_bool("font_ligatures", enabled) {
+            log::warn!("failed to persist font_ligatures={enabled}: {err}");
+        } else {
+            log::info!("font_ligatures -> {enabled} (persisted)");
+        }
+    }
+
     /// Record a new system appearance and re-resolve the palette (for `Auto`).
     pub fn set_appearance(appearance: Appearance, cx: &mut App) {
         cx.set_global(AppearanceGlobal(appearance));
@@ -245,6 +295,12 @@ struct SettingsFile {
     /// gruvbox_dark | solarized_light | github_dark | github_light
     #[serde(default)]
     theme: Option<ThemeName>,
+    /// Restore last session (tabs/splits/cwd) on launch. Default true.
+    #[serde(default)]
+    restore_session: Option<bool>,
+    /// Extra key bindings layered on top of the built-in map.
+    #[serde(default)]
+    key_bindings: Option<Vec<KeyBindingSpec>>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
@@ -258,6 +314,8 @@ struct TerminalSettingsFile {
     font_fallbacks: Option<Vec<String>>,
     /// Font weight 100–900 (optional).
     font_weight: Option<f32>,
+    /// Enable font ligatures (`calt`). Default false.
+    font_ligatures: Option<bool>,
     line_height: Option<TerminalLineHeight>,
     option_as_meta: Option<bool>,
     copy_on_select: Option<bool>,
@@ -298,6 +356,12 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(theme) = file.theme.or(file.terminal.theme) {
         settings.theme = theme;
     }
+    if let Some(v) = file.restore_session {
+        settings.restore_session = v;
+    }
+    if let Some(bindings) = file.key_bindings {
+        settings.key_bindings = bindings;
+    }
     let t = file.terminal;
     if let Some(size) = t.font_size {
         settings.font_size = Some(px(size));
@@ -310,6 +374,14 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
     if let Some(w) = t.font_weight {
         settings.font_weight = Some(FontWeight(w));
+    }
+    if let Some(v) = t.font_ligatures {
+        settings.font_ligatures = v;
+        settings.font_features = Some(if v {
+            FontFeatures::default()
+        } else {
+            FontFeatures::disable_ligatures()
+        });
     }
     if let Some(lh) = t.line_height {
         settings.line_height = lh;
@@ -360,6 +432,8 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
     }
     let default = SettingsFile {
         theme: Some(ThemeName::Mocha),
+        restore_session: Some(true),
+        key_bindings: None,
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some("Menlo".into()),
@@ -379,44 +453,82 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Merge `theme` into an existing settings JSON document, preserving other keys.
-///
-/// Returns pretty-printed JSON with a trailing newline. On empty/invalid input,
-/// starts from an empty object so only `"theme"` is written.
-pub fn merge_theme_into_json(raw: Option<&str>, theme: ThemeName) -> String {
+/// Parse settings JSON (or empty object), apply `patch`, return pretty JSON + newline.
+pub fn merge_settings_json(
+    raw: Option<&str>,
+    patch: impl FnOnce(&mut serde_json::Value),
+) -> String {
     let mut value: serde_json::Value = raw
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     if !value.is_object() {
         value = serde_json::json!({});
     }
-    value["theme"] = serde_json::Value::String(theme.as_str().to_string());
-    // Prefer top-level theme; drop nested terminal.theme if present so the two
-    // cannot disagree after a picker write.
-    if let Some(terminal) = value.get_mut("terminal") {
-        if let Some(obj) = terminal.as_object_mut() {
-            obj.remove("theme");
-        }
-    }
-    let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| {
-        format!("{{\n  \"theme\": \"{}\"\n}}", theme.as_str())
-    });
+    patch(&mut value);
+    let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into());
     format!("{pretty}\n")
 }
 
-fn persist_theme(theme: ThemeName) -> anyhow::Result<()> {
+/// Merge `theme` into an existing settings JSON document, preserving other keys.
+///
+/// Returns pretty-printed JSON with a trailing newline. On empty/invalid input,
+/// starts from an empty object so only `"theme"` is written.
+pub fn merge_theme_into_json(raw: Option<&str>, theme: ThemeName) -> String {
+    merge_settings_json(raw, |value| {
+        value["theme"] = serde_json::Value::String(theme.as_str().to_string());
+        // Prefer top-level theme; drop nested terminal.theme if present so the two
+        // cannot disagree after a picker write.
+        if let Some(terminal) = value.get_mut("terminal") {
+            if let Some(obj) = terminal.as_object_mut() {
+                obj.remove("theme");
+            }
+        }
+    })
+}
+
+fn read_settings_raw() -> anyhow::Result<Option<String>> {
+    let path = config_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn write_settings_json(json: &str) -> anyhow::Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => Some(s),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => return Err(err.into()),
-    };
-    let json = merge_theme_into_json(raw.as_deref(), theme);
     std::fs::write(&path, json)?;
     Ok(())
+}
+
+fn persist_theme(theme: ThemeName) -> anyhow::Result<()> {
+    let raw = read_settings_raw()?;
+    let json = merge_theme_into_json(raw.as_deref(), theme);
+    write_settings_json(&json)
+}
+
+fn persist_bool_key(key: &str, value: bool) -> anyhow::Result<()> {
+    let raw = read_settings_raw()?;
+    let json = merge_settings_json(raw.as_deref(), |doc| {
+        doc[key] = serde_json::Value::Bool(value);
+    });
+    write_settings_json(&json)
+}
+
+fn persist_terminal_bool(key: &str, value: bool) -> anyhow::Result<()> {
+    let raw = read_settings_raw()?;
+    let json = merge_settings_json(raw.as_deref(), |doc| {
+        if !doc.get("terminal").map(|t| t.is_object()).unwrap_or(false) {
+            doc["terminal"] = serde_json::json!({});
+        }
+        if let Some(terminal) = doc.get_mut("terminal").and_then(|t| t.as_object_mut()) {
+            terminal.insert(key.to_string(), serde_json::Value::Bool(value));
+        }
+    });
+    write_settings_json(&json)
 }
 
 pub fn init(cx: &mut App) {
@@ -477,5 +589,22 @@ mod tests {
             let json = serde_json::to_string(&name).unwrap();
             assert_eq!(json, format!("\"{}\"", name.as_str()));
         }
+    }
+
+    #[test]
+    fn merge_settings_preserves_and_sets_bools() {
+        let raw = r#"{ "theme": "mocha", "terminal": { "font_size": 14 } }"#;
+        let out = merge_settings_json(Some(raw), |v| {
+            v["restore_session"] = serde_json::Value::Bool(false);
+            if !v["terminal"].is_object() {
+                v["terminal"] = serde_json::json!({});
+            }
+            v["terminal"]["font_ligatures"] = serde_json::Value::Bool(true);
+        });
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], "mocha");
+        assert_eq!(v["restore_session"], false);
+        assert_eq!(v["terminal"]["font_size"], 14);
+        assert_eq!(v["terminal"]["font_ligatures"], true);
     }
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+## 0.1.5
+
+### Features
+- **Session restore (M8):** tabs, splits, custom titles, and per-pane working directories are saved to `~/.config/sleipnir/session.json` and restored on launch (`restore_session`, default `true`)
+- **Command palette (M9):** `⌘⇧K` fuzzy action list; optional `key_bindings` array in settings.json
+- **Find in scrollback (M10):** `⌘F` / `⌘G` / `⌘⇧G` with match highlights
+- **Font ligatures (M10):** `terminal.font_ligatures` setting (default off)
+
 ## 0.1.4
 
 ### Changes

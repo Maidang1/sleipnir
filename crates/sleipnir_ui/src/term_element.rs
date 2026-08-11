@@ -115,6 +115,7 @@ pub struct LayoutState {
     batches: Vec<BatchedTextRun>,
     backgrounds: Vec<BgRect>,
     selection: Vec<BgRect>,
+    search_rects: Vec<BgRect>,
     background_color: gpui::Hsla,
     /// Column, display line, cell char, shape — `None` when the app hid the cursor.
     cursor: Option<(usize, i32, char, CursorShape)>,
@@ -246,6 +247,14 @@ impl Element for TermElement {
                     })
                     .unwrap_or_default();
 
+                // Search highlights (M10): paint under selection, above cell bg.
+                let search_matches = self.terminal.read(cx).matches.clone();
+                let match_color = palette.selection.opacity(0.35);
+                let mut search_rects = Vec::new();
+                for m in search_matches {
+                    search_rects.extend(range_rects(m, content.display_offset, match_color));
+                }
+
                 let cursor_point = content.cursor.point;
                 let display_line = cursor_point.line + content.display_offset as i32;
                 let ime_cursor_bounds = Some(Bounds::new(
@@ -275,6 +284,7 @@ impl Element for TermElement {
                     batches,
                     backgrounds,
                     selection,
+                    search_rects,
                     background_color: palette.background,
                     cursor,
                     ime_cursor_bounds,
@@ -315,6 +325,9 @@ impl Element for TermElement {
                     window.handle_input(&self.focus, input_handler, cx);
                     window.set_cursor_style(gpui::CursorStyle::IBeam, &layout.hitbox);
 
+                    for bg in &layout.search_rects {
+                        paint_bg(origin, bg, &layout.dimensions, window);
+                    }
                     for bg in &layout.selection {
                         paint_bg(origin, bg, &layout.dimensions, window);
                     }
@@ -444,13 +457,17 @@ fn selection_rects(
     display_offset: usize,
     palette: &TerminalPalette,
 ) -> Vec<BgRect> {
+    range_rects(range, display_offset, palette.selection.opacity(0.55))
+}
+
+/// Convert a terminal point range into display-space background rects.
+fn range_rects(range: TerminalRange, display_offset: usize, color: gpui::Hsla) -> Vec<BgRect> {
     let mut rects = Vec::new();
     let start_line = range.start().line + display_offset as i32;
     let end_line = range.end().line + display_offset as i32;
     let start_col = range.start().column as i32;
     let end_col = range.end().column as i32;
-    let color = palette.selection.opacity(0.55);
-    // Simple single/multi-line selection blocks (approximate).
+    // Simple single/multi-line blocks (approximate).
     if start_line == end_line {
         rects.push(BgRect {
             line: start_line,

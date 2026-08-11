@@ -5,7 +5,7 @@ use gpui::{
     FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
     ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, actions, canvas, deferred, div, point,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _, px, relative,
 };
 use sleipnir_settings::{
     Appearance, TerminalPalette, TerminalSettings, ThemeName, palette_for_theme,
@@ -13,9 +13,14 @@ use sleipnir_settings::{
 
 use crate::TermView;
 use crate::chrome::{ChromeGeometry, ChromeTokens, active_after_close};
+use crate::command_palette::{CommandId, CommandItem, commands as palette_commands, filter_commands};
 use crate::pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
     neighbor,
+};
+use crate::session::{
+    SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, sanitize_session,
+    save_session, session_path,
 };
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
@@ -57,6 +62,14 @@ actions!(
         FocusPaneDown,
         /// Check GitHub Releases for a newer version.
         CheckForUpdates,
+        /// Toggle the command palette (⌘⇧K).
+        ToggleCommandPalette,
+        /// Open find-in-scrollback (⌘F).
+        Find,
+        /// Jump to the next search match (⌘G).
+        FindNext,
+        /// Jump to the previous search match (⌘⇧G).
+        FindPrev,
     ]
 );
 
@@ -116,20 +129,24 @@ struct RenameState {
 enum SettingsSection {
     #[default]
     Theme,
+    /// Session restore, ligatures, and other app/terminal toggles.
+    General,
 }
 
 impl SettingsSection {
-    const ALL: &'static [SettingsSection] = &[SettingsSection::Theme];
+    const ALL: &'static [SettingsSection] = &[SettingsSection::Theme, SettingsSection::General];
 
     fn id(self) -> &'static str {
         match self {
             SettingsSection::Theme => "theme",
+            SettingsSection::General => "general",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             SettingsSection::Theme => "theme",
+            SettingsSection::General => "general",
         }
     }
 }
@@ -217,6 +234,18 @@ pub struct AppShell {
     update_open: bool,
     /// Verified update zip path, ready to install on restart.
     staged_zip: Option<std::path::PathBuf>,
+    /// Command palette open state (M9).
+    palette_open: bool,
+    palette_query: String,
+    palette_selected: usize,
+    palette_items: Vec<CommandItem>,
+    /// Find-in-scrollback bar (M10).
+    find_open: bool,
+    find_query: String,
+    find_match_count: usize,
+    find_active_index: usize,
+    /// Keep the app-quit subscription alive for the window lifetime.
+    _quit_subscription: Option<gpui::Subscription>,
 }
 
 impl Focusable for AppShell {
@@ -247,6 +276,15 @@ impl AppShell {
             update_state: UpdateUiState::Idle,
             update_open: false,
             staged_zip: None,
+            palette_open: false,
+            palette_query: String::new(),
+            palette_selected: 0,
+            palette_items: palette_commands(),
+            find_open: false,
+            find_query: String::new(),
+            find_match_count: 0,
+            find_active_index: 0,
+            _quit_subscription: None,
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -257,7 +295,22 @@ impl AppShell {
                 cx.refresh_windows();
             })
             .detach();
-        shell.add_tab(window, cx);
+
+        // Persist session on quit (M8).
+        shell._quit_subscription = Some(cx.on_app_quit(|this, cx| {
+            this.persist_session_now(cx);
+            async {}
+        }));
+
+        let restore = TerminalSettings::get_global(cx).restore_session;
+        let restored = if restore {
+            shell.try_restore_session(window, cx)
+        } else {
+            false
+        };
+        if !restored {
+            shell.add_tab(window, cx);
+        }
         shell
     }
 
@@ -277,8 +330,17 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
+        self.spawn_term_view_with_cwd(None, window, cx)
+    }
+
+    fn spawn_term_view_with_cwd(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TermView> {
         let shell = cx.weak_entity();
-        let view = cx.new(|cx| TermView::new_local_in_shell(Some(shell), window, cx));
+        let view = cx.new(|cx| TermView::new_local_in_shell(Some(shell), cwd, window, cx));
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         cx.subscribe_in(
             &view,
@@ -292,6 +354,138 @@ impl AppShell {
         )
         .detach();
         view
+    }
+
+    // ── session persistence (M8) ────────────────────────────────────────────
+
+    fn try_restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let path = session_path();
+        let Some(raw) = load_session(&path) else {
+            return false;
+        };
+        let Some(session) = sanitize_session(raw) else {
+            return false;
+        };
+        self.restore_from_session(session, window, cx);
+        !self.tabs.is_empty()
+    }
+
+    fn restore_from_session(
+        &mut self,
+        session: SessionFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tabs.clear();
+        let mut max_pane = 0u64;
+        let mut max_tab = 0u64;
+        for (i, stab) in session.tabs.into_iter().enumerate() {
+            max_pane = max_pane.max(stab.tree.max_pane_id());
+            let tab_id = (i as u64) + 1;
+            max_tab = max_tab.max(tab_id);
+            let tree = self.materialize_tree(&stab.tree, window, cx);
+            let active_pane = if tree_contains(&tree, stab.active_pane) {
+                stab.active_pane
+            } else {
+                tree.first_leaf_id()
+            };
+            self.tabs.push(Tab {
+                id: tab_id,
+                tree,
+                active_pane,
+                custom_title: stab
+                    .custom_title
+                    .filter(|s| !s.is_empty())
+                    .map(SharedString::from),
+            });
+        }
+        self.next_id = max_tab + 1;
+        self.next_pane_id = max_pane + 1;
+        self.active = session.active_tab.min(self.tabs.len().saturating_sub(1));
+        self.focus_active(window, cx);
+        self.sync_window_title(window, cx);
+        self.tab_scroll_handle.scroll_to_item(self.active);
+        cx.notify();
+        log::info!(
+            "restored session: {} tab(s), active={}",
+            self.tabs.len(),
+            self.active
+        );
+    }
+
+    fn materialize_tree(
+        &mut self,
+        node: &SessionNode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneNode {
+        match node {
+            SessionNode::Leaf { id, cwd } => {
+                let view = self.spawn_term_view_with_cwd(resolve_cwd(cwd.as_deref()), window, cx);
+                PaneNode::leaf(*id, view)
+            }
+            SessionNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let first = self.materialize_tree(first, window, cx);
+                let second = self.materialize_tree(second, window, cx);
+                PaneNode::Split {
+                    axis: match axis {
+                        SessionAxis::Horizontal => SplitAxis::Horizontal,
+                        SessionAxis::Vertical => SplitAxis::Vertical,
+                    },
+                    ratio: (*ratio).clamp(MIN_RATIO, 1.0 - MIN_RATIO),
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }
+            }
+        }
+    }
+
+    fn snapshot_session(&self, cx: &App) -> SessionFile {
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| SessionTab {
+                custom_title: tab.custom_title.as_ref().map(|s| s.to_string()),
+                active_pane: tab.active_pane,
+                tree: snapshot_tree(&tab.tree, cx),
+            })
+            .collect();
+        SessionFile {
+            version: crate::session::SESSION_VERSION,
+            active_tab: self.active,
+            tabs,
+        }
+    }
+
+    fn persist_session_now(&self, cx: &App) {
+        if !TerminalSettings::get_global(cx).restore_session {
+            return;
+        }
+        let session = self.snapshot_session(cx);
+        if session.tabs.is_empty() {
+            return;
+        }
+        let path = session_path();
+        if let Err(err) = save_session(&path, &session) {
+            log::warn!("failed to save session to {}: {err}", path.display());
+        } else {
+            log::debug!(
+                "session saved: {} tab(s) → {}",
+                session.tabs.len(),
+                path.display()
+            );
+        }
+    }
+
+    /// Mark layout dirty and write session (debounced enough via direct write;
+    /// structural changes are infrequent).
+    fn schedule_session_save(&self, cx: &App) {
+        self.persist_session_now(cx);
     }
 
     /// The active pane's `TermView`, if any.
@@ -322,6 +516,7 @@ impl AppShell {
         self.focus_active(window, cx);
         self.sync_window_title(window, cx);
         self.tab_scroll_handle.scroll_to_item(self.active);
+        self.schedule_session_save(cx);
         cx.notify();
     }
 
@@ -361,6 +556,7 @@ impl AppShell {
                 };
             }
             self.sync_window_title(window, cx);
+            self.schedule_session_save(cx);
             cx.notify();
         }
     }
@@ -439,6 +635,7 @@ impl AppShell {
                 self.focus_active(window, cx);
                 self.sync_window_title(window, cx);
                 self.tab_scroll_handle.scroll_to_item(self.active);
+                self.schedule_session_save(cx);
                 cx.notify();
             }
         }
@@ -458,6 +655,7 @@ impl AppShell {
             self.focus_active(window, cx);
             self.sync_window_title(window, cx);
             self.tab_scroll_handle.scroll_to_item(self.active);
+            self.schedule_session_save(cx);
             cx.notify();
         }
     }
@@ -509,6 +707,7 @@ impl AppShell {
             }
         }
         self.focus_active(window, cx);
+        self.schedule_session_save(cx);
         cx.notify();
     }
 
@@ -527,6 +726,7 @@ impl AppShell {
                 tab.active_pane = next;
             }
             self.focus_active(window, cx);
+            self.schedule_session_save(cx);
             cx.notify();
         }
     }
@@ -558,6 +758,7 @@ impl AppShell {
                 tab.active_pane = tab.tree.first_leaf_id();
                 self.sync_window_title(window, cx);
                 self.focus_active(window, cx);
+                self.schedule_session_save(cx);
                 cx.notify();
             }
         }
@@ -641,6 +842,288 @@ impl AppShell {
         let next = TerminalSettings::get_global(cx).theme.next();
         TerminalSettings::set_theme(next, cx);
         cx.notify();
+    }
+
+    // ── command palette (M9) ────────────────────────────────────────────────
+
+    fn on_toggle_command_palette(
+        &mut self,
+        _: &ToggleCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette_open {
+            self.close_palette(window, cx);
+        } else {
+            self.open_palette(cx);
+        }
+    }
+
+    fn open_palette(&mut self, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.settings_open = false;
+        self.find_open = false;
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            self.palette_open = false;
+            self.palette_query.clear();
+            self.palette_selected = 0;
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn filtered_palette_indices(&self) -> Vec<usize> {
+        filter_commands(&self.palette_items, &self.palette_query)
+    }
+
+    fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        match id {
+            CommandId::NewTab => self.add_tab(window, cx),
+            CommandId::ClosePane => self.close_active_pane(window, cx),
+            CommandId::NextTab => self.next_tab(window, cx),
+            CommandId::PrevTab => self.prev_tab(window, cx),
+            CommandId::SplitRight => self.split_active(SplitAxis::Horizontal, window, cx),
+            CommandId::SplitDown => self.split_active(SplitAxis::Vertical, window, cx),
+            CommandId::OpenSettings => {
+                self.settings_open = true;
+                self.settings_section = SettingsSection::Theme;
+                cx.notify();
+            }
+            CommandId::ReloadSettings => {
+                TerminalSettings::reload(cx);
+                cx.notify();
+            }
+            CommandId::CycleTheme => {
+                let next = TerminalSettings::get_global(cx).theme.next();
+                TerminalSettings::set_theme(next, cx);
+                cx.notify();
+            }
+            CommandId::CheckForUpdates => {
+                self.update_open = true;
+                self.spawn_update_check(window, cx);
+            }
+            CommandId::Find => self.open_find(cx),
+            CommandId::ToggleCommandPalette => self.open_palette(cx),
+        }
+    }
+
+    fn palette_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.palette_open {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.close_palette(window, cx);
+                true
+            }
+            "enter" => {
+                let hits = self.filtered_palette_indices();
+                if let Some(&idx) = hits.get(self.palette_selected) {
+                    let id = self.palette_items[idx].id;
+                    self.run_command(id, window, cx);
+                }
+                true
+            }
+            "up" | "arrowup" => {
+                let hits = self.filtered_palette_indices();
+                if !hits.is_empty() {
+                    self.palette_selected = if self.palette_selected == 0 {
+                        hits.len() - 1
+                    } else {
+                        self.palette_selected - 1
+                    };
+                    cx.notify();
+                }
+                true
+            }
+            "down" | "arrowdown" => {
+                let hits = self.filtered_palette_indices();
+                if !hits.is_empty() {
+                    self.palette_selected = (self.palette_selected + 1) % hits.len();
+                    cx.notify();
+                }
+                true
+            }
+            "backspace" => {
+                self.palette_query.pop();
+                self.palette_selected = 0;
+                cx.notify();
+                true
+            }
+            _ => {
+                if let Some(ch) = event.keystroke.key_char.as_ref() {
+                    if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
+                        self.palette_query.push_str(ch);
+                        self.palette_selected = 0;
+                        cx.notify();
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    // ── find in scrollback (M10) ────────────────────────────────────────────
+
+    fn on_find(&mut self, _: &Find, _window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find(cx);
+    }
+
+    fn open_find(&mut self, cx: &mut Context<Self>) {
+        self.find_open = true;
+        self.palette_open = false;
+        self.settings_open = false;
+        cx.notify();
+        // Re-run search if query already present.
+        if !self.find_query.is_empty() {
+            self.run_find(cx);
+        }
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_open {
+            self.find_open = false;
+            self.clear_find_matches(cx);
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn clear_find_matches(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.active_view(cx) {
+            if let Some(term) = view.read(cx).terminal_entity().cloned() {
+                term.update(cx, |t, _| t.matches.clear());
+            }
+        }
+        self.find_match_count = 0;
+        self.find_active_index = 0;
+    }
+
+    fn run_find(&mut self, cx: &mut Context<Self>) {
+        let query = self.find_query.clone();
+        if query.is_empty() {
+            self.clear_find_matches(cx);
+            cx.notify();
+            return;
+        }
+        let Some(search) = terminal::Search::new(&regex_escape_literal(&query)) else {
+            self.clear_find_matches(cx);
+            cx.notify();
+            return;
+        };
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        let Some(term) = view.read(cx).terminal_entity().cloned() else {
+            return;
+        };
+        let task = term.update(cx, |t, cx| t.find_matches(search, cx));
+        cx.spawn(async move |this, cx| {
+            let matches = task.await;
+            this.update(cx, |this, cx| {
+                let count = matches.len();
+                if let Some(view) = this.active_view(cx) {
+                    if let Some(term) = view.read(cx).terminal_entity().cloned() {
+                        term.update(cx, |t, _| {
+                            t.matches = matches;
+                            if count > 0 {
+                                t.activate_match(0);
+                            }
+                        });
+                    }
+                }
+                this.find_match_count = count;
+                this.find_active_index = 0;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_find(1, cx);
+    }
+
+    fn on_find_prev(&mut self, _: &FindPrev, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_find(-1, cx);
+    }
+
+    fn step_find(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if self.find_match_count == 0 {
+            if self.find_open && !self.find_query.is_empty() {
+                self.run_find(cx);
+            }
+            return;
+        }
+        let n = self.find_match_count as i32;
+        let next = (self.find_active_index as i32 + delta).rem_euclid(n) as usize;
+        self.find_active_index = next;
+        if let Some(view) = self.active_view(cx) {
+            if let Some(term) = view.read(cx).terminal_entity().cloned() {
+                term.update(cx, |t, _| t.activate_match(next));
+            }
+        }
+        cx.notify();
+    }
+
+    fn find_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.find_open {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.close_find(window, cx);
+                true
+            }
+            "enter" => {
+                if event.keystroke.modifiers.shift {
+                    self.step_find(-1, cx);
+                } else {
+                    // First Enter runs search; subsequent Enter = next match.
+                    if self.find_match_count == 0 || event.keystroke.modifiers.platform {
+                        self.run_find(cx);
+                    } else {
+                        self.step_find(1, cx);
+                    }
+                }
+                true
+            }
+            "backspace" => {
+                self.find_query.pop();
+                self.run_find(cx);
+                true
+            }
+            _ => {
+                if let Some(ch) = event.keystroke.key_char.as_ref() {
+                    if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
+                        self.find_query.push_str(ch);
+                        self.run_find(cx);
+                    }
+                }
+                // Swallow non-platform keys so they don't go to the PTY.
+                !event.keystroke.modifiers.platform
+            }
+        }
     }
 
     // ── auto-update ─────────────────────────────────────────────────────────
@@ -1359,6 +1842,7 @@ impl AppShell {
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
                         this.drag = None;
+                        this.schedule_session_save(cx);
                         cx.notify();
                     }),
                 );
@@ -1439,7 +1923,14 @@ impl AppShell {
 
         // ── Body for the active section ──────────────────────────────────
         let body = match section {
-            SettingsSection::Theme => self.render_settings_theme_section(tokens, window, cx),
+            SettingsSection::Theme => {
+                self.render_settings_theme_section(tokens, window, cx)
+                    .into_any_element()
+            }
+            SettingsSection::General => {
+                self.render_settings_general_section(tokens, cx)
+                    .into_any_element()
+            }
         };
 
         // ── Footer: key hints (reference: WezTerm settings) ──────────────
@@ -1580,6 +2071,166 @@ impl AppShell {
         )
     }
 
+    /// General section: session restore, ligatures, and pointers for advanced config.
+    fn render_settings_general_section(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let settings = TerminalSettings::get_global(cx);
+        let restore = settings.restore_session;
+        let ligatures = settings.font_ligatures;
+
+        div()
+            .id("settings-general")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(tokens.fg_muted)
+                    .child("Application"),
+            )
+            .child(self.settings_toggle_row(
+                "restore-session",
+                "Restore session on launch",
+                "Reopen tabs, splits, and working directories from the last quit",
+                restore,
+                tokens,
+                cx,
+                |this, cx| {
+                    let next = !TerminalSettings::get_global(cx).restore_session;
+                    TerminalSettings::set_restore_session(next, cx);
+                    // Drop session file writes immediately when turned off so a
+                    // later quit does not overwrite with a stale layout.
+                    if next {
+                        this.schedule_session_save(cx);
+                    }
+                    cx.notify();
+                },
+            ))
+            .child(
+                div()
+                    .mt_2()
+                    .text_size(px(11.0))
+                    .text_color(tokens.fg_muted)
+                    .child("Terminal"),
+            )
+            .child(self.settings_toggle_row(
+                "font-ligatures",
+                "Font ligatures",
+                "Enable OpenType ligatures when the font supports them (e.g. JetBrains Mono)",
+                ligatures,
+                tokens,
+                cx,
+                |_this, cx| {
+                    let next = !TerminalSettings::get_global(cx).font_ligatures;
+                    TerminalSettings::set_font_ligatures(next, cx);
+                    cx.notify();
+                },
+            ))
+            .child(
+                div()
+                    .mt_3()
+                    .p_3()
+                    .rounded(px(6.0))
+                    .bg(tokens.hover)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(tokens.fg)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child("Advanced"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(tokens.fg_muted)
+                            .child(
+                                "Custom key bindings, font family/size, and shell options live in settings.json. Open the file and reload with ⌘⇧R (key bindings apply on next launch).",
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_size(px(11.0))
+                            .text_color(tokens.accent)
+                            .child("~/.config/sleipnir/settings.json"),
+                    ),
+            )
+    }
+
+    /// One toggle row: title + description + on/off marker. `on_toggle` runs on click.
+    fn settings_toggle_row(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        description: &'static str,
+        enabled: bool,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+        on_toggle: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        let check: SharedString = if enabled { "●".into() } else { "○".into() };
+        let state: SharedString = if enabled { "On".into() } else { "Off".into() };
+        let state_color = if enabled { tokens.accent } else { tokens.fg_muted };
+
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .w_full()
+            .px_2()
+            .py_2()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|el| el.bg(tokens.hover))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                on_toggle(this, cx);
+            }))
+            .child(
+                div()
+                    .w(px(18.0))
+                    .text_size(px(14.0))
+                    .text_color(state_color)
+                    .child(check),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(tokens.fg)
+                            .child(SharedString::from(title)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(tokens.fg_muted)
+                            .child(SharedString::from(description)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(state_color)
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(state),
+            )
+    }
+
     /// Theme section body: selectable list with ANSI swatches.
     fn render_settings_theme_section(
         &self,
@@ -1672,6 +2323,283 @@ impl AppShell {
         }
 
         list
+    }
+
+    fn render_command_palette(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let hits = self.filtered_palette_indices();
+        let selected = self.palette_selected.min(hits.len().saturating_sub(1));
+        let query: SharedString = if self.palette_query.is_empty() {
+            "Type a command…".into()
+        } else {
+            format!("{}|", self.palette_query).into()
+        };
+        let query_color = if self.palette_query.is_empty() {
+            tokens.fg_muted
+        } else {
+            tokens.fg
+        };
+
+        let mut list = div()
+            .id("palette-list")
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_h(px(320.0))
+            .overflow_y_scroll()
+            .py_1();
+
+        if hits.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_color(tokens.fg_muted)
+                    .text_sm()
+                    .child("No matching commands"),
+            );
+        } else {
+            for (row_i, &item_i) in hits.iter().enumerate() {
+                let item = &self.palette_items[item_i];
+                let id = item.id;
+                let title = item.title.clone();
+                let shortcut = item.shortcut.clone();
+                let is_sel = row_i == selected;
+                list = list.child(
+                    div()
+                        .id(("palette-row", row_i as u64))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px_3()
+                        .py_1p5()
+                        .cursor_pointer()
+                        .when(is_sel, |el| el.bg(tokens.hover))
+                        .hover(|el| el.bg(tokens.hover))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run_command(id, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(tokens.fg)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.fg_muted)
+                                .child(shortcut),
+                        ),
+                );
+            }
+        }
+
+        deferred(
+            div()
+                .id("palette-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(px(80.0))
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.35))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.close_palette(window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .id("palette-panel")
+                        .w(px(480.0))
+                        .max_w(relative(0.9))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(tokens.border)
+                        .bg(tokens.content_bg)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2p5()
+                                .border_b_1()
+                                .border_color(tokens.border)
+                                .text_sm()
+                                .text_color(query_color)
+                                .child(query),
+                        )
+                        .child(list),
+                ),
+        )
+    }
+
+    fn render_find_bar(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let query_display: SharedString = if self.find_query.is_empty() {
+            "Find in scrollback…".into()
+        } else {
+            format!("{}|", self.find_query).into()
+        };
+        let query_color = if self.find_query.is_empty() {
+            tokens.fg_muted
+        } else {
+            tokens.fg
+        };
+        let count: SharedString = if self.find_query.is_empty() {
+            "".into()
+        } else if self.find_match_count == 0 {
+            "0 matches".into()
+        } else {
+            format!(
+                "{}/{}",
+                self.find_active_index + 1,
+                self.find_match_count
+            )
+            .into()
+        };
+
+        div()
+            .id("find-bar")
+            .w_full()
+            .h(px(36.0))
+            .px_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .bg(tokens.content_bg)
+            .border_b_1()
+            .border_color(tokens.border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.fg_muted)
+                    .child(SharedString::from("Find")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(4.0))
+                    .bg(tokens.hover)
+                    .text_sm()
+                    .text_color(query_color)
+                    .child(query_display),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.fg_muted)
+                    .min_w(px(72.0))
+                    .child(count),
+            )
+            .child(
+                div()
+                    .id("find-prev")
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tokens.hover))
+                    .text_sm()
+                    .text_color(tokens.fg)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.step_find(-1, cx);
+                    }))
+                    .child(SharedString::from("↑")),
+            )
+            .child(
+                div()
+                    .id("find-next")
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tokens.hover))
+                    .text_sm()
+                    .text_color(tokens.fg)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.step_find(1, cx);
+                    }))
+                    .child(SharedString::from("↓")),
+            )
+            .child(
+                div()
+                    .id("find-close")
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tokens.hover))
+                    .text_sm()
+                    .text_color(tokens.fg_muted)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_find(window, cx);
+                    }))
+                    .child(SharedString::from("✕")),
+            )
+    }
+}
+
+/// Escape a literal string for use inside a regex (alacritty search is regex-based).
+fn regex_escape_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        if matches!(
+            c,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn tree_contains(tree: &PaneNode, id: PaneId) -> bool {
+    let mut leaves = Vec::new();
+    tree.leaves(&mut leaves);
+    leaves.iter().any(|(leaf, _)| *leaf == id)
+}
+
+fn snapshot_tree(node: &PaneNode, cx: &App) -> SessionNode {
+    match node {
+        PaneNode::Leaf { id, view } => SessionNode::Leaf {
+            id: *id,
+            cwd: view
+                .read(cx)
+                .working_directory(cx)
+                .map(|p| p.to_string_lossy().into_owned()),
+        },
+        PaneNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => SessionNode::Split {
+            axis: match axis {
+                SplitAxis::Horizontal => SessionAxis::Horizontal,
+                SplitAxis::Vertical => SessionAxis::Vertical,
+            },
+            ratio: *ratio,
+            first: Box::new(snapshot_tree(first, cx)),
+            second: Box::new(snapshot_tree(second, cx)),
+        },
     }
 }
 
@@ -1824,8 +2752,8 @@ impl Render for AppShell {
             })
             .track_focus(&self.focus_handle)
             .key_context("AppShell")
-            // Intercept keys during an inline tab rename / settings before the
-            // focused terminal sees them (capture phase runs top-down).
+            // Intercept keys during overlays / rename before the focused terminal
+            // sees them (capture phase runs top-down).
             .capture_key_down(cx.listener(
                 |this, event: &gpui::KeyDownEvent, window, cx| {
                     if this.update_open {
@@ -1834,6 +2762,18 @@ impl Render for AppShell {
                             cx.stop_propagation();
                         }
                         if !event.keystroke.modifiers.platform {
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+                    if this.palette_open {
+                        if this.palette_key_down(event, window, cx) {
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+                    if this.find_open {
+                        if this.find_key_down(event, window, cx) {
                             cx.stop_propagation();
                         }
                         return;
@@ -1880,13 +2820,23 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_focus_pane_up))
             .on_action(cx.listener(Self::on_focus_pane_down))
             .on_action(cx.listener(Self::on_check_for_updates))
+            .on_action(cx.listener(Self::on_toggle_command_palette))
+            .on_action(cx.listener(Self::on_find))
+            .on_action(cx.listener(Self::on_find_next))
+            .on_action(cx.listener(Self::on_find_prev))
             .child(chrome_band)
+            .when(self.find_open, |el| {
+                el.child(self.render_find_bar(&tokens, cx))
+            })
             .child(self.render_content(&tokens, window, cx))
             .when(self.settings_open, |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))
             })
             .when(self.update_open, |el| {
                 el.child(self.render_update_overlay(&tokens, cx))
+            })
+            .when(self.palette_open, |el| {
+                el.child(self.render_command_palette(&tokens, cx))
             })
     }
 }

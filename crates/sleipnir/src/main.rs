@@ -9,12 +9,12 @@ use gpui::{
 };
 use gpui_platform::application;
 use release_channel::AppVersion;
-use sleipnir_settings;
+use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::CheckForUpdates;
 use sleipnir_ui::{
-    ActivateTab, AppShell, ChromeGeometry, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown,
-    SplitRight,
+    ActivateTab, AppShell, ChromeGeometry, CloseTab, CycleTheme, Find, FindNext, FindPrev,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings,
+    PrevTab, ReloadSettings, SplitDown, SplitRight, ToggleCommandPalette,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -143,7 +143,20 @@ fn main() {
             // Check for updates (menu + shortcut).
             KeyBinding::new("cmd-shift-u", CheckForUpdates, Some("AppShell")),
             KeyBinding::new("cmd-shift-u", CheckForUpdates, Some("Terminal")),
+            // Command palette (M9). ⌘⇧P is theme cycle; palette uses ⌘⇧K.
+            KeyBinding::new("cmd-shift-k", ToggleCommandPalette, Some("AppShell")),
+            KeyBinding::new("cmd-shift-k", ToggleCommandPalette, Some("Terminal")),
+            // Find in scrollback (M10).
+            KeyBinding::new("cmd-f", Find, Some("AppShell")),
+            KeyBinding::new("cmd-f", Find, Some("Terminal")),
+            KeyBinding::new("cmd-g", FindNext, Some("AppShell")),
+            KeyBinding::new("cmd-g", FindNext, Some("Terminal")),
+            KeyBinding::new("cmd-shift-g", FindPrev, Some("AppShell")),
+            KeyBinding::new("cmd-shift-g", FindPrev, Some("Terminal")),
         ]);
+
+        // User key binding overrides from settings.json (M9).
+        bind_user_key_bindings(cx);
 
         // After keybindings so menu items pick up key equivalents from the keymap.
         cx.set_menus(app_menus());
@@ -168,4 +181,60 @@ fn main() {
         .unwrap();
         cx.activate(true);
     });
+}
+
+/// Layer optional user key bindings from `settings.json` on top of builtins.
+fn bind_user_key_bindings(cx: &mut App) {
+    let bindings = TerminalSettings::get_global(cx).key_bindings.clone();
+    if bindings.is_empty() {
+        return;
+    }
+    let mut keys = Vec::new();
+    for spec in &bindings {
+        let expanded = key_bindings_for_spec(spec);
+        if expanded.is_empty() {
+            log::warn!(
+                "unknown key binding action {:?} for key {:?}",
+                spec.action,
+                spec.key
+            );
+        } else {
+            keys.extend(expanded);
+        }
+    }
+    if !keys.is_empty() {
+        log::info!("applying {} user key binding(s)", keys.len());
+        cx.bind_keys(keys);
+    }
+}
+
+fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
+    let contexts: Vec<&str> = match spec.context.as_deref() {
+        None | Some("") => vec!["AppShell", "Terminal"],
+        Some(c) => vec![c],
+    };
+    let mut out = Vec::new();
+    for ctx in contexts {
+        let kb = match spec.action.as_str() {
+            "new_tab" => KeyBinding::new(&spec.key, NewTab, Some(ctx)),
+            "close_tab" | "close_pane" => KeyBinding::new(&spec.key, CloseTab, Some(ctx)),
+            "next_tab" => KeyBinding::new(&spec.key, NextTab, Some(ctx)),
+            "prev_tab" => KeyBinding::new(&spec.key, PrevTab, Some(ctx)),
+            "split_right" => KeyBinding::new(&spec.key, SplitRight, Some(ctx)),
+            "split_down" => KeyBinding::new(&spec.key, SplitDown, Some(ctx)),
+            "open_settings" => KeyBinding::new(&spec.key, OpenSettings, Some(ctx)),
+            "reload_settings" => KeyBinding::new(&spec.key, ReloadSettings, Some(ctx)),
+            "cycle_theme" => KeyBinding::new(&spec.key, CycleTheme, Some(ctx)),
+            "check_for_updates" => KeyBinding::new(&spec.key, CheckForUpdates, Some(ctx)),
+            "find" | "search" => KeyBinding::new(&spec.key, Find, Some(ctx)),
+            "find_next" => KeyBinding::new(&spec.key, FindNext, Some(ctx)),
+            "find_prev" => KeyBinding::new(&spec.key, FindPrev, Some(ctx)),
+            "toggle_command_palette" | "command_palette" => {
+                KeyBinding::new(&spec.key, ToggleCommandPalette, Some(ctx))
+            }
+            _ => continue,
+        };
+        out.push(kb);
+    }
+    out
 }

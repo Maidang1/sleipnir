@@ -36,6 +36,9 @@ prompt.
   selections as quoted paths; force text-only paste when you need it.
 - **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R`.
 - **vi mode** — keyboard-driven selection and navigation.
+- **Session restore** — tabs, splits, and working directories survive relaunch.
+- **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings.
+- **Find in scrollback** — `⌘F` search with match highlights.
 
 ## Requirements
 
@@ -52,11 +55,18 @@ cargo run -p sleipnir
 
 ## Config
 
-`~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys plus a `theme`
-key (`auto` / `mocha` / `macchiato` / `frappe` / `latte` / `tokyo_night` / `nord` /
-`gruvbox_dark` / `solarized_light` / `github_dark` / `github_light`). `auto` follows
-the system light/dark appearance.
-Open the in-app theme picker with `⌘,`, or edit the file and reload with `⌘⇧R`.
+`~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys plus Sleipnir
+extensions:
+
+| Key | Meaning |
+|-----|---------|
+| `theme` | `auto` / `mocha` / … (see example); `auto` follows system appearance |
+| `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
+| `key_bindings` | Extra key bindings (see [`docs/M9.md`](docs/M9.md)) |
+| `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
+
+Open the in-app theme picker with `⌘,`, or edit the file and reload with `⌘⇧R`
+(key binding overrides apply on next launch).
 See [`docs/settings.example.json`](docs/settings.example.json).
 
 ## Paste
@@ -87,6 +97,9 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌘,` | Open settings (theme picker) |
 | `⌘⇧R` | Reload settings |
 | `⌘⇧P` | Cycle theme (persists) |
+| `⌘⇧K` | Command palette |
+| `⌘F` | Find in scrollback |
+| `⌘G` / `⌘⇧G` | Next / previous find match |
 | `⌘⇧U` | Check for updates |
 | `⌘↑` / `⌘↓` | Scroll page |
 | `⇧↑` / `⇧↓` | Scroll line |
@@ -95,7 +108,7 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌘⌫` | Clear line |
 | `⌃⇧Space` | Toggle vi mode |
 
-See [`docs/M6.md`](docs/M6.md) for the full list.
+See [`docs/M6.md`](docs/M6.md) for the full terminal list.
 
 ## Auto-update
 
@@ -114,7 +127,7 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
 
 ## Roadmap
 
-**Status:** M6 complete — image paste-as-path + Zed Terminal shortcuts.
+**Status:** M0–M10 complete (per-pane fonts deferred inside M10).
 
 | Milestone | Goal | Status |
 |-----------|------|:------:|
@@ -125,12 +138,12 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
 | **M4** | Theme/font settings polish | ✅ |
 | **M5** | Upstream port checklist (`UPSTREAM.md`) | ✅ |
 | **M6** | Image paste-as-path + Zed Terminal shortcuts | ✅ |
-| **M7** | Signed & notarized release builds + auto-update | 🔜 |
-| **M8** | Session persistence (restore tabs/splits on launch) | 🔜 |
-| **M9** | Configurable keymap + command palette | 🧭 |
-| **M10** | Ligatures, per-pane fonts, search-in-scrollback | 🧭 |
+| **M7** | Signed & notarized release builds + auto-update | ✅ |
+| **M8** | Session persistence (restore tabs/splits on launch) | ✅ |
+| **M9** | Configurable keymap + command palette | ✅ |
+| **M10** | Ligatures + search-in-scrollback (per-pane fonts deferred) | ✅ |
 
-Legend: ✅ done · 🔜 next · 🧭 planned.
+Legend: ✅ done. Notes: [`docs/M7.md`](docs/M7.md) · [`docs/M8.md`](docs/M8.md) · [`docs/M9.md`](docs/M9.md) · [`docs/M10.md`](docs/M10.md).
 
 ## Upstream
 
