@@ -1,17 +1,20 @@
 //! Sleipnir — standalone macOS terminal (HIG-aligned window chrome).
 
+mod app_menus;
+
+use app_menus::{Hide, HideOthers, Quit, ShowAll, app_menus};
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance,
     WindowBounds, WindowOptions, px, size,
 };
 use gpui_platform::application;
+use release_channel::AppVersion;
 use sleipnir_settings;
 use sleipnir_ui::{
     ActivateTab, AppShell, ChromeGeometry, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown,
     SplitRight,
 };
-use release_channel::AppVersion;
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
     ScrollToBottom, ScrollToTop, SelectAll, SendKeystroke, SendText, ShowCharacterPalette,
@@ -25,7 +28,17 @@ fn main() {
         AppVersion::init(cx);
         sleipnir_settings::init(cx);
 
+        // App-menu actions (always available so validation enables the items).
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Hide, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+
         cx.bind_keys([
+            // Application (menu bar + macOS conventions)
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("cmd-alt-h", HideOthers, None),
             // Clipboard
             KeyBinding::new("cmd-c", Copy, Some("Terminal")),
             KeyBinding::new("cmd-v", Paste, Some("Terminal")),
@@ -127,6 +140,9 @@ fn main() {
             KeyBinding::new("cmd-alt-up", FocusPaneUp, Some("Terminal")),
             KeyBinding::new("cmd-alt-down", FocusPaneDown, Some("Terminal")),
         ]);
+
+        // After keybindings so menu items pick up key equivalents from the keymap.
+        cx.set_menus(app_menus());
 
         let geo = ChromeGeometry::standard();
         let bounds = Bounds::centered(None, size(px(1024.0), px(680.0)), cx);

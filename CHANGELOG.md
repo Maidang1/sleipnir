@@ -3,6 +3,7 @@
 ## 0.1.1
 
 ### Features
+- Native macOS menu bar: Sleipnir / Shell / Edit / View / Window (minimal parity with Terminal.app / Kaku)
 - Settings panel with theme picker (`⌘,`), WezTerm-style section tabs
 - Theme selection persists to `~/.config/sleipnir/settings.json`
 - Theme cycle (`⌘⇧P`) also persists
