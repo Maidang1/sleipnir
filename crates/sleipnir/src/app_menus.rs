@@ -5,8 +5,8 @@
 
 use gpui::{Menu, MenuItem, SystemMenuType, actions};
 use sleipnir_ui::{
-    CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewTab,
-    NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown, SplitRight,
+    CheckForUpdates, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown, SplitRight,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -29,6 +29,8 @@ pub fn app_menus() -> Vec<Menu> {
     vec![
         Menu::new("Sleipnir").items([
             MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),

@@ -40,12 +40,18 @@ echo "=== publish-release  v${VERSION} ==="
 
 # ── Validate artifacts ────────────────────────────────────────────────────────
 ZIP="${ARTIFACT_DIR}/${APP_NAME:-Sleipnir}-${VERSION}-macos.zip"
+SHA="${ZIP}.sha256"
 DMG="${ARTIFACT_DIR}/${APP_NAME:-Sleipnir}-${VERSION}-macos.dmg"
 
 if [[ ! -f "${ZIP}" ]]; then
     echo "ERROR: zip not found at ${ZIP}" >&2
     exit 1
 fi
+
+# SHA-256 sidecar for the auto-updater to verify downloads.
+( cd "${ARTIFACT_DIR}" && shasum -a 256 "$(basename "${ZIP}")" \
+    | awk '{print $1}' > "$(basename "${SHA}")" )
+echo "  sha256: $(cat "${SHA}")"
 
 # ── Create / update GitHub Release ───────────────────────────────────────────
 TAG="v${VERSION}"
@@ -97,7 +103,8 @@ gh release create "${TAG}" \
     --notes-file "${NOTES_FILE}" \
     ${RELEASE_ARGS:-} \
     --draft=false \
-    "zip=${ZIP}" \
+    "${ZIP}" \
+    "${SHA}" \
     "${DMG:+${DMG}}"
 
 echo ""

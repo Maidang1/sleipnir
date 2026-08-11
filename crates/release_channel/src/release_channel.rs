@@ -25,7 +25,16 @@ impl AppVersion {
         cx.try_global::<Self>().cloned().unwrap_or_default()
     }
 
+    /// Initialize with this crate's own version (fallback for tests/tools).
     pub fn init(cx: &mut App) {
         cx.set_global(Self::default());
+    }
+
+    /// Initialize with an explicit version string.
+    ///
+    /// Callers should pass their own `env!("CARGO_PKG_VERSION")` so the reported
+    /// version matches the released binary (not this helper crate's version).
+    pub fn init_with(version: impl Into<String>, cx: &mut App) {
+        cx.set_global(Self(version.into()));
     }
 }

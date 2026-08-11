@@ -1,0 +1,24 @@
+[package]
+name = "updater"
+version = "0.1.1"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/updater.rs"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+reqwest.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -7,6 +7,7 @@ members = [
     "crates/terminal",
     "crates/task_types",
     "crates/release_channel",
+    "crates/updater",
     # Slim macOS-only entry; underlying gpui/gpui_macos come from Zed via git.
     "crates/gpui_platform",
 ]
@@ -40,6 +41,7 @@ sleipnir_settings = { path = "crates/sleipnir_settings" }
 terminal = { path = "crates/terminal" }
 task_types = { path = "crates/task_types" }
 release_channel = { path = "crates/release_channel" }
+updater = { path = "crates/updater" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false, features = ["font-kit"] }
 
 # ---------------------------------------------------------------------------
@@ -59,7 +61,10 @@ parking_lot = "0.12.1"
 percent-encoding = "2.3.2"
 rand = "0.9"
 regex = "1.5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 schemars = { version = "1.0", features = ["indexmap2"] }
+semver = "1.0"
+sha2 = "0.10"
 serde = { version = "1.0.221", features = ["derive", "rc"] }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
 sysinfo = "0.37.0"

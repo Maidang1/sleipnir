@@ -6,8 +6,9 @@ mod pane_tree;
 mod term_element;
 
 pub use app_shell::{
-    ActivateTab, AppShell, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown, SplitRight,
+    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown,
+    SplitRight, UpdateUiState,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use pane_tree::{

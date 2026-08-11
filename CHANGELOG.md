@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2
+
+### Features
+- Auto-update: checks GitHub Releases on launch (toggle with `auto_update` in settings.json) and via **Sleipnir → Check for Updates…** / `⌘⇧U`
+- Update notification bar with download progress and one-click **Restart & Update**
+- Downloads are verified against a published `.zip.sha256` sidecar before install; falls back to the releases page when in-place replacement isn't permitted
+
 ## 0.1.1
 
 ### Features

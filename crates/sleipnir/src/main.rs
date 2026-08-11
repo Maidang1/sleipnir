@@ -10,6 +10,7 @@ use gpui::{
 use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings;
+use sleipnir_ui::CheckForUpdates;
 use sleipnir_ui::{
     ActivateTab, AppShell, ChromeGeometry, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown,
@@ -25,7 +26,7 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     application().run(|cx: &mut App| {
-        AppVersion::init(cx);
+        AppVersion::init_with(env!("CARGO_PKG_VERSION"), cx);
         sleipnir_settings::init(cx);
 
         // App-menu actions (always available so validation enables the items).
@@ -139,6 +140,9 @@ fn main() {
             KeyBinding::new("cmd-alt-right", FocusPaneRight, Some("Terminal")),
             KeyBinding::new("cmd-alt-up", FocusPaneUp, Some("Terminal")),
             KeyBinding::new("cmd-alt-down", FocusPaneDown, Some("Terminal")),
+            // Check for updates (menu + shortcut).
+            KeyBinding::new("cmd-shift-u", CheckForUpdates, Some("AppShell")),
+            KeyBinding::new("cmd-shift-u", CheckForUpdates, Some("Terminal")),
         ]);
 
         // After keybindings so menu items pick up key equivalents from the keymap.

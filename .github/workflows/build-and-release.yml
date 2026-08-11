@@ -112,6 +112,11 @@ jobs:
             "build/Sleipnir-${VER}-macos.zip"
           du -sh "build/Sleipnir-${VER}-macos.zip"
           echo "zip=build/Sleipnir-${VER}-macos.zip" >> "$GITHUB_ENV"
+          # SHA-256 sidecar for the auto-updater to verify downloads.
+          ( cd build && shasum -a 256 "Sleipnir-${VER}-macos.zip" \
+            | awk '{print $1}' > "Sleipnir-${VER}-macos.zip.sha256" )
+          echo "  sha256: $(cat build/Sleipnir-${VER}-macos.zip.sha256)"
+          echo "sha=build/Sleipnir-${VER}-macos.zip.sha256" >> "$GITHUB_ENV"
 
       - name: Gatekeeper bypass (ad-hoc signed apps)
         run: |
@@ -149,6 +154,7 @@ jobs:
         run: |
           TAG="v${VERSION}"
           ZIP="build/Sleipnir-${VERSION}-macos.zip"
+          SHA="build/Sleipnir-${VERSION}-macos.zip.sha256"
           DMG="build/Sleipnir-${VERSION}-macos.dmg"
 
           {
@@ -180,6 +186,7 @@ jobs:
             --notes-file release-notes.md \
             "${DRAFT_FLAG[@]}" \
             "${ZIP}" \
+            "${SHA}" \
             "${DMG}"
 
           echo "Published: $(gh release view "${TAG}" --json url --jq '.url')"

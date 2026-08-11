@@ -55,6 +55,8 @@ actions!(
         FocusPaneUp,
         /// Move focus to the pane below the active one. ⌘⌥↓.
         FocusPaneDown,
+        /// Check GitHub Releases for a newer version.
+        CheckForUpdates,
     ]
 );
 
@@ -153,6 +155,36 @@ struct DividerRect {
     hit: Bounds<Pixels>,
 }
 
+/// Summary of an available release, kept UI-side (decoupled from `updater`).
+#[derive(Clone, Debug)]
+pub struct AvailableUpdate {
+    pub version: String,
+    pub tag: String,
+    pub notes: String,
+    zip_url: String,
+    sha256_url: String,
+}
+
+/// Auto-update lifecycle, surfaced through the notification bar.
+#[derive(Clone, Debug, Default)]
+pub enum UpdateUiState {
+    /// No update activity to show.
+    #[default]
+    Idle,
+    /// A background/manual check is running.
+    Checking,
+    /// Running build is current (only shown after a manual check).
+    UpToDate,
+    /// A newer release is available to download.
+    Available(AvailableUpdate),
+    /// Downloading + verifying the release artifact.
+    Downloading(AvailableUpdate),
+    /// Verified and staged; a restart will apply it.
+    ReadyToRestart(AvailableUpdate),
+    /// Something went wrong (message shown to the user).
+    Failed(String),
+}
+
 /// Window root: unified chrome band + active terminal.
 pub struct AppShell {
     tabs: Vec<Tab>,
@@ -179,6 +211,10 @@ pub struct AppShell {
     settings_open: bool,
     /// Active section tab inside the settings panel.
     settings_section: SettingsSection,
+    /// Auto-update lifecycle state (drives the update notification bar).
+    update_state: UpdateUiState,
+    /// Verified update zip path, ready to install on restart.
+    staged_zip: Option<std::path::PathBuf>,
 }
 
 impl Focusable for AppShell {
@@ -206,6 +242,8 @@ impl AppShell {
             rename: None,
             settings_open: false,
             settings_section: SettingsSection::Theme,
+            update_state: UpdateUiState::Idle,
+            staged_zip: None,
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -217,6 +255,11 @@ impl AppShell {
             })
             .detach();
         shell.add_tab(window, cx);
+        // Silently check for updates on launch when enabled; only the update
+        // notification bar surfaces a result (errors stay in the log).
+        if TerminalSettings::get_global(cx).auto_update {
+            shell.spawn_update_check(true, window, cx);
+        }
         shell
     }
 
@@ -600,6 +643,276 @@ impl AppShell {
         let next = TerminalSettings::get_global(cx).theme.next();
         TerminalSettings::set_theme(next, cx);
         cx.notify();
+    }
+
+    // ── auto-update ─────────────────────────────────────────────────────────
+
+    fn on_check_for_updates(
+        &mut self,
+        _: &CheckForUpdates,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Manual check: surface "up to date" and errors in the bar.
+        self.spawn_update_check(false, window, cx);
+    }
+
+    /// Query GitHub for a newer release. When `silent`, a no-update result or
+    /// error clears the bar instead of showing status.
+    fn spawn_update_check(&mut self, silent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_state,
+            UpdateUiState::Checking | UpdateUiState::Downloading(_)
+        ) {
+            return;
+        }
+        self.update_state = UpdateUiState::Checking;
+        cx.notify();
+
+        let current = release_channel::AppVersion::global(cx).to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = updater::fetch_latest(&current).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(updater::UpdateStatus::Available(info)) => {
+                        this.update_state = UpdateUiState::Available(AvailableUpdate {
+                            version: info.version.to_string(),
+                            tag: info.tag,
+                            notes: info.notes,
+                            zip_url: info.zip_url,
+                            sha256_url: info.sha256_url,
+                        });
+                    }
+                    Ok(updater::UpdateStatus::UpToDate) => {
+                        this.update_state = if silent {
+                            UpdateUiState::Idle
+                        } else {
+                            UpdateUiState::UpToDate
+                        };
+                    }
+                    Err(err) => {
+                        log::warn!("update check failed: {err:#}");
+                        this.update_state = if silent {
+                            UpdateUiState::Idle
+                        } else {
+                            UpdateUiState::Failed(format!("Update check failed: {err}"))
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Download + verify the available release, then stage it for restart.
+    fn start_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let update = match &self.update_state {
+            UpdateUiState::Available(u) => u.clone(),
+            _ => return,
+        };
+        self.update_state = UpdateUiState::Downloading(update.clone());
+        cx.notify();
+
+        let info = updater::ReleaseInfo {
+            version: match updater::parse_tag(&update.tag) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.update_state = UpdateUiState::Failed(format!("{err}"));
+                    cx.notify();
+                    return;
+                }
+            },
+            tag: update.tag.clone(),
+            notes: update.notes.clone(),
+            zip_url: update.zip_url.clone(),
+            sha256_url: update.sha256_url.clone(),
+        };
+        let dest = std::env::temp_dir().join(format!("sleipnir-update-{}", std::process::id()));
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = updater::download_and_verify(&info, &dest).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(zip_path) => {
+                        // Remember where the verified zip landed so a restart
+                        // can install it.
+                        this.staged_zip = Some(zip_path);
+                        this.update_state = UpdateUiState::ReadyToRestart(update.clone());
+                    }
+                    Err(err) => {
+                        log::warn!("update download failed: {err:#}");
+                        this.update_state =
+                            UpdateUiState::Failed(format!("Download failed: {err}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Install the staged update and relaunch, or fall back to the releases page.
+    fn install_and_restart(&mut self, cx: &mut Context<Self>) {
+        let Some(zip) = self.staged_zip.clone() else {
+            return;
+        };
+        match updater::current_app_bundle_path() {
+            Some(app) => match updater::install_and_relaunch(&zip, &app) {
+                Ok(()) => cx.quit(),
+                Err(err) => {
+                    log::warn!("install failed: {err:#}");
+                    self.update_state =
+                        UpdateUiState::Failed(format!("Install failed: {err}"));
+                    cx.open_url(updater::RELEASES_PAGE);
+                    cx.notify();
+                }
+            },
+            None => {
+                // Dev build or non-bundle launch: manual install.
+                cx.open_url(updater::RELEASES_PAGE);
+            }
+        }
+    }
+
+    /// Dismiss the current update notification bar.
+    fn dismiss_update(&mut self, cx: &mut Context<Self>) {
+        self.update_state = UpdateUiState::Idle;
+        cx.notify();
+    }
+
+    /// A small pill button for the update bar.
+    fn update_button(
+        &self,
+        id: &'static str,
+        label: impl Into<SharedString>,
+        tokens: &ChromeTokens,
+        primary: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        let (bg, fg) = if primary {
+            (tokens.accent, tokens.content_bg)
+        } else {
+            (tokens.surface, tokens.fg)
+        };
+        div()
+            .id(id)
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(bg)
+            .text_color(fg)
+            .text_sm()
+            .cursor_pointer()
+            .child(label.into())
+            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+    }
+
+    /// Render the update notification bar for the current [`UpdateUiState`].
+    /// Returns `None` when idle so nothing is inserted into the layout.
+    fn render_update_bar(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        let (message, buttons): (SharedString, Vec<gpui::AnyElement>) = match &self.update_state {
+            UpdateUiState::Idle => return None,
+            UpdateUiState::Checking => ("Checking for updates…".into(), Vec::new()),
+            UpdateUiState::UpToDate => (
+                "You’re on the latest version.".into(),
+                vec![
+                    self.update_button("upd-dismiss", "Dismiss", tokens, false, cx, |this, _, cx| {
+                        this.dismiss_update(cx);
+                    })
+                    .into_any_element(),
+                ],
+            ),
+            UpdateUiState::Available(u) => (
+                format!("Sleipnir {} is available.", u.version).into(),
+                vec![
+                    self.update_button(
+                        "upd-install",
+                        "Download & Install",
+                        tokens,
+                        true,
+                        cx,
+                        |this, window, cx| this.start_download(window, cx),
+                    )
+                    .into_any_element(),
+                    self.update_button(
+                        "upd-notes",
+                        "Release Notes",
+                        tokens,
+                        false,
+                        cx,
+                        |_, _, cx| cx.open_url(updater::RELEASES_PAGE),
+                    )
+                    .into_any_element(),
+                    self.update_button("upd-later", "Later", tokens, false, cx, |this, _, cx| {
+                        this.dismiss_update(cx);
+                    })
+                    .into_any_element(),
+                ],
+            ),
+            UpdateUiState::Downloading(u) => (
+                format!("Downloading Sleipnir {}…", u.version).into(),
+                Vec::new(),
+            ),
+            UpdateUiState::ReadyToRestart(u) => (
+                format!("Sleipnir {} is ready.", u.version).into(),
+                vec![
+                    self.update_button(
+                        "upd-restart",
+                        "Restart & Update",
+                        tokens,
+                        true,
+                        cx,
+                        |this, _, cx| this.install_and_restart(cx),
+                    )
+                    .into_any_element(),
+                    self.update_button("upd-later2", "Later", tokens, false, cx, |this, _, cx| {
+                        this.dismiss_update(cx);
+                    })
+                    .into_any_element(),
+                ],
+            ),
+            UpdateUiState::Failed(msg) => (
+                msg.clone().into(),
+                vec![
+                    self.update_button("upd-retry", "Dismiss", tokens, false, cx, |this, _, cx| {
+                        this.dismiss_update(cx);
+                    })
+                    .into_any_element(),
+                ],
+            ),
+        };
+
+        Some(
+            div()
+                .id("update-bar")
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .bg(tokens.surface)
+                .border_b_1()
+                .border_color(tokens.border)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(tokens.fg)
+                        .child(message),
+                )
+                .children(buttons),
+        )
     }
 
     fn on_open_settings(
@@ -1505,7 +1818,9 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_focus_pane_right))
             .on_action(cx.listener(Self::on_focus_pane_up))
             .on_action(cx.listener(Self::on_focus_pane_down))
+            .on_action(cx.listener(Self::on_check_for_updates))
             .child(chrome_band)
+            .children(self.render_update_bar(&tokens, cx))
             .child(self.render_content(&tokens, window, cx))
             .when(self.settings_open, |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))

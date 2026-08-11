@@ -87,6 +87,7 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌘,` | Open settings (theme picker) |
 | `⌘⇧R` | Reload settings |
 | `⌘⇧P` | Cycle theme (persists) |
+| `⌘⇧U` | Check for updates |
 | `⌘↑` / `⌘↓` | Scroll page |
 | `⇧↑` / `⇧↓` | Scroll line |
 | `⌘←` / `⌘→` | Line start / end |
@@ -95,6 +96,27 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌃⇧Space` | Toggle vi mode |
 
 See [`docs/M6.md`](docs/M6.md) for the full list.
+
+## Auto-update
+
+Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sleipnir/releases).
+
+- On launch it silently checks for a newer version (when `auto_update` is enabled).
+  A notification bar appears only if an update is available.
+- Trigger a check manually via **Sleipnir → Check for Updates…** or `⌘⇧U`.
+- Choosing **Download & Install** fetches the `Sleipnir-<ver>-macos.zip` artifact and
+  verifies it against the published `.zip.sha256` sidecar before staging. Because CI
+  builds are ad-hoc signed (no Apple Developer certificate), this SHA-256 check is the
+  integrity guarantee — the download is rejected on any mismatch.
+- **Restart & Update** swaps the running `.app` in place and relaunches. If the bundle
+  lives somewhere the app can't write (e.g. a protected `/Applications` install owned by
+  another user), it falls back to opening the releases page for a manual install.
+
+Disable the launch check by adding to `~/.config/sleipnir/settings.json`:
+
+```json
+{ "auto_update": false }
+```
 
 ## Roadmap
 
