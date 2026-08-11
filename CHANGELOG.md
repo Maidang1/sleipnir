@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.1.7
+
+### Improvements
+- **Decouple TermView from AppShell:** terminal views now communicate via events instead of holding a direct reference to the shell, improving testability and reducing coupling
+- **Debounced session persistence:** rapid tab/split changes no longer thrash the disk; writes are coalesced via an async debounce
+- **Font fallbacks now work:** user-configured `font_fallbacks` are properly passed to the text renderer, fixing CJK/emoji display
+- **Safe auto-update rollback:** the update helper now backs up the old `.app` before replacing it; if the swap fails, the backup is restored instead of leaving the user without an app
+- **Expanded user key bindings:** `key_bindings` in settings.json now supports terminal actions (`copy`, `paste`, `scroll_line_up/down`, `scroll_page_up/down`, `scroll_to_top/bottom`, `toggle_vi_mode`, `clear`, `select_all`, `show_character_palette`)
+
+### Fixes
+- Fix potential double-execution of clipboard shortcuts (cmd-c/cmd-v) by removing redundant handling in the key-down path
+- Fix selection/search highlight clipping at column 500 on ultra-wide terminals
+- Fix temporary paste file naming to use a monotonic counter instead of wall-clock time (avoids collisions on clock skew)
+
 ## 0.1.6
 
 ### Changes
