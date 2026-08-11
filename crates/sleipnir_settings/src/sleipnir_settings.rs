@@ -241,7 +241,8 @@ fn apply_loaded(settings: TerminalSettings, cx: &mut App) {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct SettingsFile {
-    /// Theme name: mocha | macchiato | frappe | latte
+    /// Theme name: auto | mocha | macchiato | frappe | latte | tokyo_night | nord |
+    /// gruvbox_dark | solarized_light | github_dark | github_light
     #[serde(default)]
     theme: Option<ThemeName>,
     #[serde(default)]

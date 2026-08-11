@@ -19,6 +19,10 @@ pub enum ThemeName {
     Nord,
     GruvboxDark,
     SolarizedLight,
+    /// Primer-based GitHub Dark (canvas `#0d1117`).
+    GithubDark,
+    /// Primer-based GitHub Light (canvas `#ffffff`).
+    GithubLight,
 }
 
 impl ThemeName {
@@ -33,6 +37,8 @@ impl ThemeName {
         ThemeName::Nord,
         ThemeName::GruvboxDark,
         ThemeName::SolarizedLight,
+        ThemeName::GithubDark,
+        ThemeName::GithubLight,
     ];
 
     /// Snake_case settings key (`"mocha"`, `"tokyo_night"`, …).
@@ -47,6 +53,8 @@ impl ThemeName {
             ThemeName::Nord => "nord",
             ThemeName::GruvboxDark => "gruvbox_dark",
             ThemeName::SolarizedLight => "solarized_light",
+            ThemeName::GithubDark => "github_dark",
+            ThemeName::GithubLight => "github_light",
         }
     }
 
@@ -62,6 +70,8 @@ impl ThemeName {
             ThemeName::Nord => "Nord",
             ThemeName::GruvboxDark => "Gruvbox Dark",
             ThemeName::SolarizedLight => "Solarized Light",
+            ThemeName::GithubDark => "GitHub Dark",
+            ThemeName::GithubLight => "GitHub Light",
         }
     }
 
@@ -113,6 +123,8 @@ pub fn palette_for_theme(name: ThemeName, appearance: Appearance) -> TerminalPal
         ThemeName::Nord => nord(),
         ThemeName::GruvboxDark => gruvbox_dark(),
         ThemeName::SolarizedLight => solarized_light(),
+        ThemeName::GithubDark => github_dark(),
+        ThemeName::GithubLight => github_light(),
     }
 }
 
@@ -424,6 +436,86 @@ fn solarized_light() -> TerminalPalette {
             hex(0xd33682),
             hex(0x2aa198),
             hex(0xeee8d5),
+        ],
+    }
+}
+
+/// Primer GitHub Dark — matches github.com dark default / github-vscode-theme.
+fn github_dark() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::GithubDark,
+        background: hex(0x0d1117),
+        foreground: hex(0xe6edf3),
+        bright_foreground: hex(0xffffff),
+        cursor: hex(0xe6edf3),
+        selection: hex(0x264f78),
+        ansi: [
+            hex(0x484f58), // black
+            hex(0xff7b72), // red
+            hex(0x3fb950), // green
+            hex(0xd29922), // yellow
+            hex(0x58a6ff), // blue
+            hex(0xbc8cff), // magenta
+            hex(0x39c5cf), // cyan
+            hex(0xb1bac4), // white
+            hex(0x6e7681), // bright black
+            hex(0xffa198), // bright red
+            hex(0x56d364), // bright green
+            hex(0xe3b341), // bright yellow
+            hex(0x79c0ff), // bright blue
+            hex(0xd2a8ff), // bright magenta
+            hex(0x56d4dd), // bright cyan
+            hex(0xffffff), // bright white
+        ],
+        dim: [
+            hex(0x484f58),
+            hex(0xff7b72),
+            hex(0x3fb950),
+            hex(0xd29922),
+            hex(0x58a6ff),
+            hex(0xbc8cff),
+            hex(0x39c5cf),
+            hex(0xb1bac4),
+        ],
+    }
+}
+
+/// Primer GitHub Light — matches github.com light default / github-vscode-theme.
+fn github_light() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::GithubLight,
+        background: hex(0xffffff),
+        foreground: hex(0x1f2328),
+        bright_foreground: hex(0x1f2328),
+        cursor: hex(0x1f2328),
+        selection: hex(0xb6e3ff),
+        ansi: [
+            hex(0x24292f), // black
+            hex(0xcf222e), // red
+            hex(0x116329), // green
+            hex(0x4d2d00), // yellow
+            hex(0x0969da), // blue
+            hex(0x8250df), // magenta
+            hex(0x1b7c83), // cyan
+            hex(0x6e7781), // white
+            hex(0x57606a), // bright black
+            hex(0xa40e26), // bright red
+            hex(0x1a7f37), // bright green
+            hex(0x633c01), // bright yellow
+            hex(0x218bff), // bright blue
+            hex(0xa475f9), // bright magenta
+            hex(0x3192aa), // bright cyan
+            hex(0x8c959f), // bright white
+        ],
+        dim: [
+            hex(0x24292f),
+            hex(0xcf222e),
+            hex(0x116329),
+            hex(0x4d2d00),
+            hex(0x0969da),
+            hex(0x8250df),
+            hex(0x1b7c83),
+            hex(0x6e7781),
         ],
     }
 }

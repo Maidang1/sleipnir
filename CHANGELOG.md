@@ -7,6 +7,7 @@
 - Settings panel with theme picker (`⌘,`), WezTerm-style section tabs
 - Theme selection persists to `~/.config/sleipnir/settings.json`
 - Theme cycle (`⌘⇧P`) also persists
+- GitHub Dark / GitHub Light themes (Primer palette)
 
 ### Fixes
 - Honor terminal cursor hide (`CSI ?25l` / `CursorShape::Hidden`) so full-screen TUIs no longer show a spurious blinking cursor on status text

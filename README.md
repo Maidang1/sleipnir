@@ -30,8 +30,8 @@ prompt.
 
 - **GPU rendering** — smooth scrollback and redraw via GPUI + Metal.
 - **Tabs, splits & panes** — split right/down, move focus between panes, jump to any tab.
-- **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized;
-  `auto` follows the system light/dark appearance.
+- **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
+  GitHub Dark/Light; `auto` follows the system light/dark appearance.
 - **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder
   selections as quoted paths; force text-only paste when you need it.
 - **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R`.
@@ -54,7 +54,8 @@ cargo run -p sleipnir
 
 `~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys plus a `theme`
 key (`auto` / `mocha` / `macchiato` / `frappe` / `latte` / `tokyo_night` / `nord` /
-`gruvbox_dark` / `solarized_light`). `auto` follows the system light/dark appearance.
+`gruvbox_dark` / `solarized_light` / `github_dark` / `github_light`). `auto` follows
+the system light/dark appearance.
 Open the in-app theme picker with `⌘,`, or edit the file and reload with `⌘⇧R`.
 See [`docs/settings.example.json`](docs/settings.example.json).
 
