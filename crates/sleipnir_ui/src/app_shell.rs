@@ -4,7 +4,7 @@ use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter,
     FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
     ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, actions, canvas, deferred, div, point,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, actions, canvas, deferred, div, point,
     prelude::FluentBuilder as _, px, relative,
 };
 use sleipnir_settings::{
@@ -244,6 +244,8 @@ pub struct AppShell {
     find_query: String,
     find_match_count: usize,
     find_active_index: usize,
+    /// Debounced session save task.
+    _session_save_task: Option<Task<()>>,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
 }
@@ -284,6 +286,7 @@ impl AppShell {
             find_query: String::new(),
             find_match_count: 0,
             find_active_index: 0,
+            _session_save_task: None,
             _quit_subscription: None,
         };
         // Seed the current system appearance and follow future changes so the
@@ -324,7 +327,7 @@ impl AppShell {
     }
 
     /// Create a fresh `TermView` and wire the observers a pane needs
-    /// (repaint on change, window-title sync on title change).
+    /// (repaint on change, window-title sync on title change, event routing).
     fn spawn_term_view(
         &mut self,
         window: &mut Window,
@@ -339,8 +342,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
-        let shell = cx.weak_entity();
-        let view = cx.new(|cx| TermView::new_local_in_shell(Some(shell), cwd, window, cx));
+        let view = cx.new(|cx| TermView::new_local_with_cwd(cwd, window, cx));
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         cx.subscribe_in(
             &view,
@@ -349,6 +351,27 @@ impl AppShell {
                 crate::TermViewEvent::TitleChanged => {
                     this.sync_window_title(window, cx);
                     cx.notify();
+                }
+                crate::TermViewEvent::RequestNewTab => {
+                    this.add_tab(window, cx);
+                }
+                crate::TermViewEvent::RequestNextTab => {
+                    this.next_tab(window, cx);
+                }
+                crate::TermViewEvent::RequestPrevTab => {
+                    this.prev_tab(window, cx);
+                }
+                crate::TermViewEvent::RequestReloadSettings => {
+                    TerminalSettings::reload(cx);
+                    cx.notify();
+                }
+                crate::TermViewEvent::RequestCycleTheme => {
+                    let next = TerminalSettings::get_global(cx).theme.next();
+                    TerminalSettings::set_theme(next, cx);
+                    cx.notify();
+                }
+                crate::TermViewEvent::RequestOpenSettings => {
+                    this.toggle_settings(window, cx);
                 }
             },
         )
@@ -482,10 +505,22 @@ impl AppShell {
         }
     }
 
-    /// Mark layout dirty and write session (debounced enough via direct write;
-    /// structural changes are infrequent).
-    fn schedule_session_save(&self, cx: &App) {
-        self.persist_session_now(cx);
+    /// Mark layout dirty and write session after a short debounce so rapid
+    /// tab switches don't thrash the disk.
+    fn schedule_session_save(&mut self, cx: &mut Context<Self>) {
+        // Cancel any pending save timer and start a fresh debounce.
+        // Dropping the previous task cancels the prior write, so only the most
+        // recent structural change is persisted.
+        self._session_save_task = Some(cx.spawn(async move |this, cx| {
+            // Yield a few times via background executor to defer the write
+            // past any rapid burst of sequential calls.
+            for _ in 0..3 {
+                cx.background_spawn(std::future::ready(())).await;
+            }
+            this.update(cx, |this, cx| {
+                this.persist_session_now(cx);
+            }).ok();
+        }));
     }
 
     /// The active pane's `TermView`, if any.
@@ -520,17 +555,6 @@ impl AppShell {
         cx.notify();
     }
 
-    pub(crate) fn add_tab_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_tab(window, cx);
-    }
-
-    pub(crate) fn next_tab_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.next_tab(window, cx);
-    }
-
-    pub(crate) fn prev_tab_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.prev_tab(window, cx);
-    }
 
     /// Begin an inline rename for the given tab, seeding the editable buffer
     /// with its current title.
@@ -1458,9 +1482,6 @@ impl AppShell {
         self.toggle_settings(window, cx);
     }
 
-    pub(crate) fn open_settings_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_settings(window, cx);
-    }
 
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;

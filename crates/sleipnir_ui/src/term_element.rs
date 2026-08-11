@@ -191,6 +191,7 @@ impl Element for TermElement {
                         .unwrap_or_else(gpui::FontFeatures::disable_ligatures),
                     font_weight: settings.font_weight.unwrap_or_default(),
                     font_size: font_size.into(),
+                    font_fallbacks: settings.font_fallbacks.clone(),
                     color: palette.foreground,
                     ..Default::default()
                 };
@@ -397,7 +398,6 @@ impl TermElement {
         window.on_mouse_event({
             let terminal = terminal.clone();
             let hitbox = (); // hitbox checked inside via focus
-            let focus = focus.clone();
             move |e: &MouseMoveEvent, phase, window, cx| {
                 let _ = hitbox;
                 if phase != DispatchPhase::Bubble {
@@ -418,7 +418,6 @@ impl TermElement {
         });
 
         self.interactivity.on_scroll_wheel({
-            let terminal = terminal.clone();
             move |e: &ScrollWheelEvent, _window, cx| {
                 let multiplier = TerminalSettings::get_global(cx).scroll_multiplier;
                 terminal.update(cx, |terminal, cx| {
@@ -467,6 +466,9 @@ fn range_rects(range: TerminalRange, display_offset: usize, color: gpui::Hsla) -
     let end_line = range.end().line + display_offset as i32;
     let start_col = range.start().column as i32;
     let end_col = range.end().column as i32;
+    // Use a large sentinel for "rest of line"; will be clipped by the paint
+    // bounds. i32::MAX / 2 avoids overflow when multiplied by cell_width.
+    const LINE_END: i32 = i32::MAX / 2;
     // Simple single/multi-line blocks (approximate).
     if start_line == end_line {
         rects.push(BgRect {
@@ -479,14 +481,14 @@ fn range_rects(range: TerminalRange, display_offset: usize, color: gpui::Hsla) -
         rects.push(BgRect {
             line: start_line,
             start_col,
-            end_col: 500,
+            end_col: LINE_END,
             color,
         });
         for line in (start_line + 1)..end_line {
             rects.push(BgRect {
                 line,
                 start_col: 0,
-                end_col: 500,
+                end_col: LINE_END,
                 color,
             });
         }

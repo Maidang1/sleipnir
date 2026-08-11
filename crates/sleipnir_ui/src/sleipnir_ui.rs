@@ -25,11 +25,11 @@ use collections::HashMap;
 use gpui::{
     App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
-    SharedString, Styled as _, Task, WeakEntity, Window, div, rgb,
+    SharedString, Styled as _, Task, Window, div, rgb,
 };
 use sleipnir_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 use terminal::{
     Clear, Copy, Event, MaybeNavigationTarget, Modes, Paste, PasteText, ScrollLineDown,
     ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
@@ -41,6 +41,18 @@ use util::paths::PathStyle;
 #[derive(Clone, Debug)]
 pub enum TermViewEvent {
     TitleChanged,
+    /// Request the shell open a new tab (avoids TermView holding a WeakEntity<AppShell>).
+    RequestNewTab,
+    /// Request switching to the next tab.
+    RequestNextTab,
+    /// Request switching to the previous tab.
+    RequestPrevTab,
+    /// Request reload of settings.
+    RequestReloadSettings,
+    /// Request cycling the theme.
+    RequestCycleTheme,
+    /// Request opening the settings panel.
+    RequestOpenSettings,
 }
 
 impl EventEmitter<TermViewEvent> for TermView {}
@@ -56,7 +68,6 @@ pub struct TermView {
     terminal: TerminalSlot,
     focus_handle: FocusHandle,
     title: SharedString,
-    shell: Option<WeakEntity<AppShell>>,
     _spawn: Task<()>,
 }
 
@@ -69,11 +80,10 @@ impl Focusable for TermView {
 impl TermView {
     /// Spawn a local interactive shell PTY and attach UI when ready.
     pub fn new_local(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::new_local_in_shell(None, None, window, cx)
+        Self::new_local_with_cwd(None, window, cx)
     }
 
-    pub(crate) fn new_local_in_shell(
-        shell: Option<WeakEntity<AppShell>>,
+    pub(crate) fn new_local_with_cwd(
         cwd: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -124,7 +134,6 @@ impl TermView {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
             title: "Sleipnir".into(),
-            shell,
             _spawn: spawn,
         }
     }
@@ -153,7 +162,6 @@ impl TermView {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
             title: "sleipnir (display)".into(),
-            shell: None,
             _spawn: Task::ready(()),
         };
         this.attach_terminal(terminal, window, cx);
@@ -226,28 +234,13 @@ impl TermView {
             return;
         };
 
-        // Clipboard shortcuts (also bound via keymap when present).
+        // Clipboard shortcuts are handled by on_action(Copy/Paste/PasteText);
+        // skip them here so they don't get double-processed or sent to the PTY.
         let mods = &event.keystroke.modifiers;
-        if (mods.platform || mods.control) && event.keystroke.key.eq_ignore_ascii_case("c") {
-            let has_selection = terminal
-                .read(cx)
-                .last_content()
-                .selection_text
-                .as_ref()
-                .is_some_and(|t| !t.is_empty());
-            if has_selection {
-                terminal.update(cx, |term, _| term.copy(Some(true)));
-                cx.notify();
-                return;
-            }
-        }
-        if (mods.platform || mods.control) && event.keystroke.key.eq_ignore_ascii_case("v") {
-            // ctrl-cmd-v is PasteText (text-only); plain cmd/ctrl-v is full paste.
-            if mods.platform && mods.control {
-                self.paste_text_from_clipboard(cx);
-            } else {
-                self.paste_from_clipboard(cx);
-            }
+        let key = event.keystroke.key.as_str();
+        if (mods.platform || mods.control)
+            && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("v"))
+        {
             return;
         }
 
@@ -457,39 +450,28 @@ impl TermView {
             .unwrap_or(false)
     }
 
-    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(shell) = self.shell.clone() {
-            let _ = shell.update(cx, |shell, cx| shell.add_tab_public(window, cx));
-        }
+    fn new_tab(&mut self, _: &NewTab, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TermViewEvent::RequestNewTab);
     }
 
-    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(shell) = self.shell.clone() {
-            let _ = shell.update(cx, |shell, cx| shell.next_tab_public(window, cx));
-        }
+    fn next_tab(&mut self, _: &NextTab, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TermViewEvent::RequestNextTab);
     }
 
-    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(shell) = self.shell.clone() {
-            let _ = shell.update(cx, |shell, cx| shell.prev_tab_public(window, cx));
-        }
+    fn prev_tab(&mut self, _: &PrevTab, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TermViewEvent::RequestPrevTab);
     }
 
     fn reload_settings(&mut self, _: &ReloadSettings, _window: &mut Window, cx: &mut Context<Self>) {
-        TerminalSettings::reload(cx);
-        cx.notify();
+        cx.emit(TermViewEvent::RequestReloadSettings);
     }
 
     fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
-        let next = TerminalSettings::get_global(cx).theme.next();
-        TerminalSettings::set_theme(next, cx);
-        cx.notify();
+        cx.emit(TermViewEvent::RequestCycleTheme);
     }
 
-    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(shell) = self.shell.clone() {
-            let _ = shell.update(cx, |shell, cx| shell.open_settings_public(window, cx));
-        }
+    fn open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TermViewEvent::RequestOpenSettings);
     }
 }
 
@@ -588,15 +570,15 @@ fn is_web_url(url: &str) -> bool {
         || lower.starts_with("ftp://")
 }
 
+/// Monotonic counter for unique temp file names (avoids clock-regression issues).
+static PASTE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Write a clipboard image to a unique temp file and return its absolute path.
 fn write_clipboard_image_to_temp(image: &gpui::Image) -> Result<PathBuf, String> {
     let ext = image.format().extension();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    // Low bits of the image id keep concurrent pastes unique within the same nanosecond.
-    let path = std::env::temp_dir().join(format!("sleipnir-paste-{nanos}-{:x}.{ext}", image.id()));
+    let counter = PASTE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("sleipnir-paste-{pid}-{counter}.{ext}"));
     std::fs::write(&path, image.bytes()).map_err(|e| e.to_string())?;
     log::info!("pasted clipboard image to {}", path.display());
     Ok(path)

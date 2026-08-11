@@ -130,16 +130,11 @@ pub fn save_session(path: &Path, session: &SessionFile) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_vec_pretty(session)
+    let mut json = serde_json::to_vec_pretty(session)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    json.push(b'\n');
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    // Append trailing newline for nicer diffs.
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&tmp)?;
-        f.write_all(b"\n")?;
-    }
+    std::fs::write(&tmp, &json)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

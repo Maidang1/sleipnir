@@ -210,11 +210,11 @@ pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBu
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        use std::fmt::Write;
+        write!(s, "{b:02x}").unwrap();
+        s
+    })
 }
 
 /// Resolve the `.app` bundle that contains the current executable.
@@ -325,12 +325,20 @@ done
 
 NEW={new_app}
 OLD={old_app}
+BACKUP="$OLD.bak"
 
-# Atomic-ish swap: remove old, move new into place.
-if rm -rf "$OLD" 2>/dev/null && mv "$NEW" "$OLD" 2>/dev/null; then
-  # Clear quarantine so Gatekeeper does not block the freshly-moved bundle.
-  xattr -cr "$OLD" 2>/dev/null || true
-  open "$OLD"
+# Safe swap: backup old, move new into place, remove backup on success.
+if mv "$OLD" "$BACKUP" 2>/dev/null; then
+  if mv "$NEW" "$OLD" 2>/dev/null; then
+    # Clear quarantine so Gatekeeper does not block the freshly-moved bundle.
+    xattr -cr "$OLD" 2>/dev/null || true
+    rm -rf "$BACKUP" 2>/dev/null || true
+    open "$OLD"
+  else
+    # mv failed: restore backup
+    mv "$BACKUP" "$OLD" 2>/dev/null || true
+    open "{releases}"
+  fi
 else
   # Permission or IO failure — fall back to a manual install.
   open "{releases}"
