@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+### Fixes
+- Fix crash on launch (`there is no reactor running`): the updater used a Tokio-based HTTP client, but Sleipnir runs on GPUI's smol executor. Switched to a blocking `ureq` (rustls) client run on the background executor.
+
 ## 0.1.2
 
 ### Features

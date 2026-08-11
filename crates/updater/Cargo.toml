@@ -14,11 +14,11 @@ path = "src/updater.rs"
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
-reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

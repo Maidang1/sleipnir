@@ -671,7 +671,11 @@ impl AppShell {
 
         let current = release_channel::AppVersion::global(cx).to_string();
         cx.spawn_in(window, async move |this, cx| {
-            let result = updater::fetch_latest(&current).await;
+            // ureq is blocking — run it on the background executor so we never
+            // touch a (nonexistent) Tokio reactor on the main thread.
+            let result = cx
+                .background_spawn(async move { updater::fetch_latest(&current) })
+                .await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(updater::UpdateStatus::Available(info)) => {
@@ -732,7 +736,9 @@ impl AppShell {
         let dest = std::env::temp_dir().join(format!("sleipnir-update-{}", std::process::id()));
 
         cx.spawn_in(window, async move |this, cx| {
-            let result = updater::download_and_verify(&info, &dest).await;
+            let result = cx
+                .background_spawn(async move { updater::download_and_verify(&info, &dest) })
+                .await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(zip_path) => {

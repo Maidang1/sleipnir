@@ -61,7 +61,6 @@ parking_lot = "0.12.1"
 percent-encoding = "2.3.2"
 rand = "0.9"
 regex = "1.5"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 schemars = { version = "1.0", features = ["indexmap2"] }
 semver = "1.0"
 sha2 = "0.10"
@@ -71,6 +70,7 @@ sysinfo = "0.37.0"
 thiserror = "2.0.12"
 url = "2.2"
 urlencoding = "2.1.2"
+ureq = { version = "3", features = ["json"] }
 vte = { version = "0.15.0", features = ["ansi"] }
 
 [workspace.lints.rust]

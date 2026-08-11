@@ -134,28 +134,28 @@ fn parse_sha256_sidecar(body: &str) -> Result<String> {
     Ok(token.to_ascii_lowercase())
 }
 
-// ── network / IO ────────────────────────────────────────────────────────────
+// ── network / IO (synchronous; run on a background thread) ──────────────────
+//
+// ureq is a blocking client with no async runtime dependency, so it works on
+// GPUI's smol-based executor. (reqwest/hyper require a Tokio reactor and panic
+// otherwise — do not reintroduce it here.)
 
-fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .context("build HTTP client")
-}
+/// Max bytes we'll read for the release `.zip` (guards against runaway reads).
+const MAX_ZIP_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Query GitHub for the latest release and compare against `current_version`.
-pub async fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
+///
+/// Blocking — call from `cx.background_spawn`.
+pub fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let release: Value = client()?
-        .get(&url)
+    let mut resp = ureq::get(&url)
+        .header("User-Agent", USER_AGENT)
         .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .context("request latest release")?
-        .error_for_status()
-        .context("GitHub releases API returned an error status")?
-        .json()
-        .await
+        .call()
+        .context("request latest release")?;
+    let release: Value = resp
+        .body_mut()
+        .read_json()
         .context("decode release JSON")?;
 
     let info = parse_release(&release)?;
@@ -169,34 +169,30 @@ pub async fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
 /// Download the release `.zip`, verify its SHA-256, and return the local path.
 ///
 /// The zip is written to `dest_dir`, which the caller owns and should clean up.
-pub async fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBuf> {
+/// Blocking — call from `cx.background_spawn`.
+pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("create staging dir {}", dest_dir.display()))?;
-    let http = client()?;
 
     // Expected digest from the sidecar.
-    let sidecar = http
-        .get(&info.sha256_url)
-        .send()
-        .await
+    let sidecar = ureq::get(&info.sha256_url)
+        .header("User-Agent", USER_AGENT)
+        .call()
         .context("download sha256 sidecar")?
-        .error_for_status()
-        .context("sha256 sidecar returned an error status")?
-        .text()
-        .await
+        .body_mut()
+        .read_to_string()
         .context("read sha256 sidecar body")?;
     let expected = parse_sha256_sidecar(&sidecar)?;
 
     // Zip payload.
-    let bytes = http
-        .get(&info.zip_url)
-        .send()
-        .await
+    let bytes = ureq::get(&info.zip_url)
+        .header("User-Agent", USER_AGENT)
+        .call()
         .context("download release zip")?
-        .error_for_status()
-        .context("release zip returned an error status")?
-        .bytes()
-        .await
+        .body_mut()
+        .with_config()
+        .limit(MAX_ZIP_BYTES)
+        .read_to_vec()
         .context("read release zip body")?;
 
     let mut hasher = Sha256::new();
