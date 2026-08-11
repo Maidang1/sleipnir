@@ -7,7 +7,7 @@ mod term_element;
 
 pub use app_shell::{
     ActivateTab, AppShell, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, NewTab, NextTab, PrevTab, ReloadSettings, SplitDown, SplitRight,
+    FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown, SplitRight,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use pane_tree::{
@@ -475,20 +475,15 @@ impl TermView {
     }
 
     fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
-        let mut settings = TerminalSettings::get_global(cx).clone();
-        settings.theme = match settings.theme {
-            sleipnir_settings::ThemeName::Auto => sleipnir_settings::ThemeName::Mocha,
-            sleipnir_settings::ThemeName::Mocha => sleipnir_settings::ThemeName::Macchiato,
-            sleipnir_settings::ThemeName::Macchiato => sleipnir_settings::ThemeName::Frappe,
-            sleipnir_settings::ThemeName::Frappe => sleipnir_settings::ThemeName::Latte,
-            sleipnir_settings::ThemeName::Latte => sleipnir_settings::ThemeName::TokyoNight,
-            sleipnir_settings::ThemeName::TokyoNight => sleipnir_settings::ThemeName::Nord,
-            sleipnir_settings::ThemeName::Nord => sleipnir_settings::ThemeName::GruvboxDark,
-            sleipnir_settings::ThemeName::GruvboxDark => sleipnir_settings::ThemeName::SolarizedLight,
-            sleipnir_settings::ThemeName::SolarizedLight => sleipnir_settings::ThemeName::Auto,
-        };
-        TerminalSettings::apply(settings, cx);
+        let next = TerminalSettings::get_global(cx).theme.next();
+        TerminalSettings::set_theme(next, cx);
         cx.notify();
+    }
+
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.clone() {
+            let _ = shell.update(cx, |shell, cx| shell.open_settings_public(window, cx));
+        }
     }
 }
 
@@ -526,6 +521,7 @@ impl Render for TermView {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::reload_settings))
             .on_action(cx.listener(Self::cycle_theme))
+            .on_action(cx.listener(Self::open_settings))
             .on_key_down(cx.listener(Self::on_key_down))
             .child(match &self.terminal {
                 TerminalSlot::Loading => div()

@@ -21,6 +21,57 @@ pub enum ThemeName {
     SolarizedLight,
 }
 
+impl ThemeName {
+    /// Stable order for theme pickers and cycle.
+    pub const ALL: &'static [ThemeName] = &[
+        ThemeName::Auto,
+        ThemeName::Mocha,
+        ThemeName::Macchiato,
+        ThemeName::Frappe,
+        ThemeName::Latte,
+        ThemeName::TokyoNight,
+        ThemeName::Nord,
+        ThemeName::GruvboxDark,
+        ThemeName::SolarizedLight,
+    ];
+
+    /// Snake_case settings key (`"mocha"`, `"tokyo_night"`, …).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeName::Auto => "auto",
+            ThemeName::Mocha => "mocha",
+            ThemeName::Macchiato => "macchiato",
+            ThemeName::Frappe => "frappe",
+            ThemeName::Latte => "latte",
+            ThemeName::TokyoNight => "tokyo_night",
+            ThemeName::Nord => "nord",
+            ThemeName::GruvboxDark => "gruvbox_dark",
+            ThemeName::SolarizedLight => "solarized_light",
+        }
+    }
+
+    /// Human-readable label for the settings UI.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ThemeName::Auto => "Auto (System)",
+            ThemeName::Mocha => "Catppuccin Mocha",
+            ThemeName::Macchiato => "Catppuccin Macchiato",
+            ThemeName::Frappe => "Catppuccin Frappé",
+            ThemeName::Latte => "Catppuccin Latte",
+            ThemeName::TokyoNight => "Tokyo Night",
+            ThemeName::Nord => "Nord",
+            ThemeName::GruvboxDark => "Gruvbox Dark",
+            ThemeName::SolarizedLight => "Solarized Light",
+        }
+    }
+
+    /// Next theme in [`Self::ALL`] (wraps around). Used by cycle shortcuts.
+    pub fn next(self) -> ThemeName {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
 /// System light/dark appearance, used to resolve the `Auto` theme.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Appearance {

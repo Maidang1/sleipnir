@@ -8,7 +8,8 @@ use gpui_platform::application;
 use sleipnir_settings;
 use sleipnir_ui::{
     ActivateTab, AppShell, ChromeGeometry, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, NewTab, NextTab, PrevTab, ReloadSettings, SplitDown, SplitRight,
+    FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown,
+    SplitRight,
 };
 use release_channel::AppVersion;
 use terminal::{
@@ -105,8 +106,10 @@ fn main() {
             // Settings / theme
             KeyBinding::new("cmd-shift-r", ReloadSettings, Some("AppShell")),
             KeyBinding::new("cmd-shift-r", ReloadSettings, Some("Terminal")),
-            // Theme cycling lives on ⌘⇧P for now; ⌘⇧T is reserved for the
-            // conventional "reopen closed tab" (Phase 3 replaces this with a picker).
+            // Settings panel (theme picker); macOS convention is ⌘,.
+            KeyBinding::new("cmd-,", OpenSettings, Some("AppShell")),
+            KeyBinding::new("cmd-,", OpenSettings, Some("Terminal")),
+            // Quick theme cycle (also persists). ⌘⇧T reserved for reopen-closed-tab.
             KeyBinding::new("cmd-shift-p", CycleTheme, Some("AppShell")),
             KeyBinding::new("cmd-shift-p", CycleTheme, Some("Terminal")),
             // Splits (iTerm2 keymap): ⌘D splits right, ⌘⇧D splits down.

@@ -2,12 +2,14 @@
 
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
+    FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
     ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, actions, canvas, deferred, div, point,
     prelude::FluentBuilder as _, px,
 };
-use sleipnir_settings::{Appearance, TerminalPalette, TerminalSettings, ThemeName};
+use sleipnir_settings::{
+    Appearance, TerminalPalette, TerminalSettings, ThemeName, palette_for_theme,
+};
 
 use crate::TermView;
 use crate::chrome::{ChromeGeometry, ChromeTokens, active_after_close};
@@ -37,8 +39,10 @@ actions!(
         PrevTab,
         /// Reload `~/.config/sleipnir/settings.json`.
         ReloadSettings,
-        /// Cycle built-in theme (mocha → macchiato → frappe → latte).
+        /// Cycle built-in theme (persists to settings.json).
         CycleTheme,
+        /// Toggle the settings panel (⌘,).
+        OpenSettings,
         /// Split the active pane left|right (new pane on the right). ⌘D.
         SplitRight,
         /// Split the active pane top/bottom (new pane below). ⌘⇧D.
@@ -104,6 +108,30 @@ struct RenameState {
     buffer: String,
 }
 
+/// Top-level section inside the settings panel (WezTerm-style tabs).
+/// Add variants here as new setting pages land.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SettingsSection {
+    #[default]
+    Theme,
+}
+
+impl SettingsSection {
+    const ALL: &'static [SettingsSection] = &[SettingsSection::Theme];
+
+    fn id(self) -> &'static str {
+        match self {
+            SettingsSection::Theme => "theme",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Theme => "theme",
+        }
+    }
+}
+
 /// In-progress divider drag: which tab, which split, and its axis.
 #[derive(Clone)]
 struct DragState {
@@ -147,6 +175,10 @@ pub struct AppShell {
     drag: Option<DragState>,
     /// In-progress inline tab rename, if any.
     rename: Option<RenameState>,
+    /// Whether the settings overlay is visible.
+    settings_open: bool,
+    /// Active section tab inside the settings panel.
+    settings_section: SettingsSection,
 }
 
 impl Focusable for AppShell {
@@ -172,6 +204,8 @@ impl AppShell {
             content_bounds: None,
             drag: None,
             rename: None,
+            settings_open: false,
+            settings_section: SettingsSection::Theme,
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -554,20 +588,52 @@ impl AppShell {
     }
 
     fn on_cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
-        let mut settings = TerminalSettings::get_global(cx).clone();
-        settings.theme = match settings.theme {
-            ThemeName::Auto => ThemeName::Mocha,
-            ThemeName::Mocha => ThemeName::Macchiato,
-            ThemeName::Macchiato => ThemeName::Frappe,
-            ThemeName::Frappe => ThemeName::Latte,
-            ThemeName::Latte => ThemeName::TokyoNight,
-            ThemeName::TokyoNight => ThemeName::Nord,
-            ThemeName::Nord => ThemeName::GruvboxDark,
-            ThemeName::GruvboxDark => ThemeName::SolarizedLight,
-            ThemeName::SolarizedLight => ThemeName::Auto,
-        };
-        log::info!("theme -> {:?}", settings.theme);
-        TerminalSettings::apply(settings, cx);
+        let next = TerminalSettings::get_global(cx).theme.next();
+        TerminalSettings::set_theme(next, cx);
+        cx.notify();
+    }
+
+    fn on_open_settings(
+        &mut self,
+        _: &OpenSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_settings(window, cx);
+    }
+
+    pub(crate) fn open_settings_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_settings(window, cx);
+    }
+
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = !self.settings_open;
+        if self.settings_open {
+            // Always land on Theme when reopening; future sections can restore.
+            self.settings_section = SettingsSection::Theme;
+        } else {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.settings_open = false;
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn select_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        if self.settings_section != section {
+            self.settings_section = section;
+            cx.notify();
+        }
+    }
+
+    fn select_theme(&mut self, theme: ThemeName, cx: &mut Context<Self>) {
+        TerminalSettings::set_theme(theme, cx);
         cx.notify();
     }
 
@@ -889,6 +955,290 @@ impl AppShell {
         self.tabs[idx].tree.set_ratio(&drag.path, ratio);
         cx.notify();
     }
+
+    /// Settings overlay: WezTerm-style panel with section tabs + content body.
+    fn render_settings_overlay(
+        &self,
+        tokens: &ChromeTokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let section = self.settings_section;
+
+        // ── Section tab strip ────────────────────────────────────────────
+        let mut section_tabs = div()
+            .id("settings-section-tabs")
+            .flex()
+            .flex_row()
+            .items_end()
+            .gap_4()
+            .w_full()
+            .px_4()
+            .pt_1();
+
+        for &s in SettingsSection::ALL {
+            let active = s == section;
+            let tab_id: ElementId = format!("settings-section-{}", s.id()).into();
+            let label: SharedString = s.label().into();
+            section_tabs = section_tabs.child(
+                div()
+                    .id(tab_id)
+                    .cursor_pointer()
+                    .pb_1p5()
+                    .text_size(px(13.0))
+                    .when(active, |el| {
+                        el.text_color(tokens.accent)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .border_b_2()
+                            .border_color(tokens.accent)
+                    })
+                    .when(!active, |el| {
+                        el.text_color(tokens.fg_muted)
+                            .hover(|el| el.text_color(tokens.fg))
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.select_settings_section(s, cx);
+                    }))
+                    .child(label),
+            );
+        }
+
+        // ── Body for the active section ──────────────────────────────────
+        let body = match section {
+            SettingsSection::Theme => self.render_settings_theme_section(tokens, window, cx),
+        };
+
+        // ── Footer: key hints (reference: WezTerm settings) ──────────────
+        let footer = div()
+            .id("settings-footer")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .px_4()
+            .py_2()
+            .border_t_1()
+            .border_color(tokens.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(11.0))
+                    .text_color(tokens.fg_muted)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .px_1()
+                                    .rounded(px(3.0))
+                                    .bg(tokens.hover)
+                                    .text_color(tokens.fg)
+                                    .child("click"),
+                            )
+                            .child("apply"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .px_1()
+                                    .rounded(px(3.0))
+                                    .bg(tokens.hover)
+                                    .text_color(tokens.fg)
+                                    .child("esc"),
+                            )
+                            .child("close"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(tokens.fg_muted)
+                    .child("~/.config/sleipnir/settings.json"),
+            );
+
+        let panel = div()
+            .id("settings-panel")
+            .w(px(560.0))
+            .max_w(px(720.0))
+            .h(px(480.0))
+            .max_h(px(560.0))
+            .flex()
+            .flex_col()
+            .rounded(px(10.0))
+            .bg(tokens.surface)
+            .border_1()
+            .border_color(tokens.border)
+            .text_color(tokens.fg)
+            .overflow_hidden()
+            // Keep clicks inside the panel from reaching the backdrop.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // Title
+            .child(
+                div()
+                    .px_4()
+                    .pt_3()
+                    .pb_1()
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(tokens.fg)
+                    .child("settings"),
+            )
+            // Section tabs
+            .child(section_tabs)
+            // Divider under tabs
+            .child(
+                div()
+                    .w_full()
+                    .h(px(1.0))
+                    .bg(tokens.border),
+            )
+            // Scrollable body
+            .child(
+                div()
+                    .id("settings-body")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .px_4()
+                    .py_3()
+                    .child(body),
+            )
+            // Footer
+            .child(footer);
+
+        deferred(
+            div()
+                .id("settings-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("settings-backdrop")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .bg(Hsla::black().opacity(0.5))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.close_settings(window, cx);
+                            }),
+                        ),
+                )
+                .child(panel),
+        )
+    }
+
+    /// Theme section body: selectable list with ANSI swatches.
+    fn render_settings_theme_section(
+        &self,
+        tokens: &ChromeTokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let current = TerminalSettings::get_global(cx).theme;
+        let appearance = appearance_of(window.appearance());
+
+        let mut list = div()
+            .id("settings-theme-list")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .w_full();
+
+        for &theme in ThemeName::ALL {
+            let selected = theme == current;
+            let preview = palette_for_theme(theme, appearance);
+            let label: SharedString = theme.display_name().into();
+            let row_id: ElementId = format!("theme-row-{}", theme.as_str()).into();
+
+            let mut swatches = div().flex().flex_row().items_center().gap_1();
+            let swatch_colors = [
+                preview.background,
+                preview.ansi[1],
+                preview.ansi[2],
+                preview.ansi[3],
+                preview.ansi[4],
+                preview.ansi[5],
+                preview.ansi[6],
+            ];
+            for (i, color) in swatch_colors.into_iter().enumerate() {
+                swatches = swatches.child(
+                    div()
+                        .id(format!("swatch-{}-{}", theme.as_str(), i))
+                        .w(px(11.0))
+                        .h(px(11.0))
+                        .rounded(px(2.0))
+                        .bg(color)
+                        .border_1()
+                        .border_color(tokens.border),
+                );
+            }
+
+            // Marker: ▸ + check for active (WezTerm-like), empty space otherwise.
+            let marker: SharedString = if selected { "▸".into() } else { " ".into() };
+            let check: SharedString = if selected { "✓".into() } else { "".into() };
+
+            let row = div()
+                .id(row_id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .when(selected, |el| el.bg(tokens.hover))
+                .hover(|el| el.bg(tokens.hover))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.select_theme(theme, cx);
+                }))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .text_color(tokens.accent)
+                        .child(marker),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.0))
+                        .text_color(tokens.fg)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .text_color(tokens.accent)
+                        .child(check),
+                )
+                .child(swatches);
+
+            list = list.child(row);
+        }
+
+        list
+    }
 }
 
 impl Render for AppShell {
@@ -1040,10 +1390,23 @@ impl Render for AppShell {
             })
             .track_focus(&self.focus_handle)
             .key_context("AppShell")
-            // Intercept keys during an inline tab rename before the focused
-            // terminal sees them (capture phase runs top-down).
+            // Intercept keys during an inline tab rename / settings before the
+            // focused terminal sees them (capture phase runs top-down).
             .capture_key_down(cx.listener(
                 |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if this.settings_open {
+                        if event.keystroke.key.as_str() == "escape" {
+                            this.close_settings(window, cx);
+                            cx.stop_propagation();
+                        }
+                        // Swallow other keys while the settings panel is open
+                        // so they don't reach the terminal underneath.
+                        // ⌘, (OpenSettings) still fires via on_action.
+                        if !event.keystroke.modifiers.platform {
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
                     if this.rename_key_down(event, window, cx) {
                         cx.stop_propagation();
                     }
@@ -1065,6 +1428,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_activate_tab))
             .on_action(cx.listener(Self::on_reload_settings))
             .on_action(cx.listener(Self::on_cycle_theme))
+            .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_split_right))
             .on_action(cx.listener(Self::on_split_down))
             .on_action(cx.listener(Self::on_focus_pane_left))
@@ -1073,5 +1437,8 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_focus_pane_down))
             .child(chrome_band)
             .child(self.render_content(&tokens, window, cx))
+            .when(self.settings_open, |el| {
+                el.child(self.render_settings_overlay(&tokens, window, cx))
+            })
     }
 }

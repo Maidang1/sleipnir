@@ -196,6 +196,18 @@ impl TerminalSettings {
         apply_loaded(settings, cx);
     }
 
+    /// Set the active theme, refresh the palette, and persist to settings.json.
+    pub fn set_theme(theme: ThemeName, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.theme = theme;
+        apply_loaded(settings, cx);
+        if let Err(err) = persist_theme(theme) {
+            log::warn!("failed to persist theme={theme:?}: {err}");
+        } else {
+            log::info!("theme -> {theme:?} (persisted)");
+        }
+    }
+
     /// Record a new system appearance and re-resolve the palette (for `Auto`).
     pub fn set_appearance(appearance: Appearance, cx: &mut App) {
         cx.set_global(AppearanceGlobal(appearance));
@@ -366,7 +378,103 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Merge `theme` into an existing settings JSON document, preserving other keys.
+///
+/// Returns pretty-printed JSON with a trailing newline. On empty/invalid input,
+/// starts from an empty object so only `"theme"` is written.
+pub fn merge_theme_into_json(raw: Option<&str>, theme: ThemeName) -> String {
+    let mut value: serde_json::Value = raw
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !value.is_object() {
+        value = serde_json::json!({});
+    }
+    value["theme"] = serde_json::Value::String(theme.as_str().to_string());
+    // Prefer top-level theme; drop nested terminal.theme if present so the two
+    // cannot disagree after a picker write.
+    if let Some(terminal) = value.get_mut("terminal") {
+        if let Some(obj) = terminal.as_object_mut() {
+            obj.remove("theme");
+        }
+    }
+    let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| {
+        format!("{{\n  \"theme\": \"{}\"\n}}", theme.as_str())
+    });
+    format!("{pretty}\n")
+}
+
+fn persist_theme(theme: ThemeName) -> anyhow::Result<()> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => Some(s),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err.into()),
+    };
+    let json = merge_theme_into_json(raw.as_deref(), theme);
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
 pub fn init(cx: &mut App) {
     let _ = ensure_default_config_file();
     TerminalSettings::init(cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_theme_sets_top_level_on_empty() {
+        let out = merge_theme_into_json(None, ThemeName::Nord);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], "nord");
+    }
+
+    #[test]
+    fn merge_theme_preserves_other_keys() {
+        let raw = r#"{
+  "theme": "mocha",
+  "terminal": {
+    "font_size": 14,
+    "font_family": "Menlo"
+  }
+}"#;
+        let out = merge_theme_into_json(Some(raw), ThemeName::Latte);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], "latte");
+        assert_eq!(v["terminal"]["font_size"], 14);
+        assert_eq!(v["terminal"]["font_family"], "Menlo");
+        assert!(v["terminal"].get("theme").is_none());
+    }
+
+    #[test]
+    fn merge_theme_removes_nested_terminal_theme() {
+        let raw = r#"{"theme":"mocha","terminal":{"theme":"latte","font_size":12}}"#;
+        let out = merge_theme_into_json(Some(raw), ThemeName::TokyoNight);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], "tokyo_night");
+        assert!(v["terminal"].get("theme").is_none());
+        assert_eq!(v["terminal"]["font_size"], 12);
+    }
+
+    #[test]
+    fn theme_next_wraps_all() {
+        let mut t = ThemeName::Auto;
+        for _ in 0..ThemeName::ALL.len() {
+            t = t.next();
+        }
+        assert_eq!(t, ThemeName::Auto);
+    }
+
+    #[test]
+    fn theme_as_str_matches_serde() {
+        for &name in ThemeName::ALL {
+            let json = serde_json::to_string(&name).unwrap();
+            assert_eq!(json, format!("\"{}\"", name.as_str()));
+        }
+    }
 }

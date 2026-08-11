@@ -55,7 +55,8 @@ cargo run -p sleipnir
 `~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys plus a `theme`
 key (`auto` / `mocha` / `macchiato` / `frappe` / `latte` / `tokyo_night` / `nord` /
 `gruvbox_dark` / `solarized_light`). `auto` follows the system light/dark appearance.
-See [`docs/settings.example.json`](docs/settings.example.json). Reload with `⌘⇧R`.
+Open the in-app theme picker with `⌘,`, or edit the file and reload with `⌘⇧R`.
+See [`docs/settings.example.json`](docs/settings.example.json).
 
 ## Paste
 
@@ -82,8 +83,9 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌘⌥←↑↓→` | Move focus between panes |
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab |
 | `⌘⇧]` / `⌘⇧[` | Next / previous tab |
+| `⌘,` | Open settings (theme picker) |
 | `⌘⇧R` | Reload settings |
-| `⌘⇧P` | Cycle theme (session) |
+| `⌘⇧P` | Cycle theme (persists) |
 | `⌘↑` / `⌘↓` | Scroll page |
 | `⇧↑` / `⇧↓` | Scroll line |
 | `⌘←` / `⌘→` | Line start / end |
