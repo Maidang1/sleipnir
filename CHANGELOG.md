@@ -10,6 +10,7 @@
 ### Fixes
 - Honor terminal cursor hide (`CSI ?25l` / `CursorShape::Hidden`) so full-screen TUIs no longer show a spurious blinking cursor on status text
 - Paint underline, bar, and hollow cursor shapes correctly
+- Forward right/middle mouse down+up into the PTY so mouse-mode apps (e.g. Herdr tab context menus) receive clicks
 
 ## 0.1.0
 

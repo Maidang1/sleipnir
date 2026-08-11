@@ -354,17 +354,32 @@ impl TermElement {
         let terminal = self.terminal.clone();
         let focus = self.focus.clone();
 
-        self.interactivity.on_mouse_down(MouseButton::Left, {
-            let terminal = terminal.clone();
-            let focus = focus.clone();
-            move |e: &MouseDownEvent, window, cx| {
-                window.focus(&focus, cx);
-                terminal.update(cx, |terminal, cx| {
-                    terminal.mouse_down(e, cx);
-                    cx.notify();
-                });
-            }
-        });
+        // Forward left/right/middle so mouse-mode apps (Herdr, vim, etc.) receive
+        // full click sequences. Only Left was registered before, so right-click
+        // context menus inside full-screen TUIs never fired.
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            self.interactivity.on_mouse_down(button, {
+                let terminal = terminal.clone();
+                let focus = focus.clone();
+                move |e: &MouseDownEvent, window, cx| {
+                    window.focus(&focus, cx);
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.mouse_down(e, cx);
+                        cx.notify();
+                    });
+                }
+            });
+
+            self.interactivity.on_mouse_up(button, {
+                let terminal = terminal.clone();
+                move |e: &MouseUpEvent, _window, cx| {
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.mouse_up(e, cx);
+                        cx.notify();
+                    });
+                }
+            });
+        }
 
         window.on_mouse_event({
             let terminal = terminal.clone();
@@ -385,16 +400,6 @@ impl TermElement {
                 }
                 terminal.update(cx, |terminal, cx| {
                     terminal.mouse_move(e, cx);
-                });
-            }
-        });
-
-        self.interactivity.on_mouse_up(MouseButton::Left, {
-            let terminal = terminal.clone();
-            move |e: &MouseUpEvent, _window, cx| {
-                terminal.update(cx, |terminal, cx| {
-                    terminal.mouse_up(e, cx);
-                    cx.notify();
                 });
             }
         });
