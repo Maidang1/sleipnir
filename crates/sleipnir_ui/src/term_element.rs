@@ -11,8 +11,8 @@ use itertools::Itertools;
 use sleipnir_settings::{TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
 use terminal::{
-    Cell, Color, IndexedCell, NamedColor, Range as TerminalRange, Terminal, TerminalBounds,
-    is_default_background_color,
+    Cell, Color, CursorShape, IndexedCell, NamedColor, Range as TerminalRange, Terminal,
+    TerminalBounds, is_default_background_color,
 };
 
 pub struct TermElement {
@@ -116,7 +116,8 @@ pub struct LayoutState {
     backgrounds: Vec<BgRect>,
     selection: Vec<BgRect>,
     background_color: gpui::Hsla,
-    cursor: Option<(usize, i32, char)>,
+    /// Column, display line, cell char, shape — `None` when the app hid the cursor.
+    cursor: Option<(usize, i32, char, CursorShape)>,
     ime_cursor_bounds: Option<Bounds<Pixels>>,
 }
 
@@ -255,6 +256,19 @@ impl Element for TermElement {
                     size(cell_width, line_height),
                 ));
 
+                // Honor DECTCEM / app cursor-hide (CSI ?25l). Full-screen TUIs
+                // (e.g. Grok) leave the grid cursor on a status cell while
+                // reporting Hidden — painting anyway yields a spurious blink.
+                let cursor = match content.cursor.shape {
+                    CursorShape::Hidden => None,
+                    _ => Some((
+                        cursor_point.column,
+                        display_line,
+                        content.cursor_char,
+                        content.cursor.shape,
+                    )),
+                };
+
                 LayoutState {
                     hitbox,
                     dimensions,
@@ -262,7 +276,7 @@ impl Element for TermElement {
                     backgrounds,
                     selection,
                     background_color: palette.background,
-                    cursor: Some((cursor_point.column, display_line, content.cursor_char)),
+                    cursor,
                     ime_cursor_bounds,
                 }
             },
@@ -312,44 +326,22 @@ impl Element for TermElement {
                     }
 
                     if self.focused
-                        && let Some((col, line, ch)) = layout.cursor
+                        && let Some((col, line, ch, shape)) = layout.cursor
                     {
-                        let palette = TerminalPalette::get_global(cx);
-                        let cursor_bounds = Bounds::new(
-                            point(
-                                origin.x + col as f32 * layout.dimensions.cell_width,
-                                origin.y + line as f32 * layout.dimensions.line_height,
-                            ),
-                            size(layout.dimensions.cell_width, layout.dimensions.line_height),
-                        );
-                        window.paint_quad(fill(cursor_bounds, palette.cursor));
-                        let style = TextRun {
-                            len: ch.len_utf8(),
-                            font: window.text_style().font(),
-                            color: palette.background,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
-                        let font_size = TerminalSettings::get_global(cx)
-                            .font_size
-                            .unwrap_or(px(14.));
-                        let _ = window
-                            .text_system()
-                            .shape_line(
-                                ch.to_string().into(),
-                                font_size,
-                                &[style],
-                                Some(layout.dimensions.cell_width),
-                            )
-                            .paint(
-                                cursor_bounds.origin,
-                                layout.dimensions.line_height,
-                                gpui::TextAlign::Left,
-                                None,
+                        // Skip off-screen cursor (scrolled away).
+                        let rows = layout.dimensions.num_lines() as i32;
+                        if line >= 0 && line < rows {
+                            paint_terminal_cursor(
+                                shape,
+                                col,
+                                line,
+                                ch,
+                                origin,
+                                &layout.dimensions,
                                 window,
                                 cx,
                             );
+                        }
                     }
                 },
             );
@@ -582,6 +574,85 @@ fn layout_grid(
         batches.push(batch);
     }
     (batches, backgrounds)
+}
+
+/// Paint the terminal cell cursor. Caller must already filter out `Hidden`.
+fn paint_terminal_cursor(
+    shape: CursorShape,
+    col: usize,
+    line: i32,
+    ch: char,
+    origin: GpuiPoint<Pixels>,
+    dimensions: &TerminalBounds,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let palette = TerminalPalette::get_global(cx);
+    let cell_origin = point(
+        origin.x + col as f32 * dimensions.cell_width,
+        origin.y + line as f32 * dimensions.line_height,
+    );
+    let cell = size(dimensions.cell_width, dimensions.line_height);
+
+    match shape {
+        CursorShape::Hidden => {}
+        CursorShape::Block | CursorShape::HollowBlock => {
+            let cursor_bounds = Bounds::new(cell_origin, cell);
+            if matches!(shape, CursorShape::HollowBlock) {
+                // Outline only: leave cell content visible.
+                window.paint_quad(gpui::outline(
+                    cursor_bounds,
+                    palette.cursor,
+                    gpui::BorderStyle::Solid,
+                ));
+            } else {
+                window.paint_quad(fill(cursor_bounds, palette.cursor));
+                let style = TextRun {
+                    len: ch.len_utf8(),
+                    font: window.text_style().font(),
+                    color: palette.background,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let font_size = TerminalSettings::get_global(cx)
+                    .font_size
+                    .unwrap_or(px(14.));
+                let _ = window
+                    .text_system()
+                    .shape_line(
+                        ch.to_string().into(),
+                        font_size,
+                        &[style],
+                        Some(dimensions.cell_width),
+                    )
+                    .paint(
+                        cursor_bounds.origin,
+                        dimensions.line_height,
+                        gpui::TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+            }
+        }
+        CursorShape::Underline => {
+            let h = (dimensions.line_height * 0.12).max(px(1.));
+            let underline = Bounds::new(
+                point(
+                    cell_origin.x,
+                    cell_origin.y + dimensions.line_height - h,
+                ),
+                size(dimensions.cell_width, h),
+            );
+            window.paint_quad(fill(underline, palette.cursor));
+        }
+        CursorShape::Bar => {
+            let w = (dimensions.cell_width * 0.15).max(px(1.));
+            let bar = Bounds::new(cell_origin, size(w, dimensions.line_height));
+            window.paint_quad(fill(bar, palette.cursor));
+        }
+    }
 }
 
 fn convert_color(color: &Color, palette: &TerminalPalette) -> gpui::Hsla {
