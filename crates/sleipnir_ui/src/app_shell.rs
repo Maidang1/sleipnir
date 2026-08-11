@@ -288,10 +288,6 @@ impl AppShell {
         self.add_tab(window, cx);
     }
 
-    pub(crate) fn close_active_tab_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_active_tab(window, cx);
-    }
-
     pub(crate) fn next_tab_public(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.next_tab(window, cx);
     }
@@ -495,18 +491,31 @@ impl AppShell {
     }
 
     /// Close the active pane. If it is the last pane in the tab, close the tab.
+    ///
+    /// ⌘W / Shell → Close (handled only on AppShell — never from TermView, which
+    /// must not drop itself mid-action):
+    /// - multi-pane tab → drop the focused pane, focus a survivor
+    /// - single-pane tab → close the tab (shell always keeps ≥1 tab open)
     fn close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
         let target = tab.active_pane;
         match tab.tree.close(target) {
-            CloseOutcome::TreeEmpty | CloseOutcome::NotFound => {
+            CloseOutcome::TreeEmpty => {
                 self.close_active_tab(window, cx);
             }
-            CloseOutcome::Closed => {
-                // Focus falls to the first remaining leaf of the tab.
+            CloseOutcome::NotFound => {
+                // Stale active_pane id: recover focus instead of nuking the tab.
                 tab.active_pane = tab.tree.first_leaf_id();
+                self.focus_active(window, cx);
+                cx.notify();
+            }
+            CloseOutcome::Closed => {
+                // Surviving subtree: focus its first leaf (the collapsed sibling
+                // when the closed pane was a direct child of a split).
+                tab.active_pane = tab.tree.first_leaf_id();
+                self.sync_window_title(window, cx);
                 self.focus_active(window, cx);
                 cx.notify();
             }
@@ -772,17 +781,21 @@ impl AppShell {
         let leaves: Vec<(PaneId, Entity<TermView>)> =
             leaves.into_iter().map(|(id, v)| (id, v.clone())).collect();
 
-        // Analytic layout over last frame's content bounds (if known).
+        // Analytic layout over last frame's content bounds (if known and non-zero).
+        // A 0×0 measure (collapsed canvas) must not drive absolute pane layout.
         let mut pane_rects = Vec::new();
         let mut dividers = Vec::new();
-        if let Some(area) = self.content_bounds {
+        let usable_bounds = self.content_bounds.filter(|area| {
+            f32::from(area.size.width) > 1.0 && f32::from(area.size.height) > 1.0
+        });
+        if let Some(area) = usable_bounds {
             // Lay out relative to a zero origin; absolute children are positioned
             // relative to the content container, not the window.
             let local = Bounds::new(point(px(0.0), px(0.0)), area.size);
             Self::compute_layout(&tab.tree, local, SplitPath::new(), &mut pane_rects, &mut dividers);
         }
         // Record rects (with true screen origin) for neighbor navigation.
-        self.pane_rects = if let Some(area) = self.content_bounds {
+        self.pane_rects = if let Some(area) = usable_bounds {
             pane_rects
                 .iter()
                 .map(|r| PaneRect {
@@ -803,23 +816,37 @@ impl AppShell {
         // Single pane: render the view directly, still capturing bounds.
         let single = leaves.len() == 1;
 
+        // Measure the content area with a full-size absolute canvas (Zed pattern).
+        // Without size_full the canvas collapses to 0×0, which makes multi-pane
+        // absolute layout produce empty rects and a blank terminal area.
         let mut container = div()
             .id("pane-area")
             .flex_1()
             .size_full()
             .min_h_0()
             .relative()
-            .child(canvas(
-                {
-                    let shell = cx.weak_entity();
-                    move |bounds, _window, cx| {
-                        let _ = shell.update(cx, |this, _| {
-                            this.content_bounds = Some(bounds);
-                        });
-                    }
-                },
-                |_, _, _, _| {},
-            ));
+            .child(
+                canvas(
+                    {
+                        let shell = cx.weak_entity();
+                        move |bounds, _window, cx| {
+                            let _ = shell.update(cx, |this, cx| {
+                                if this.content_bounds != Some(bounds) {
+                                    this.content_bounds = Some(bounds);
+                                    // Re-render so multi-pane absolute layout
+                                    // picks up the measured size.
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
 
         if single {
             let (_, view) = &leaves[0];
@@ -835,6 +862,49 @@ impl AppShell {
         }
 
         // Multi-pane: absolutely position each leaf by its computed rect.
+        // If we have no measured layout yet (first frame after open/split),
+        // fall back to equal flex so panes never disappear entirely.
+        if pane_rects.is_empty() {
+            let mut row = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .flex_row()
+                .min_h_0();
+            for (id, view) in &leaves {
+                let is_active = *id == active_pane;
+                let pane_id = *id;
+                let mut pane = div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(view.clone().into_any_element());
+                if !is_active {
+                    pane = pane.border_1().border_color(tokens.border);
+                } else {
+                    pane = pane.border_1().border_color(tokens.accent);
+                }
+                pane = pane.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        if let Some(tab) = this.tabs.get_mut(this.active) {
+                            if tab.active_pane != pane_id {
+                                tab.active_pane = pane_id;
+                                this.focus_active(window, cx);
+                                cx.notify();
+                            }
+                        }
+                    }),
+                );
+                row = row.child(pane);
+            }
+            container = container.child(row);
+            return container.into_any_element();
+        }
+
         for (id, view) in &leaves {
             let rect = pane_rects.iter().find(|r| r.id == *id);
             let Some(rect) = rect else { continue };

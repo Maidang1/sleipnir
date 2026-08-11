@@ -451,12 +451,6 @@ impl TermView {
         }
     }
 
-    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(shell) = self.shell.clone() {
-            let _ = shell.update(cx, |shell, cx| shell.close_active_tab_public(window, cx));
-        }
-    }
-
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.clone() {
             let _ = shell.update(cx, |shell, cx| shell.next_tab_public(window, cx));
@@ -516,7 +510,11 @@ impl Render for TermView {
             .on_action(cx.listener(Self::send_text))
             .on_action(cx.listener(Self::send_keystroke))
             .on_action(cx.listener(Self::new_tab))
-            .on_action(cx.listener(Self::close_tab))
+            // CloseTab (⌘W) is intentionally NOT handled here. TermView would
+            // nest-update AppShell and drop *this* entity while it is still
+            // leased for the action — that panics and tears down the window.
+            // AppShell owns the close path (close active pane, or tab if last)
+            // and receives the action via bubble phase, same as SplitRight.
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::reload_settings))
