@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.6
+
+### Changes
+- App icon: enlarge the knight mark and terminal prompt so they fill the icon safe area
+
 ## 0.1.5
 
 ### Features

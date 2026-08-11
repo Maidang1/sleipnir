@@ -72,8 +72,8 @@ APP="${BUILD_DIR}/${APP_BUNDLE}"
 mkdir -p "${APP}/Contents/MacOS"
 mkdir -p "${APP}/Contents/Resources"
 
-# Copy binary
-cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
+# Copy binary (must match CFBundleExecutable in Info.plist)
+cp "${BIN}" "${APP}/Contents/MacOS/sleipnir"
 
 # Copy Info.plist (patch version)
 plist="${ROOT}/resources/Info.plist"

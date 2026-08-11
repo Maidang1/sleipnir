@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Sleipnir app icon v4 — smooth chess-knight + terminal prompt -->
+<!-- Sleipnir app icon v5 — full-bleed chess-knight + terminal prompt -->
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <clipPath id="sq">
@@ -29,9 +29,8 @@
     <rect width="1024" height="1024" fill="url(#bg)"/>
     <rect width="1024" height="1024" fill="url(#glow)"/>
 
-    <!-- Horse head, muzzle lower-left, ears upper-right, mane sweeping down right side.
-         Coordinates in a 0..340 local box, scaled/translated into the safe area. -->
-    <g transform="translate(300 232) scale(1.28)">
+    <!-- Horse head nearly fills the safe area (local box ~1.92×). -->
+    <g transform="translate(155 95) scale(1.92)">
       <path fill="url(#accent)" d="
         M 60 360
         C 60 300 84 258 132 232
@@ -61,11 +60,15 @@
       </g>
     </g>
 
-    <!-- Terminal prompt: chevron + block cursor -->
-    <path d="M340 806 L 412 840 L 340 874"
-      fill="none" stroke="#8ff3ff" stroke-width="30"
+    <!-- Terminal prompt overlaid on the lower base (safe from corner clip) -->
+    <path d="M340 782 L 420 820 L 340 858"
+      fill="none" stroke="#0c1428" stroke-width="34"
+      stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    <rect x="480" y="802" width="168" height="36" rx="18" fill="#0c1428" opacity="0.55"/>
+    <path d="M340 782 L 420 820 L 340 858"
+      fill="none" stroke="#8ff3ff" stroke-width="28"
       stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="462" y="824" width="150" height="34" rx="16" fill="#8ff3ff"/>
+    <rect x="486" y="806" width="156" height="28" rx="14" fill="#8ff3ff"/>
 
     <rect width="1024" height="1024" fill="url(#topsheen)"/>
   </g>
