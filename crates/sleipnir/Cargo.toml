@@ -1,6 +1,6 @@
 [package]
 name = "sleipnir"
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 publish = false
 license = "GPL-3.0-or-later"

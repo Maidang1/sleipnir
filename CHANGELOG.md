@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+### Changes
+- Check for Updates now opens a centered modal dialog (Download & Install / Restart & Update / Release Notes) instead of a cramped top bar
+- No automatic update check on launch — updates are only checked when you open **Sleipnir → Check for Updates…** (`⌘⇧U`); removed the `auto_update` setting
+- `Esc` or clicking the backdrop closes the update dialog
+
 ## 0.1.3
 
 ### Fixes

@@ -127,8 +127,6 @@ pub struct TerminalSettings {
     pub bell: TerminalBell,
     /// Active color theme name (sleipnir extension; also top-level `theme` key).
     pub theme: ThemeName,
-    /// Automatically check GitHub Releases for updates on launch.
-    pub auto_update: bool,
 }
 
 impl Default for TerminalSettings {
@@ -158,7 +156,6 @@ impl Default for TerminalSettings {
             path_hyperlink_timeout_ms: 50,
             bell: TerminalBell::Off,
             theme: ThemeName::Mocha,
-            auto_update: true,
         }
     }
 }
@@ -249,8 +246,6 @@ struct SettingsFile {
     #[serde(default)]
     theme: Option<ThemeName>,
     #[serde(default)]
-    auto_update: Option<bool>,
-    #[serde(default)]
     terminal: TerminalSettingsFile,
 }
 
@@ -302,9 +297,6 @@ fn load_or_default() -> TerminalSettings {
 fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(theme) = file.theme.or(file.terminal.theme) {
         settings.theme = theme;
-    }
-    if let Some(v) = file.auto_update {
-        settings.auto_update = v;
     }
     let t = file.terminal;
     if let Some(size) = t.font_size {
@@ -368,7 +360,6 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
     }
     let default = SettingsFile {
         theme: Some(ThemeName::Mocha),
-        auto_update: Some(true),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some("Menlo".into()),

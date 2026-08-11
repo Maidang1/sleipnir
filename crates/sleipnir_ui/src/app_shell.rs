@@ -211,8 +211,10 @@ pub struct AppShell {
     settings_open: bool,
     /// Active section tab inside the settings panel.
     settings_section: SettingsSection,
-    /// Auto-update lifecycle state (drives the update notification bar).
+    /// Auto-update lifecycle state (drives the update dialog).
     update_state: UpdateUiState,
+    /// Whether the update dialog is visible.
+    update_open: bool,
     /// Verified update zip path, ready to install on restart.
     staged_zip: Option<std::path::PathBuf>,
 }
@@ -243,6 +245,7 @@ impl AppShell {
             settings_open: false,
             settings_section: SettingsSection::Theme,
             update_state: UpdateUiState::Idle,
+            update_open: false,
             staged_zip: None,
         };
         // Seed the current system appearance and follow future changes so the
@@ -255,11 +258,6 @@ impl AppShell {
             })
             .detach();
         shell.add_tab(window, cx);
-        // Silently check for updates on launch when enabled; only the update
-        // notification bar surfaces a result (errors stay in the log).
-        if TerminalSettings::get_global(cx).auto_update {
-            shell.spawn_update_check(true, window, cx);
-        }
         shell
     }
 
@@ -653,13 +651,18 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Manual check: surface "up to date" and errors in the bar.
-        self.spawn_update_check(false, window, cx);
+        // Open the update dialog and start a check.
+        self.update_open = true;
+        self.spawn_update_check(window, cx);
     }
 
-    /// Query GitHub for a newer release. When `silent`, a no-update result or
-    /// error clears the bar instead of showing status.
-    fn spawn_update_check(&mut self, silent: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_update(&mut self, cx: &mut Context<Self>) {
+        self.update_open = false;
+        cx.notify();
+    }
+
+    /// Query GitHub for a newer release; result is shown in the update dialog.
+    fn spawn_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
             self.update_state,
             UpdateUiState::Checking | UpdateUiState::Downloading(_)
@@ -688,19 +691,12 @@ impl AppShell {
                         });
                     }
                     Ok(updater::UpdateStatus::UpToDate) => {
-                        this.update_state = if silent {
-                            UpdateUiState::Idle
-                        } else {
-                            UpdateUiState::UpToDate
-                        };
+                        this.update_state = UpdateUiState::UpToDate;
                     }
                     Err(err) => {
                         log::warn!("update check failed: {err:#}");
-                        this.update_state = if silent {
-                            UpdateUiState::Idle
-                        } else {
-                            UpdateUiState::Failed(format!("Update check failed: {err}"))
-                        };
+                        this.update_state =
+                            UpdateUiState::Failed(format!("Update check failed: {err}"));
                     }
                 }
                 cx.notify();
@@ -783,13 +779,7 @@ impl AppShell {
         }
     }
 
-    /// Dismiss the current update notification bar.
-    fn dismiss_update(&mut self, cx: &mut Context<Self>) {
-        self.update_state = UpdateUiState::Idle;
-        cx.notify();
-    }
-
-    /// A small pill button for the update bar.
+    /// A pill button for the update dialog.
     fn update_button(
         &self,
         id: &'static str,
@@ -802,122 +792,177 @@ impl AppShell {
         let (bg, fg) = if primary {
             (tokens.accent, tokens.content_bg)
         } else {
-            (tokens.surface, tokens.fg)
+            (tokens.hover, tokens.fg)
         };
         div()
             .id(id)
-            .px_2()
-            .py_0p5()
+            .px_3()
+            .py_1p5()
             .rounded_md()
             .bg(bg)
             .text_color(fg)
-            .text_sm()
+            .text_size(px(13.0))
             .cursor_pointer()
+            .hover(|el| el.opacity(0.9))
             .child(label.into())
             .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
     }
 
-    /// Render the update notification bar for the current [`UpdateUiState`].
-    /// Returns `None` when idle so nothing is inserted into the layout.
-    fn render_update_bar(
+    /// Modal update dialog reflecting the current [`UpdateUiState`].
+    fn render_update_overlay(
         &self,
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::Stateful<gpui::Div>> {
-        let (message, buttons): (SharedString, Vec<gpui::AnyElement>) = match &self.update_state {
-            UpdateUiState::Idle => return None,
-            UpdateUiState::Checking => ("Checking for updates…".into(), Vec::new()),
-            UpdateUiState::UpToDate => (
-                "You’re on the latest version.".into(),
-                vec![
-                    self.update_button("upd-dismiss", "Dismiss", tokens, false, cx, |this, _, cx| {
-                        this.dismiss_update(cx);
-                    })
-                    .into_any_element(),
-                ],
-            ),
-            UpdateUiState::Available(u) => (
-                format!("Sleipnir {} is available.", u.version).into(),
-                vec![
-                    self.update_button(
-                        "upd-install",
-                        "Download & Install",
-                        tokens,
-                        true,
-                        cx,
-                        |this, window, cx| this.start_download(window, cx),
-                    )
-                    .into_any_element(),
-                    self.update_button(
-                        "upd-notes",
-                        "Release Notes",
-                        tokens,
-                        false,
-                        cx,
-                        |_, _, cx| cx.open_url(updater::RELEASES_PAGE),
-                    )
-                    .into_any_element(),
-                    self.update_button("upd-later", "Later", tokens, false, cx, |this, _, cx| {
-                        this.dismiss_update(cx);
-                    })
-                    .into_any_element(),
-                ],
-            ),
-            UpdateUiState::Downloading(u) => (
-                format!("Downloading Sleipnir {}…", u.version).into(),
-                Vec::new(),
-            ),
-            UpdateUiState::ReadyToRestart(u) => (
-                format!("Sleipnir {} is ready.", u.version).into(),
-                vec![
-                    self.update_button(
-                        "upd-restart",
-                        "Restart & Update",
-                        tokens,
-                        true,
-                        cx,
-                        |this, _, cx| this.install_and_restart(cx),
-                    )
-                    .into_any_element(),
-                    self.update_button("upd-later2", "Later", tokens, false, cx, |this, _, cx| {
-                        this.dismiss_update(cx);
-                    })
-                    .into_any_element(),
-                ],
-            ),
-            UpdateUiState::Failed(msg) => (
-                msg.clone().into(),
-                vec![
-                    self.update_button("upd-retry", "Dismiss", tokens, false, cx, |this, _, cx| {
-                        this.dismiss_update(cx);
-                    })
-                    .into_any_element(),
-                ],
-            ),
-        };
+    ) -> impl IntoElement {
+        let current = release_channel::AppVersion::global(cx).to_string();
 
-        Some(
+        // Headline + detail + action buttons per state.
+        let (headline, detail, buttons): (SharedString, SharedString, Vec<gpui::AnyElement>) =
+            match &self.update_state {
+                UpdateUiState::Idle | UpdateUiState::Checking => (
+                    "Checking for updates…".into(),
+                    format!("Current version {current}").into(),
+                    Vec::new(),
+                ),
+                UpdateUiState::UpToDate => (
+                    "You’re up to date".into(),
+                    format!("Sleipnir {current} is the latest version.").into(),
+                    vec![
+                        self.update_button("upd-close", "Close", tokens, true, cx, |this, _, cx| {
+                            this.close_update(cx);
+                        })
+                        .into_any_element(),
+                    ],
+                ),
+                UpdateUiState::Available(u) => (
+                    "Update available".into(),
+                    format!("Sleipnir {} is available (you have {current}).", u.version).into(),
+                    vec![
+                        self.update_button(
+                            "upd-notes",
+                            "Release Notes",
+                            tokens,
+                            false,
+                            cx,
+                            |_, _, cx| cx.open_url(updater::RELEASES_PAGE),
+                        )
+                        .into_any_element(),
+                        self.update_button("upd-later", "Later", tokens, false, cx, |this, _, cx| {
+                            this.close_update(cx);
+                        })
+                        .into_any_element(),
+                        self.update_button(
+                            "upd-install",
+                            "Download & Install",
+                            tokens,
+                            true,
+                            cx,
+                            |this, window, cx| this.start_download(window, cx),
+                        )
+                        .into_any_element(),
+                    ],
+                ),
+                UpdateUiState::Downloading(u) => (
+                    "Downloading update…".into(),
+                    format!("Fetching and verifying Sleipnir {}…", u.version).into(),
+                    Vec::new(),
+                ),
+                UpdateUiState::ReadyToRestart(u) => (
+                    "Ready to install".into(),
+                    format!("Sleipnir {} is verified. Restart to finish updating.", u.version)
+                        .into(),
+                    vec![
+                        self.update_button("upd-later2", "Later", tokens, false, cx, |this, _, cx| {
+                            this.close_update(cx);
+                        })
+                        .into_any_element(),
+                        self.update_button(
+                            "upd-restart",
+                            "Restart & Update",
+                            tokens,
+                            true,
+                            cx,
+                            |this, _, cx| this.install_and_restart(cx),
+                        )
+                        .into_any_element(),
+                    ],
+                ),
+                UpdateUiState::Failed(msg) => (
+                    "Update failed".into(),
+                    msg.clone().into(),
+                    vec![
+                        self.update_button("upd-close2", "Close", tokens, true, cx, |this, _, cx| {
+                            this.close_update(cx);
+                        })
+                        .into_any_element(),
+                    ],
+                ),
+            };
+
+        let panel = div()
+            .id("update-panel")
+            .w(px(420.0))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .rounded(px(12.0))
+            .bg(tokens.surface)
+            .border_1()
+            .border_color(tokens.border)
+            .text_color(tokens.fg)
+            .px_5()
+            .py_4()
+            // Keep clicks inside the panel from reaching the backdrop.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(headline),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(tokens.fg_muted)
+                    .child(detail),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .pt_2()
+                    .children(buttons),
+            );
+
+        deferred(
             div()
-                .id("update-bar")
-                .w_full()
+                .id("update-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
                 .flex()
-                .flex_row()
                 .items_center()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .bg(tokens.surface)
-                .border_b_1()
-                .border_color(tokens.border)
+                .justify_center()
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_sm()
-                        .text_color(tokens.fg)
-                        .child(message),
+                        .id("update-backdrop")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .bg(Hsla::black().opacity(0.5))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| {
+                                this.close_update(cx);
+                            }),
+                        ),
                 )
-                .children(buttons),
+                .child(panel),
         )
     }
 
@@ -1783,6 +1828,16 @@ impl Render for AppShell {
             // focused terminal sees them (capture phase runs top-down).
             .capture_key_down(cx.listener(
                 |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if this.update_open {
+                        if event.keystroke.key.as_str() == "escape" {
+                            this.close_update(cx);
+                            cx.stop_propagation();
+                        }
+                        if !event.keystroke.modifiers.platform {
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
                     if this.settings_open {
                         if event.keystroke.key.as_str() == "escape" {
                             this.close_settings(window, cx);
@@ -1826,10 +1881,12 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_focus_pane_down))
             .on_action(cx.listener(Self::on_check_for_updates))
             .child(chrome_band)
-            .children(self.render_update_bar(&tokens, cx))
             .child(self.render_content(&tokens, window, cx))
             .when(self.settings_open, |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))
+            })
+            .when(self.update_open, |el| {
+                el.child(self.render_update_overlay(&tokens, cx))
             })
     }
 }
