@@ -2,10 +2,12 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Draft |
+| **Status** | Design ready · **not implemented** (docs only) |
 | **Date** | 2025-01-20 |
 | **Scope** | `term_element.rs` paint layer + `TermView` animation state |
 | **Goal** | Native macOS visual refinement — make Sleipnir feel as polished as a first-party Apple app |
+| **Milestone notes** | [`docs/M11.md`](../../M11.md) |
+| **Roadmap plan** | [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md`](../plans/2026-08-12-post-m10-feature-roadmap.md) |
 
 ---
 

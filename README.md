@@ -127,7 +127,8 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
 
 ## Roadmap
 
-**Status:** M0–M10 complete (per-pane fonts deferred inside M10).
+**Status:** M0–M10 complete (per-pane fonts deferred inside M10).  
+**Next:** M12 daily gaps (planned). M11 visual polish may run in parallel.
 
 | Milestone | Goal | Status |
 |-----------|------|:------:|
@@ -142,8 +143,17 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
 | **M8** | Session persistence (restore tabs/splits on launch) | ✅ |
 | **M9** | Configurable keymap + command palette | ✅ |
 | **M10** | Ligatures + search-in-scrollback (per-pane fonts deferred) | ✅ |
+| **M11** | Visual polish (cursor fade, URL hover, optional scroll) | 📋 |
+| **M12** | Daily gaps (font zoom, multi-window, close confirm, path open, bell) | 📋 |
+| **M13** | Split professionalism (pane zoom, unfocused dim) | 📋 |
+| **M14** | Shell collaboration (OSC 133, jump prompt, notify) | 📋 |
+| **M15** | Optional differentiators (Quick Terminal, Quick Select) | 📋 |
 
-Legend: ✅ done. Notes: [`docs/M7.md`](docs/M7.md) · [`docs/M8.md`](docs/M8.md) · [`docs/M9.md`](docs/M9.md) · [`docs/M10.md`](docs/M10.md).
+Legend: ✅ done · 📋 planned (docs only; not implemented).  
+Shipped notes: [`docs/M7.md`](docs/M7.md) · [`docs/M8.md`](docs/M8.md) · [`docs/M9.md`](docs/M9.md) · [`docs/M10.md`](docs/M10.md).  
+Planned notes: [`docs/M11.md`](docs/M11.md)–[`docs/M15.md`](docs/M15.md).  
+Competitive research: [`docs/competitive-research-features.md`](docs/competitive-research-features.md).  
+Implementation plan: [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md`](docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md).
 
 ## Upstream
 
