@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changes
+- **App icon full-bleed redesign:** remove the circular inset so the mark fills the entire rounded square (same solid-fill style as typical macOS icons), with a larger knight silhouette and integrated terminal prompt
+
+## 0.1.8
+
+### Fixes
+- Restore plain `Ctrl+C` / `Ctrl+V` delivery to the PTY so foreground programs receive `SIGINT` / control bytes again; clipboard actions stay on `⌘C`/`⌘V`, `⌃⇧C`/`⌃⇧V`, and `⌃⌘V`
+- Add unit tests for clipboard-key routing and terminal control-byte mapping (`Ctrl+C` → `0x03`, `Ctrl+V` → `0x16`)
+
 ## 0.1.7
 
 ### Improvements

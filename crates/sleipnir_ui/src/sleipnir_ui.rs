@@ -174,8 +174,10 @@ impl TermView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe_in(&terminal, window, |this, terminal, event, _window, cx| {
-            match event {
+        cx.subscribe_in(
+            &terminal,
+            window,
+            |this, terminal, event, _window, cx| match event {
                 Event::Wakeup | Event::SelectionsChanged | Event::BlinkChanged(_) => {
                     cx.notify();
                 }
@@ -196,8 +198,8 @@ impl TermView {
                 Event::Open(target) => {
                     open_navigation_target(target, cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.title = terminal.read(cx).title(true).into();
@@ -208,11 +210,7 @@ impl TermView {
 
     pub fn title(&self) -> &str {
         let title = self.title.as_ref();
-        if title.is_empty() {
-            "shell"
-        } else {
-            title
-        }
+        if title.is_empty() { "shell" } else { title }
     }
 
     pub fn terminal_entity(&self) -> Option<&Entity<Terminal>> {
@@ -235,12 +233,8 @@ impl TermView {
         };
 
         // Clipboard shortcuts are handled by on_action(Copy/Paste/PasteText);
-        // skip them here so they don't get double-processed or sent to the PTY.
-        let mods = &event.keystroke.modifiers;
-        let key = event.keystroke.key.as_str();
-        if (mods.platform || mods.control)
-            && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("v"))
-        {
+        // skip only those combinations so plain Ctrl+C/V still reach the PTY.
+        if is_clipboard_shortcut(&event.keystroke) {
             return;
         }
 
@@ -341,7 +335,12 @@ impl TermView {
         }
     }
 
-    fn scroll_line_down(&mut self, _: &ScrollLineDown, _window: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_line_down(
+        &mut self,
+        _: &ScrollLineDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_alt_screen(cx) {
             return;
         }
@@ -361,7 +360,12 @@ impl TermView {
         }
     }
 
-    fn scroll_page_down(&mut self, _: &ScrollPageDown, _window: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_page_down(
+        &mut self,
+        _: &ScrollPageDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_alt_screen(cx) {
             return;
         }
@@ -441,12 +445,7 @@ impl TermView {
 
     fn is_alt_screen(&self, cx: &App) -> bool {
         self.terminal_entity()
-            .map(|t| {
-                t.read(cx)
-                    .last_content()
-                    .mode
-                    .contains(Modes::ALT_SCREEN)
-            })
+            .map(|t| t.read(cx).last_content().mode.contains(Modes::ALT_SCREEN))
             .unwrap_or(false)
     }
 
@@ -462,7 +461,12 @@ impl TermView {
         cx.emit(TermViewEvent::RequestPrevTab);
     }
 
-    fn reload_settings(&mut self, _: &ReloadSettings, _window: &mut Window, cx: &mut Context<Self>) {
+    fn reload_settings(
+        &mut self,
+        _: &ReloadSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.emit(TermViewEvent::RequestReloadSettings);
     }
 
@@ -546,6 +550,20 @@ impl Render for TermView {
     }
 }
 
+/// Whether a keystroke is reserved for clipboard actions (Copy/Paste/PasteText).
+///
+/// Plain `Ctrl+C` / `Ctrl+V` must **not** match so they reach the PTY as ETX/SYN
+/// and can interrupt or pass control sequences to foreground programs.
+fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
+    let modifiers = &keystroke.modifiers;
+    let is_c = keystroke.key.eq_ignore_ascii_case("c");
+    let is_v = keystroke.key.eq_ignore_ascii_case("v");
+
+    // Cmd+C/V and Ctrl+Cmd+V (PasteText) are covered by the platform branch.
+    (modifiers.platform && (is_c || is_v))
+        || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v))
+}
+
 /// Open only web URLs (M3 scope). Paths are ignored for now.
 fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
     match target {
@@ -592,7 +610,8 @@ fn shell_quote_path(path: &Path) -> String {
     }
     // Unquoted only when clearly safe for common shells.
     let safe = s.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
+        c.is_ascii_alphanumeric()
+            || matches!(c, '/' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
     });
     if safe {
         s.into_owned()
@@ -613,4 +632,115 @@ fn format_external_paths(paths: &[PathBuf]) -> String {
         out.push(' ');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(keystroke: &str) -> Keystroke {
+        Keystroke::parse(keystroke).unwrap_or_else(|err| panic!("parse {keystroke:?}: {err}"))
+    }
+
+    #[test]
+    fn plain_control_c_and_v_are_sent_to_the_terminal() {
+        assert!(!is_clipboard_shortcut(&parse("ctrl-c")));
+        assert!(!is_clipboard_shortcut(&parse("ctrl-v")));
+    }
+
+    #[test]
+    fn configured_clipboard_shortcuts_are_reserved() {
+        for shortcut in [
+            "cmd-c",
+            "cmd-v",
+            "ctrl-shift-c",
+            "ctrl-shift-v",
+            "ctrl-cmd-v",
+        ] {
+            assert!(
+                is_clipboard_shortcut(&parse(shortcut)),
+                "expected clipboard shortcut reserved: {shortcut}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_or_unbound_combinations_are_not_reserved() {
+        for shortcut in [
+            "c",
+            "v",
+            "ctrl-x",
+            "ctrl-a",
+            "cmd-x",
+            "ctrl-shift-x",
+            "alt-c",
+            "ctrl-alt-c",
+            "shift-c",
+        ] {
+            assert!(
+                !is_clipboard_shortcut(&parse(shortcut)),
+                "expected not reserved for terminal: {shortcut}"
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_routing_is_case_insensitive_for_c_and_v() {
+        // Keystroke::parse maps an uppercase letter to shift+lowercase; so
+        // "ctrl-C" is equivalent to the reserved clipboard combo ctrl-shift-c.
+        assert!(is_clipboard_shortcut(&parse("ctrl-C")));
+        assert!(is_clipboard_shortcut(&parse("ctrl-V")));
+        assert!(is_clipboard_shortcut(&parse("cmd-C")));
+        assert!(is_clipboard_shortcut(&parse("cmd-V")));
+        assert!(is_clipboard_shortcut(&parse("ctrl-shift-C")));
+        assert!(is_clipboard_shortcut(&parse("ctrl-shift-V")));
+
+        // Runtime events may still carry an uppercase key without shift; those
+        // must use case-insensitive key matching, not parse-time shift folding.
+        let mut plain_ctrl_c = parse("ctrl-c");
+        plain_ctrl_c.key = "C".into();
+        assert!(!is_clipboard_shortcut(&plain_ctrl_c));
+
+        let mut plain_ctrl_v = parse("ctrl-v");
+        plain_ctrl_v.key = "V".into();
+        assert!(!is_clipboard_shortcut(&plain_ctrl_v));
+
+        let mut cmd_c = parse("cmd-c");
+        cmd_c.key = "C".into();
+        assert!(is_clipboard_shortcut(&cmd_c));
+    }
+
+    #[test]
+    fn shell_quote_path_quotes_unsafe_paths() {
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/safe-name")),
+            "/tmp/safe-name"
+        );
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/has space")),
+            "'/tmp/has space'"
+        );
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/o'reilly")),
+            "'/tmp/o'\\''reilly'"
+        );
+        assert_eq!(shell_quote_path(Path::new("")), "''");
+    }
+
+    #[test]
+    fn format_external_paths_joins_quoted_paths() {
+        let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")];
+        assert_eq!(format_external_paths(&paths), " /tmp/a '/tmp/b c' ");
+        assert_eq!(format_external_paths(&[]), "");
+    }
+
+    #[test]
+    fn is_web_url_accepts_common_schemes() {
+        assert!(is_web_url("https://example.com"));
+        assert!(is_web_url("HTTP://example.com"));
+        assert!(is_web_url("mailto:a@b.com"));
+        assert!(is_web_url("ftp://files.example"));
+        assert!(!is_web_url("file:///tmp/x"));
+        assert!(!is_web_url("not-a-url"));
+    }
 }

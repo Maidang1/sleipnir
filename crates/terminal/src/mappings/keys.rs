@@ -347,6 +347,18 @@ mod test {
     }
 
     #[test]
+    fn plain_control_c_and_v_emit_terminal_control_bytes() {
+        assert_eq!(
+            to_esc_str(&Keystroke::parse("ctrl-c").unwrap(), Modes::NONE, false),
+            Some("\x03".into())
+        );
+        assert_eq!(
+            to_esc_str(&Keystroke::parse("ctrl-v").unwrap(), Modes::NONE, false),
+            Some("\x16".into())
+        );
+    }
+
+    #[test]
     fn alt_is_meta() {
         let ascii_printable = ' '..='~';
         for character in ascii_printable {
