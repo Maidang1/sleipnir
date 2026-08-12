@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sleipnir — a fast native terminal for macOS</title>
+    <meta
+      name="description"
+      content="GPU-rendered terminal for macOS. Tabs, splits, adaptive themes, smart paste, and session restore — built on GPUI, no Electron."
+    />
+    <meta property="og:title" content="Sleipnir — a fast native terminal for macOS" />
+    <meta
+      property="og:description"
+      content="GPU-rendered terminal for macOS. Tabs, splits, adaptive themes, smart paste, and session restore — built on GPUI, no Electron."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/app-icon.png" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1e1e1e" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <script>
+      try {
+        var m = matchMedia('(prefers-color-scheme: dark)')
+        var d = document.documentElement
+        var s = function () {
+          d.classList.toggle('dark', m.matches)
+        }
+        s()
+        m.addEventListener('change', s)
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
