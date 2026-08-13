@@ -5,10 +5,10 @@
 
 use gpui::{actions, Menu, MenuItem, SystemMenuType};
 use sleipnir_ui::{
-    CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab,
-    NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize,
-    SplitDown, SplitRight, ToggleBroadcast, TogglePaneZoom, ToggleQuickSelect,
+    CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback, FocusPaneDown,
+    FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt,
+    NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings,
+    ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, TogglePaneZoom, ToggleQuickSelect,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -136,6 +136,8 @@ fn macos_menus() -> Vec<Menu> {
             ])),
             MenuItem::separator(),
             MenuItem::action("Clear", Clear),
+            MenuItem::separator(),
+            MenuItem::action("Export Scrollback…", ExportScrollback),
         ]),
         edit,
         view,
@@ -163,6 +165,7 @@ fn windows_menus() -> Vec<Menu> {
             ])),
             MenuItem::separator(),
             MenuItem::action("Clear", Clear),
+            MenuItem::action("Export Scrollback…", ExportScrollback),
             MenuItem::separator(),
             MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),

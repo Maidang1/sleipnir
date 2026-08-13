@@ -12,8 +12,8 @@ mod term_element;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 
 pub use app_shell::{
-    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, Find,
-    FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback,
+    Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
     SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
@@ -36,12 +36,13 @@ use collections::HashMap;
 use gpui::{
     App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, div, rgb,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, rgb,
 };
 use gpui::Pixels;
 use gpui::prelude::FluentBuilder as _;
 use sleipnir_settings::{
-    AlternateScroll, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
+    AlternateScroll, NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette,
+    TerminalSettings,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,11 +127,16 @@ impl TermView {
         for (k, v) in &settings.env {
             env.insert(k.clone(), v.clone());
         }
+        let shell = terminal::apply_inject_to_shell(
+            settings.shell.clone(),
+            &mut env,
+            settings.inject_osc133,
+        );
 
         let builder_task = TerminalBuilder::new(
             cwd,
             None,
-            settings.shell.clone(),
+            shell,
             env,
             settings.cursor_shape,
             settings.alternate_scroll,
@@ -218,14 +224,24 @@ impl TermView {
             window,
             |this, terminal, event, window, cx| match event {
                 Event::Wakeup | Event::SelectionsChanged => {
-                    // Poll command-finish notify (M14) when unfocused.
-                    let min_secs =
-                        TerminalSettings::get_global(cx).notify_on_command_finish_secs;
-                    if min_secs > 0 {
+                    // Poll command-finish notify (M14 → matrix).
+                    let (min_secs, mode) = {
+                        let settings = TerminalSettings::get_global(cx);
+                        (
+                            settings.notify_on_command_finish_secs,
+                            settings.notify_on_command_finish_mode,
+                        )
+                    };
+                    if min_secs > 0 && mode != NotifyOnCommandFinish::Never {
                         if let Some(dur) =
                             terminal.update(cx, |t, _| t.poll_command_finish(min_secs))
                         {
-                            if !window.is_window_active() {
+                            let should_notify = match mode {
+                                NotifyOnCommandFinish::Never => false,
+                                NotifyOnCommandFinish::Unfocused => !window.is_window_active(),
+                                NotifyOnCommandFinish::Always => true,
+                            };
+                            if should_notify {
                                 notify_command_finished(dur);
                             }
                         }
@@ -257,6 +273,9 @@ impl TermView {
                 Event::NewNavigationTarget(_) => {}
                 Event::Open(target) => {
                     open_navigation_target(target, cx);
+                }
+                Event::Notify(message) => {
+                    notify_message("Sleipnir", message);
                 }
             },
         )
@@ -599,6 +618,30 @@ impl TermView {
     }
 }
 
+/// Hover tooltip previewing the hyperlink/path under the pointer (M16).
+struct LinkPreview {
+    text: SharedString,
+}
+
+impl Render for LinkPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = TerminalPalette::get_global(cx);
+        let bg = palette
+            .background
+            .blend(gpui::Hsla::black().opacity(0.4))
+            .alpha(1.0);
+        div()
+            .px_2()
+            .py_1()
+            .rounded(gpui::px(4.0))
+            .bg(bg)
+            .text_color(palette.foreground)
+            .text_size(gpui::px(12.0))
+            .font_family(sleipnir_settings::default_font_family())
+            .child(self.text.clone())
+    }
+}
+
 impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
@@ -663,11 +706,36 @@ impl Render for TermView {
                     .text_color(rgb(0xf38ba8))
                     .child(err.clone())
                     .into_any_element(),
-                TerminalSlot::Ready(terminal) => div()
-                    .id("term-view-body")
-                    .size_full()
-                    .p_2()
-                    .child(TermElement::new(
+                TerminalSlot::Ready(terminal) => {
+                    let hovered = terminal
+                        .read(cx)
+                        .last_content()
+                        .last_hovered_word
+                        .as_ref()
+                        .map(|w| w.word.clone());
+
+                    let a11y_text: SharedString =
+                        terminal.read(cx).visible_screen_text().into();
+                    let body = div()
+                        .id("term-view-body")
+                        .size_full()
+                        .p_2()
+                        // Read-only accessibility: VoiceOver reads the visible
+                        // screen as the terminal's value (Ghostty-parity, opt-in
+                        // there; we keep it always-on and read-only).
+                        .role(gpui::Role::MultilineTextInput)
+                        .aria_label("Terminal")
+                        .aria_value(a11y_text);
+                    let body = if let Some(word) = hovered {
+                        body.tooltip(move |_window, cx| {
+                            let text: SharedString = word.clone().into();
+                            cx.new(move |_| LinkPreview { text }).into()
+                        })
+                    } else {
+                        body
+                    };
+
+                    body.child(TermElement::new(
                         terminal.clone(),
                         self.focus_handle.clone(),
                         focused,
@@ -675,7 +743,8 @@ impl Render for TermView {
                         self.last_input_at,
                         self.terminal_wants_blink,
                     ))
-                    .into_any_element(),
+                    .into_any_element()
+                }
             })
             .when(show_copy_toast, |el| {
                 el.child(
@@ -726,12 +795,7 @@ fn notify_command_finished(dur: std::time::Duration) {
     #[cfg(target_os = "macos")]
     {
         let secs = dur.as_secs();
-        let script = format!(
-            "display notification \"Command finished after {secs}s\" with title \"Sleipnir\""
-        );
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .spawn();
+        notify_message("Sleipnir", &format!("Command finished after {secs}s"));
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -759,6 +823,23 @@ fn notify_command_finished(dur: std::time::Duration) {
 /// Whether command-finish notify shells out to `osascript` on this OS.
 pub fn notify_uses_osascript() -> bool {
     cfg!(target_os = "macos")
+}
+
+/// Best-effort macOS desktop notification (OSC 9 / 777 / command finish).
+/// Non-macOS logs only, matching the existing command-finish behavior.
+fn notify_message(title: &str, message: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("display notification \"{escaped}\" with title \"{title}\"");
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        log::info!("desktop notification ({title}): {message}");
+    }
 }
 
 /// Clamp font size for zoom / settings (pt).
@@ -969,7 +1050,7 @@ pub fn path_opener_program() -> Option<&'static str> {
     }
 }
 
-fn open_existing_path(candidate: &Path) {
+pub(crate) fn open_existing_path(candidate: &Path) {
     #[cfg(windows)]
     {
         match std::process::Command::new("cmd")

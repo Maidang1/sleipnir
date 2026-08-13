@@ -28,6 +28,10 @@
 	<string>NSApplication</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Sleipnir needs AppleScript access to read clipboard content for paste operations.</string>
+	<key>NSAppleScriptEnabled</key>
+	<true/>
+	<key>OSAScriptingDefinition</key>
+	<string>Sleipnir.sdef</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Sleipnir can capture screenshots for paste-as-image.</string>
 	<key>LSApplicationCategoryType</key>

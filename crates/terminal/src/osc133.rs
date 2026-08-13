@@ -19,11 +19,30 @@ pub enum Osc133Kind {
     CommandFinished { status: Option<i32> },
 }
 
+impl Osc133Kind {
+    /// Parse a vendored-alacritty event payload (`"A"`, `"B"`, `"C"`, `"D"`, `"D;0"`).
+    pub fn from_payload(payload: &str) -> Option<Self> {
+        let mut parts = payload.split(';');
+        match parts.next()? {
+            "A" => Some(Self::PromptStart),
+            "B" => Some(Self::CommandStart),
+            "C" => Some(Self::CommandExecuted),
+            "D" => {
+                let status = parts.next().and_then(|s| s.parse().ok());
+                Some(Self::CommandFinished { status })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// One marker with optional scrollback line (filled by the terminal when known).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Osc133Marker {
     pub kind: Osc133Kind,
     pub line: Option<i32>,
+    /// Cursor column when the marker was recorded (input start for B).
+    pub column: Option<usize>,
 }
 
 /// Incremental scanner for OSC 133 sequences in a byte stream.
@@ -155,5 +174,29 @@ mod tests {
     fn ignores_other_osc() {
         let seq = b"\x1b]0;title\x07\x1b]133;A\x07";
         assert_eq!(scan_osc133(seq), vec![Osc133Kind::PromptStart]);
+    }
+
+    #[test]
+    fn from_payload_parses_vendor_event_kinds() {
+        assert_eq!(Osc133Kind::from_payload("A"), Some(Osc133Kind::PromptStart));
+        assert_eq!(Osc133Kind::from_payload("B"), Some(Osc133Kind::CommandStart));
+        assert_eq!(
+            Osc133Kind::from_payload("C"),
+            Some(Osc133Kind::CommandExecuted)
+        );
+        assert_eq!(
+            Osc133Kind::from_payload("D"),
+            Some(Osc133Kind::CommandFinished { status: None })
+        );
+        assert_eq!(
+            Osc133Kind::from_payload("D;0"),
+            Some(Osc133Kind::CommandFinished { status: Some(0) })
+        );
+        assert_eq!(
+            Osc133Kind::from_payload("D;1"),
+            Some(Osc133Kind::CommandFinished { status: Some(1) })
+        );
+        assert_eq!(Osc133Kind::from_payload("Z"), None);
+        assert_eq!(Osc133Kind::from_payload(""), None);
     }
 }

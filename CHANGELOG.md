@@ -15,6 +15,20 @@
 - README and website treat Linux as a shipped platform: one-line install, `.deb` / `.tar.gz` downloads, Vulkan/Wayland notes, and Linux shortcuts
 - In-place auto-update stays macOS-only; Linux Check for Updates opens the releases page
 
+### Features
+- **Find in scrollback:** regex (`.*`) and match-case (`Aa`) toggles in the find bar (`⌥⌘R` / `⌥⌘C` on macOS). Literal + case-insensitive remains the default; toggling regex passes the query through as a regex, and match-case forces case-sensitive matching via inline flags.
+- **Export scrollback:** **Shell → Export Scrollback…** (macOS) / **File → Export Scrollback…** (Windows), also in the command palette, writes the active pane's scrollback to a timestamped temp file and opens it in the default editor.
+- **Link/path hover preview:** hovering a URL or path shows a small tooltip with the matched text (on top of the M11 underline + pointing hand).
+- **Tab drag reorder + detach:** drag a tab chip onto another to reorder (a ghost chip follows the pointer); drop a tab onto the terminal area to detach it into a new window (its panes keep running).
+- **Shell integration:** new tabs and splits now inherit the active pane's working directory instead of opening in `$HOME`.
+- **Notification matrix:** `notify_on_command_finish_mode` (`never` / `unfocused` / `always`, default `unfocused`) controls when the command-finish notification fires, on top of the existing `notify_on_command_finish_secs` threshold.
+- **Themes:** added Dracula and One Dark built-in palettes; `custom_theme` accepts a full hex palette (background/foreground/ANSI 16/cursor/selection); `theme` now accepts any name from a bundled 600+ scheme catalog (converted from iterm2-color-schemes, MIT) plus a user `themes.json` overlay in the config dir; the Settings → theme picker lists built-ins and catalog themes with swatches and type-to-filter search.
+- **Accessibility:** the terminal now exposes the visible screen as a read-only accessible value (`Role::MultilineTextInput` + label "Terminal"), so VoiceOver can read the current output (Ghostty-parity, read-only AX).
+- **OSC 9/777 desktop notifications:** programs can trigger a macOS notification via `ESC ] 9 ; msg` or kitty's `ESC ] 777 ; notify ; msg` on both the display-only path and the real PTY (vendored alacritty_terminal + vte emit `DesktopNotification` through `ZedListener`).
+- **OSC 133 on the real PTY:** shell-integration markers (`ESC ] 133 ; A/B/C/D`) now reach jump-prompt (`⌘⇧↑`/`⌘⇧↓`) through the same vendor hook, not just `write_output`.
+- **Shell semantics:** opt-in `terminal.inject_osc133` sources OSC 133 A/B/C/D into new zsh/bash/fish sessions (skipped if another terminal already injects, or for `shell -c`). Option/Alt-click in the current prompt sends left/right to move the shell cursor; Cmd/Ctrl-triple-click selects the marked command’s output (plain triple-click still selects lines).
+- **AppleScript:** shipped a minimal scripting dictionary (`Sleipnir.sdef`) — read-only `name`/`version`/`frontmost` plus `quit` (Ghostty 1.3.0-style), wired via `NSAppleScriptEnabled` + `OSAScriptingDefinition`.
+
 ## 0.1.10
 
 ### Features

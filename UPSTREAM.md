@@ -11,6 +11,8 @@ What stays **local** (forked or original):
 | `terminal` | Heavily forked: settings/theme/task rewired to `sleipnir_settings` / `task_types` |
 | `gpui_platform` | Slim multi-platform application entry (macOS / Windows / Linux) |
 | `sleipnir`, `sleipnir_ui`, `sleipnir_settings`, `task_types`, `release_channel` | Product code |
+| `vendor/alacritty_terminal` | **Vendored** from the zed alacritty fork (see [ADR-0005](docs/adr/0005-vendored-alacritty-term.md)) to patch OSC dispatch (133/9/777); keep a diff of our changes vs upstream in mind when bumping |
+| `vendor/vte` | **Vendored** vte 0.15.0 so `Handler::osc_custom` exists; workspace `[patch.crates-io]` forces every crate onto this tree |
 
 ---
 
@@ -21,7 +23,7 @@ What stays **local** (forked or original):
 | Source | `https://github.com/zed-industries/zed` |
 | **Zed `rev`** | `371a7d4ba2fd0064b79a0bc67d28e57a906779dc` (2026-08-09) |
 | Packages from that rev | `gpui`, `gpui_macos`, `gpui_linux`, `collections`, `util`, `util_macros` (+ their transitive Zed crates) |
-| `alacritty_terminal` | `git = "https://github.com/zed-industries/alacritty"` **rev `4c129667ce56611becdc82de6e28218c80e2e88f`** |
+| `alacritty_terminal` | **vendored**: `path = "vendor/alacritty_terminal"` — snapshot of `git = "https://github.com/zed-industries/alacritty"` **rev `4c129667ce56611becdc82de6e28218c80e2e88f`** + our OSC patch |
 | Rust toolchain | `1.95.0` (`rust-toolchain.toml`, match Zed) |
 | License | GPUI stack Apache-2.0; terminal path GPL-3.0-or-later |
 
@@ -41,7 +43,9 @@ util = { git = "https://github.com/zed-industries/zed", rev = "<SAME>" }
 
 Cargo clones the monorepo once per rev and resolves workspace/path deps inside Zed. You do **not** need to list every transitive crate (`scheduler`, `sum_tree`, `media`, …) in sleipnir’s workspace unless a **local** crate depends on it via `workspace = true`.
 
-Required `[patch.crates-io]` entries (aligned with Zed) live in root `Cargo.toml` (`async-process`, `async-task`, …).
+Required `[patch.crates-io]` entries live in root `Cargo.toml`:
+- `async-process` / `async-task` — aligned with Zed
+- `vte = { path = "vendor/vte" }` — vendored 0.15.0 + `Handler::osc_custom` so OSC 133/9/777 reach `alacritty_terminal` (ADR-0005)
 
 ---
 
@@ -82,6 +86,8 @@ Optional dry-run against a local Zed checkout (forks only):
 ## When to re-vendor (exception)
 
 Prefer git pin. Copy a crate into `crates/` only if you need a long-lived private patch to GPUI that cannot live upstream or in a personal Zed fork + alternate `git` URL.
+
+`alacritty_terminal` was **vendored** (into `vendor/`) for exactly this reason: we need a long-lived private patch (OSC 133/9/777 dispatch) and there is no personal fork URL to point at. To bump it: copy the newer upstream `alacritty_terminal/` source over `vendor/alacritty_terminal/src` (keep `vendor/alacritty_terminal/Cargo.toml`), then re-apply our patch (see [ADR-0005](docs/adr/0005-vendored-alacritty-term.md)).
 
 ---
 

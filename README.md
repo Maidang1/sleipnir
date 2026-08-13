@@ -35,21 +35,25 @@ prompt.
 ## Features
 
 - **GPU rendering** — smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D on Windows, Vulkan on Linux); ease-in-out cursor blink.
-- **Tabs, splits & panes** — split right/down, jump tabs, move focus; pane zoom and unfocused dim.
+- **Tabs, splits & panes** — split right/down, jump tabs, move focus, drag tabs to reorder or drop onto the terminal to detach into a new window; pane zoom and unfocused dim.
 - **Multi-window** — `⌘N` / `Ctrl+Shift+N` opens an independent window with its own tabs and shells.
 - **Font zoom** — `⌘+` / `Ctrl++` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
-  GitHub Dark/Light; `auto` follows the system light/dark appearance.
+  GitHub Dark/Light, Dracula, One Dark; `auto` follows the system light/dark appearance;
+  a bundled 600+ scheme catalog (from [iterm2-color-schemes](https://github.com/mbadolato/iTerm2-Color-Schemes), MIT)
+  is searchable in the Settings → theme picker (just type to filter); `themes.json` in the
+  config dir adds or overrides themes (`"theme": "kanagawa"`, see `docs/themes.example.json`).
 - **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder / Explorer /
   Nautilus selections as quoted paths; force text-only paste when you need it.
 - **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R` / `Ctrl+Shift+R`.
 - **vi mode** — keyboard-driven selection and navigation.
+- **Accessibility** — the terminal exposes the visible screen as a read-only accessible value (VoiceOver can read the current output), like Ghostty's read-only AX.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
 - **Command palette** — discover actions with `⌘⇧K` / `Ctrl+Shift+P`; optional key binding overrides in settings.
-- **Find in scrollback** — `⌘F` / `Ctrl+Shift+F` search with match highlights.
-- **Path links & bell** — ⌘-click / Ctrl-click paths open in the default app; optional system/visual bell.
+- **Find in scrollback** — `⌘F` / `Ctrl+Shift+F` search with match highlights, regex (`.*`) and match-case (`Aa`) toggles; export scrollback to a file via **Shell → Export Scrollback…** (opens in your default editor).
+- **Path links & bell** — ⌘-click / Ctrl-click paths open in the default app; hover shows a URL/path preview tooltip; optional system/visual bell.
 - **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
-- **Shell collaboration** — OSC 133 prompt jump; optional notify when a long command finishes
+- **Shell collaboration** — OSC 133 prompt jump; new tabs/splits inherit the active pane's working directory; optional notify when a long command finishes
   while unfocused (macOS notification; Windows logs only; Linux via libnotify).
 - **Quick Terminal / Quick Select** — open a spare window fast; link-oriented mode.
 
@@ -172,7 +176,8 @@ on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linu
 
 | Key | Meaning |
 |-----|---------|
-| `theme` | `auto` / `mocha` / … (see example); `auto` follows system appearance |
+| `theme` | `auto` / `mocha` / … (see example); `auto` follows system appearance; any name from `themes.json` also works |
+| `custom_theme` | Optional hex palette (`background`/`foreground`/`ansi`…) that overrides `theme` |
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
 | `path_links` | Open path-like targets on ⌘-click / Ctrl-click (default `true`) |
@@ -181,7 +186,8 @@ on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linu
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
 | `terminal.bell` | `off` / `system` / `visual` (default `off`) |
 | `background_opacity` | 0.15–1.0 content opacity (default `1.0` opaque) |
-| `notify_on_command_finish_secs` | Unfocused long-job notify threshold seconds (default `5`; `0` off) |
+| `notify_on_command_finish_secs` | Long-job notify threshold seconds (default `5`; `0` off) |
+| `notify_on_command_finish_mode` | `never` / `unfocused` / `always` (default `unfocused`) |
 
 Open the in-app theme picker with `⌘,` / `Ctrl+,`, or edit the file and reload
 with `⌘⇧R` / `Ctrl+Shift+R` (key binding overrides apply on next launch).
@@ -232,6 +238,7 @@ Ctrl+Shift so `Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
 | Command palette | `⌘⇧K` | `Ctrl+Shift+P` |
 | Find in scrollback | `⌘F` | `Ctrl+Shift+F` |
 | Next / previous find match | `⌘G` / `⌘⇧G` | `Ctrl+Shift+G` / `Ctrl+Shift+Alt+G` |
+| Find: match case / regex | `⌥⌘C` / `⌥⌘R` | (find-bar buttons) |
 | Check for updates | `⌘⇧U` | `Ctrl+Shift+U` |
 | Scroll page | `⌘↑` / `⌘↓` | `Shift+PageUp` / `Shift+PageDown` |
 | Scroll line | `⇧↑` / `⇧↓` | `Shift+↑` / `Shift+↓` |
@@ -276,7 +283,7 @@ queries GitHub, then opens the releases page.
 
 ## Roadmap
 
-**Status:** M0–M15 complete (per-pane fonts still deferred inside M10).
+**Status:** M0–M15 complete (per-pane fonts still deferred inside M10). Next phase planned below.
 
 | Milestone | Goal | Status |
 |-----------|------|:------:|
@@ -298,9 +305,21 @@ queries GitHub, then opens the releases page.
 | **M15** | Optional differentiators (Quick Terminal, Quick Select) | ✅ |
 
 Legend: ✅ done · 📋 planned.  
-Shipped notes: [`docs/M7.md`](docs/M7.md)–[`docs/M15.md`](docs/M15.md).  
-Competitive research: [`docs/competitive-research-features.md`](docs/competitive-research-features.md).  
-Implementation plan: [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md`](docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md).
+Shipped notes: [`docs/M7.md`](docs/M7.md)–[`docs/M15.md`](docs/M15.md).
+
+### Next phase (post competitive research)
+
+| Step | Scope | Timebox |
+|------|-------|---------|
+| **0 · 性能基线** | 可复现的吞吐 / 输入延迟 / 回填内存基准 + 两个待核查项（🧑‍🌾 ZWJ 宽度、Quick Terminal `⌘⇧N` 全局热键）| 1–2 天 |
+| **1 · 高频 UX 缺口** | 搜索正则/大小写 + scrollback 导出 · tab 拖拽重排/拖新窗口 · 链接/路径 hover 预览 tooltip | 1–2 周 |
+| **2 · 深度能力** | shell 集成深化（自动注入 + 继承 cwd + 点击移光标 + 三击选命令）· 回填内存字节预算+压缩 · 通知矩阵 | 2–4 周 |
+| **3 · 边界重议** | kitty graphics 改「跟踪」· 主题库扩充+导入 · 最小 AppleScript 字典 · 屏幕阅读器 | 选择性 |
+
+**先量再投：** 第 0 步的数字是第 2 步性能项是否必要的判据；第 0 步不完成，不轻易投第 2 步的性能优化。
+
+Competitive research: [`docs/competitive-research-ux-performance.md`](docs/competitive-research-ux-performance.md) · [`docs/competitive-research-features.md`](docs/competitive-research-features.md).  
+Implementation plan: [`docs/superpowers/plans/2026-08-14-post-competitive-research-roadmap.md`](docs/superpowers/plans/2026-08-14-post-competitive-research-roadmap.md) · [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md`](docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md).
 
 ## Upstream
 

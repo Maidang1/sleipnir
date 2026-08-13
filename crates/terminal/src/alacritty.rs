@@ -318,6 +318,8 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::Bell => Self::Bell,
             AlacTermEvent::Exit => Self::Exit,
             AlacTermEvent::ChildExit(status) => Self::ChildExit(status),
+            AlacTermEvent::Osc133(kind) => Self::Osc133(kind),
+            AlacTermEvent::DesktopNotification(msg) => Self::DesktopNotification(msg),
         }
     }
 }
@@ -855,6 +857,19 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// The currently visible screen (scrollback excluded), for accessibility.
+pub(super) fn visible_screen_text(term: &Term<ZedListener>) -> String {
+    let offset = term.grid().display_offset() as i32;
+    let screen = term.screen_lines() as i32;
+    // Visible rows in grid coordinates: the top row is `-offset` (0 = the
+    // bottom of the scrollback / top of the viewport when scrolled to bottom).
+    let top = Line(-offset);
+    let bottom = Line((-offset + screen - 1).max(top.0));
+    let start = AlacPoint::new(top, Column(0));
+    let end = AlacPoint::new(bottom, term.last_column());
+    term.bounds_to_string(start, end)
+}
+
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }
@@ -1121,5 +1136,82 @@ mod tests {
         set_selection(&mut term, Some(&selection));
 
         assert_eq!(selection_text(&term).as_deref(), Some("zms-demo.target"));
+    }
+
+    #[test]
+    fn visible_screen_text_excludes_scrollback() {
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        // The debug screen is 100×6 cells; 130 five-char lines overflow it and
+        // scroll the first rows off.
+        for i in 0..130 {
+            for c in format!("line{i}").chars() {
+                term.input(c);
+            }
+        }
+        let text = visible_screen_text(&term);
+        assert!(text.contains("line129"), "last line visible: {text:?}");
+        assert!(!text.contains("line0"), "first line scrolled off: {text:?}");
+    }
+
+    #[test]
+    fn search_inline_flags_override_smart_case() {
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        for character in "Hello WORLD".chars() {
+            term.input(character);
+        }
+
+        // `(?i)` forces case-insensitive even though the query has uppercase,
+        // defeating alacritty's smart-case (which would otherwise be sensitive).
+        let insensitive = Search::new("(?i)HELLO").expect("valid regex");
+        assert!(!search_matches(&term, insensitive).is_empty());
+
+        // `(?-i)` forces case-sensitive: lowercase query misses the capital H…
+        let sensitive = Search::new("(?-i)hello").expect("valid regex");
+        assert!(search_matches(&term, sensitive).is_empty());
+
+        // …and the correctly-cased query matches.
+        let exact = Search::new("(?-i)Hello").expect("valid regex");
+        assert!(!search_matches(&term, exact).is_empty());
+    }
+
+    #[test]
+    fn maps_osc133_and_desktop_notification_events() {
+        match TerminalBackendEvent::from(AlacTermEvent::Osc133("A".into())) {
+            TerminalBackendEvent::Osc133(kind) => assert_eq!(kind, "A"),
+            other => panic!("unexpected {other:?}"),
+        }
+        match TerminalBackendEvent::from(AlacTermEvent::DesktopNotification("hi".into())) {
+            TerminalBackendEvent::DesktopNotification(msg) => assert_eq!(msg, "hi"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn processor_emits_osc133_and_notify_through_zed_listener() {
+        use vte::ansi::{Processor, StdSyncHandler};
+
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        let mut processor = Processor::<StdSyncHandler>::new();
+        processor.advance(&mut term, b"\x1b]133;A\x07");
+        processor.advance(&mut term, b"\x1b]9;hello\x07");
+        processor.advance(&mut term, b"\x1b]777;notify;done\x07");
+
+        let mut kinds = Vec::new();
+        let mut notes = Vec::new();
+        while let Ok(PtyEvent::Event(ev)) = events_rx.try_recv() {
+            match ev {
+                TerminalBackendEvent::Osc133(k) => kinds.push(k),
+                TerminalBackendEvent::DesktopNotification(m) => notes.push(m),
+                _ => {}
+            }
+        }
+        assert_eq!(kinds, ["A"]);
+        assert_eq!(notes, ["hello", "done"]);
     }
 }

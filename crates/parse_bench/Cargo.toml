@@ -1,0 +1,14 @@
+[package]
+name = "parse_bench"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+description = "Headless alacritty_terminal parser-throughput benchmark (Sleipnir emulation core)"
+
+[[bin]]
+name = "parse_bench"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal.workspace = true

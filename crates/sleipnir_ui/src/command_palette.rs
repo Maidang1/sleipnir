@@ -30,6 +30,7 @@ pub enum CommandId {
     JumpNextPrompt,
     ToggleQuickSelect,
     OpenQuickTerminal,
+    ExportScrollback,
 }
 
 impl CommandId {
@@ -57,6 +58,7 @@ impl CommandId {
             CommandId::JumpNextPrompt => "jump_next_prompt",
             CommandId::ToggleQuickSelect => "toggle_quick_select",
             CommandId::OpenQuickTerminal => "open_quick_terminal",
+            CommandId::ExportScrollback => "export_scrollback",
         }
     }
 
@@ -84,6 +86,7 @@ impl CommandId {
             "jump_next_prompt" | "next_prompt" => Some(CommandId::JumpNextPrompt),
             "toggle_quick_select" | "quick_select" => Some(CommandId::ToggleQuickSelect),
             "open_quick_terminal" | "quick_terminal" => Some(CommandId::OpenQuickTerminal),
+            "export_scrollback" | "export_scrollback_to_file" => Some(CommandId::ExportScrollback),
             _ => None,
         }
     }
@@ -238,6 +241,12 @@ pub fn commands_for(windows: bool) -> Vec<CommandItem> {
             title: "Open Quick Terminal".into(),
             shortcut: display_shortcut_for("open_quick_terminal", windows).into(),
             keywords: "quick terminal dropdown window",
+        },
+        CommandItem {
+            id: CommandId::ExportScrollback,
+            title: "Export Scrollback to File".into(),
+            shortcut: display_shortcut_for("export_scrollback", windows).into(),
+            keywords: "export scrollback save file editor dump",
         },
     ]
 }

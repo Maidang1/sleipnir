@@ -7,13 +7,15 @@
 mod themes;
 
 pub use themes::{
-    Appearance, TerminalPalette, ThemeName, get_color_at_index, palette_for_theme,
+    Appearance, CustomPalette, TerminalPalette, ThemeName, ThemeSetting, get_color_at_index,
+    palette_for_theme,
 };
 
 use collections::HashMap;
 use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels, px};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap as StdHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use util::shell::Shell;
@@ -58,6 +60,19 @@ pub enum ConfirmClose {
     Always,
     /// Never confirm (previous behavior).
     Never,
+}
+
+/// When to notify that a long-running foreground job finished (M14 → matrix).
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyOnCommandFinish {
+    /// Never show a command-finish notification.
+    Never,
+    /// Only when the window is not focused (default).
+    #[default]
+    Unfocused,
+    /// Always show a command-finish notification, even when focused.
+    Always,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
@@ -141,8 +156,10 @@ pub struct TerminalSettings {
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
     pub bell: TerminalBell,
-    /// Active color theme name (sleipnir extension; also top-level `theme` key).
-    pub theme: ThemeName,
+    /// Active theme: a built-in name, or a user theme from `themes.json`.
+    pub theme: ThemeSetting,
+    /// User-defined inline palette; when set, it overrides `theme`.
+    pub custom_theme: Option<CustomPalette>,
     /// Restore tabs/splits/cwd from the last session on launch (M8).
     pub restore_session: bool,
     /// Enable OpenType ligatures (`calt`) when the font supports them (M10).
@@ -158,6 +175,11 @@ pub struct TerminalSettings {
     /// Notify when a long-running foreground job finishes while unfocused (M14).
     /// Seconds; `0` disables. Default 5.
     pub notify_on_command_finish_secs: u64,
+    /// When to fire the command-finish notification: never | unfocused | always.
+    pub notify_on_command_finish_mode: NotifyOnCommandFinish,
+    /// Opt-in: source OSC 133 A/B/C/D into newly spawned zsh/bash/fish.
+    /// Off (default) keeps detect-only behavior.
+    pub inject_osc133: bool,
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -253,7 +275,8 @@ impl Default for TerminalSettings {
             path_hyperlink_regexes: Vec::new(),
             path_hyperlink_timeout_ms: 50,
             bell: TerminalBell::Off,
-            theme: ThemeName::Mocha,
+            theme: ThemeSetting::Builtin(ThemeName::Mocha),
+            custom_theme: None,
             restore_session: true,
             font_ligatures: false,
             key_bindings: Vec::new(),
@@ -261,6 +284,8 @@ impl Default for TerminalSettings {
             path_links: true,
             background_opacity: 1.0,
             notify_on_command_finish_secs: 5,
+            notify_on_command_finish_mode: NotifyOnCommandFinish::Unfocused,
+            inject_osc133: false,
         }
     }
 }
@@ -271,6 +296,10 @@ impl Global for TerminalSettingsGlobal {}
 struct TerminalPaletteGlobal(Arc<TerminalPalette>);
 impl Global for TerminalPaletteGlobal {}
 
+/// User theme catalog from `themes.json`: `{ "name": {palette}, … }`.
+struct UserThemesGlobal(Arc<StdHashMap<String, CustomPalette>>);
+impl Global for UserThemesGlobal {}
+
 /// Last-known system appearance, used to resolve the `Auto` theme.
 struct AppearanceGlobal(Appearance);
 impl Global for AppearanceGlobal {}
@@ -280,12 +309,20 @@ impl TerminalSettings {
         &cx.global::<TerminalSettingsGlobal>().0
     }
 
+    /// The user theme catalog (`~/.config/sleipnir/themes.json`), for custom
+    /// `"theme": "<name>"` values.
+    pub fn user_themes(cx: &App) -> Arc<StdHashMap<String, CustomPalette>> {
+        cx.global::<UserThemesGlobal>().0.clone()
+    }
+
     pub fn init(cx: &mut App) {
+        cx.set_global(UserThemesGlobal(Arc::new(load_user_themes())));
         apply_loaded(load_or_default(), cx);
     }
 
-    /// Re-read `settings.json` and refresh globals.
+    /// Re-read `settings.json` (and the theme catalog) and refresh globals.
     pub fn reload(cx: &mut App) {
+        cx.set_global(UserThemesGlobal(Arc::new(load_user_themes())));
         let settings = load_or_default();
         log::info!(
             "reloaded settings: theme={:?} font={:?} size={:?}",
@@ -302,14 +339,15 @@ impl TerminalSettings {
     }
 
     /// Set the active theme, refresh the palette, and persist to settings.json.
-    pub fn set_theme(theme: ThemeName, cx: &mut App) {
+    pub fn set_theme(theme: ThemeSetting, cx: &mut App) {
         let mut settings = Self::get_global(cx).clone();
-        settings.theme = theme;
+        settings.theme = theme.clone();
+        settings.custom_theme = None;
         apply_loaded(settings, cx);
-        if let Err(err) = persist_theme(theme) {
-            log::warn!("failed to persist theme={theme:?}: {err}");
+        if let Err(err) = persist_theme(&theme) {
+            log::warn!("failed to persist theme={:?}: {err}", theme.as_str());
         } else {
-            log::info!("theme -> {theme:?} (persisted)");
+            log::info!("theme -> {} (persisted)", theme.as_str());
         }
     }
 
@@ -358,7 +396,7 @@ impl TerminalSettings {
     pub fn set_appearance(appearance: Appearance, cx: &mut App) {
         cx.set_global(AppearanceGlobal(appearance));
         let settings = Self::get_global(cx).clone();
-        let palette = Arc::new(palette_for_theme(settings.theme, appearance));
+        let palette = Arc::new(resolve_palette(&settings, appearance, cx));
         cx.set_global(TerminalPaletteGlobal(palette));
     }
 }
@@ -377,9 +415,48 @@ fn current_appearance(cx: &App) -> Appearance {
 
 fn apply_loaded(settings: TerminalSettings, cx: &mut App) {
     let appearance = current_appearance(cx);
-    let palette = Arc::new(palette_for_theme(settings.theme, appearance));
+    let palette = Arc::new(resolve_palette(&settings, appearance, cx));
     cx.set_global(TerminalPaletteGlobal(palette));
     cx.set_global(TerminalSettingsGlobal(settings));
+}
+
+/// Resolve the effective palette: a user `custom_theme` wins, else the built-in
+/// theme name (resolving `Auto` against the system appearance), else a theme
+/// from the user catalog by name.
+fn resolve_palette(settings: &TerminalSettings, appearance: Appearance, cx: &App) -> TerminalPalette {
+    if let Some(custom) = &settings.custom_theme {
+        return custom.to_palette();
+    }
+    match &settings.theme {
+        ThemeSetting::Builtin(name) => palette_for_theme(*name, appearance),
+        ThemeSetting::Custom(name) => {
+            let catalog = TerminalSettings::user_themes(cx);
+            catalog
+                .get(name)
+                .map(CustomPalette::to_palette)
+                .unwrap_or_else(|| palette_for_theme(ThemeName::Mocha, appearance))
+        }
+    }
+}
+
+/// Load the theme catalog: the bundled 600+ scheme library (from
+/// `resources/themes.json`, converted from iterm2-color-schemes), overlaid
+/// with any user themes from `themes.json` in the config dir.
+fn load_user_themes() -> StdHashMap<String, CustomPalette> {
+    let mut themes: StdHashMap<String, CustomPalette> =
+        serde_json::from_str(include_str!("../../../resources/themes.json")).unwrap_or_default();
+    let path = config_dir().join("themes.json");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<StdHashMap<String, CustomPalette>>(&raw) {
+            Ok(user) => {
+                themes.extend(user);
+            }
+            Err(err) => log::warn!("failed to parse themes.json: {err}"),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => log::warn!("failed to read themes.json: {err}"),
+    }
+    themes
 }
 
 // ── file schema ─────────────────────────────────────────────────────────────
@@ -387,10 +464,12 @@ fn apply_loaded(settings: TerminalSettings, cx: &mut App) {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct SettingsFile {
-    /// Theme name: auto | mocha | macchiato | frappe | latte | tokyo_night | nord |
-    /// gruvbox_dark | solarized_light | github_dark | github_light
+    /// Theme name: auto | mocha | … or any user theme name from `themes.json`.
     #[serde(default)]
-    theme: Option<ThemeName>,
+    theme: Option<String>,
+    /// User-defined palette (hex colors); overrides `theme` when present.
+    #[serde(default)]
+    custom_theme: Option<CustomPalette>,
     /// Restore last session (tabs/splits/cwd) on launch. Default true.
     #[serde(default)]
     restore_session: Option<bool>,
@@ -409,6 +488,12 @@ struct SettingsFile {
     /// Notify after unfocused commands longer than N seconds (M14). 0 = off.
     #[serde(default)]
     notify_on_command_finish_secs: Option<u64>,
+    /// When to fire the finish notification (never | unfocused | always).
+    #[serde(default)]
+    notify_on_command_finish_mode: Option<NotifyOnCommandFinish>,
+    /// Opt-in OSC 133 inject (also accepted at the top level).
+    #[serde(default)]
+    inject_osc133: Option<bool>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
@@ -438,6 +523,8 @@ struct TerminalSettingsFile {
     env: Option<HashMap<String, String>>,
     /// Optional nested theme override.
     theme: Option<ThemeName>,
+    /// Opt-in: inject OSC 133 A/B/C/D into zsh/bash/fish (default false).
+    inject_osc133: Option<bool>,
 }
 
 /// Directory that holds `settings.json` and `session.json`.
@@ -481,8 +568,15 @@ fn load_or_default() -> TerminalSettings {
 }
 
 fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
-    if let Some(theme) = file.theme.or(file.terminal.theme) {
-        settings.theme = theme;
+    if let Some(name) = file.theme {
+        settings.theme = ThemeName::from_str(&name)
+            .map(ThemeSetting::Builtin)
+            .unwrap_or(ThemeSetting::Custom(name));
+    } else if let Some(name) = file.terminal.theme {
+        settings.theme = ThemeSetting::Builtin(name);
+    }
+    if let Some(custom) = file.custom_theme {
+        settings.custom_theme = Some(custom);
     }
     if let Some(v) = file.restore_session {
         settings.restore_session = v;
@@ -501,6 +595,12 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
     if let Some(v) = file.notify_on_command_finish_secs {
         settings.notify_on_command_finish_secs = v;
+    }
+    if let Some(v) = file.notify_on_command_finish_mode {
+        settings.notify_on_command_finish_mode = v;
+    }
+    if let Some(v) = file.inject_osc133 {
+        settings.inject_osc133 = v;
     }
     let t = file.terminal;
     if let Some(size) = t.font_size {
@@ -559,6 +659,9 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(env) = t.env {
         settings.env = env;
     }
+    if let Some(v) = t.inject_osc133 {
+        settings.inject_osc133 = v;
+    }
 }
 
 /// Write a default settings file if missing.
@@ -571,13 +674,16 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let default = SettingsFile {
-        theme: Some(ThemeName::Mocha),
+        theme: Some("mocha".into()),
+        custom_theme: None,
         restore_session: Some(true),
         key_bindings: None,
         confirm_close: Some(ConfirmClose::Dirty),
         path_links: Some(true),
         background_opacity: Some(1.0),
         notify_on_command_finish_secs: Some(5),
+        notify_on_command_finish_mode: Some(NotifyOnCommandFinish::Unfocused),
+        inject_osc133: Some(false),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some(default_font_family().into()),
@@ -617,9 +723,9 @@ pub fn merge_settings_json(
 ///
 /// Returns pretty-printed JSON with a trailing newline. On empty/invalid input,
 /// starts from an empty object so only `"theme"` is written.
-pub fn merge_theme_into_json(raw: Option<&str>, theme: ThemeName) -> String {
+pub fn merge_theme_into_json(raw: Option<&str>, theme: &ThemeSetting) -> String {
     merge_settings_json(raw, |value| {
-        value["theme"] = serde_json::Value::String(theme.as_str().to_string());
+        value["theme"] = serde_json::Value::String(theme.as_str());
         // Prefer top-level theme; drop nested terminal.theme if present so the two
         // cannot disagree after a picker write.
         if let Some(terminal) = value.get_mut("terminal") {
@@ -648,7 +754,7 @@ fn write_settings_json(json: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn persist_theme(theme: ThemeName) -> anyhow::Result<()> {
+fn persist_theme(theme: &ThemeSetting) -> anyhow::Result<()> {
     let raw = read_settings_raw()?;
     let json = merge_theme_into_json(raw.as_deref(), theme);
     write_settings_json(&json)
@@ -686,7 +792,7 @@ mod tests {
 
     #[test]
     fn merge_theme_sets_top_level_on_empty() {
-        let out = merge_theme_into_json(None, ThemeName::Nord);
+        let out = merge_theme_into_json(None, &ThemeSetting::Builtin(ThemeName::Nord));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "nord");
     }
@@ -700,7 +806,7 @@ mod tests {
     "font_family": "Menlo"
   }
 }"#;
-        let out = merge_theme_into_json(Some(raw), ThemeName::Latte);
+        let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::Latte));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "latte");
         assert_eq!(v["terminal"]["font_size"], 14);
@@ -711,7 +817,7 @@ mod tests {
     #[test]
     fn merge_theme_removes_nested_terminal_theme() {
         let raw = r#"{"theme":"mocha","terminal":{"theme":"latte","font_size":12}}"#;
-        let out = merge_theme_into_json(Some(raw), ThemeName::TokyoNight);
+        let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::TokyoNight));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "tokyo_night");
         assert!(v["terminal"].get("theme").is_none());
@@ -732,6 +838,47 @@ mod tests {
         for &name in ThemeName::ALL {
             let json = serde_json::to_string(&name).unwrap();
             assert_eq!(json, format!("\"{}\"", name.as_str()));
+        }
+    }
+
+    #[test]
+    fn theme_name_from_str_roundtrips_all() {
+        for &name in ThemeName::ALL {
+            assert_eq!(ThemeName::from_str(name.as_str()), Some(name));
+        }
+        assert_eq!(ThemeName::from_str("definitely_not_a_theme"), None);
+    }
+
+    #[test]
+    fn theme_setting_parses_builtin_key() {
+        let raw = r#"{ "theme": "dracula" }"#;
+        let file: SettingsFile = serde_json::from_str(raw).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.theme, ThemeSetting::Builtin(ThemeName::Dracula));
+    }
+
+    #[test]
+    fn theme_setting_accepts_custom_names() {
+        let raw = r#"{ "theme": "kanagawa" }"#;
+        let file: SettingsFile = serde_json::from_str(raw).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.theme, ThemeSetting::Custom("kanagawa".into()));
+        assert_eq!(settings.theme.as_str(), "kanagawa");
+    }
+
+    #[test]
+    fn bundled_theme_catalog_parses_and_is_large() {
+        let catalog: StdHashMap<String, CustomPalette> =
+            serde_json::from_str(include_str!("../../../resources/themes.json")).unwrap();
+        assert!(
+            catalog.len() >= 600,
+            "bundled catalog has {} themes",
+            catalog.len()
+        );
+        for name in ["Dracula", "Nord", "Catppuccin Mocha"] {
+            assert!(catalog.contains_key(name), "missing {name}");
         }
     }
 
@@ -759,6 +906,23 @@ mod tests {
         assert!(settings.path_links);
         assert_eq!(settings.bell, TerminalBell::Off);
         assert!(!settings.copy_on_select);
+    }
+
+    #[test]
+    fn inject_osc133_defaults_off() {
+        assert!(
+            !TerminalSettings::default().inject_osc133,
+            "inject is opt-in so detect-only remains the default"
+        );
+    }
+
+    #[test]
+    fn inject_osc133_parses_from_terminal_block() {
+        let raw = r#"{"terminal":{"inject_osc133":true}}"#;
+        let file: SettingsFile = serde_json::from_str(raw).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert!(settings.inject_osc133);
     }
 
     #[test]

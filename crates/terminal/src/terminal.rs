@@ -2,10 +2,18 @@ mod mappings;
 
 mod alacritty;
 mod osc133;
+mod osc_notify;
+mod shell_semantics;
 mod pty_info;
 pub mod terminal_settings;
 
 pub use osc133::{Osc133Kind, Osc133Marker, Osc133Scanner, scan_osc133};
+pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
+pub use shell_semantics::{
+    ClickToMove, InjectShell, TripleClickKind, apply_inject_to_shell, click_to_move_sequence,
+    command_output_range, inject_script, triple_click_kind, wrap_shell_for_inject,
+    wrap_shell_for_inject_in,
+};
 
 #[cfg(not(windows))]
 use anyhow::Context as _;
@@ -74,6 +82,7 @@ use crate::alacritty::{
     set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
     toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
     update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    visible_screen_text as term_visible_screen_text,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -702,6 +711,8 @@ pub enum Event {
     Open(MaybeNavigationTarget),
     /// Selection text was written to the system clipboard (⌘C or copy-on-select).
     CopiedToClipboard,
+    /// A desktop-notification request via OSC 9 / OSC 777.
+    Notify(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -761,6 +772,11 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     Exit,
     ChildExit(ExitStatus),
+    /// Shell-integration marker payload from the vendored alacritty handler
+    /// (`"A"`, `"B"`, `"C"`, `"D;0"`).
+    Osc133(String),
+    /// Desktop notification from OSC 9 / OSC 777.
+    DesktopNotification(String),
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -779,6 +795,8 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
+            Self::Osc133(kind) => write!(f, "Osc133({kind})"),
+            Self::DesktopNotification(msg) => write!(f, "DesktopNotification({msg})"),
         }
     }
 }
@@ -1044,6 +1062,7 @@ impl TerminalBuilder {
             keyboard_input_sent: false,
             init_command_startup_marker: None,
             osc133: Osc133Scanner::new(),
+            osc_notify: OscNotifyScanner::new(),
             prompt_markers: Vec::new(),
             last_busy: false,
             busy_since: None,
@@ -1323,6 +1342,7 @@ impl TerminalBuilder {
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
                 osc133: Osc133Scanner::new(),
+            osc_notify: OscNotifyScanner::new(),
                 prompt_markers: Vec::new(),
                 last_busy: false,
                 busy_since: None,
@@ -1537,6 +1557,7 @@ pub struct Terminal {
     init_command_startup_marker: Option<String>,
     /// OSC 133 scanner (M14 shell integration detect).
     osc133: Osc133Scanner,
+    osc_notify: OscNotifyScanner,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
     /// Last known busy state for command-finish notify (M14).
@@ -1696,6 +1717,14 @@ impl Terminal {
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
                 self.register_task_finished(Some(exit_status), cx);
+            }
+            TerminalBackendEvent::Osc133(payload) => {
+                if let Some(kind) = Osc133Kind::from_payload(&payload) {
+                    self.record_osc133_marker(kind);
+                }
+            }
+            TerminalBackendEvent::DesktopNotification(msg) => {
+                cx.emit(Event::Notify(msg));
             }
         }
     }
@@ -1964,6 +1993,7 @@ impl Terminal {
         let converted = convert_lf_to_crlf(bytes, &mut previous_byte_was_cr);
 
         self.ingest_osc133(&converted);
+        self.ingest_osc_notify(&converted, cx);
 
         let mut term = self.term.lock();
         self.output_processor.advance(&mut *term, &converted);
@@ -1974,33 +2004,44 @@ impl Terminal {
 
     /// Feed OSC 133 scanner and record prompt markers at the current cursor line.
     pub fn ingest_osc133(&mut self, bytes: &[u8]) {
-        let kinds = self.osc133.push(bytes);
-        if kinds.is_empty() {
-            return;
+        for kind in self.osc133.push(bytes) {
+            self.record_osc133_marker(kind);
         }
-        let line = {
+    }
+
+    /// Record a parsed OSC 133 marker against the current cursor line.
+    /// Shared by the display-only scanner and the real-PTY event path.
+    pub fn record_osc133_marker(&mut self, kind: Osc133Kind) {
+        let (line, column) = {
             let term = self.term.lock_unfair();
             let cursor = term.grid().cursor.point;
-            Some(cursor.line.0 + term.history_size() as i32)
+            (
+                Some(cursor.line.0 + term.history_size() as i32),
+                Some(cursor.column.0),
+            )
         };
-        for kind in kinds {
-            // Keep prompt starts and command finishes for jump navigation.
-            if matches!(
-                kind,
-                Osc133Kind::PromptStart | Osc133Kind::CommandFinished { .. }
-            ) {
-                self.prompt_markers.push(Osc133Marker { kind, line });
-                // Bound memory.
-                if self.prompt_markers.len() > 500 {
-                    let drain = self.prompt_markers.len() - 500;
-                    self.prompt_markers.drain(0..drain);
-                }
-            }
-            if matches!(kind, Osc133Kind::CommandFinished { .. }) {
-                // Command ended via shell integration; clear busy timer.
-                self.last_busy = false;
-                self.busy_since = None;
-            }
+        // Keep A/B/C/D so jump-prompt, click-to-move, and output select share one log.
+        self.prompt_markers.push(Osc133Marker {
+            kind,
+            line,
+            column,
+        });
+        if self.prompt_markers.len() > 500 {
+            let drain = self.prompt_markers.len() - 500;
+            self.prompt_markers.drain(0..drain);
+        }
+        if matches!(kind, Osc133Kind::CommandFinished { .. }) {
+            // Command ended via shell integration; clear busy timer.
+            self.last_busy = false;
+            self.busy_since = None;
+        }
+    }
+
+    /// Feed OSC 9 / 777 desktop-notification requests from a byte stream,
+    /// emitting `Event::Notify` for each.
+    pub fn ingest_osc_notify(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        for n in self.osc_notify.push(bytes) {
+            cx.emit(Event::Notify(n.message));
         }
     }
 
@@ -2011,6 +2052,34 @@ impl Terminal {
             .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
             .filter_map(|m| m.line)
             .collect()
+    }
+
+    /// Option/Alt-click: CSI left/right to the clicked cell when it is inside
+    /// the current prompt. `None` if the click should fall through.
+    fn click_to_move_bytes(&self, point: Point) -> Option<Vec<u8>> {
+        let prompt_line = self
+            .prompt_markers
+            .iter()
+            .rev()
+            .find(|m| matches!(m.kind, Osc133Kind::PromptStart))
+            .and_then(|m| m.line);
+        let prompt_prefix_cols = self
+            .prompt_markers
+            .iter()
+            .rev()
+            .find(|m| matches!(m.kind, Osc133Kind::CommandStart) && m.line == prompt_line)
+            .and_then(|m| m.column)
+            .unwrap_or(0);
+        let cursor = self.last_content.cursor.point;
+        click_to_move_sequence(ClickToMove {
+            click_line: point.line,
+            click_column: point.column,
+            cursor_line: cursor.line,
+            cursor_column: cursor.column,
+            prompt_line,
+            prompt_prefix_cols,
+            alt_screen: self.last_content.mode.contains(Modes::ALT_SCREEN),
+        })
     }
 
     /// Jump display to the previous/next prompt marker relative to the viewport.
@@ -2080,6 +2149,17 @@ impl Terminal {
 
     pub fn total_lines(&self) -> usize {
         total_lines(&self.term.lock_unfair())
+    }
+
+    /// Full contents — retained scrollback plus the visible screen — as plain
+    /// text, for "export scrollback".
+    pub fn scrollback_text(&self) -> String {
+        content_text(&self.term.lock_unfair())
+    }
+
+    /// The currently visible screen (scrollback excluded), for accessibility.
+    pub fn visible_screen_text(&self) -> String {
+        term_visible_screen_text(&self.term.lock_unfair())
     }
 
     pub fn viewport_lines(&self) -> usize {
@@ -2723,6 +2803,15 @@ impl Terminal {
             self.last_content.display_offset,
         );
 
+        if e.button == MouseButton::Left && e.modifiers.alt && !e.modifiers.secondary() {
+            if let Some(bytes) = self.click_to_move_bytes(point) {
+                if !bytes.is_empty() {
+                    self.write_to_pty(bytes);
+                }
+                return;
+            }
+        }
+
         if e.button == MouseButton::Left
             && e.modifiers.secondary()
             && (TerminalSettings::get_global(cx).open_links_in_mouse_mode
@@ -2756,7 +2845,30 @@ impl Terminal {
                         0 => return, //This is a release
                         1 => Some(SelectionType::Simple),
                         2 => Some(SelectionType::Semantic),
-                        3 => Some(SelectionType::Lines),
+                        3 => {
+                            if e.modifiers.secondary() {
+                                let last_col = self
+                                    .last_content
+                                    .terminal_bounds
+                                    .num_columns()
+                                    .saturating_sub(1);
+                                if let TripleClickKind::CommandOutput(range) = triple_click_kind(
+                                    true,
+                                    &self.prompt_markers,
+                                    point.line,
+                                    last_col,
+                                ) {
+                                    self.events.push_back(InternalEvent::SetSelection(Some(
+                                        Selection::simple_range(Range::new(
+                                            range.start,
+                                            range.end,
+                                        )),
+                                    )));
+                                    return;
+                                }
+                            }
+                            Some(SelectionType::Lines)
+                        }
                         _ => None,
                     };
 
