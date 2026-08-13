@@ -18,8 +18,10 @@ import { Accordion } from '@/components/accordion'
 import { DownloadMenu } from '@/components/download-menu'
 import { InstallCommand } from '@/components/install-command'
 import {
+  detectInstallPlatform,
   fetchLatestRelease,
   GITHUB_URL,
+  type InstallPlatform,
   type LatestRelease,
 } from '@/lib/release'
 
@@ -157,9 +159,11 @@ function GitHubIcon({ className }: { className?: string }) {
 
 export default function App() {
   const [release, setRelease] = useState<LatestRelease | null>(null)
+  const [installPlatform, setInstallPlatform] = useState<InstallPlatform>('macos')
 
   useEffect(() => {
     void fetchLatestRelease().then(setRelease)
+    setInstallPlatform(detectInstallPlatform())
   }, [])
 
   return (
@@ -220,14 +224,11 @@ export default function App() {
                 </span>
               )}
             </div>
-            <InstallCommand className="mt-4" />
-            <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">
-              macOS: verifies the published SHA-256, installs to{' '}
-              <code className="font-mono">/Applications</code>, and clears
-              Gatekeeper quarantine with{' '}
-              <code className="font-mono">xattr -cr</code>. Windows: build from
-              source (see the repo README).
-            </p>
+            <InstallCommand
+              className="mt-4"
+              platform={installPlatform}
+              onPlatformChange={setInstallPlatform}
+            />
 
             <div className="mt-16">
               <SectionLabel>What you get</SectionLabel>
@@ -281,18 +282,14 @@ export default function App() {
             <SectionLabel>Download</SectionLabel>
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">Get Sleipnir</h2>
             <p className="mt-2 max-w-lg text-sm text-muted-foreground">
-              Free and open source. On macOS, install from the terminal or grab a
-              .dmg / .zip from GitHub Releases. On Windows, download the
-              x64 .zip and run <code className="font-mono">sleipnir.exe</code>.
+              Free and open source. Pick your platform below for the one-line
+              install, or use the Download menu for a .dmg / .zip.
             </p>
-            <InstallCommand className="mt-6" />
-            <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">
-              Downloads the latest Release, checks{' '}
-              <code className="font-mono">.zip.sha256</code>, copies the app to{' '}
-              <code className="font-mono">/Applications</code>, and runs{' '}
-              <code className="font-mono">xattr -cr</code> so the ad-hoc-signed
-              build is not blocked on first launch.
-            </p>
+            <InstallCommand
+              className="mt-6"
+              platform={installPlatform}
+              onPlatformChange={setInstallPlatform}
+            />
             <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
               <DownloadMenu
                 release={release}

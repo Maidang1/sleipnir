@@ -23,8 +23,9 @@ scrolling and redraw stay smooth even under heavy output. It ships with a real P
 adaptive theming that follows the system appearance, and a file-manager-friendly
 clipboard that turns pasted images into quoted paths.
 
-Prebuilt installers are **macOS-only** today. Windows runs from source
-(`cargo run -p sleipnir`).
+Prebuilt downloads: macOS `.dmg` / `.zip`, and a Windows x64 `.zip`
+(`Sleipnir-<ver>-windows-x64.zip`). Both ship on
+[GitHub Releases](https://github.com/Maidang1/sleipnir/releases).
 
 The name comes from Norse myth — Odin's eight-legged steed, the fastest horse in the
 nine worlds. The app icon abstracts that into a minimal horse-head mark over a terminal
@@ -82,7 +83,13 @@ xattr -cr /Applications/Sleipnir.app
 
 ### Windows
 
-Grab `Sleipnir-<ver>-windows-x64.zip` from
+PowerShell, latest GitHub Release (installs to `%LOCALAPPDATA%\Sleipnir`):
+
+```powershell
+irm https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.ps1 | iex
+```
+
+Or grab `Sleipnir-<ver>-windows-x64.zip` from
 [Releases](https://github.com/Maidang1/sleipnir/releases), unzip, and run
 `sleipnir.exe`. The default shell is the system shell (usually PowerShell).
 Set `terminal.shell` to `wsl.exe` in settings if you want WSL.
@@ -94,9 +101,15 @@ Or build from source (see below).
 
 ## Requirements
 
-- **macOS:** Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
-- **Windows:** Windows 10 1809+ (ConPTY) with a Direct3D 11 GPU
-- Rust **1.95.0** (see `rust-toolchain.toml`) — required to build from source
+To **run** a release build:
+
+- macOS 14.0+ (Sonoma)
+- Windows 10 1809+ (ConPTY) with a Direct3D 11 GPU
+
+To **build** from source, also:
+
+- Rust **1.95.0** (see `rust-toolchain.toml`)
+- macOS: Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
 
 ## Build & run
 

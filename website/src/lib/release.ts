@@ -10,7 +10,28 @@ export const GITHUB_REPO = 'Maidang1/sleipnir'
 export const GITHUB_URL = `https://github.com/${GITHUB_REPO}`
 export const FALLBACK_RELEASES_URL = `${GITHUB_URL}/releases`
 export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh`
+export const INSTALL_PS1_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.ps1`
 export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_SCRIPT_URL} | bash`
+
+export type InstallPlatform = 'macos' | 'windows'
+
+export const INSTALL_COMMANDS: Record<InstallPlatform, string> = {
+  macos: `curl -fsSL ${INSTALL_SCRIPT_URL} | bash`,
+  windows: `irm ${INSTALL_PS1_URL} | iex`,
+}
+
+export const INSTALL_HINTS: Record<InstallPlatform, string> = {
+  macos:
+    'Verifies SHA-256, installs to /Applications, and clears Gatekeeper quarantine with xattr -cr.',
+  windows:
+    'Verifies SHA-256, installs sleipnir.exe to %LOCALAPPDATA%\\Sleipnir, and launches it.',
+}
+
+export function detectInstallPlatform(): InstallPlatform {
+  if (typeof navigator === 'undefined') return 'macos'
+  if (/Windows/i.test(navigator.userAgent)) return 'windows'
+  return 'macos'
+}
 
 export async function fetchLatestRelease(): Promise<LatestRelease | null> {
   try {

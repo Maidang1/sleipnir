@@ -83,6 +83,27 @@ export function DownloadMenu({
               macOS (.zip)
             </a>
           ) : null}
+          {windowsZip ? (
+            <a
+              role="menuitem"
+              href={windowsZip}
+              className="flex h-8 items-center rounded-md px-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
+              onClick={() => setOpen(false)}
+            >
+              Windows (.zip)
+            </a>
+          ) : (
+            <a
+              role="menuitem"
+              href={`${GITHUB_URL}#windows`}
+              target="_blank"
+              rel="noreferrer"
+              className="flex h-8 items-center rounded-md px-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
+              onClick={() => setOpen(false)}
+            >
+              Windows (build from source)
+            </a>
+          )}
           {!dmg && !zip && !windowsZip ? (
             <a
               role="menuitem"
@@ -107,27 +128,6 @@ export function DownloadMenu({
             </a>
           )}
           <div className="my-1 h-px bg-border" />
-          {windowsZip ? (
-            <a
-              role="menuitem"
-              href={windowsZip}
-              className="flex h-8 items-center rounded-md px-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
-              onClick={() => setOpen(false)}
-            >
-              Windows (.zip)
-            </a>
-          ) : (
-            <a
-              role="menuitem"
-              href={`${GITHUB_URL}#windows`}
-              target="_blank"
-              rel="noreferrer"
-              className="flex h-8 items-center rounded-md px-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
-              onClick={() => setOpen(false)}
-            >
-              Windows (build from source)
-            </a>
-          )}
           <div className="flex h-8 cursor-default items-center rounded-md px-2.5 text-sm text-muted-foreground opacity-45">
             Linux (soon)
           </div>
