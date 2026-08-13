@@ -2,6 +2,7 @@ export interface LatestRelease {
   version: string
   dmgUrl: string | null
   zipUrl: string | null
+  windowsZipUrl: string | null
   htmlUrl: string
 }
 
@@ -31,12 +32,17 @@ export async function fetchLatestRelease(): Promise<LatestRelease | null> {
     const assets = data.assets ?? []
     const dmg = assets.find((a) => a.name.endsWith('.dmg'))
     const zip = assets.find(
-      (a) => a.name.endsWith('.zip') && !a.name.endsWith('.sha256'),
+      (a) => a.name.endsWith('-macos.zip') && !a.name.endsWith('.sha256'),
+    )
+    const windowsZip = assets.find(
+      (a) =>
+        a.name.endsWith('-windows-x64.zip') && !a.name.endsWith('.sha256'),
     )
     return {
       version,
       dmgUrl: dmg?.browser_download_url ?? null,
       zipUrl: zip?.browser_download_url ?? null,
+      windowsZipUrl: windowsZip?.browser_download_url ?? null,
       htmlUrl: data.html_url ?? FALLBACK_RELEASES_URL,
     }
   } catch {

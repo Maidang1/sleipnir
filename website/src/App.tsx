@@ -124,7 +124,7 @@ const FAQ = [
   },
   {
     q: 'What about Windows and Linux?',
-    a: 'Windows runs from source today (cargo run -p sleipnir). There is no Windows installer or Release zip yet. Linux is not available.',
+    a: 'Windows has a portable x64 zip on GitHub Releases (unzip and run sleipnir.exe). You can also build from source. Linux is not available.',
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',
@@ -204,7 +204,7 @@ export default function App() {
             <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
               GPU-rendered through GPUI: tabs, splits, multi-window, adaptive themes,
               file-manager paste, path links, and session restore. Prebuilt installers
-              are macOS for now. Windows builds from source.
+              are macOS .dmg/.zip and a Windows x64 zip.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
               <DownloadMenu
@@ -282,8 +282,8 @@ export default function App() {
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">Get Sleipnir</h2>
             <p className="mt-2 max-w-lg text-sm text-muted-foreground">
               Free and open source. On macOS, install from the terminal or grab a
-              .dmg / .zip from GitHub Releases. On Windows, clone the repo and
-              run <code className="font-mono">cargo run -p sleipnir</code>.
+              .dmg / .zip from GitHub Releases. On Windows, download the
+              x64 .zip and run <code className="font-mono">sleipnir.exe</code>.
             </p>
             <InstallCommand className="mt-6" />
             <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">

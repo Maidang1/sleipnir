@@ -6,7 +6,7 @@
 
 ### Features
 - **Windows from source:** GPUI `WindowsPlatform` + ConPTY, Ctrl/Ctrl+Shift keymap (does not steal `Ctrl+C` / `Ctrl+W` / `Ctrl+D`), `%APPDATA%\sleipnir\` settings/session, Cascadia Mono default font, PowerShell path quoting, and last-window-close quits
-- CI `windows-latest` job builds/tests `-p sleipnir` and uploads `sleipnir.exe` as a workflow artifact (not a GitHub Release zip yet)
+- CI `windows-latest` job builds/tests `-p sleipnir` and attaches `Sleipnir-<ver>-windows-x64.zip` (plus `.sha256`) to the GitHub Release
 
 ### Changes
 - One-line macOS install (`curl | bash`) on README and the website: download the latest Release, verify SHA-256, install to `/Applications`, and clear Gatekeeper quarantine with `xattr -cr`

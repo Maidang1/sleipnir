@@ -82,12 +82,15 @@ xattr -cr /Applications/Sleipnir.app
 
 ### Windows
 
-There is no prebuilt installer yet. Build from source (see below). The default
-shell is the system shell (usually PowerShell). Set `terminal.shell` to `wsl.exe`
-in settings if you want WSL.
+Grab `Sleipnir-<ver>-windows-x64.zip` from
+[Releases](https://github.com/Maidang1/sleipnir/releases), unzip, and run
+`sleipnir.exe`. The default shell is the system shell (usually PowerShell).
+Set `terminal.shell` to `wsl.exe` in settings if you want WSL.
 
 Closing the last window exits the process (unlike macOS, where the app can stay
 in the Dock with no windows).
+
+Or build from source (see below).
 
 ## Requirements
 
@@ -278,8 +281,8 @@ git push origin v0.2.0
 ### CI (GitHub Actions)
 
 Triggered automatically on git tags (`v*`). Also supports manual dispatch.
-The same workflow builds and tests `-p sleipnir` on `windows-latest` and uploads
-`sleipnir.exe` as a workflow artifact (not a GitHub Release asset yet).
+The same workflow builds and tests `-p sleipnir` on `windows-latest` and attaches
+`Sleipnir-<ver>-windows-x64.zip` (plus `.sha256`) to the GitHub Release.
 
 ```bash
 gh workflow run build-and-release.yml \
