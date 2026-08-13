@@ -1,4 +1,4 @@
-//! Sleipnir — standalone macOS terminal (HIG-aligned window chrome).
+//! Sleipnir — standalone terminal (HIG-aligned window chrome).
 
 mod app_menus;
 
@@ -8,12 +8,12 @@ use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    font_zoom_key_bindings, open_sleipnir_window, ActivateTab, CheckForUpdates, CloseTab,
-    CycleTheme, DecreaseFontSize, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab,
-    NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize,
-    SplitDown, SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom,
-    ToggleQuickSelect,
+    BindingContext, BuiltinAction, builtin_bindings, last_window_close_quits, open_sleipnir_window,
+    ActivateTab, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, Find, FindNext, FindPrev,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
+    JumpPrevPrompt, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab,
+    ReloadSettings, ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, ToggleCommandPalette,
+    TogglePaneZoom, ToggleQuickSelect,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -24,161 +24,54 @@ use terminal::{
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    let app = application();
     // Last-window close does not quit on macOS. Dock / Cmd-Tab reactivation
     // fires `applicationShouldHandleReopen` with no visible windows; without
     // this callback the click is a no-op and the process stays headless.
-    let app = application();
-    app.on_reopen(|cx| {
-        if cx.windows().is_empty() {
-            open_sleipnir_window(cx);
-            return;
-        }
-        // All windows may be minimized; AppKit reports no visible windows and
-        // GPUI still holds the handles — bring one back instead of spawning.
-        if let Some(handle) = cx.windows().first().copied() {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-        }
-    });
+    #[cfg(target_os = "macos")]
+    {
+        app.on_reopen(|cx| {
+            if cx.windows().is_empty() {
+                open_sleipnir_window(cx);
+                return;
+            }
+            // All windows may be minimized; AppKit reports no visible windows and
+            // GPUI still holds the handles — bring one back instead of spawning.
+            if let Some(handle) = cx.windows().first().copied() {
+                let _ = handle.update(cx, |_, window, _| window.activate_window());
+            }
+        });
+    }
     app.run(|cx: &mut App| {
         AppVersion::init_with(env!("CARGO_PKG_VERSION"), cx);
         sleipnir_settings::init(cx);
 
         // App-menu actions (always available so validation enables the items).
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &Hide, cx| cx.hide());
-        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
-        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        #[cfg(target_os = "macos")]
+        {
+            cx.on_action(|_: &Hide, cx| cx.hide());
+            cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+            cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        }
         // AppShell's NewWindow handler dies with the last window; keep
-        // Shell → New Window / ⌘N working while the process is still up.
+        // New Window working while the process is still up.
         cx.on_action(|_: &NewWindow, cx| open_sleipnir_window(cx));
 
-        /// Bind an action in both AppShell and Terminal contexts.
-        fn bind_both(key: &str, action: impl gpui::Action + Clone) -> [KeyBinding; 2] {
-            [
-                KeyBinding::new(key, action.clone(), Some("AppShell")),
-                KeyBinding::new(key, action, Some("Terminal")),
-            ]
+        if last_window_close_quits() {
+            cx.on_window_closed(|cx, _window_id| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
         }
 
-        cx.bind_keys([
-            // Application (menu bar + macOS conventions)
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-h", Hide, None),
-            KeyBinding::new("cmd-alt-h", HideOthers, None),
-            // Clipboard
-            KeyBinding::new("cmd-c", Copy, Some("Terminal")),
-            KeyBinding::new("cmd-v", Paste, Some("Terminal")),
-            KeyBinding::new("ctrl-shift-c", Copy, Some("Terminal")),
-            KeyBinding::new("ctrl-shift-v", Paste, Some("Terminal")),
-            KeyBinding::new("ctrl-cmd-v", PasteText, Some("Terminal")),
-            // Select / clear / character palette / vi mode
-            KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
-            KeyBinding::new("cmd-k", Clear, Some("Terminal")),
-            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("Terminal")),
-            KeyBinding::new("ctrl-shift-space", ToggleViMode, Some("Terminal")),
-            // Scrollback (disabled for alt-screen apps in the handlers)
-            KeyBinding::new("shift-up", ScrollLineUp, Some("Terminal")),
-            KeyBinding::new("shift-down", ScrollLineDown, Some("Terminal")),
-            KeyBinding::new("shift-pageup", ScrollPageUp, Some("Terminal")),
-            KeyBinding::new("shift-pagedown", ScrollPageDown, Some("Terminal")),
-            KeyBinding::new("cmd-up", ScrollPageUp, Some("Terminal")),
-            KeyBinding::new("cmd-down", ScrollPageDown, Some("Terminal")),
-            KeyBinding::new("shift-home", ScrollToTop, Some("Terminal")),
-            KeyBinding::new("shift-end", ScrollToBottom, Some("Terminal")),
-            KeyBinding::new("cmd-home", ScrollToTop, Some("Terminal")),
-            KeyBinding::new("cmd-end", ScrollToBottom, Some("Terminal")),
-            // Shell line editing conveniences (Zed Terminal parity)
-            KeyBinding::new(
-                "cmd-backspace",
-                SendKeystroke("ctrl-u".into()),
-                Some("Terminal"),
-            ),
-            KeyBinding::new(
-                "cmd-delete",
-                SendKeystroke("ctrl-k".into()),
-                Some("Terminal"),
-            ),
-            KeyBinding::new("cmd-left", SendKeystroke("ctrl-a".into()), Some("Terminal")),
-            KeyBinding::new(
-                "cmd-right",
-                SendKeystroke("ctrl-e".into()),
-                Some("Terminal"),
-            ),
-            KeyBinding::new("alt-left", SendText("\u{1b}b".into()), Some("Terminal")),
-            KeyBinding::new("alt-right", SendText("\u{1b}f".into()), Some("Terminal")),
-            KeyBinding::new("alt-b", SendText("\u{1b}b".into()), Some("Terminal")),
-            KeyBinding::new("alt-f", SendText("\u{1b}f".into()), Some("Terminal")),
-            KeyBinding::new("alt-delete", SendText("\u{1b}d".into()), Some("Terminal")),
-            KeyBinding::new(
-                "ctrl-delete",
-                SendText("\u{1b}[3;5~".into()),
-                Some("Terminal"),
-            ),
-        ]);
-
-        // Tabs, splits, navigation, font zoom, new window — AppShell + Terminal.
-        let dual_bindings: Vec<KeyBinding> = [
-            bind_both("cmd-t", NewTab),
-            bind_both("cmd-w", CloseTab),
-            bind_both("cmd-n", NewWindow),
-            bind_both("cmd-shift-]", NextTab),
-            bind_both("cmd-shift-[", PrevTab),
-            bind_both("ctrl-tab", NextTab),
-            bind_both("ctrl-shift-tab", PrevTab),
-            bind_both("cmd-shift-r", ReloadSettings),
-            bind_both("cmd-,", OpenSettings),
-            bind_both("cmd-shift-p", CycleTheme),
-            bind_both("cmd-d", SplitRight),
-            bind_both("cmd-shift-d", SplitDown),
-            bind_both("cmd-alt-left", FocusPaneLeft),
-            bind_both("cmd-alt-right", FocusPaneRight),
-            bind_both("cmd-alt-up", FocusPaneUp),
-            bind_both("cmd-alt-down", FocusPaneDown),
-            bind_both("cmd-shift-u", CheckForUpdates),
-            bind_both("cmd-shift-k", ToggleCommandPalette),
-            bind_both("cmd-f", Find),
-            bind_both("cmd-g", FindNext),
-            bind_both("cmd-shift-g", FindPrev),
-            // M13
-            bind_both("cmd-shift-enter", TogglePaneZoom),
-            bind_both("cmd-shift-b", ToggleBroadcast),
-            // M14
-            bind_both("cmd-shift-up", JumpPrevPrompt),
-            bind_both("cmd-shift-down", JumpNextPrompt),
-            // M15
-            bind_both("cmd-shift-o", ToggleQuickSelect),
-            bind_both("cmd-shift-n", OpenQuickTerminal),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        cx.bind_keys(dual_bindings);
-
-        // Font zoom (⌘+ / ⌘= / ⌘- / ⌘0) from the shared table in sleipnir_ui
-        // so unit tests cover the exact keystroke strings that ship.
-        // GPUI: `cmd-+` / `cmd--` (not `cmd-plus` / `cmd-minus`).
-        let font_zoom_bindings: Vec<KeyBinding> = font_zoom_key_bindings()
-            .iter()
-            .flat_map(|(key, action)| match *action {
-                "increase_font_size" => bind_both(key, IncreaseFontSize)
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                "decrease_font_size" => bind_both(key, DecreaseFontSize)
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                "reset_font_size" => bind_both(key, ResetFontSize)
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            })
-            .collect();
-        cx.bind_keys(font_zoom_bindings);
-
-        // Jump directly to tab N (⌘1..⌘9); 1-based, out-of-range is a no-op.
-        let tab_bindings: Vec<KeyBinding> = (1..=9u8)
-            .flat_map(|n| bind_both(&format!("cmd-{n}"), ActivateTab(n as usize)))
-            .collect();
-        cx.bind_keys(tab_bindings);
+        let mut keys = Vec::new();
+        for spec in builtin_bindings() {
+            keys.extend(key_bindings_for_builtin(&spec));
+        }
+        cx.bind_keys(keys);
 
         // User key binding overrides from settings.json (M9).
         bind_user_key_bindings(cx);
@@ -189,6 +82,74 @@ fn main() {
         open_sleipnir_window(cx);
         cx.activate(true);
     });
+}
+
+fn key_bindings_for_builtin(spec: &sleipnir_ui::BuiltinBinding) -> Vec<KeyBinding> {
+    let contexts: Vec<Option<&str>> = match spec.context {
+        BindingContext::Global => vec![None],
+        BindingContext::Terminal => vec![Some("Terminal")],
+        BindingContext::Both => vec![Some("AppShell"), Some("Terminal")],
+    };
+    contexts
+        .into_iter()
+        .map(|ctx| bind_action(&spec.key, spec.action, ctx))
+        .collect()
+}
+
+fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBinding {
+    match action {
+        BuiltinAction::Quit => KeyBinding::new(key, Quit, context),
+        BuiltinAction::Hide => KeyBinding::new(key, Hide, context),
+        BuiltinAction::HideOthers => KeyBinding::new(key, HideOthers, context),
+        BuiltinAction::Copy => KeyBinding::new(key, Copy, context),
+        BuiltinAction::Paste => KeyBinding::new(key, Paste, context),
+        BuiltinAction::PasteText => KeyBinding::new(key, PasteText, context),
+        BuiltinAction::SelectAll => KeyBinding::new(key, SelectAll, context),
+        BuiltinAction::Clear => KeyBinding::new(key, Clear, context),
+        BuiltinAction::ShowCharacterPalette => KeyBinding::new(key, ShowCharacterPalette, context),
+        BuiltinAction::ToggleViMode => KeyBinding::new(key, ToggleViMode, context),
+        BuiltinAction::ScrollLineUp => KeyBinding::new(key, ScrollLineUp, context),
+        BuiltinAction::ScrollLineDown => KeyBinding::new(key, ScrollLineDown, context),
+        BuiltinAction::ScrollPageUp => KeyBinding::new(key, ScrollPageUp, context),
+        BuiltinAction::ScrollPageDown => KeyBinding::new(key, ScrollPageDown, context),
+        BuiltinAction::ScrollToTop => KeyBinding::new(key, ScrollToTop, context),
+        BuiltinAction::ScrollToBottom => KeyBinding::new(key, ScrollToBottom, context),
+        BuiltinAction::NewTab => KeyBinding::new(key, NewTab, context),
+        BuiltinAction::CloseTab => KeyBinding::new(key, CloseTab, context),
+        BuiltinAction::NewWindow => KeyBinding::new(key, NewWindow, context),
+        BuiltinAction::NextTab => KeyBinding::new(key, NextTab, context),
+        BuiltinAction::PrevTab => KeyBinding::new(key, PrevTab, context),
+        BuiltinAction::ReloadSettings => KeyBinding::new(key, ReloadSettings, context),
+        BuiltinAction::OpenSettings => KeyBinding::new(key, OpenSettings, context),
+        BuiltinAction::CycleTheme => KeyBinding::new(key, CycleTheme, context),
+        BuiltinAction::SplitRight => KeyBinding::new(key, SplitRight, context),
+        BuiltinAction::SplitDown => KeyBinding::new(key, SplitDown, context),
+        BuiltinAction::FocusPaneLeft => KeyBinding::new(key, FocusPaneLeft, context),
+        BuiltinAction::FocusPaneRight => KeyBinding::new(key, FocusPaneRight, context),
+        BuiltinAction::FocusPaneUp => KeyBinding::new(key, FocusPaneUp, context),
+        BuiltinAction::FocusPaneDown => KeyBinding::new(key, FocusPaneDown, context),
+        BuiltinAction::CheckForUpdates => KeyBinding::new(key, CheckForUpdates, context),
+        BuiltinAction::ToggleCommandPalette => {
+            KeyBinding::new(key, ToggleCommandPalette, context)
+        }
+        BuiltinAction::Find => KeyBinding::new(key, Find, context),
+        BuiltinAction::FindNext => KeyBinding::new(key, FindNext, context),
+        BuiltinAction::FindPrev => KeyBinding::new(key, FindPrev, context),
+        BuiltinAction::TogglePaneZoom => KeyBinding::new(key, TogglePaneZoom, context),
+        BuiltinAction::ToggleBroadcast => KeyBinding::new(key, ToggleBroadcast, context),
+        BuiltinAction::JumpPrevPrompt => KeyBinding::new(key, JumpPrevPrompt, context),
+        BuiltinAction::JumpNextPrompt => KeyBinding::new(key, JumpNextPrompt, context),
+        BuiltinAction::ToggleQuickSelect => KeyBinding::new(key, ToggleQuickSelect, context),
+        BuiltinAction::OpenQuickTerminal => KeyBinding::new(key, OpenQuickTerminal, context),
+        BuiltinAction::IncreaseFontSize => KeyBinding::new(key, IncreaseFontSize, context),
+        BuiltinAction::DecreaseFontSize => KeyBinding::new(key, DecreaseFontSize, context),
+        BuiltinAction::ResetFontSize => KeyBinding::new(key, ResetFontSize, context),
+        BuiltinAction::ActivateTab(n) => KeyBinding::new(key, ActivateTab(n), context),
+        BuiltinAction::SendKeystroke(ks) => {
+            KeyBinding::new(key, SendKeystroke(ks.into()), context)
+        }
+        BuiltinAction::SendText(text) => KeyBinding::new(key, SendText(text.into()), context),
+    }
 }
 
 /// Layer optional user key bindings from `settings.json` on top of builtins.

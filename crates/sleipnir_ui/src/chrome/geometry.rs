@@ -21,14 +21,22 @@ pub struct ChromeGeometry {
     /// Radius of the macOS window's rounded corners; the content is clipped to
     /// this so the opaque terminal background does not square off the corners.
     pub window_radius: Pixels,
+    /// Trailing inset so tab chips stay clear of system caption buttons.
+    pub trailing_pad: Pixels,
 }
 
 impl ChromeGeometry {
     pub fn standard() -> Self {
+        Self::standard_for(cfg!(windows))
+    }
+
+    /// Chrome insets for a given OS family. `windows = true` uses a small
+    /// leading pad and reserves trailing space for caption buttons.
+    pub fn standard_for(windows: bool) -> Self {
         Self {
             height: px(40.0),
             traffic_light_position: point(px(12.0), px(12.0)),
-            leading_pad: traffic_light_leading_pad(),
+            leading_pad: leading_pad_for(windows),
             tab_height: px(28.0),
             tab_radius: px(6.0),
             tab_min_width: px(80.0),
@@ -39,6 +47,7 @@ impl ChromeGeometry {
             new_tab_hit: px(28.0),
             close_hit: px(24.0),
             window_radius: px(10.0),
+            trailing_pad: trailing_pad_for(windows),
         }
     }
 
@@ -49,13 +58,30 @@ impl ChromeGeometry {
 }
 
 #[inline]
+#[allow(dead_code)]
 pub fn traffic_light_leading_pad() -> Pixels {
-    // Match Zed ui::TRAFFIC_LIGHT_PADDING without depending on ui.
-    // Without build.rs, cfg is always false → 71.
-    if cfg!(macos_sdk_26_or_later) {
+    leading_pad_for(cfg!(windows))
+}
+
+#[inline]
+pub fn leading_pad_for(windows: bool) -> Pixels {
+    if windows {
+        px(8.0)
+    } else if cfg!(macos_sdk_26_or_later) {
+        // Match Zed ui::TRAFFIC_LIGHT_PADDING without depending on ui.
         px(78.0)
     } else {
         px(71.0)
+    }
+}
+
+/// Space reserved on the right for system window controls.
+#[inline]
+pub fn trailing_pad_for(windows: bool) -> Pixels {
+    if windows {
+        px(138.0)
+    } else {
+        px(8.0)
     }
 }
 
@@ -72,6 +98,22 @@ mod tests {
         assert_eq!(g.new_tab_hit, px(28.0));
         // Without SDK 26 cfg in unit test host, pad is 71 unless build set the cfg.
         let pad = traffic_light_leading_pad();
-        assert!(pad == px(71.0) || pad == px(78.0));
+        if cfg!(windows) {
+            assert_eq!(pad, px(8.0));
+            assert_eq!(g.trailing_pad, px(138.0));
+        } else {
+            assert!(pad == px(71.0) || pad == px(78.0));
+            assert_eq!(g.trailing_pad, px(8.0));
+        }
+    }
+
+    #[test]
+    fn windows_chrome_reserves_caption_not_traffic_lights() {
+        let win = ChromeGeometry::standard_for(true);
+        assert_eq!(win.leading_pad, px(8.0));
+        assert_eq!(win.trailing_pad, px(138.0));
+        let mac = ChromeGeometry::standard_for(false);
+        assert!(mac.leading_pad >= px(71.0));
+        assert_eq!(mac.trailing_pad, px(8.0));
     }
 }

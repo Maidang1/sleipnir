@@ -307,7 +307,11 @@ pub fn open_sleipnir_window(cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(geo.traffic_light_position),
+                traffic_light_position: if cfg!(windows) {
+                    None
+                } else {
+                    Some(geo.traffic_light_position)
+                },
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -2017,7 +2021,10 @@ impl AppShell {
                             .bg(tokens.accent.opacity(0.85))
                             .text_size(px(11.0))
                             .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
-                            .child("Zoomed · ⌘⇧Enter to restore"),
+                            .child(format!(
+                                "Zoomed · {} to restore",
+                                crate::display_shortcut("toggle_pane_zoom")
+                            )),
                     )
                     .into_any_element();
             }
@@ -2584,7 +2591,10 @@ impl AppShell {
                             .text_size(px(11.0))
                             .text_color(tokens.fg_muted)
                             .child(
-                                "Custom key bindings, font family/size, and shell options live in settings.json. Open the file and reload with ⌘⇧R (key bindings apply on next launch).",
+                                format!(
+                                    "Custom key bindings, font family/size, and shell options live in settings.json. Open the file and reload with {} (key bindings apply on next launch).",
+                                    crate::display_shortcut("reload_settings")
+                                ),
                             ),
                     )
                     .child(
@@ -2592,7 +2602,7 @@ impl AppShell {
                             .mt_1()
                             .text_size(px(11.0))
                             .text_color(tokens.accent)
-                            .child("~/.config/sleipnir/settings.json"),
+                            .child(sleipnir_settings::config_path().display().to_string()),
                     ),
             )
     }
@@ -3060,7 +3070,7 @@ impl Render for AppShell {
         let trailing_drag = self
             .attach_empty_drag("chrome-drag-trailing", cx)
             .flex_1()
-            .min_w(px(8.0));
+            .min_w(geo.trailing_pad);
 
         let tab_scroll = div()
             .id("tab-scroller")
@@ -3332,7 +3342,10 @@ impl Render for AppShell {
                                 .border_color(tokens.accent)
                                 .text_size(px(12.0))
                                 .text_color(tokens.fg)
-                                .child("Quick Select · Esc to close · click links with ⌘"),
+                                .child(format!(
+                                    "Quick Select · Esc to close · click links with {}",
+                                    crate::display_shortcut("secondary_click")
+                                )),
                         ),
                 )
             })

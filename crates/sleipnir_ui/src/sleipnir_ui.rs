@@ -4,6 +4,7 @@ mod app_shell;
 mod blink;
 mod chrome;
 mod command_palette;
+mod keymap;
 mod pane_tree;
 mod session;
 mod term_element;
@@ -20,6 +21,10 @@ pub use app_shell::{
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
+pub use keymap::{
+    BindingContext, BuiltinAction, BuiltinBinding, builtin_bindings, builtin_bindings_for,
+    display_shortcut, font_zoom_key_bindings, font_zoom_key_bindings_for, last_window_close_quits,
+};
 pub use pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
     neighbor,
@@ -707,7 +712,7 @@ impl Render for TermView {
                                     div()
                                         .text_size(gpui::px(12.0))
                                         .text_color(toast_fg)
-                                        .font_family("Menlo")
+                                        .font_family(sleipnir_settings::default_font_family())
                                         .child("copied to clipboard"),
                                 ),
                         ),
@@ -716,15 +721,27 @@ impl Render for TermView {
     }
 }
 
-/// Best-effort macOS notification when a long-running command finishes (M14).
+/// Best-effort notification when a long-running command finishes (M14).
 fn notify_command_finished(dur: std::time::Duration) {
-    let secs = dur.as_secs();
-    let script = format!(
-        "display notification \"Command finished after {secs}s\" with title \"Sleipnir\""
-    );
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn();
+    #[cfg(target_os = "macos")]
+    {
+        let secs = dur.as_secs();
+        let script = format!(
+            "display notification \"Command finished after {secs}s\" with title \"Sleipnir\""
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        log::info!("command finished after {}s", dur.as_secs());
+    }
+}
+
+/// Whether command-finish notify shells out to `osascript` on this OS.
+pub fn notify_uses_osascript() -> bool {
+    cfg!(target_os = "macos")
 }
 
 /// Clamp font size for zoom / settings (pt).
@@ -732,20 +749,7 @@ pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 72.0;
 pub const FONT_SIZE_STEP: f32 = 1.0;
 
-/// GPUI keystroke strings wired for font zoom in `sleipnir` (main key map).
-///
-/// Kept here so unit tests can assert the **same** strings that ship, using
-/// real `Keystroke::parse` (GPUI never emits keys named `"plus"` / `"minus"`;
-/// the correct forms are `cmd-+` and `cmd--`, matching Zed).
-pub fn font_zoom_key_bindings() -> &'static [(&'static str, &'static str)] {
-    &[
-        // (keystroke, action id)
-        ("cmd-=", "increase_font_size"),
-        ("cmd-+", "increase_font_size"),
-        ("cmd--", "decrease_font_size"),
-        ("cmd-0", "reset_font_size"),
-    ]
-}
+
 
 /// Effective font size from optional override + settings.
 pub fn effective_font_size(override_size: Option<Pixels>, cx: &App) -> Pixels {
@@ -773,13 +777,28 @@ fn handle_bell(window: &mut Window, cx: &mut Context<TermView>) {
 /// Plain `Ctrl+C` / `Ctrl+V` must **not** match so they reach the PTY as ETX/SYN
 /// and can interrupt or pass control sequences to foreground programs.
 fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
+    is_clipboard_shortcut_for(keystroke, cfg!(windows))
+}
+
+/// Clipboard reservation. `windows = true` treats plain Ctrl+V as paste
+/// (Windows Terminal) while leaving plain Ctrl+C for the PTY.
+pub fn is_clipboard_shortcut_for(keystroke: &Keystroke, windows: bool) -> bool {
     let modifiers = &keystroke.modifiers;
     let is_c = keystroke.key.eq_ignore_ascii_case("c");
     let is_v = keystroke.key.eq_ignore_ascii_case("v");
 
     // Cmd+C/V and Ctrl+Cmd+V (PasteText) are covered by the platform branch.
-    (modifiers.platform && (is_c || is_v))
-        || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v))
+    let reserved = (modifiers.platform && (is_c || is_v))
+        || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v));
+    if reserved {
+        return true;
+    }
+    // Windows: Ctrl+V (no shift, no Win) is paste. Ctrl+C is never reserved.
+    windows
+        && is_v
+        && modifiers.control
+        && !modifiers.shift
+        && !modifiers.platform
 }
 
 /// Open web URLs, and path-like targets when `path_links` is enabled (M12).
@@ -830,19 +849,21 @@ pub fn parse_path_line_col(input: &str) -> ParsedPathTarget {
 }
 
 fn split_path_line_col(s: &str) -> (String, Option<u32>, Option<u32>) {
-    // From the right: optional :col, then :line. Path may contain colons only
-    // as separators here (macOS paths don't use drive letters).
-    let bytes = s.as_bytes();
+    // From the right: optional :col, then :line. A Windows drive prefix
+    // (`C:` / `/C:`) is not treated as a suffix separator.
+    let drive = windows_drive_prefix_len(s);
+    let searchable = &s[drive..];
     let mut col_start = None;
     let mut line_start = None;
-    // Find trailing :digits
-    if let Some(colon) = s.rfind(':') {
+    if let Some(rel) = searchable.rfind(':') {
+        let colon = drive + rel;
         let after = &s[colon + 1..];
         if !after.is_empty() && after.bytes().all(|b| b.is_ascii_digit()) {
             col_start = Some(colon);
-            let before = &s[..colon];
-            if let Some(colon2) = before.rfind(':') {
-                let mid = &before[colon2 + 1..];
+            let before = &s[drive..colon];
+            if let Some(rel2) = before.rfind(':') {
+                let colon2 = drive + rel2;
+                let mid = &s[colon2 + 1..colon];
                 if !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_digit()) {
                     line_start = Some(colon2);
                 }
@@ -857,16 +878,28 @@ fn split_path_line_col(s: &str) -> (String, Option<u32>, Option<u32>) {
             (path, line, column)
         }
         (None, Some(cs)) => {
-            // Only one numeric suffix → treat as :line
             let path = s[..cs].to_string();
             let line = s[cs + 1..].parse().ok();
             (path, line, None)
         }
-        _ => {
-            let _ = bytes;
-            (s.to_string(), None, None)
+        _ => (s.to_string(), None, None),
+    }
+}
+
+/// Length of a leading `C:` / `/C:` drive prefix so `:line` parsing ignores it.
+fn windows_drive_prefix_len(s: &str) -> usize {
+    let (offset, rest) = if let Some(stripped) = s.strip_prefix('/') {
+        (1, stripped)
+    } else {
+        (0, s)
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        if bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/' {
+            return offset + 2;
         }
     }
+    0
 }
 
 /// Resolve a path-like target against cwd and open if it exists.
@@ -898,11 +931,40 @@ fn open_path_like_target(path: &terminal::PathLikeTarget) {
         parsed.line,
         parsed.column
     );
-    // macOS `open` handles files and directories; line/col are not passed
-    // (default app may ignore them). Existence-checked above → no panic.
-    match std::process::Command::new("open").arg(&candidate).spawn() {
-        Ok(_) => {}
-        Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+    // Existence-checked above → no panic. Line/col are not passed (the
+    // default app may ignore them).
+    open_existing_path(&candidate);
+}
+
+/// Program used to open paths, if any. Windows uses `cmd /C start` instead.
+pub fn path_opener_program() -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        Some("open")
+    }
+}
+
+fn open_existing_path(candidate: &Path) {
+    #[cfg(windows)]
+    {
+        match std::process::Command::new("cmd")
+            .args(["/C", "start", "", &candidate.to_string_lossy()])
+            .spawn()
+        {
+            Ok(_) => {}
+            Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match std::process::Command::new("open").arg(candidate).spawn() {
+            Ok(_) => {}
+            Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+        }
     }
 }
 
@@ -946,19 +1008,26 @@ fn write_clipboard_image_to_temp(image: &gpui::Image) -> Result<PathBuf, String>
 
 /// Quote a filesystem path for safe insertion into a shell command line.
 fn shell_quote_path(path: &Path) -> String {
+    quote_path_for_shell(path, cfg!(windows))
+}
+
+/// Quote `path` for POSIX (`windows = false`) or PowerShell (`windows = true`).
+pub fn quote_path_for_shell(path: &Path, windows: bool) -> String {
     let s = path.to_string_lossy();
     if s.is_empty() {
         return "''".to_string();
     }
-    // Unquoted only when clearly safe for common shells.
     let safe = s.chars().all(|c| {
         c.is_ascii_alphanumeric()
             || matches!(c, '/' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
+            || (windows && c == '\\')
     });
     if safe {
-        s.into_owned()
+        return s.into_owned();
+    }
+    if windows {
+        format!("'{}'", s.replace('\'', "''"))
     } else {
-        // POSIX single-quote: wrap and escape embedded ' as '\''
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
@@ -985,9 +1054,17 @@ mod tests {
     }
 
     #[test]
-    fn plain_control_c_and_v_are_sent_to_the_terminal() {
+    fn plain_control_c_is_sent_to_the_terminal() {
         assert!(!is_clipboard_shortcut(&parse("ctrl-c")));
-        assert!(!is_clipboard_shortcut(&parse("ctrl-v")));
+        assert!(!is_clipboard_shortcut_for(&parse("ctrl-c"), true));
+        assert!(!is_clipboard_shortcut_for(&parse("ctrl-c"), false));
+    }
+
+    #[test]
+    fn windows_ctrl_v_is_paste_but_macos_sends_it_to_pty() {
+        assert!(is_clipboard_shortcut_for(&parse("ctrl-v"), true));
+        assert!(!is_clipboard_shortcut_for(&parse("ctrl-v"), false));
+        assert_eq!(is_clipboard_shortcut(&parse("ctrl-v")), cfg!(windows));
     }
 
     #[test]
@@ -1045,7 +1122,9 @@ mod tests {
 
         let mut plain_ctrl_v = parse("ctrl-v");
         plain_ctrl_v.key = "V".into();
-        assert!(!is_clipboard_shortcut(&plain_ctrl_v));
+        assert_eq!(is_clipboard_shortcut(&plain_ctrl_v), cfg!(windows));
+        assert!(is_clipboard_shortcut_for(&plain_ctrl_v, true));
+        assert!(!is_clipboard_shortcut_for(&plain_ctrl_v, false));
 
         let mut cmd_c = parse("cmd-c");
         cmd_c.key = "C".into();
@@ -1055,18 +1134,30 @@ mod tests {
     #[test]
     fn shell_quote_path_quotes_unsafe_paths() {
         assert_eq!(
-            shell_quote_path(Path::new("/tmp/safe-name")),
+            quote_path_for_shell(Path::new("/tmp/safe-name"), false),
             "/tmp/safe-name"
         );
         assert_eq!(
-            shell_quote_path(Path::new("/tmp/has space")),
+            quote_path_for_shell(Path::new("/tmp/has space"), false),
             "'/tmp/has space'"
         );
         assert_eq!(
-            shell_quote_path(Path::new("/tmp/o'reilly")),
+            quote_path_for_shell(Path::new("/tmp/o'reilly"), false),
             "'/tmp/o'\\''reilly'"
         );
-        assert_eq!(shell_quote_path(Path::new("")), "''");
+        assert_eq!(quote_path_for_shell(Path::new(""), false), "''");
+        assert_eq!(
+            quote_path_for_shell(Path::new(r"C:\Program Files\x"), true),
+            r"'C:\Program Files\x'"
+        );
+        assert_eq!(
+            quote_path_for_shell(Path::new(r"C:\o'reilly"), true),
+            r"'C:\o''reilly'"
+        );
+        assert_eq!(
+            quote_path_for_shell(Path::new(r"C:\safe"), true),
+            r"C:\safe"
+        );
     }
 
     #[test]
@@ -1120,6 +1211,30 @@ mod tests {
                 column: Some(4),
             }
         );
+        assert_eq!(
+            parse_path_line_col(r"C:\Windows\win.ini:12"),
+            ParsedPathTarget {
+                path: r"C:\Windows\win.ini".into(),
+                line: Some(12),
+                column: None,
+            }
+        );
+        assert_eq!(
+            parse_path_line_col(r"C:\foo\bar.rs:10:2"),
+            ParsedPathTarget {
+                path: r"C:\foo\bar.rs".into(),
+                line: Some(10),
+                column: Some(2),
+            }
+        );
+        assert_eq!(
+            parse_path_line_col("C:/Users/me/x.rs:3"),
+            ParsedPathTarget {
+                path: "C:/Users/me/x.rs".into(),
+                line: Some(3),
+                column: None,
+            }
+        );
     }
 
     #[test]
@@ -1147,31 +1262,40 @@ mod tests {
     #[test]
     fn font_zoom_shipped_keystrokes_parse_as_platform_keys() {
         let bindings = font_zoom_key_bindings();
+        let want_plus = if cfg!(windows) { "ctrl-+" } else { "cmd-+" };
+        let want_minus = if cfg!(windows) { "ctrl--" } else { "cmd--" };
         assert!(
             bindings
                 .iter()
-                .any(|(k, a)| *k == "cmd-+" && *a == "increase_font_size"),
-            "shipped table must include cmd-+ for increase"
+                .any(|(k, a)| *k == want_plus && *a == "increase_font_size"),
+            "shipped table must include {want_plus} for increase"
         );
         assert!(
             bindings
                 .iter()
-                .any(|(k, a)| *k == "cmd--" && *a == "decrease_font_size"),
-            "shipped table must include cmd-- for decrease"
+                .any(|(k, a)| *k == want_minus && *a == "decrease_font_size"),
+            "shipped table must include {want_minus} for decrease"
         );
         assert!(
-            !bindings.iter().any(|(k, _)| *k == "cmd-plus" || *k == "cmd-minus"),
-            "must not use cmd-plus/cmd-minus (never-emitted key names)"
+            !bindings.iter().any(|(k, _)| k.ends_with("-plus") || k.ends_with("-minus")),
+            "must not use plus/minus key names (never-emitted)"
         );
 
         for (keystroke, action) in bindings {
             let ks = Keystroke::parse(keystroke).unwrap_or_else(|err| {
                 panic!("shipped font-zoom keystroke {keystroke:?} must parse: {err}")
             });
-            assert!(
-                ks.modifiers.platform,
-                "{keystroke} must include cmd/platform"
-            );
+            if cfg!(windows) {
+                assert!(
+                    ks.modifiers.control,
+                    "{keystroke} must include ctrl"
+                );
+            } else {
+                assert!(
+                    ks.modifiers.platform,
+                    "{keystroke} must include cmd/platform"
+                );
+            }
             match *action {
                 "increase_font_size" => {
                     assert!(
@@ -1201,6 +1325,42 @@ mod tests {
         assert_eq!(
             wrong_minus.key, "minus",
             "cmd-minus binds dead key name \"minus\" (platform never emits this)"
+        );
+    }
+
+    #[test]
+    fn windows_path_opener_is_not_open_or_osascript() {
+        assert_eq!(path_opener_program().is_some(), !cfg!(windows));
+        if !cfg!(windows) {
+            assert_eq!(path_opener_program(), Some("open"));
+        }
+        assert_eq!(notify_uses_osascript(), cfg!(target_os = "macos"));
+        let src = include_str!("sleipnir_ui.rs");
+        // The Windows `open_existing_path` arm must not spawn `open`/`osascript`.
+        let win_marker = "#[cfg(windows)]";
+        let win_idx = src
+            .find("fn open_existing_path")
+            .expect("open_existing_path");
+        let win_fn = &src[win_idx..];
+        let win_arm_start = win_fn.find(win_marker).expect("windows arm");
+        let win_arm = &win_fn[win_arm_start..win_fn.find("#[cfg(not(windows))]").unwrap_or(win_fn.len())];
+        assert!(
+            !win_arm.contains("\"open\"") && !win_arm.contains("osascript"),
+            "Windows open path must not call open/osascript"
+        );
+        let notify_start = src
+            .find("fn notify_command_finished")
+            .expect("notify fn");
+        let notify_fn = &src[notify_start..];
+        let notify_end = notify_fn.find("\npub fn notify_uses_osascript").unwrap_or(400);
+        let notify_body = &notify_fn[..notify_end];
+        let non_mac = notify_body
+            .split("#[cfg(not(target_os = \"macos\"))]")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            !non_mac.contains("Command::new(\"osascript\")"),
+            "non-macOS notify arm must not spawn osascript: {non_mac}"
         );
     }
 

@@ -1,7 +1,8 @@
 //! Thin settings for sleipnir.
 //!
 //! JSON keys align with Zed's `terminal` segment where practical.
-//! Path: `~/.config/sleipnir/settings.json` (not Zed's config path).
+//! Path: `config_path()` — `~/.config/sleipnir/settings.json` on macOS/Unix,
+//! `%APPDATA%\sleipnir\settings.json` on Windows (not Zed's config path).
 
 mod themes;
 
@@ -171,14 +172,45 @@ pub struct KeyBindingSpec {
     pub context: Option<String>,
 }
 
+/// Default monospace family for this OS.
+pub fn default_font_family() -> &'static str {
+    default_font_family_for(cfg!(windows))
+}
+
+/// Default monospace family. `windows = true` selects Cascadia Mono.
+pub fn default_font_family_for(windows: bool) -> &'static str {
+    if windows {
+        "Cascadia Mono"
+    } else {
+        "Menlo"
+    }
+}
+
+/// Fallback families so a missing Cascadia Mono still renders a grid.
+pub fn default_font_fallbacks_for(windows: bool) -> Option<FontFallbacks> {
+    if windows {
+        Some(FontFallbacks::from_fonts(vec![
+            "Consolas".into(),
+            "Courier New".into(),
+        ]))
+    } else {
+        None
+    }
+}
+
+/// Alt-as-meta default. Off on Windows so Alt can reach the menu bar.
+pub fn option_as_meta_default_for(windows: bool) -> bool {
+    !windows
+}
+
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
             shell: Shell::System,
             working_directory: WorkingDirectory::AlwaysHome,
             font_size: Some(px(14.)),
-            font_family: Some("Menlo".into()),
-            font_fallbacks: None,
+            font_family: Some(default_font_family().into()),
+            font_fallbacks: default_font_fallbacks_for(cfg!(windows)),
             font_features: Some(FontFeatures::disable_ligatures()),
             font_weight: None,
             line_height: TerminalLineHeight::default(),
@@ -186,7 +218,7 @@ impl Default for TerminalSettings {
             cursor_shape: CursorShape::Block,
             blinking: TerminalBlink::TerminalControlled,
             alternate_scroll: AlternateScroll::On,
-            option_as_meta: true,
+            option_as_meta: option_as_meta_default_for(cfg!(windows)),
             copy_on_select: false,
             keep_selection_on_copy: true,
             open_links_in_mouse_mode: true,
@@ -384,10 +416,30 @@ struct TerminalSettingsFile {
     theme: Option<ThemeName>,
 }
 
+/// Directory that holds `settings.json` and `session.json`.
+pub fn config_dir() -> PathBuf {
+    config_dir_for(cfg!(windows))
+}
+
+/// Settings/session directory for a given OS family.
+pub fn config_dir_for(windows: bool) -> PathBuf {
+    if windows {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("sleipnir")
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config/sleipnir")
+    }
+}
+
 pub fn config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/sleipnir/settings.json")
+    config_path_for(cfg!(windows))
+}
+
+pub fn config_path_for(windows: bool) -> PathBuf {
+    config_dir_for(windows).join("settings.json")
 }
 
 fn load_or_default() -> TerminalSettings {
@@ -504,9 +556,9 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         notify_on_command_finish_secs: Some(5),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
-            font_family: Some("Menlo".into()),
+            font_family: Some(default_font_family().into()),
             line_height: Some(TerminalLineHeight::Custom(1.3)),
-            option_as_meta: Some(true),
+            option_as_meta: Some(option_as_meta_default_for(cfg!(windows))),
             copy_on_select: Some(false),
             max_scroll_history_lines: Some(10_000),
             scroll_multiplier: Some(3.0),
@@ -683,6 +735,52 @@ mod tests {
         assert!(settings.path_links);
         assert_eq!(settings.bell, TerminalBell::Off);
         assert!(!settings.copy_on_select);
+    }
+
+    #[test]
+    fn default_font_is_os_specific() {
+        assert_eq!(default_font_family_for(false), "Menlo");
+        assert_eq!(default_font_family_for(true), "Cascadia Mono");
+        assert_eq!(
+            TerminalSettings::default().font_family.as_deref(),
+            Some(default_font_family())
+        );
+        let win_fallbacks = default_font_fallbacks_for(true).expect("windows fallbacks");
+        assert!(win_fallbacks.0.iter().any(|f| f == "Consolas"));
+        assert!(win_fallbacks.0.iter().any(|f| f == "Courier New"));
+        assert!(default_font_fallbacks_for(false).is_none());
+    }
+
+    #[test]
+    fn option_as_meta_defaults_off_on_windows() {
+        assert!(option_as_meta_default_for(false));
+        assert!(!option_as_meta_default_for(true));
+        assert_eq!(
+            TerminalSettings::default().option_as_meta,
+            option_as_meta_default_for(cfg!(windows))
+        );
+    }
+
+    #[test]
+    fn config_path_uses_os_config_dir_on_windows() {
+        let unix = config_path_for(false);
+        assert!(
+            unix.ends_with(".config/sleipnir/settings.json"),
+            "unix path was {}",
+            unix.display()
+        );
+
+        let win = config_path_for(true);
+        assert_eq!(win.file_name().and_then(|s| s.to_str()), Some("settings.json"));
+        assert_eq!(
+            win.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+            Some("sleipnir")
+        );
+        let win_dir = config_dir_for(true);
+        assert_eq!(win.parent(), Some(win_dir.as_path()));
+        if let Some(config) = dirs::config_dir() {
+            assert_eq!(win_dir, config.join("sleipnir"));
+        }
     }
 
     #[test]

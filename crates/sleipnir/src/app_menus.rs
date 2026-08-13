@@ -26,39 +26,32 @@ actions!(
     ]
 );
 
+/// Top-level menu titles for this OS.
+pub fn app_menu_bar_titles() -> &'static [&'static str] {
+    app_menu_bar_titles_for(cfg!(windows))
+}
+
+pub fn app_menu_bar_titles_for(windows: bool) -> &'static [&'static str] {
+    if windows {
+        &["File", "Edit", "View", "Window"]
+    } else {
+        &["Sleipnir", "Shell", "Edit", "View", "Window"]
+    }
+}
+
 /// Build the main menu bar. First entry is the application menu on macOS.
 pub fn app_menus() -> Vec<Menu> {
-    vec![
-        Menu::new("Sleipnir").items([
-            MenuItem::action("Settings…", OpenSettings),
-            MenuItem::separator(),
-            MenuItem::action("Check for Updates…", CheckForUpdates),
-            MenuItem::separator(),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action("Hide Sleipnir", Hide),
-            MenuItem::action("Hide Others", HideOthers),
-            MenuItem::action("Show All", ShowAll),
-            MenuItem::separator(),
-            MenuItem::action("Quit Sleipnir", Quit),
-        ]),
-        Menu::new("Shell").items([
-            MenuItem::action("New Window", NewWindow),
-            MenuItem::action("New Tab", NewTab),
-            MenuItem::action("Close", CloseTab),
-            MenuItem::separator(),
-            MenuItem::action("Split Right", SplitRight),
-            MenuItem::action("Split Down", SplitDown),
-            MenuItem::separator(),
-            MenuItem::submenu(Menu::new("Focus Pane").items([
-                MenuItem::action("Left", FocusPaneLeft),
-                MenuItem::action("Right", FocusPaneRight),
-                MenuItem::action("Up", FocusPaneUp),
-                MenuItem::action("Down", FocusPaneDown),
-            ])),
-            MenuItem::separator(),
-            MenuItem::action("Clear", Clear),
-        ]),
+    let menus = if cfg!(windows) {
+        windows_menus()
+    } else {
+        macos_menus()
+    };
+    debug_assert_eq!(menus.len(), app_menu_bar_titles().len());
+    menus
+}
+
+fn shared_edit_view_window() -> [Menu; 3] {
+    [
         Menu::new("Edit").items([
             MenuItem::action("Copy", Copy),
             MenuItem::action("Paste", Paste),
@@ -95,4 +88,95 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Previous Tab", PrevTab),
         ]),
     ]
+}
+
+fn macos_menus() -> Vec<Menu> {
+    let [edit, view, window] = shared_edit_view_window();
+    vec![
+        Menu::new("Sleipnir").items([
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide Sleipnir", Hide),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAll),
+            MenuItem::separator(),
+            MenuItem::action("Quit Sleipnir", Quit),
+        ]),
+        Menu::new("Shell").items([
+            MenuItem::action("New Window", NewWindow),
+            MenuItem::action("New Tab", NewTab),
+            MenuItem::action("Close", CloseTab),
+            MenuItem::separator(),
+            MenuItem::action("Split Right", SplitRight),
+            MenuItem::action("Split Down", SplitDown),
+            MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Focus Pane").items([
+                MenuItem::action("Left", FocusPaneLeft),
+                MenuItem::action("Right", FocusPaneRight),
+                MenuItem::action("Up", FocusPaneUp),
+                MenuItem::action("Down", FocusPaneDown),
+            ])),
+            MenuItem::separator(),
+            MenuItem::action("Clear", Clear),
+        ]),
+        edit,
+        view,
+        window,
+    ]
+}
+
+fn windows_menus() -> Vec<Menu> {
+    let [edit, view, window] = shared_edit_view_window();
+    vec![
+        Menu::new("File").items([
+            MenuItem::action("New Window", NewWindow),
+            MenuItem::action("New Tab", NewTab),
+            MenuItem::action("Close", CloseTab),
+            MenuItem::separator(),
+            MenuItem::action("Split Right", SplitRight),
+            MenuItem::action("Split Down", SplitDown),
+            MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Focus Pane").items([
+                MenuItem::action("Left", FocusPaneLeft),
+                MenuItem::action("Right", FocusPaneRight),
+                MenuItem::action("Up", FocusPaneUp),
+                MenuItem::action("Down", FocusPaneDown),
+            ])),
+            MenuItem::separator(),
+            MenuItem::action("Clear", Clear),
+            MenuItem::separator(),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
+            MenuItem::separator(),
+            MenuItem::action("Exit", Quit),
+        ]),
+        edit,
+        view,
+        window,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_menu_bar_has_file_not_app_menu() {
+        assert_eq!(
+            app_menu_bar_titles_for(true),
+            &["File", "Edit", "View", "Window"]
+        );
+        assert!(!app_menu_bar_titles_for(true).contains(&"Sleipnir"));
+    }
+
+    #[test]
+    fn macos_menu_bar_keeps_app_and_shell() {
+        assert_eq!(
+            app_menu_bar_titles_for(false),
+            &["Sleipnir", "Shell", "Edit", "View", "Window"]
+        );
+    }
 }

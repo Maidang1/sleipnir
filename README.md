@@ -4,7 +4,7 @@
 
 # Sleipnir
 
-**A fast, native terminal emulator for macOS — GPU-rendered, tab- and split-aware.**
+**A fast, native terminal emulator for macOS and Windows — GPU-rendered, tab- and split-aware.**
 
 Built on [GPUI](https://gpui.rs) (the UI framework behind [Zed](https://github.com/zed-industries/zed))
 with a forked terminal backend.
@@ -17,11 +17,14 @@ with a forked terminal backend.
 
 ## About
 
-Sleipnir is a standalone terminal for macOS that renders on the GPU through GPUI, so
-scrolling and redraw stay smooth even under heavy output. It ships with a real PTY,
-IME support, multi-tab and split panes, multi-window sessions, adaptive theming that
-follows the system appearance, and a Finder-friendly clipboard that turns pasted images
-into file paths.
+Sleipnir is a standalone terminal that renders on the GPU through GPUI, so
+scrolling and redraw stay smooth even under heavy output. It ships with a real PTY
+(ConPTY on Windows), IME support, multi-tab and split panes, multi-window sessions,
+adaptive theming that follows the system appearance, and a file-manager-friendly
+clipboard that turns pasted images into quoted paths.
+
+Prebuilt installers are **macOS-only** today. Windows runs from source
+(`cargo run -p sleipnir`).
 
 The name comes from Norse myth — Odin's eight-legged steed, the fastest horse in the
 nine worlds. The app icon abstracts that into a minimal horse-head mark over a terminal
@@ -29,28 +32,30 @@ prompt.
 
 ## Features
 
-- **GPU rendering** — smooth scrollback and redraw via GPUI + Metal; ease-in-out cursor blink.
+- **GPU rendering** — smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D on Windows); ease-in-out cursor blink.
 - **Tabs, splits & panes** — split right/down, jump tabs, move focus; pane zoom and unfocused dim.
-- **Multi-window** — `⌘N` opens an independent window with its own tabs and shells.
-- **Font zoom** — `⌘+` / `⌘-` / `⌘0` resize the grid for the current window (not persisted).
+- **Multi-window** — `⌘N` / `Ctrl+Shift+N` opens an independent window with its own tabs and shells.
+- **Font zoom** — `⌘+` / `Ctrl++` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
   GitHub Dark/Light; `auto` follows the system light/dark appearance.
-- **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder
+- **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder / Explorer
   selections as quoted paths; force text-only paste when you need it.
-- **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R`.
+- **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R` / `Ctrl+Shift+R`.
 - **vi mode** — keyboard-driven selection and navigation.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
-- **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings.
-- **Find in scrollback** — `⌘F` search with match highlights.
-- **Path links & bell** — cmd-click paths open in the default app; optional system/visual bell.
+- **Command palette** — discover actions with `⌘⇧K` / `Ctrl+Shift+P`; optional key binding overrides in settings.
+- **Find in scrollback** — `⌘F` / `Ctrl+Shift+F` search with match highlights.
+- **Path links & bell** — ⌘-click / Ctrl-click paths open in the default app; optional system/visual bell.
 - **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
-- **Shell collaboration** — OSC 133 prompt jump (`⌘⇧↑`/`⌘⇧↓`); optional notify when a long
-  command finishes while unfocused.
-- **Quick Terminal / Quick Select** — open a spare window fast (`⌘⇧N`); link-oriented mode (`⌘⇧O`).
+- **Shell collaboration** — OSC 133 prompt jump; optional notify when a long command finishes
+  while unfocused (macOS notification; Windows logs only for now).
+- **Quick Terminal / Quick Select** — open a spare window fast; link-oriented mode.
 
 ## Install
 
-macOS, latest GitHub Release:
+### macOS
+
+Latest GitHub Release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | bash
@@ -75,30 +80,47 @@ and, if macOS still blocks it, run:
 xattr -cr /Applications/Sleipnir.app
 ```
 
+### Windows
+
+There is no prebuilt installer yet. Build from source (see below). The default
+shell is the system shell (usually PowerShell). Set `terminal.shell` to `wsl.exe`
+in settings if you want WSL.
+
+Closing the last window exits the process (unlike macOS, where the app can stay
+in the Dock with no windows).
+
 ## Requirements
 
-- macOS
-- Rust **1.95.0** (see `rust-toolchain.toml`) — only needed to build from source
-- Xcode + Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`
+- **macOS:** Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+- **Windows:** Windows 10 1809+ (ConPTY) with a Direct3D 11 GPU
+- Rust **1.95.0** (see `rust-toolchain.toml`) — required to build from source
 
 ## Build & run
 
 ```bash
 cargo run -p sleipnir
-# binary: target/debug/sleipnir
+# macOS binary: target/debug/sleipnir
+# Windows binary: target/debug/sleipnir.exe
 ```
 
 ## Config
 
-`~/.config/sleipnir/settings.json` — Zed-compatible `terminal.*` keys plus Sleipnir
-extensions:
+Zed-compatible `terminal.*` keys plus Sleipnir extensions:
+
+| OS | Settings / session |
+|----|--------------------|
+| macOS | `~/.config/sleipnir/settings.json` and `session.json` |
+| Windows | `%APPDATA%\sleipnir\settings.json` and `session.json` |
+
+Default font is **Menlo** on macOS and **Cascadia Mono** (then Consolas, Courier New)
+on Windows.
 
 | Key | Meaning |
 |-----|---------|
 | `theme` | `auto` / `mocha` / … (see example); `auto` follows system appearance |
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
-| `path_links` | Open path-like targets on cmd-click (default `true`) |
+| `path_links` | Open path-like targets on ⌘-click / Ctrl-click (default `true`) |
 | `key_bindings` | Extra key bindings (see [`docs/M9.md`](docs/M9.md)) |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
@@ -106,64 +128,75 @@ extensions:
 | `background_opacity` | 0.15–1.0 content opacity (default `1.0` opaque) |
 | `notify_on_command_finish_secs` | Unfocused long-job notify threshold seconds (default `5`; `0` off) |
 
-Open the in-app theme picker with `⌘,`, or edit the file and reload with `⌘⇧R`
-(key binding overrides apply on next launch).
+Open the in-app theme picker with `⌘,` / `Ctrl+,`, or edit the file and reload
+with `⌘⇧R` / `Ctrl+Shift+R` (key binding overrides apply on next launch).
 See [`docs/settings.example.json`](docs/settings.example.json).
 
 ## Paste
 
-| Clipboard | `⌘V` behavior |
+| Clipboard | Paste behavior (`⌘V` / `Ctrl+V` / `Ctrl+Shift+V`) |
 |-----------|----------------|
-| Image (screenshot, etc.) | Write to a temp file; paste shell-quoted absolute path |
-| Finder file paths | Paste space-separated quoted paths |
+| Image (screenshot, etc.) | Write to a temp file; paste a quoted absolute path (POSIX on macOS, PowerShell on Windows) |
+| Finder / Explorer file paths | Paste space-separated quoted paths |
 | Text | Normal paste (bracketed paste when the app enables it) |
 
-Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
+Force **text-only** paste (skip image→path conversion) with `⌃⌘V` on macOS or
+`Ctrl+Alt+V` on Windows.
+
+On Windows, plain `Ctrl+C` still goes to the PTY (interrupt). Copy is
+`Ctrl+Shift+C`.
 
 ## Shortcuts
 
-| Key | Action |
-|-----|--------|
-| `⌘C` / `⌃⇧C` | Copy |
-| `⌘V` / `⌃⇧V` | Paste (image → path) |
-| `⌃⌘V` | Paste text only |
-| `⌘A` | Select all |
-| `⌘K` | Clear |
-| `⌘T` / `⌘W` | New tab / close active pane (then tab) |
-| `⌘N` | New window |
-| `⌘1`…`⌘9` | Jump to tab N |
-| `⌘D` / `⌘⇧D` | Split pane right / down |
-| `⌘⌥←↑↓→` | Move focus between panes |
-| `⌃Tab` / `⌃⇧Tab` | Next / previous tab |
-| `⌘⇧]` / `⌘⇧[` | Next / previous tab |
-| `⌘+` / `⌘=` / `⌘-` / `⌘0` | Increase / decrease / reset font size (window) |
-| `⌘⇧Enter` | Toggle pane zoom |
-| `⌘⇧B` | Toggle broadcast input banner |
-| `⌘⇧↑` / `⌘⇧↓` | Jump to previous / next shell prompt (OSC 133) |
-| `⌘⇧O` | Toggle Quick Select mode |
-| `⌘⇧N` | Open Quick Terminal (new window) |
-| `⌘,` | Open settings (theme picker) |
-| `⌘⇧R` | Reload settings |
-| `⌘⇧P` | Cycle theme (persists) |
-| `⌘⇧K` | Command palette |
-| `⌘F` | Find in scrollback |
-| `⌘G` / `⌘⇧G` | Next / previous find match |
-| `⌘⇧U` | Check for updates |
-| `⌘↑` / `⌘↓` | Scroll page |
-| `⇧↑` / `⇧↓` | Scroll line |
-| `⌘←` / `⌘→` | Line start / end |
-| `⌥←` / `⌥→` | Word back / forward |
-| `⌘⌫` | Clear line |
-| `⌃⇧Space` | Toggle vi mode |
+Windows follows Windows Terminal / Zed conventions: app chords use Ctrl+Shift so
+`Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
 
-See [`docs/M6.md`](docs/M6.md) for the full terminal list.
+| Action | macOS | Windows |
+|--------|-------|---------|
+| Copy | `⌘C` / `⌃⇧C` | `Ctrl+Shift+C` / `Ctrl+Insert` |
+| Paste (image → path) | `⌘V` / `⌃⇧V` | `Ctrl+V` / `Ctrl+Shift+V` / `Shift+Insert` |
+| Paste text only | `⌃⌘V` | `Ctrl+Alt+V` |
+| Select all | `⌘A` | `Ctrl+Shift+A` |
+| Clear | `⌘K` | `Ctrl+Shift+L` |
+| New tab / close pane | `⌘T` / `⌘W` | `Ctrl+Shift+T` / `Ctrl+Shift+W` |
+| New window | `⌘N` | `Ctrl+Shift+N` |
+| Jump to tab N | `⌘1`…`⌘9` | `Ctrl+1`…`Ctrl+9` |
+| Split pane right / down | `⌘D` / `⌘⇧D` | `Alt+Shift+D` / `Alt+Shift+-` |
+| Move focus between panes | `⌘⌥←↑↓→` | `Ctrl+Alt+←↑↓→` |
+| Next / previous tab | `⌃Tab` / `⌃⇧Tab` | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Next / previous tab (alt) | `⌘⇧]` / `⌘⇧[` | (use Ctrl+Tab) |
+| Increase / decrease / reset font | `⌘+` `⌘=` `⌘-` `⌘0` | `Ctrl++` `Ctrl+=` `Ctrl+-` `Ctrl+0` |
+| Toggle pane zoom | `⌘⇧Enter` | `Ctrl+Shift+Enter` |
+| Toggle broadcast | `⌘⇧B` | `Ctrl+Shift+B` |
+| Jump prev / next prompt | `⌘⇧↑` / `⌘⇧↓` | `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
+| Quick Select | `⌘⇧O` | `Ctrl+Shift+O` |
+| Quick Terminal | `⌘⇧N` | `Ctrl+Alt+N` |
+| Settings | `⌘,` | `Ctrl+,` |
+| Reload settings | `⌘⇧R` | `Ctrl+Shift+R` |
+| Cycle theme | `⌘⇧P` | `Ctrl+Shift+Alt+P` |
+| Command palette | `⌘⇧K` | `Ctrl+Shift+P` |
+| Find in scrollback | `⌘F` | `Ctrl+Shift+F` |
+| Next / previous find match | `⌘G` / `⌘⇧G` | `Ctrl+Shift+G` / `Ctrl+Shift+Alt+G` |
+| Check for updates | `⌘⇧U` | `Ctrl+Shift+U` |
+| Scroll page | `⌘↑` / `⌘↓` | `Shift+PageUp` / `Shift+PageDown` |
+| Scroll line | `⇧↑` / `⇧↓` | `Shift+↑` / `Shift+↓` |
+| Line start / end | `⌘←` / `⌘→` | (send to PTY) |
+| Word back / forward | `⌥←` / `⌥→` | `Alt+←` / `Alt+→` |
+| Clear line | `⌘⌫` | (send to PTY) |
+| Toggle vi mode | `⌃⇧Space` | `Ctrl+Shift+Space` |
+| Quit | `⌘Q` | `Alt+F4` / `Ctrl+Q` |
+
+See [`docs/M6.md`](docs/M6.md) for the full macOS terminal list.
 
 ## Auto-update
 
 Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sleipnir/releases).
 
-- Open the update dialog via **Sleipnir → Check for Updates…** or `⌘⇧U`. Sleipnir does
-  **not** check for updates automatically on launch.
+In-place install is **macOS-only**. On Windows, Check for Updates still queries
+GitHub, then opens the releases page.
+
+- Open the update dialog via **Sleipnir → Check for Updates…** (`⌘⇧U` / `Ctrl+Shift+U`).
+  Sleipnir does **not** check for updates automatically on launch.
 - If a newer version is found, choosing **Download & Install** fetches the
   `Sleipnir-<ver>-macos.zip` artifact and verifies it against the published
   `.zip.sha256` sidecar before staging. Because CI builds are ad-hoc signed (no Apple
@@ -204,9 +237,9 @@ Implementation plan: [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadma
 ## Upstream
 
 The GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a
-fixed `rev` (`gpui`, `gpui_macos`, `collections`, `util`, …). Local forks: `terminal`,
-a slim `gpui_platform`, and the Sleipnir app crates. See [`UPSTREAM.md`](UPSTREAM.md) to
-bump the pin.
+fixed `rev` (`gpui`, `gpui_macos`, `gpui_windows`, `collections`, `util`, …). Local forks:
+`terminal`, a slim `gpui_platform`, and the Sleipnir app crates. See [`UPSTREAM.md`](UPSTREAM.md)
+to bump the pin.
 
 ```bash
 ./scripts/upstream-diff.sh /path/to/zed
@@ -244,7 +277,9 @@ git push origin v0.2.0
 
 ### CI (GitHub Actions)
 
-Triggered automatically on git tags (`v*`). Also supports manual dispatch:
+Triggered automatically on git tags (`v*`). Also supports manual dispatch.
+The same workflow builds and tests `-p sleipnir` on `windows-latest` and uploads
+`sleipnir.exe` as a workflow artifact (not a GitHub Release asset yet).
 
 ```bash
 gh workflow run build-and-release.yml \

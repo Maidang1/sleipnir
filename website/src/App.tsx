@@ -24,7 +24,7 @@ import {
 } from '@/lib/release'
 
 const HIGHLIGHTS = [
-  { icon: Zap, label: 'GPU / Metal' },
+  { icon: Zap, label: 'GPU rendering' },
   { icon: Columns2, label: 'Tabs, splits & zoom' },
   { icon: AppWindow, label: 'Multi-window' },
   { icon: Palette, label: 'Adaptive themes' },
@@ -38,17 +38,17 @@ const FEATURES = [
   {
     icon: Zap,
     title: 'Native down to the frame',
-    body: 'Rust and GPUI — the GPU framework behind Zed. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output — no Electron tax.',
+    body: 'Rust and GPUI, the GPU framework behind Zed. Metal on macOS, Direct3D on Windows. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output. No Electron tax.',
   },
   {
     icon: Columns2,
     title: 'Tabs, splits & pane zoom',
-    body: 'Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. Zoom a pane with ⌘⇧Enter; inactive splits dim so focus stays clear.',
+    body: 'Split right or down, jump tabs with ⌘1–9 or Ctrl+1–9, move focus with ⌘⌥ / Ctrl+Alt arrows. Zoom a pane with ⌘⇧Enter or Ctrl+Shift+Enter; inactive splits dim so focus stays clear.',
   },
   {
     icon: AppWindow,
     title: 'Multi-window & font zoom',
-    body: '⌘N opens an independent window with its own tabs and shells. Resize the grid with ⌘+/⌘−/⌘0 — window-scoped, not written to settings.',
+    body: '⌘N / Ctrl+Shift+N opens an independent window with its own tabs and shells. Resize the grid with ⌘+ or Ctrl++ (and − / 0). Window-scoped, not written to settings.',
   },
   {
     icon: Palette,
@@ -57,49 +57,54 @@ const FEATURES = [
   },
   {
     icon: ImageIcon,
-    title: 'Paste that understands macOS',
-    body: 'Screenshot on the clipboard becomes a shell-quoted temp path. Finder selections paste as quoted paths. ⌃⌘V forces text-only.',
+    title: 'Paste that understands the file manager',
+    body: 'A screenshot on the clipboard becomes a quoted temp path. Finder or Explorer selections paste as quoted paths. ⌃⌘V / Ctrl+Alt+V forces text-only.',
   },
   {
     icon: Keyboard,
     title: 'Keyboard first',
-    body: 'Command palette (⌘⇧K), vi mode, configurable key bindings, find in scrollback, close confirm when a job is running. Almost everything stays under your fingers.',
+    body: 'Command palette (⌘⇧K / Ctrl+Shift+P), vi mode, configurable key bindings, find in scrollback, close confirm when a job is running. Windows chords stay off Ctrl+C / Ctrl+W / Ctrl+D so the shell keeps them.',
   },
   {
     icon: Link2,
     title: 'Paths, links & shell markers',
-    body: 'Cmd-click paths open in the default app. Optional system or visual bell. Jump previous/next shell prompt when OSC 133 markers are present (⌘⇧↑/⌘⇧↓).',
+    body: '⌘-click or Ctrl-click paths open in the default app. Optional system or visual bell. Jump previous/next shell prompt when OSC 133 markers are present.',
   },
   {
     icon: Maximize2,
     title: 'Daily extras without bloat',
-    body: 'Quick Terminal (⌘⇧N), Quick Select mode (⌘⇧O), optional content opacity, and notify when a long command finishes while you are in another app.',
+    body: 'Quick Terminal, Quick Select mode, optional content opacity, and (on macOS) notify when a long command finishes while you are in another app.',
   },
   {
     icon: RefreshCw,
     title: 'Quietly current',
-    body: 'Check for updates when you want (⌘⇧U). Downloads verify against a published SHA-256 sidecar before install. Session layout restores on launch.',
+    body: 'Check for updates when you want (⌘⇧U / Ctrl+Shift+U). macOS downloads verify against a published SHA-256 sidecar before install. Session layout restores on launch.',
   },
 ]
 
 const FAQ = [
   {
     q: 'Is this another Electron app?',
-    a: 'No. Sleipnir is a native macOS binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal, not a browser engine.',
+    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS and Direct3D on Windows, not a browser engine.',
   },
   {
     q: 'Where does config live?',
     a: (
       <>
+        macOS:{' '}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           ~/.config/sleipnir/settings.json
         </code>
-        . Terminal keys are Zed-compatible; hot-reload with ⌘⇧R. Session layout
-        restores from{' '}
+        . Windows:{' '}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
+          %APPDATA%\sleipnir\settings.json
+        </code>
+        . Terminal keys are Zed-compatible; hot-reload with ⌘⇧R / Ctrl+Shift+R.
+        Session layout restores from{' '}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           session.json
-        </code>
-        . See the repo{' '}
+        </code>{' '}
+        in the same folder. See the repo{' '}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           docs/settings.example.json
         </code>{' '}
@@ -111,7 +116,7 @@ const FAQ = [
   },
   {
     q: 'Does it auto-update on launch?',
-    a: 'No. Updates are manual via Sleipnir → Check for Updates… or ⌘⇧U. Artifacts are verified with a .zip.sha256 sidecar before install.',
+    a: 'No. Updates are manual via Sleipnir → Check for Updates… (⌘⇧U / Ctrl+Shift+U). macOS artifacts are verified with a .zip.sha256 sidecar before install. On Windows the dialog opens the releases page.',
   },
   {
     q: 'macOS says the app is from an unidentified developer.',
@@ -119,7 +124,7 @@ const FAQ = [
   },
   {
     q: 'What about Windows and Linux?',
-    a: 'macOS ships first. The core is Rust; other platforms are not available yet.',
+    a: 'Windows runs from source today (cargo run -p sleipnir). There is no Windows installer or Release zip yet. Linux is not available.',
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',
@@ -191,15 +196,15 @@ export default function App() {
           <section className="px-5 pt-14 pb-14 md:px-10 md:pt-24">
             <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
               <Command className="size-3.5" />
-              Built on GPUI · macOS only
+              Built on GPUI · macOS · Windows
             </div>
             <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.4rem] md:leading-[1.04]">
-              A fast native terminal for macOS.
+              A fast native terminal for macOS and Windows.
             </h1>
             <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-              GPU-rendered through GPUI — tabs, splits, multi-window, adaptive themes,
-              Finder-aware paste, path links, and session restore. Built for daily work,
-              entirely on your machine.
+              GPU-rendered through GPUI: tabs, splits, multi-window, adaptive themes,
+              file-manager paste, path links, and session restore. Prebuilt installers
+              are macOS for now. Windows builds from source.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
               <DownloadMenu
@@ -217,10 +222,11 @@ export default function App() {
             </div>
             <InstallCommand className="mt-4" />
             <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">
-              Verifies the published SHA-256, installs to{' '}
+              macOS: verifies the published SHA-256, installs to{' '}
               <code className="font-mono">/Applications</code>, and clears
               Gatekeeper quarantine with{' '}
-              <code className="font-mono">xattr -cr</code>.
+              <code className="font-mono">xattr -cr</code>. Windows: build from
+              source (see the repo README).
             </p>
 
             <div className="mt-16">
@@ -275,8 +281,9 @@ export default function App() {
             <SectionLabel>Download</SectionLabel>
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">Get Sleipnir</h2>
             <p className="mt-2 max-w-lg text-sm text-muted-foreground">
-              Free and open source. Install from the terminal, or grab a
-              .dmg / .zip from GitHub Releases.
+              Free and open source. On macOS, install from the terminal or grab a
+              .dmg / .zip from GitHub Releases. On Windows, clone the repo and
+              run <code className="font-mono">cargo run -p sleipnir</code>.
             </p>
             <InstallCommand className="mt-6" />
             <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">

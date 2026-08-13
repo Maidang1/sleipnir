@@ -103,11 +103,13 @@ impl SessionNode {
     }
 }
 
-/// Default session file path: `~/.config/sleipnir/session.json`.
+/// Default session file path, next to `settings.json`.
 pub fn session_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/sleipnir/session.json")
+    session_path_for(cfg!(windows))
+}
+
+pub fn session_path_for(windows: bool) -> PathBuf {
+    sleipnir_settings::config_dir_for(windows).join("session.json")
 }
 
 /// Load a session from disk. Returns `None` if the file is missing, empty,
@@ -265,5 +267,18 @@ mod tests {
         let loaded = load_session(&path).unwrap();
         assert_eq!(loaded.tabs[0].custom_title.as_deref(), Some("work"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_file_sits_beside_settings() {
+        let unix = session_path_for(false);
+        assert!(
+            unix.ends_with(".config/sleipnir/session.json"),
+            "{}",
+            unix.display()
+        );
+        let win = session_path_for(true);
+        assert_eq!(win.file_name().and_then(|s| s.to_str()), Some("session.json"));
+        assert_eq!(win.parent(), Some(sleipnir_settings::config_dir_for(true).as_path()));
     }
 }

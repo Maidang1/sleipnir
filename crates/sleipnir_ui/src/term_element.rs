@@ -213,7 +213,7 @@ impl Element for TermElement {
                 let font_family = settings
                     .font_family
                     .clone()
-                    .unwrap_or_else(|| "Menlo".into());
+                    .unwrap_or_else(|| sleipnir_settings::default_font_family().into());
                 let font_size = font_size_override
                     .or(settings.font_size)
                     .unwrap_or(px(14.))

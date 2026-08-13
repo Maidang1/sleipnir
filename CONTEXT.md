@@ -1,13 +1,13 @@
 # Sleipnir
 
-A standalone macOS terminal emulator built on GPUI. This glossary fixes the
-language for the window/tab/pane model and its interaction surface.
+A standalone terminal emulator built on GPUI (macOS and Windows). This glossary
+fixes the language for the window/tab/pane model and its interaction surface.
 
 ## Window & layout
 
 **Window**:
-One macOS `NSWindow`. Sleipnir may open several. Each hosts one chrome band and
-one content area.
+One OS window (AppKit `NSWindow` on macOS, a GPUI/Win32 window on Windows).
+Sleipnir may open several. Each hosts one chrome band and one content area.
 _Avoid_: App, screen.
 
 **Tab**:

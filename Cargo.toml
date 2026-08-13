@@ -8,7 +8,7 @@ members = [
     "crates/task_types",
     "crates/release_channel",
     "crates/updater",
-    # Slim macOS-only entry; underlying gpui/gpui_macos come from Zed via git.
+    # OS-branched entry; gpui / gpui_macos / gpui_windows come from Zed via git.
     "crates/gpui_platform",
 ]
 default-members = ["crates/sleipnir"]
@@ -28,6 +28,7 @@ edition = "2024"
 
 gpui = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false, features = ["font-kit"] }
 gpui_macos = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false, features = ["font-kit"] }
+gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false }
 collections = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc" }
 util = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc" }
 util_macros = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc" }
@@ -72,6 +73,7 @@ url = "2.2"
 urlencoding = "2.1.2"
 ureq = { version = "3", features = ["json"] }
 vte = { version = "0.15.0", features = ["ansi"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

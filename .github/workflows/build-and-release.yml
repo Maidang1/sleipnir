@@ -24,6 +24,35 @@ env:
   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || '692T845H5K' }}
 
 jobs:
+  windows-check:
+    name: Windows build & test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test -p terminal -p sleipnir_ui -p sleipnir_settings -p updater -p sleipnir
+
+      - name: Release build
+        run: cargo build --release -p sleipnir
+
+      - name: Upload sleipnir.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: sleipnir-windows
+          path: target/release/sleipnir.exe
+
   build-and-release:
     name: Build & Publish
     runs-on: macos-latest

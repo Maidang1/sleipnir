@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Download } from 'lucide-react'
 import { Button } from '@/components/button'
 import type { LatestRelease } from '@/lib/release'
-import { FALLBACK_RELEASES_URL } from '@/lib/release'
+import { FALLBACK_RELEASES_URL, GITHUB_URL } from '@/lib/release'
 import { cn } from '@/lib/utils'
 
 export function DownloadMenu({
@@ -106,9 +106,16 @@ export function DownloadMenu({
             </a>
           )}
           <div className="my-1 h-px bg-border" />
-          <div className="flex h-8 cursor-default items-center rounded-md px-2.5 text-sm text-muted-foreground opacity-45">
-            Windows (soon)
-          </div>
+          <a
+            role="menuitem"
+            href={`${GITHUB_URL}#windows`}
+            target="_blank"
+            rel="noreferrer"
+            className="flex h-8 items-center rounded-md px-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setOpen(false)}
+          >
+            Windows (build from source)
+          </a>
           <div className="flex h-8 cursor-default items-center rounded-md px-2.5 text-sm text-muted-foreground opacity-45">
             Linux (soon)
           </div>
