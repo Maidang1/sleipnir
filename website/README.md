@@ -29,6 +29,7 @@ Latest release download links are resolved client-side from the GitHub Releases 
 | Surface | Source |
 |---------|--------|
 | Feature grid / hero / FAQ | `src/App.tsx` |
+| One-line install (`curl | bash`) | `src/components/install-command.tsx` + `INSTALL_COMMAND` in `src/lib/release.ts` |
 | Download menu | `src/components/download-menu.tsx` + `src/lib/release.ts` |
 | Meta / OG | `index.html` |
 | Product docs (canonical detail) | repo root `README.md`, `docs/M*.md`, `docs/settings.example.json` |

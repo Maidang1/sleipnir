@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { Accordion } from '@/components/accordion'
 import { DownloadMenu } from '@/components/download-menu'
+import { InstallCommand } from '@/components/install-command'
 import {
   fetchLatestRelease,
   GITHUB_URL,
@@ -111,6 +112,10 @@ const FAQ = [
   {
     q: 'Does it auto-update on launch?',
     a: 'No. Updates are manual via Sleipnir → Check for Updates… or ⌘⇧U. Artifacts are verified with a .zip.sha256 sidecar before install.',
+  },
+  {
+    q: 'macOS says the app is from an unidentified developer.',
+    a: 'CI builds are ad-hoc signed. The one-line installer runs xattr -cr after copying to /Applications so Gatekeeper does not quarantine the download. If you installed from a .dmg or .zip instead, run xattr -cr /Applications/Sleipnir.app, then open the app.',
   },
   {
     q: 'What about Windows and Linux?',
@@ -210,6 +215,13 @@ export default function App() {
                 </span>
               )}
             </div>
+            <InstallCommand className="mt-4" />
+            <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">
+              Verifies the published SHA-256, installs to{' '}
+              <code className="font-mono">/Applications</code>, and clears
+              Gatekeeper quarantine with{' '}
+              <code className="font-mono">xattr -cr</code>.
+            </p>
 
             <div className="mt-16">
               <SectionLabel>What you get</SectionLabel>
@@ -262,8 +274,17 @@ export default function App() {
           <section id="download" className="border-t border-border px-5 py-16 md:px-10 md:py-20">
             <SectionLabel>Download</SectionLabel>
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">Get Sleipnir</h2>
-            <p className="mt-2 max-w-md text-sm text-muted-foreground">
-              Free and open source. Grab the latest macOS build from GitHub Releases.
+            <p className="mt-2 max-w-lg text-sm text-muted-foreground">
+              Free and open source. Install from the terminal, or grab a
+              .dmg / .zip from GitHub Releases.
+            </p>
+            <InstallCommand className="mt-6" />
+            <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">
+              Downloads the latest Release, checks{' '}
+              <code className="font-mono">.zip.sha256</code>, copies the app to{' '}
+              <code className="font-mono">/Applications</code>, and runs{' '}
+              <code className="font-mono">xattr -cr</code> so the ad-hoc-signed
+              build is not blocked on first launch.
             </p>
             <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
               <DownloadMenu

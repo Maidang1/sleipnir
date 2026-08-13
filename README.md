@@ -9,7 +9,7 @@
 Built on [GPUI](https://gpui.rs) (the UI framework behind [Zed](https://github.com/zed-industries/zed))
 with a forked terminal backend.
 
-[Features](#features) · [Install](#build--run) · [Config](#config) · [Shortcuts](#shortcuts) · [Roadmap](#roadmap)
+[Features](#features) · [Install](#install) · [Config](#config) · [Shortcuts](#shortcuts) · [Roadmap](#roadmap)
 
 </div>
 
@@ -48,10 +48,37 @@ prompt.
   command finishes while unfocused.
 - **Quick Terminal / Quick Select** — open a spare window fast (`⌘⇧N`); link-oriented mode (`⌘⇧O`).
 
+## Install
+
+macOS, latest GitHub Release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | bash
+```
+
+The script downloads `Sleipnir-<ver>-macos.zip`, checks it against the published
+`.zip.sha256` sidecar, copies the app to `/Applications`, and runs `xattr -cr`
+to drop the quarantine flag. CI builds are ad-hoc signed (no Developer ID), so
+without that step Gatekeeper shows “unidentified developer” on first launch.
+
+Prefer a different folder, or skip launching the app:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh \
+  | PREFIX="$HOME/Applications" SLEIPNIR_NO_OPEN=1 bash
+```
+
+Or grab the `.dmg` / `.zip` from [Releases](https://github.com/Maidang1/sleipnir/releases)
+and, if macOS still blocks it, run:
+
+```bash
+xattr -cr /Applications/Sleipnir.app
+```
+
 ## Requirements
 
 - macOS
-- Rust **1.95.0** (see `rust-toolchain.toml`)
+- Rust **1.95.0** (see `rust-toolchain.toml`) — only needed to build from source
 - Xcode + Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`
 
 ## Build & run

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changes
+- One-line macOS install (`curl | bash`) on README and the website: download the latest Release, verify SHA-256, install to `/Applications`, and clear Gatekeeper quarantine with `xattr -cr`
+
 ## 0.1.9
 
 ### Features

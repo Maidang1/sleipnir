@@ -8,6 +8,8 @@ export interface LatestRelease {
 export const GITHUB_REPO = 'Maidang1/sleipnir'
 export const GITHUB_URL = `https://github.com/${GITHUB_REPO}`
 export const FALLBACK_RELEASES_URL = `${GITHUB_URL}/releases`
+export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh`
+export const INSTALL_COMMAND = `curl -fsSL ${INSTALL_SCRIPT_URL} | bash`
 
 export async function fetchLatestRelease(): Promise<LatestRelease | null> {
   try {
