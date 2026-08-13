@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.9
+
 ### Features
 - **M11 visual polish:** ease-in-out cursor blink (~530ms half-period, solid after typing); URL/path hover underline + pointing hand; trackpad momentum via platform events
 - **M12 daily gaps:**
