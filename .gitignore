@@ -11,3 +11,6 @@ build/
 # website
 website/node_modules/
 website/dist/
+
+# Cloudflare Wrangler local cache (account ids, pages metadata)
+.wrangler/

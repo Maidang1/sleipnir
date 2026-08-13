@@ -3,12 +3,13 @@
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter,
     FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
-    ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, actions, canvas, deferred, div, point,
+    ParentElement as _, Pixels, Render, ScrollHandle, SharedString, size,
+    StatefulInteractiveElement as _, Styled as _, Task, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas, deferred, div, point,
     prelude::FluentBuilder as _, px, relative,
 };
 use sleipnir_settings::{
-    Appearance, TerminalPalette, TerminalSettings, ThemeName, palette_for_theme,
+    Appearance, ConfirmClose, TerminalPalette, TerminalSettings, ThemeName, palette_for_theme,
 };
 
 use crate::TermView;
@@ -70,6 +71,26 @@ actions!(
         FindNext,
         /// Jump to the previous search match (⌘⇧G).
         FindPrev,
+        /// Increase window font size (⌘+ / ⌘=).
+        IncreaseFontSize,
+        /// Decrease window font size (⌘-).
+        DecreaseFontSize,
+        /// Reset window font size to settings (⌘0).
+        ResetFontSize,
+        /// Open a new independent OS window (⌘N).
+        NewWindow,
+        /// Toggle pane zoom (maximize active pane) — M13.
+        TogglePaneZoom,
+        /// Toggle broadcast input to all panes in the tab — M13.
+        ToggleBroadcast,
+        /// Jump to previous OSC 133 prompt — M14.
+        JumpPrevPrompt,
+        /// Jump to next OSC 133 prompt — M14.
+        JumpNextPrompt,
+        /// Toggle Quick Select overlay labels — M15.
+        ToggleQuickSelect,
+        /// Open Quick Terminal window — M15.
+        OpenQuickTerminal,
     ]
 );
 
@@ -87,6 +108,8 @@ struct Tab {
     /// User-assigned title (via right-click rename). When set, it overrides the
     /// active pane's title on the tab chip.
     custom_title: Option<SharedString>,
+    /// When set, only this pane is shown full-content (M13 pane zoom).
+    zoomed_pane: Option<PaneId>,
 }
 
 impl Tab {
@@ -244,10 +267,26 @@ pub struct AppShell {
     find_query: String,
     find_match_count: usize,
     find_active_index: usize,
+    /// Window-scoped font size override (M12 zoom); not written to settings.
+    font_size_override: Option<Pixels>,
+    /// Close-confirm dialog pending (M12).
+    close_confirm: Option<CloseConfirmState>,
+    /// Tab ids currently flashing for visual bell (M12).
+    bell_flash_tabs: std::collections::HashSet<u64>,
+    /// Fan-out keystrokes to all panes in the active tab (M13).
+    broadcast: bool,
+    /// Quick Select overlay active (M15).
+    quick_select_open: bool,
     /// Debounced session save task.
     _session_save_task: Option<Task<()>>,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
+}
+
+/// Pending close confirmation dialog.
+struct CloseConfirmState {
+    /// Human-readable what will close.
+    message: SharedString,
 }
 
 impl Focusable for AppShell {
@@ -257,6 +296,29 @@ impl Focusable for AppShell {
 }
 
 impl EventEmitter<()> for AppShell {}
+
+/// Open a new independent Sleipnir window (startup + ⌘N).
+pub fn open_sleipnir_window(cx: &mut App) {
+    let geo = ChromeGeometry::standard();
+    let bounds = Bounds::centered(None, size(px(1024.0), px(680.0)), cx);
+    if let Err(err) = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Sleipnir".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(geo.traffic_light_position),
+            }),
+            app_owns_titlebar_drag: true,
+            window_background: WindowBackgroundAppearance::Opaque,
+            window_min_size: Some(size(px(360.0), px(240.0))),
+            ..Default::default()
+        },
+        |window, cx| cx.new(|cx| AppShell::new(window, cx)),
+    ) {
+        log::error!("failed to open window: {err:#}");
+    }
+}
 
 impl AppShell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -286,6 +348,11 @@ impl AppShell {
             find_query: String::new(),
             find_match_count: 0,
             find_active_index: 0,
+            font_size_override: None,
+            close_confirm: None,
+            bell_flash_tabs: std::collections::HashSet::new(),
+            broadcast: false,
+            quick_select_open: false,
             _session_save_task: None,
             _quit_subscription: None,
         };
@@ -342,12 +409,19 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
-        let view = cx.new(|cx| TermView::new_local_with_cwd(cwd, window, cx));
+        let override_size = self.font_size_override;
+        let view = cx.new(|cx| {
+            let mut v = TermView::new_local_with_cwd(cwd, window, cx);
+            if override_size.is_some() {
+                v.set_font_size_override(override_size, cx);
+            }
+            v
+        });
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         cx.subscribe_in(
             &view,
             window,
-            |this, _view, event: &crate::TermViewEvent, window, cx| match event {
+            |this, view, event: &crate::TermViewEvent, window, cx| match event {
                 crate::TermViewEvent::TitleChanged => {
                     this.sync_window_title(window, cx);
                     cx.notify();
@@ -362,6 +436,9 @@ impl AppShell {
                     this.prev_tab(window, cx);
                 }
                 crate::TermViewEvent::RequestReloadSettings => {
+                    // Reload clears window font zoom override (plan risk mitigation).
+                    this.font_size_override = None;
+                    this.apply_font_override_to_all_panes(cx);
                     TerminalSettings::reload(cx);
                     cx.notify();
                 }
@@ -373,10 +450,193 @@ impl AppShell {
                 crate::TermViewEvent::RequestOpenSettings => {
                     this.toggle_settings(window, cx);
                 }
+                crate::TermViewEvent::Bell => {
+                    this.on_term_bell(view, cx);
+                }
             },
         )
         .detach();
         view
+    }
+
+    /// Flash the tab that owns `view` when visual bell is enabled.
+    fn on_term_bell(&mut self, view: &Entity<TermView>, cx: &mut Context<Self>) {
+        use sleipnir_settings::TerminalBell;
+        if !matches!(
+            TerminalSettings::get_global(cx).bell,
+            TerminalBell::Visual
+        ) {
+            return;
+        }
+        let Some(tab_id) = self.tab_id_for_view(view, cx) else {
+            return;
+        };
+        self.bell_flash_tabs.insert(tab_id);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            this.update(cx, |this, cx| {
+                this.bell_flash_tabs.remove(&tab_id);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn tab_id_for_view(&self, view: &Entity<TermView>, _cx: &App) -> Option<u64> {
+        for tab in &self.tabs {
+            let mut leaves = Vec::new();
+            tab.tree.leaves(&mut leaves);
+            for (_, leaf) in leaves {
+                if leaf == view {
+                    return Some(tab.id);
+                }
+            }
+        }
+        None
+    }
+
+    fn apply_font_override_to_all_panes(&self, cx: &mut Context<Self>) {
+        let size = self.font_size_override;
+        for tab in &self.tabs {
+            let mut leaves = Vec::new();
+            tab.tree.leaves(&mut leaves);
+            for (_, view) in leaves {
+                view.update(cx, |v, cx| {
+                    v.set_font_size_override(size, cx);
+                });
+            }
+        }
+    }
+
+    fn step_font_size(&mut self, delta: f32, cx: &mut Context<Self>) {
+        use crate::{FONT_SIZE_MAX, FONT_SIZE_MIN, effective_font_size};
+        let current = f32::from(effective_font_size(self.font_size_override, cx));
+        let next = (current + delta).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        self.font_size_override = Some(px(next));
+        self.apply_font_override_to_all_panes(cx);
+        cx.notify();
+    }
+
+    fn reset_font_size(&mut self, cx: &mut Context<Self>) {
+        self.font_size_override = None;
+        self.apply_font_override_to_all_panes(cx);
+        cx.notify();
+    }
+
+    fn on_increase_font_size(
+        &mut self,
+        _: &IncreaseFontSize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::FONT_SIZE_STEP;
+        self.step_font_size(FONT_SIZE_STEP, cx);
+    }
+
+    fn on_decrease_font_size(
+        &mut self,
+        _: &DecreaseFontSize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::FONT_SIZE_STEP;
+        self.step_font_size(-FONT_SIZE_STEP, cx);
+    }
+
+    fn on_reset_font_size(
+        &mut self,
+        _: &ResetFontSize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_font_size(cx);
+    }
+
+    fn on_new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
+        open_sleipnir_window(cx);
+    }
+
+    fn on_toggle_pane_zoom(
+        &mut self,
+        _: &TogglePaneZoom,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if tab.zoomed_pane.is_some() {
+            tab.zoomed_pane = None;
+        } else {
+            tab.zoomed_pane = Some(tab.active_pane);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn on_toggle_broadcast(
+        &mut self,
+        _: &ToggleBroadcast,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.broadcast = !self.broadcast;
+        cx.notify();
+    }
+
+    fn on_jump_prev_prompt(
+        &mut self,
+        _: &JumpPrevPrompt,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_prompt(-1, cx);
+    }
+
+    fn on_jump_next_prompt(
+        &mut self,
+        _: &JumpNextPrompt,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_prompt(1, cx);
+    }
+
+    fn jump_prompt(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        if let Some(term) = view.read(cx).terminal_entity().cloned() {
+            let jumped = term.update(cx, |t, _| t.jump_prompt(delta));
+            if jumped {
+                cx.notify();
+            }
+        }
+    }
+
+    fn on_toggle_quick_select(
+        &mut self,
+        _: &ToggleQuickSelect,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quick_select_open = !self.quick_select_open;
+        cx.notify();
+    }
+
+    fn on_open_quick_terminal(
+        &mut self,
+        _: &OpenQuickTerminal,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Dedicated lightweight window (M15). Same shell stack; user can assign
+        // a global hotkey via system settings / `key_bindings`.
+        open_sleipnir_window(cx);
     }
 
     // ── session persistence (M8) ────────────────────────────────────────────
@@ -420,6 +680,7 @@ impl AppShell {
                     .custom_title
                     .filter(|s| !s.is_empty())
                     .map(SharedString::from),
+                zoomed_pane: None,
             });
         }
         self.next_id = max_tab + 1;
@@ -546,6 +807,7 @@ impl AppShell {
             tree: PaneNode::leaf(pane_id, view),
             active_pane: pane_id,
             custom_title: None,
+            zoomed_pane: None,
         });
         self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
@@ -788,12 +1050,61 @@ impl AppShell {
         }
     }
 
+    /// Whether the active pane (or any pane in the active tab when closing the
+    /// last pane) looks dirty for close-confirm.
+    fn active_pane_is_dirty(&self, cx: &App) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let mut leaves = Vec::new();
+        tab.tree.leaves(&mut leaves);
+        // Prefer the focused pane; if it is the only leaf we still check it.
+        if let Some((_, view)) = leaves.iter().find(|(id, _)| *id == tab.active_pane) {
+            return view.read(cx).looks_busy(cx);
+        }
+        leaves
+            .iter()
+            .any(|(_, view)| view.read(cx).looks_busy(cx))
+    }
+
+    /// Gate close on `confirm_close` setting; may open a modal instead of closing.
+    fn request_close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_confirm.is_some() {
+            return;
+        }
+        let policy = TerminalSettings::get_global(cx).confirm_close;
+        let needs_confirm = match policy {
+            ConfirmClose::Never => false,
+            ConfirmClose::Always => true,
+            ConfirmClose::Dirty => self.active_pane_is_dirty(cx),
+        };
+        if needs_confirm {
+            self.close_confirm = Some(CloseConfirmState {
+                message: "A process is still running. Close this pane anyway?".into(),
+            });
+            cx.notify();
+        } else {
+            self.close_active_pane(window, cx);
+        }
+    }
+
+    fn confirm_close_proceed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_confirm = None;
+        self.close_active_pane(window, cx);
+    }
+
+    fn confirm_close_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_confirm = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.add_tab(window, cx);
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_active_pane(window, cx);
+        self.request_close_active_pane(window, cx);
     }
 
     fn on_split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
@@ -858,6 +1169,9 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Settings reload clears window-scoped font zoom.
+        self.font_size_override = None;
+        self.apply_font_override_to_all_panes(cx);
         TerminalSettings::reload(cx);
         cx.notify();
     }
@@ -910,7 +1224,7 @@ impl AppShell {
         self.close_palette(window, cx);
         match id {
             CommandId::NewTab => self.add_tab(window, cx),
-            CommandId::ClosePane => self.close_active_pane(window, cx),
+            CommandId::ClosePane => self.request_close_active_pane(window, cx),
             CommandId::NextTab => self.next_tab(window, cx),
             CommandId::PrevTab => self.prev_tab(window, cx),
             CommandId::SplitRight => self.split_active(SplitAxis::Horizontal, window, cx),
@@ -921,6 +1235,8 @@ impl AppShell {
                 cx.notify();
             }
             CommandId::ReloadSettings => {
+                self.font_size_override = None;
+                self.apply_font_override_to_all_panes(cx);
                 TerminalSettings::reload(cx);
                 cx.notify();
             }
@@ -935,6 +1251,26 @@ impl AppShell {
             }
             CommandId::Find => self.open_find(cx),
             CommandId::ToggleCommandPalette => self.open_palette(cx),
+            CommandId::IncreaseFontSize => {
+                use crate::FONT_SIZE_STEP;
+                self.step_font_size(FONT_SIZE_STEP, cx);
+            }
+            CommandId::DecreaseFontSize => {
+                use crate::FONT_SIZE_STEP;
+                self.step_font_size(-FONT_SIZE_STEP, cx);
+            }
+            CommandId::ResetFontSize => self.reset_font_size(cx),
+            CommandId::NewWindow => open_sleipnir_window(cx),
+            CommandId::TogglePaneZoom => self.on_toggle_pane_zoom(&TogglePaneZoom, window, cx),
+            CommandId::ToggleBroadcast => self.on_toggle_broadcast(&ToggleBroadcast, window, cx),
+            CommandId::JumpPrevPrompt => self.on_jump_prev_prompt(&JumpPrevPrompt, window, cx),
+            CommandId::JumpNextPrompt => self.on_jump_next_prompt(&JumpNextPrompt, window, cx),
+            CommandId::ToggleQuickSelect => {
+                self.on_toggle_quick_select(&ToggleQuickSelect, window, cx)
+            }
+            CommandId::OpenQuickTerminal => {
+                self.on_open_quick_terminal(&OpenQuickTerminal, window, cx)
+            }
         }
     }
 
@@ -1451,6 +1787,9 @@ impl AppShell {
                 .top_0()
                 .left_0()
                 .size_full()
+                // BlockMouse: otherwise TermElement under the overlay still
+                // sees should_handle_scroll() and the terminal scrolls too.
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1642,12 +1981,47 @@ impl AppShell {
         };
         let active_pane = tab.active_pane;
         let tab_id = tab.id;
+        let zoomed = tab.zoomed_pane;
 
         // Gather leaves (id -> view) in tree order.
         let mut leaves = Vec::new();
         tab.tree.leaves(&mut leaves);
         let leaves: Vec<(PaneId, Entity<TermView>)> =
             leaves.into_iter().map(|(id, v)| (id, v.clone())).collect();
+
+        // Pane zoom (M13): only the zoomed leaf is shown full-size.
+        if let Some(zid) = zoomed {
+            if let Some((_, view)) = leaves.iter().find(|(id, _)| *id == zid) {
+                return div()
+                    .id("pane-area-zoomed")
+                    .flex_1()
+                    .size_full()
+                    .min_h_0()
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .child(view.clone().into_any_element()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(6.0))
+                            .right(px(8.0))
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(4.0))
+                            .bg(tokens.accent.opacity(0.85))
+                            .text_size(px(11.0))
+                            .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
+                            .child("Zoomed · ⌘⇧Enter to restore"),
+                    )
+                    .into_any_element();
+            }
+        }
 
         // Analytic layout over last frame's content bounds (if known and non-zero).
         // A 0×0 measure (collapsed canvas) must not drive absolute pane layout.
@@ -1778,6 +2152,7 @@ impl AppShell {
             let Some(rect) = rect else { continue };
             let is_active = *id == active_pane;
             let b = rect.bounds;
+            let pane_id = *id;
             let mut pane = div()
                 .absolute()
                 .left(b.origin.x)
@@ -1785,26 +2160,46 @@ impl AppShell {
                 .w(b.size.width)
                 .h(b.size.height)
                 .overflow_hidden()
-                .child(view.clone().into_any_element());
+                .child(view.clone().into_any_element())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        if let Some(tab) = this.tabs.get_mut(this.active) {
+                            if tab.active_pane != pane_id {
+                                tab.active_pane = pane_id;
+                                this.focus_active(window, cx);
+                                cx.notify();
+                            }
+                        }
+                    }),
+                );
             if !is_active {
-                // Subtle inactive treatment: hairline border; active pane gets accent.
-                pane = pane.border_1().border_color(tokens.border);
+                // Unfocused split dim (M13): dark overlay ~20% + muted border.
+                // Overlay also receives clicks so focusing still works.
+                pane = pane.border_1().border_color(tokens.border).child(
+                    div()
+                        .id(("pane-dim", pane_id))
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .bg(Hsla::black().opacity(0.22))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                if let Some(tab) = this.tabs.get_mut(this.active) {
+                                    if tab.active_pane != pane_id {
+                                        tab.active_pane = pane_id;
+                                        this.focus_active(window, cx);
+                                        cx.notify();
+                                    }
+                                }
+                            }),
+                        ),
+                );
             } else {
                 pane = pane.border_1().border_color(tokens.accent);
             }
-            let pane_id = *id;
-            pane = pane.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    if let Some(tab) = this.tabs.get_mut(this.active) {
-                        if tab.active_pane != pane_id {
-                            tab.active_pane = pane_id;
-                            this.focus_active(window, cx);
-                            cx.notify();
-                        }
-                    }
-                }),
-            );
             container = container.child(pane);
         }
 
@@ -2070,6 +2465,9 @@ impl AppShell {
                 .top_0()
                 .left_0()
                 .size_full()
+                // BlockMouse: otherwise TermElement under the overlay still
+                // sees should_handle_scroll() and the terminal scrolls too.
+                .occlude()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2149,6 +2547,19 @@ impl AppShell {
                 |_this, cx| {
                     let next = !TerminalSettings::get_global(cx).font_ligatures;
                     TerminalSettings::set_font_ligatures(next, cx);
+                    cx.notify();
+                },
+            ))
+            .child(self.settings_toggle_row(
+                "copy-on-select",
+                "Copy on select",
+                "Copy selected text when you release the mouse; shows a brief “copied to clipboard” toast",
+                TerminalSettings::get_global(cx).copy_on_select,
+                tokens,
+                cx,
+                |_this, cx| {
+                    let next = !TerminalSettings::get_global(cx).copy_on_select;
+                    TerminalSettings::set_copy_on_select(next, cx);
                     cx.notify();
                 },
             ))
@@ -2427,6 +2838,9 @@ impl AppShell {
                 .top_0()
                 .left_0()
                 .size_full()
+                // BlockMouse: otherwise TermElement under the overlay still
+                // sees should_handle_scroll() and the terminal scrolls too.
+                .occlude()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -2671,7 +3085,10 @@ impl Render for AppShell {
                     .map(|s| s.buffer.clone());
                 let is_renaming = rename_buffer.is_some();
 
-                let bg = if is_active {
+                let is_bell = self.bell_flash_tabs.contains(&tab_id);
+                let bg = if is_bell {
+                    tokens.accent.opacity(0.35)
+                } else if is_active {
                     tokens.active_tab_bg()
                 } else if is_hovered {
                     tokens.hover
@@ -2679,9 +3096,7 @@ impl Render for AppShell {
                     // Transparent over the chrome band
                     gpui::hsla(0.0, 0.0, 0.0, 0.0)
                 };
-                let fg = if is_active {
-                    tokens.fg
-                } else if is_hovered {
+                let fg = if is_active || is_bell || is_hovered {
                     tokens.fg
                 } else {
                     tokens.fg_muted
@@ -2706,6 +3121,7 @@ impl Render for AppShell {
                     .when(is_renaming, |el| {
                         el.border_1().border_color(tokens.accent)
                     })
+                    .when(is_bell, |el| el.border_1().border_color(tokens.accent))
                     .on_hover(cx.listener(move |this, hovered, _, cx| {
                         if *hovered {
                             this.hovered_tab = Some(tab_id);
@@ -2777,6 +3193,24 @@ impl Render for AppShell {
             // sees them (capture phase runs top-down).
             .capture_key_down(cx.listener(
                 |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if this.close_confirm.is_some() {
+                        match event.keystroke.key.as_str() {
+                            "escape" => {
+                                this.confirm_close_cancel(window, cx);
+                                cx.stop_propagation();
+                            }
+                            "enter" => {
+                                this.confirm_close_proceed(window, cx);
+                                cx.stop_propagation();
+                            }
+                            _ => {
+                                if !event.keystroke.modifiers.platform {
+                                    cx.stop_propagation();
+                                }
+                            }
+                        }
+                        return;
+                    }
                     if this.update_open {
                         if event.keystroke.key.as_str() == "escape" {
                             this.close_update(cx);
@@ -2845,7 +3279,63 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_find))
             .on_action(cx.listener(Self::on_find_next))
             .on_action(cx.listener(Self::on_find_prev))
+            .on_action(cx.listener(Self::on_increase_font_size))
+            .on_action(cx.listener(Self::on_decrease_font_size))
+            .on_action(cx.listener(Self::on_reset_font_size))
+            .on_action(cx.listener(Self::on_new_window))
+            .on_action(cx.listener(Self::on_toggle_pane_zoom))
+            .on_action(cx.listener(Self::on_toggle_broadcast))
+            .on_action(cx.listener(Self::on_jump_prev_prompt))
+            .on_action(cx.listener(Self::on_jump_next_prompt))
+            .on_action(cx.listener(Self::on_toggle_quick_select))
+            .on_action(cx.listener(Self::on_open_quick_terminal))
             .child(chrome_band)
+            .when(self.broadcast, |el| {
+                el.child(
+                    div()
+                        .id("broadcast-banner")
+                        .absolute()
+                        .top(px(36.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded(px(6.0))
+                                .bg(tokens.accent.opacity(0.9))
+                                .text_size(px(12.0))
+                                .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
+                                .child("Broadcast on · input goes to all panes"),
+                        ),
+                )
+            })
+            .when(self.quick_select_open, |el| {
+                el.child(
+                    div()
+                        .id("quick-select-banner")
+                        .absolute()
+                        .bottom(px(12.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded(px(6.0))
+                                .bg(tokens.surface)
+                                .border_1()
+                                .border_color(tokens.accent)
+                                .text_size(px(12.0))
+                                .text_color(tokens.fg)
+                                .child("Quick Select · Esc to close · click links with ⌘"),
+                        ),
+                )
+            })
             .when(self.find_open, |el| {
                 el.child(self.render_find_bar(&tokens, cx))
             })
@@ -2859,5 +3349,126 @@ impl Render for AppShell {
             .when(self.palette_open, |el| {
                 el.child(self.render_command_palette(&tokens, cx))
             })
+            .when(self.close_confirm.is_some(), |el| {
+                el.child(self.render_close_confirm(&tokens, cx))
+            })
+    }
+}
+
+impl AppShell {
+    fn render_close_confirm(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let message = self
+            .close_confirm
+            .as_ref()
+            .map(|s| s.message.clone())
+            .unwrap_or_else(|| "Close this pane?".into());
+
+        let panel = div()
+            .id("close-confirm-panel")
+            .w(px(360.0))
+            .rounded(px(10.0))
+            .bg(tokens.content_bg)
+            .border_1()
+            .border_color(tokens.border)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            // Keep clicks inside the panel from reaching the backdrop.
+            // Without this, mouse_down on Close/Cancel hits the full-size
+            // backdrop first and cancel wins — the pane never closes.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px_4()
+                    .pt_4()
+                    .pb_2()
+                    .text_size(px(15.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(tokens.fg)
+                    .child("Close pane?"),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .pb_4()
+                    .text_size(px(13.0))
+                    .text_color(tokens.fg_muted)
+                    .child(message),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .pb_4()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("close-confirm-cancel")
+                            .px_3()
+                            .py_1p5()
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .hover(|el| el.bg(tokens.hover))
+                            .text_size(px(13.0))
+                            .text_color(tokens.fg)
+                            .child("Cancel")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.confirm_close_cancel(window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("close-confirm-ok")
+                            .px_3()
+                            .py_1p5()
+                            .rounded(px(6.0))
+                            .bg(tokens.accent)
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
+                            .child("Close")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.confirm_close_proceed(window, cx);
+                            })),
+                    ),
+            );
+
+        deferred(
+            div()
+                .id("close-confirm-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                // BlockMouse: otherwise TermElement under the overlay still
+                // sees should_handle_scroll() and the terminal scrolls too.
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("close-confirm-backdrop")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .bg(Hsla::black().opacity(0.5))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.confirm_close_cancel(window, cx);
+                            }),
+                        ),
+                )
+                .child(panel),
+        )
     }
 }

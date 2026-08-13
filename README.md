@@ -19,8 +19,9 @@ with a forked terminal backend.
 
 Sleipnir is a standalone terminal for macOS that renders on the GPU through GPUI, so
 scrolling and redraw stay smooth even under heavy output. It ships with a real PTY,
-IME support, multi-tab and split panes, adaptive theming that follows the system
-appearance, and a Finder-friendly clipboard that turns pasted images into file paths.
+IME support, multi-tab and split panes, multi-window sessions, adaptive theming that
+follows the system appearance, and a Finder-friendly clipboard that turns pasted images
+into file paths.
 
 The name comes from Norse myth — Odin's eight-legged steed, the fastest horse in the
 nine worlds. The app icon abstracts that into a minimal horse-head mark over a terminal
@@ -28,8 +29,10 @@ prompt.
 
 ## Features
 
-- **GPU rendering** — smooth scrollback and redraw via GPUI + Metal.
-- **Tabs, splits & panes** — split right/down, move focus between panes, jump to any tab.
+- **GPU rendering** — smooth scrollback and redraw via GPUI + Metal; ease-in-out cursor blink.
+- **Tabs, splits & panes** — split right/down, jump tabs, move focus; pane zoom and unfocused dim.
+- **Multi-window** — `⌘N` opens an independent window with its own tabs and shells.
+- **Font zoom** — `⌘+` / `⌘-` / `⌘0` resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
   GitHub Dark/Light; `auto` follows the system light/dark appearance.
 - **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder
@@ -39,6 +42,11 @@ prompt.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
 - **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings.
 - **Find in scrollback** — `⌘F` search with match highlights.
+- **Path links & bell** — cmd-click paths open in the default app; optional system/visual bell.
+- **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
+- **Shell collaboration** — OSC 133 prompt jump (`⌘⇧↑`/`⌘⇧↓`); optional notify when a long
+  command finishes while unfocused.
+- **Quick Terminal / Quick Select** — open a spare window fast (`⌘⇧N`); link-oriented mode (`⌘⇧O`).
 
 ## Requirements
 
@@ -62,8 +70,14 @@ extensions:
 |-----|---------|
 | `theme` | `auto` / `mocha` / … (see example); `auto` follows system appearance |
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
+| `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
+| `path_links` | Open path-like targets on cmd-click (default `true`) |
 | `key_bindings` | Extra key bindings (see [`docs/M9.md`](docs/M9.md)) |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
+| `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
+| `terminal.bell` | `off` / `system` / `visual` (default `off`) |
+| `background_opacity` | 0.15–1.0 content opacity (default `1.0` opaque) |
+| `notify_on_command_finish_secs` | Unfocused long-job notify threshold seconds (default `5`; `0` off) |
 
 Open the in-app theme picker with `⌘,`, or edit the file and reload with `⌘⇧R`
 (key binding overrides apply on next launch).
@@ -89,11 +103,18 @@ Use `⌃⌘V` to force **text-only** paste (skip image→path conversion).
 | `⌘A` | Select all |
 | `⌘K` | Clear |
 | `⌘T` / `⌘W` | New tab / close active pane (then tab) |
+| `⌘N` | New window |
 | `⌘1`…`⌘9` | Jump to tab N |
 | `⌘D` / `⌘⇧D` | Split pane right / down |
 | `⌘⌥←↑↓→` | Move focus between panes |
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab |
 | `⌘⇧]` / `⌘⇧[` | Next / previous tab |
+| `⌘+` / `⌘=` / `⌘-` / `⌘0` | Increase / decrease / reset font size (window) |
+| `⌘⇧Enter` | Toggle pane zoom |
+| `⌘⇧B` | Toggle broadcast input banner |
+| `⌘⇧↑` / `⌘⇧↓` | Jump to previous / next shell prompt (OSC 133) |
+| `⌘⇧O` | Toggle Quick Select mode |
+| `⌘⇧N` | Open Quick Terminal (new window) |
 | `⌘,` | Open settings (theme picker) |
 | `⌘⇧R` | Reload settings |
 | `⌘⇧P` | Cycle theme (persists) |
@@ -127,8 +148,7 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
 
 ## Roadmap
 
-**Status:** M0–M10 complete (per-pane fonts deferred inside M10).  
-**Next:** M12 daily gaps (planned). M11 visual polish may run in parallel.
+**Status:** M0–M15 complete (per-pane fonts still deferred inside M10).
 
 | Milestone | Goal | Status |
 |-----------|------|:------:|
@@ -143,15 +163,14 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
 | **M8** | Session persistence (restore tabs/splits on launch) | ✅ |
 | **M9** | Configurable keymap + command palette | ✅ |
 | **M10** | Ligatures + search-in-scrollback (per-pane fonts deferred) | ✅ |
-| **M11** | Visual polish (cursor fade, URL hover, optional scroll) | 📋 |
-| **M12** | Daily gaps (font zoom, multi-window, close confirm, path open, bell) | 📋 |
-| **M13** | Split professionalism (pane zoom, unfocused dim) | 📋 |
-| **M14** | Shell collaboration (OSC 133, jump prompt, notify) | 📋 |
-| **M15** | Optional differentiators (Quick Terminal, Quick Select) | 📋 |
+| **M11** | Visual polish (cursor fade, URL hover, optional scroll) | ✅ |
+| **M12** | Daily gaps (font zoom, multi-window, close confirm, path open, bell) | ✅ |
+| **M13** | Split professionalism (pane zoom, unfocused dim) | ✅ |
+| **M14** | Shell collaboration (OSC 133, jump prompt, notify) | ✅ |
+| **M15** | Optional differentiators (Quick Terminal, Quick Select) | ✅ |
 
-Legend: ✅ done · 📋 planned (docs only; not implemented).  
-Shipped notes: [`docs/M7.md`](docs/M7.md) · [`docs/M8.md`](docs/M8.md) · [`docs/M9.md`](docs/M9.md) · [`docs/M10.md`](docs/M10.md).  
-Planned notes: [`docs/M11.md`](docs/M11.md)–[`docs/M15.md`](docs/M15.md).  
+Legend: ✅ done · 📋 planned.  
+Shipped notes: [`docs/M7.md`](docs/M7.md)–[`docs/M15.md`](docs/M15.md).  
 Competitive research: [`docs/competitive-research-features.md`](docs/competitive-research-features.md).  
 Implementation plan: [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md`](docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md).
 

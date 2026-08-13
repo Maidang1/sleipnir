@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Features
+- **M11 visual polish:** ease-in-out cursor blink (~530ms half-period, solid after typing); URL/path hover underline + pointing hand; trackpad momentum via platform events
+- **M12 daily gaps:**
+  - **Font zoom:** `⌘+` / `⌘=` / `⌘-` / `⌘0` (window-scoped; not persisted; reset restores settings size)
+  - **New window:** `⌘N` opens an independent OS window with its own tabs/shells
+  - **Close confirm:** `confirm_close` (`dirty` \| `always` \| `never`, default `dirty`) prompts when a non-shell foreground job is running
+  - **Path open:** cmd-click path-like targets (`file.rs:12`, relative to pane cwd) when `path_links` is true (default)
+  - **Bell:** `terminal.bell` supports `off` \| `system` \| `visual` (system beep / tab chrome flash)
+  - **Copy on select:** toggle in Settings → General (`terminal.copy_on_select`, default still `false`)
+- **M13 splits:** pane zoom (`⌘⇧Enter`), unfocused pane dim, broadcast mode banner (`⌘⇧B`)
+- **M14 shell collaboration:** OSC 133 detect + jump prev/next prompt (`⌘⇧↑`/`⌘⇧↓`); `notify_on_command_finish_secs` for unfocused long jobs
+- **M15 optional:** Quick Terminal (`⌘⇧N`), Quick Select mode (`⌘⇧O`), `background_opacity` (default opaque)
+
+### Fixes
+- Restore a window when clicking the Dock icon (or choosing **Shell → New Window** / `⌘N`) after the last window was closed; the process stays running on macOS, but previously had no reopen handler
+- Close-confirm **Close** now actually closes the pane: the dialog panel was missing the mouse-down stop that settings/update/palette overlays have, so the click hit the backdrop and cancelled instead
+- Scrolling a modal overlay (settings / palette / update / close-confirm) no longer also scrolls the terminal underneath; overlays now `occlude()` so GPUI drops the terminal from the scroll hit-test
+
 ### Changes
 - **App icon full-bleed redesign:** remove the circular inset so the mark fills the entire rounded square (same solid-fill style as typical macOS icons), with a larger knight silhouette and integrated terminal prompt
 

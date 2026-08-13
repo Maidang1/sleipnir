@@ -1,16 +1,22 @@
 //! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
 mod app_shell;
+mod blink;
 mod chrome;
 mod command_palette;
 mod pane_tree;
 mod session;
 mod term_element;
 
+pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
+
 pub use app_shell::{
-    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, Find, FindNext, FindPrev,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewTab, NextTab, OpenSettings,
-    PrevTab, ReloadSettings, SplitDown, SplitRight, ToggleCommandPalette, UpdateUiState,
+    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, Find,
+    FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
+    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
+    SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
+    UpdateUiState, open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
@@ -27,9 +33,14 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
     SharedString, Styled as _, Task, Window, div, rgb,
 };
-use sleipnir_settings::{AlternateScroll, TerminalPalette, TerminalSettings};
+use gpui::Pixels;
+use gpui::prelude::FluentBuilder as _;
+use sleipnir_settings::{
+    AlternateScroll, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use terminal::{
     Clear, Copy, Event, MaybeNavigationTarget, Modes, Paste, PasteText, ScrollLineDown,
     ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
@@ -53,6 +64,8 @@ pub enum TermViewEvent {
     RequestCycleTheme,
     /// Request opening the settings panel.
     RequestOpenSettings,
+    /// Terminal BEL — shell may flash tab chrome (visual bell).
+    Bell,
 }
 
 impl EventEmitter<TermViewEvent> for TermView {}
@@ -68,7 +81,20 @@ pub struct TermView {
     terminal: TerminalSlot,
     focus_handle: FocusHandle,
     title: SharedString,
+    /// Window-scoped font size override from AppShell zoom (not persisted).
+    font_size_override: Option<Pixels>,
+    /// App-reported cursor blink (DECSCUSR); used with settings for M11 fade.
+    terminal_wants_blink: bool,
+    /// Last keystroke / input time — cursor stays solid briefly after typing.
+    last_input_at: Instant,
+    /// Bottom toast after copy / copy-on-select.
+    copy_toast: Option<CopyToast>,
     _spawn: Task<()>,
+}
+
+struct CopyToast {
+    /// Hide task; dropping it cancels a previous toast.
+    _hide: Task<()>,
 }
 
 impl Focusable for TermView {
@@ -134,6 +160,10 @@ impl TermView {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
             title: "Sleipnir".into(),
+            font_size_override: None,
+            terminal_wants_blink: true,
+            last_input_at: Instant::now(),
+            copy_toast: None,
             _spawn: spawn,
         }
     }
@@ -162,6 +192,10 @@ impl TermView {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
             title: "sleipnir (display)".into(),
+            font_size_override: None,
+            terminal_wants_blink: true,
+            last_input_at: Instant::now(),
+            copy_toast: None,
             _spawn: Task::ready(()),
         };
         this.attach_terminal(terminal, window, cx);
@@ -177,8 +211,24 @@ impl TermView {
         cx.subscribe_in(
             &terminal,
             window,
-            |this, terminal, event, _window, cx| match event {
-                Event::Wakeup | Event::SelectionsChanged | Event::BlinkChanged(_) => {
+            |this, terminal, event, window, cx| match event {
+                Event::Wakeup | Event::SelectionsChanged => {
+                    // Poll command-finish notify (M14) when unfocused.
+                    let min_secs =
+                        TerminalSettings::get_global(cx).notify_on_command_finish_secs;
+                    if min_secs > 0 {
+                        if let Some(dur) =
+                            terminal.update(cx, |t, _| t.poll_command_finish(min_secs))
+                        {
+                            if !window.is_window_active() {
+                                notify_command_finished(dur);
+                            }
+                        }
+                    }
+                    cx.notify();
+                }
+                Event::BlinkChanged(blinking) => {
+                    this.terminal_wants_blink = *blinking;
                     cx.notify();
                 }
                 Event::TitleChanged | Event::BreadcrumbsChanged => {
@@ -187,7 +237,12 @@ impl TermView {
                     cx.notify();
                 }
                 Event::Bell => {
+                    handle_bell(window, cx);
+                    cx.emit(TermViewEvent::Bell);
                     cx.notify();
+                }
+                Event::CopiedToClipboard => {
+                    this.show_copy_toast(cx);
                 }
                 Event::CloseTerminal => {
                     this.title = "exited".into();
@@ -220,6 +275,28 @@ impl TermView {
         }
     }
 
+    /// Whether the attached PTY has a non-shell foreground job.
+    pub fn looks_busy(&self, cx: &App) -> bool {
+        self.terminal_entity()
+            .map(|t| t.read(cx).looks_busy())
+            .unwrap_or(false)
+    }
+
+    /// Apply a window-scoped font size override (zoom). `None` restores settings size.
+    pub fn set_font_size_override(&mut self, size: Option<Pixels>, cx: &mut Context<Self>) {
+        self.font_size_override = size;
+        cx.notify();
+    }
+
+    pub fn font_size_override(&self) -> Option<Pixels> {
+        self.font_size_override
+    }
+
+    /// Effective font size: zoom override or settings (clamped).
+    pub fn effective_font_size(&self, cx: &App) -> Pixels {
+        effective_font_size(self.font_size_override, cx)
+    }
+
     pub fn write_output(&self, bytes: &[u8], cx: &mut Context<Self>) {
         if let TerminalSlot::Ready(terminal) = &self.terminal {
             terminal.update(cx, |term, cx| term.write_output(bytes, cx));
@@ -238,6 +315,9 @@ impl TermView {
             return;
         }
 
+        // Reset cursor blink solid window on any keystroke (M11).
+        self.last_input_at = Instant::now();
+
         let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
         let handled = terminal.update(cx, |term, _| {
             term.try_keystroke(&event.keystroke, option_as_meta)
@@ -245,6 +325,41 @@ impl TermView {
         if handled {
             cx.notify();
         }
+    }
+
+    /// Effective cursor blink opacity for the paint path (M11).
+    pub fn blink_alpha(&self, cx: &App) -> f32 {
+        let settings = TerminalSettings::get_global(cx).blinking;
+        cursor_blink_alpha(
+            self.last_input_at.elapsed(),
+            self.terminal_wants_blink,
+            settings,
+        )
+    }
+
+    /// Whether the cursor animation should keep requesting frames.
+    pub fn blink_needs_animation(&self, cx: &App) -> bool {
+        match TerminalSettings::get_global(cx).blinking {
+            TerminalBlink::Off => false,
+            TerminalBlink::On => true,
+            TerminalBlink::TerminalControlled => self.terminal_wants_blink,
+        }
+    }
+
+    /// Show a brief bottom toast after text lands on the clipboard.
+    fn show_copy_toast(&mut self, cx: &mut Context<Self>) {
+        let hide = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1600))
+                .await;
+            this.update(cx, |this, cx| {
+                this.copy_toast = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.copy_toast = Some(CopyToast { _hide: hide });
+        cx.notify();
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
@@ -483,11 +598,18 @@ impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
+        let show_copy_toast = self.copy_toast.is_some();
+        // Toast chrome: dark surface, lime border/dot (matches common terminal UX).
+        let toast_bg = palette.background.blend(gpui::Hsla::black().opacity(0.35)).alpha(1.0);
+        let toast_border = palette.ansi[2].opacity(0.9);
+        let toast_dot = palette.ansi[2];
+        let toast_fg = palette.foreground.blend(palette.ansi[3].opacity(0.15)).alpha(1.0);
 
         div()
             .size_full()
             .flex()
             .flex_col()
+            .relative()
             .bg(palette.background)
             .text_color(palette.foreground)
             .track_focus(&self.focus_handle)
@@ -544,9 +666,105 @@ impl Render for TermView {
                         terminal.clone(),
                         self.focus_handle.clone(),
                         focused,
+                        self.font_size_override,
+                        self.last_input_at,
+                        self.terminal_wants_blink,
                     ))
                     .into_any_element(),
             })
+            .when(show_copy_toast, |el| {
+                el.child(
+                    div()
+                        .id("copy-toast")
+                        .absolute()
+                        .bottom(gpui::px(14.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        // Don't steal mouse from the terminal under the toast.
+                        .occlude()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_1p5()
+                                .rounded(gpui::px(6.0))
+                                .bg(toast_bg)
+                                .border_1()
+                                .border_color(toast_border)
+                                .shadow_md()
+                                .child(
+                                    div()
+                                        .size(gpui::px(7.0))
+                                        .rounded_full()
+                                        .bg(toast_dot),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(gpui::px(12.0))
+                                        .text_color(toast_fg)
+                                        .font_family("Menlo")
+                                        .child("copied to clipboard"),
+                                ),
+                        ),
+                )
+            })
+    }
+}
+
+/// Best-effort macOS notification when a long-running command finishes (M14).
+fn notify_command_finished(dur: std::time::Duration) {
+    let secs = dur.as_secs();
+    let script = format!(
+        "display notification \"Command finished after {secs}s\" with title \"Sleipnir\""
+    );
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn();
+}
+
+/// Clamp font size for zoom / settings (pt).
+pub const FONT_SIZE_MIN: f32 = 8.0;
+pub const FONT_SIZE_MAX: f32 = 72.0;
+pub const FONT_SIZE_STEP: f32 = 1.0;
+
+/// GPUI keystroke strings wired for font zoom in `sleipnir` (main key map).
+///
+/// Kept here so unit tests can assert the **same** strings that ship, using
+/// real `Keystroke::parse` (GPUI never emits keys named `"plus"` / `"minus"`;
+/// the correct forms are `cmd-+` and `cmd--`, matching Zed).
+pub fn font_zoom_key_bindings() -> &'static [(&'static str, &'static str)] {
+    &[
+        // (keystroke, action id)
+        ("cmd-=", "increase_font_size"),
+        ("cmd-+", "increase_font_size"),
+        ("cmd--", "decrease_font_size"),
+        ("cmd-0", "reset_font_size"),
+    ]
+}
+
+/// Effective font size from optional override + settings.
+pub fn effective_font_size(override_size: Option<Pixels>, cx: &App) -> Pixels {
+    let base = override_size
+        .or_else(|| TerminalSettings::get_global(cx).font_size)
+        .unwrap_or(gpui::px(14.));
+    let v = f32::from(base).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+    gpui::px(v)
+}
+
+fn handle_bell(window: &mut Window, cx: &mut Context<TermView>) {
+    match TerminalSettings::get_global(cx).bell {
+        TerminalBell::Off => {}
+        TerminalBell::System => {
+            window.play_system_bell();
+        }
+        TerminalBell::Visual => {
+            // Tab flash is applied by AppShell via TermViewEvent::Bell.
+        }
     }
 }
 
@@ -564,7 +782,7 @@ fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
         || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v))
 }
 
-/// Open only web URLs (M3 scope). Paths are ignored for now.
+/// Open web URLs, and path-like targets when `path_links` is enabled (M12).
 fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
     match target {
         MaybeNavigationTarget::Url(url) if is_web_url(url) => {
@@ -575,9 +793,133 @@ fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
             log::debug!("ignoring non-web url: {url}");
         }
         MaybeNavigationTarget::PathLike(path) => {
-            log::debug!("ignoring path-like target in M3: {}", path.maybe_path);
+            if !TerminalSettings::get_global(cx).path_links {
+                log::debug!("path_links disabled; ignoring {}", path.maybe_path);
+                return;
+            }
+            open_path_like_target(path);
         }
     }
+}
+
+/// Parsed path target with optional line/column suffix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedPathTarget {
+    pub path: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+/// Split `path`, `path:line`, or `path:line:col` (and optional `file://` prefix).
+pub fn parse_path_line_col(input: &str) -> ParsedPathTarget {
+    let mut s = input.trim();
+    if let Some(rest) = s.strip_prefix("file://") {
+        s = rest;
+        // file:///abs → /abs; file://localhost/abs handled loosely
+        if let Some(rest) = s.strip_prefix("localhost") {
+            s = rest;
+        }
+    }
+    // Strip a single leading slash after host-less file: (//path → /path already)
+    let (path, line, column) = split_path_line_col(s);
+    ParsedPathTarget {
+        path,
+        line,
+        column,
+    }
+}
+
+fn split_path_line_col(s: &str) -> (String, Option<u32>, Option<u32>) {
+    // From the right: optional :col, then :line. Path may contain colons only
+    // as separators here (macOS paths don't use drive letters).
+    let bytes = s.as_bytes();
+    let mut col_start = None;
+    let mut line_start = None;
+    // Find trailing :digits
+    if let Some(colon) = s.rfind(':') {
+        let after = &s[colon + 1..];
+        if !after.is_empty() && after.bytes().all(|b| b.is_ascii_digit()) {
+            col_start = Some(colon);
+            let before = &s[..colon];
+            if let Some(colon2) = before.rfind(':') {
+                let mid = &before[colon2 + 1..];
+                if !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_digit()) {
+                    line_start = Some(colon2);
+                }
+            }
+        }
+    }
+    match (line_start, col_start) {
+        (Some(ls), Some(cs)) => {
+            let path = s[..ls].to_string();
+            let line = s[ls + 1..cs].parse().ok();
+            let column = s[cs + 1..].parse().ok();
+            (path, line, column)
+        }
+        (None, Some(cs)) => {
+            // Only one numeric suffix → treat as :line
+            let path = s[..cs].to_string();
+            let line = s[cs + 1..].parse().ok();
+            (path, line, None)
+        }
+        _ => {
+            let _ = bytes;
+            (s.to_string(), None, None)
+        }
+    }
+}
+
+/// Resolve a path-like target against cwd and open if it exists.
+fn open_path_like_target(path: &terminal::PathLikeTarget) {
+    let parsed = parse_path_line_col(&path.maybe_path);
+    if parsed.path.is_empty() {
+        return;
+    }
+    // Skip method-call-looking tokens when they don't exist on disk.
+    if looks_like_method_call(&parsed.path) {
+        let candidate = resolve_path(&parsed.path, path.working_directory.as_deref());
+        if !candidate.exists() {
+            log::debug!("skipping method-like path target: {}", parsed.path);
+            return;
+        }
+    }
+    let candidate = resolve_path(&parsed.path, path.working_directory.as_deref());
+    if !candidate.exists() {
+        log::debug!(
+            "path-like target does not exist: {} (resolved {})",
+            parsed.path,
+            candidate.display()
+        );
+        return;
+    }
+    log::info!(
+        "opening path: {} (line={:?} col={:?})",
+        candidate.display(),
+        parsed.line,
+        parsed.column
+    );
+    // macOS `open` handles files and directories; line/col are not passed
+    // (default app may ignore them). Existence-checked above → no panic.
+    match std::process::Command::new("open").arg(&candidate).spawn() {
+        Ok(_) => {}
+        Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+    }
+}
+
+fn resolve_path(path_str: &str, cwd: Option<&Path>) -> PathBuf {
+    let p = Path::new(path_str);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else if let Some(cwd) = cwd {
+        cwd.join(p)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+fn looks_like_method_call(s: &str) -> bool {
+    // e.g. foo.bar() or obj.method — common false positives from path regexes.
+    s.contains("()") || (s.contains('.') && s.contains('(') && s.ends_with(')'))
 }
 
 fn is_web_url(url: &str) -> bool {
@@ -742,5 +1084,179 @@ mod tests {
         assert!(is_web_url("ftp://files.example"));
         assert!(!is_web_url("file:///tmp/x"));
         assert!(!is_web_url("not-a-url"));
+    }
+
+    #[test]
+    fn splits_line_column_suffix() {
+        assert_eq!(
+            parse_path_line_col("src/main.rs:10:2"),
+            ParsedPathTarget {
+                path: "src/main.rs".into(),
+                line: Some(10),
+                column: Some(2),
+            }
+        );
+        assert_eq!(
+            parse_path_line_col("src/main.rs:10"),
+            ParsedPathTarget {
+                path: "src/main.rs".into(),
+                line: Some(10),
+                column: None,
+            }
+        );
+        assert_eq!(
+            parse_path_line_col("/tmp/foo"),
+            ParsedPathTarget {
+                path: "/tmp/foo".into(),
+                line: None,
+                column: None,
+            }
+        );
+        assert_eq!(
+            parse_path_line_col("file:///Users/me/x.rs:3:4"),
+            ParsedPathTarget {
+                path: "/Users/me/x.rs".into(),
+                line: Some(3),
+                column: Some(4),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_path_joins_relative_to_cwd() {
+        let cwd = Path::new("/project");
+        assert_eq!(
+            resolve_path("src/main.rs", Some(cwd)),
+            PathBuf::from("/project/src/main.rs")
+        );
+        assert_eq!(
+            resolve_path("/abs/x", Some(cwd)),
+            PathBuf::from("/abs/x")
+        );
+    }
+
+    #[test]
+    fn method_call_guardrail() {
+        assert!(looks_like_method_call("foo.bar()"));
+        assert!(!looks_like_method_call("src/main.rs"));
+    }
+
+    /// Regression: GPUI binds the printed key name. `cmd-plus` / `cmd-minus`
+    /// parse as keys "plus"/"minus", which the platform never emits for ⌘+/⌘-.
+    /// The shipped binding table must use `cmd-+` and `cmd--` (and `cmd-=` / `cmd-0`).
+    #[test]
+    fn font_zoom_shipped_keystrokes_parse_as_platform_keys() {
+        let bindings = font_zoom_key_bindings();
+        assert!(
+            bindings
+                .iter()
+                .any(|(k, a)| *k == "cmd-+" && *a == "increase_font_size"),
+            "shipped table must include cmd-+ for increase"
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|(k, a)| *k == "cmd--" && *a == "decrease_font_size"),
+            "shipped table must include cmd-- for decrease"
+        );
+        assert!(
+            !bindings.iter().any(|(k, _)| *k == "cmd-plus" || *k == "cmd-minus"),
+            "must not use cmd-plus/cmd-minus (never-emitted key names)"
+        );
+
+        for (keystroke, action) in bindings {
+            let ks = Keystroke::parse(keystroke).unwrap_or_else(|err| {
+                panic!("shipped font-zoom keystroke {keystroke:?} must parse: {err}")
+            });
+            assert!(
+                ks.modifiers.platform,
+                "{keystroke} must include cmd/platform"
+            );
+            match *action {
+                "increase_font_size" => {
+                    assert!(
+                        ks.key == "+" || ks.key == "=",
+                        "{keystroke} parsed key={:?}, want + or =",
+                        ks.key
+                    );
+                }
+                "decrease_font_size" => {
+                    assert_eq!(ks.key, "-", "{keystroke} must parse to key \"-\"");
+                }
+                "reset_font_size" => {
+                    assert_eq!(ks.key, "0", "{keystroke} must parse to key \"0\"");
+                }
+                other => panic!("unexpected action id {other}"),
+            }
+        }
+
+        // Contrast: the incorrect strings the bug used parse to dead keys.
+        let wrong_plus = Keystroke::parse("cmd-plus").expect("cmd-plus still parses as a string");
+        assert_eq!(
+            wrong_plus.key, "plus",
+            "cmd-plus binds dead key name \"plus\" (platform never emits this)"
+        );
+        let wrong_minus =
+            Keystroke::parse("cmd-minus").expect("cmd-minus still parses as a string");
+        assert_eq!(
+            wrong_minus.key, "minus",
+            "cmd-minus binds dead key name \"minus\" (platform never emits this)"
+        );
+    }
+
+    /// Regression: clicking Close on the confirm dialog must not hit the
+    /// full-size backdrop. Other overlays (settings/update/palette) already
+    /// stop mouse_down on the panel; this dialog originally omitted that.
+    #[test]
+    fn close_confirm_panel_stops_backdrop_clicks() {
+        let src = include_str!("app_shell.rs");
+        let panel = src
+            .find(r#".id("close-confirm-panel")"#)
+            .expect("close-confirm-panel");
+        let backdrop = src
+            .find(r#".id("close-confirm-backdrop")"#)
+            .expect("close-confirm-backdrop");
+        assert!(
+            panel < backdrop,
+            "panel markup should precede backdrop markup"
+        );
+        assert!(
+            src[panel..backdrop].contains("stop_propagation"),
+            "close-confirm panel must stop mouse_down so Close is not cancelled by the backdrop"
+        );
+    }
+
+    /// Modal overlays sit as siblings above TermElement, not as ancestors.
+    /// GPUI's `on_scroll_wheel` fires when `hitbox.should_handle_scroll()` is
+    /// true for *every* hitbox under the pointer. Only `.occlude()`
+    /// (`HitboxBehavior::BlockMouse`) drops the terminal from that list.
+    /// `stop_propagation` on mouse_down does not.
+    fn overlay_builder_prefix<'a>(src: &'a str, id: &str) -> &'a str {
+        let needle = format!(r#".id("{id}")"#);
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{id} missing from app_shell.rs"));
+        let after = &src[start..];
+        let child = after
+            .find(".child(")
+            .unwrap_or_else(|| panic!("{id} has no .child("));
+        &after[..child]
+    }
+
+    #[test]
+    fn modal_overlays_occlude_so_terminal_does_not_scroll() {
+        let src = include_str!("app_shell.rs");
+        for id in [
+            "settings-overlay",
+            "update-overlay",
+            "palette-overlay",
+            "close-confirm-overlay",
+        ] {
+            let prefix = overlay_builder_prefix(src, id);
+            assert!(
+                prefix.contains(".occlude()"),
+                "{id} must .occlude() so wheel events do not reach TermElement under the overlay"
+            );
+        }
     }
 }

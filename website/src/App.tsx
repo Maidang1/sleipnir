@@ -1,11 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import {
+  AppWindow,
   Columns2,
   Command,
   Download,
   HardDrive,
   Image as ImageIcon,
   Keyboard,
+  Link2,
+  Maximize2,
   Palette,
   RefreshCw,
   Search,
@@ -21,23 +24,30 @@ import {
 
 const HIGHLIGHTS = [
   { icon: Zap, label: 'GPU / Metal' },
-  { icon: Columns2, label: 'Tabs & splits' },
+  { icon: Columns2, label: 'Tabs, splits & zoom' },
+  { icon: AppWindow, label: 'Multi-window' },
   { icon: Palette, label: 'Adaptive themes' },
   { icon: ImageIcon, label: 'Smart paste' },
-  { icon: Search, label: 'Find in scrollback' },
+  { icon: Search, label: 'Find & palette' },
   { icon: HardDrive, label: 'Session restore' },
+  { icon: Link2, label: 'Path links' },
 ]
 
 const FEATURES = [
   {
     icon: Zap,
     title: 'Native down to the frame',
-    body: 'Rust and GPUI — the GPU framework behind Zed. Smooth scrollback and redraw under heavy output, no Electron tax.',
+    body: 'Rust and GPUI — the GPU framework behind Zed. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output — no Electron tax.',
   },
   {
     icon: Columns2,
-    title: 'Tabs, splits & panes',
-    body: 'Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. A real workspace, not a single PTY window.',
+    title: 'Tabs, splits & pane zoom',
+    body: 'Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. Zoom a pane with ⌘⇧Enter; inactive splits dim so focus stays clear.',
+  },
+  {
+    icon: AppWindow,
+    title: 'Multi-window & font zoom',
+    body: '⌘N opens an independent window with its own tabs and shells. Resize the grid with ⌘+/⌘−/⌘0 — window-scoped, not written to settings.',
   },
   {
     icon: Palette,
@@ -52,12 +62,22 @@ const FEATURES = [
   {
     icon: Keyboard,
     title: 'Keyboard first',
-    body: 'Command palette (⌘⇧K), vi mode, configurable key bindings, find in scrollback. Almost everything stays under your fingers.',
+    body: 'Command palette (⌘⇧K), vi mode, configurable key bindings, find in scrollback, close confirm when a job is running. Almost everything stays under your fingers.',
+  },
+  {
+    icon: Link2,
+    title: 'Paths, links & shell markers',
+    body: 'Cmd-click paths open in the default app. Optional system or visual bell. Jump previous/next shell prompt when OSC 133 markers are present (⌘⇧↑/⌘⇧↓).',
+  },
+  {
+    icon: Maximize2,
+    title: 'Daily extras without bloat',
+    body: 'Quick Terminal (⌘⇧N), Quick Select mode (⌘⇧O), optional content opacity, and notify when a long command finishes while you are in another app.',
   },
   {
     icon: RefreshCw,
     title: 'Quietly current',
-    body: 'Check for updates when you want (⌘⇧U). Downloads verify against a published SHA-256 sidecar before install.',
+    body: 'Check for updates when you want (⌘⇧U). Downloads verify against a published SHA-256 sidecar before install. Session layout restores on launch.',
   },
 ]
 
@@ -78,7 +98,13 @@ const FAQ = [
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           session.json
         </code>
-        .
+        . See the repo{' '}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
+          docs/settings.example.json
+        </code>{' '}
+        for keys like <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">confirm_close</code>,{' '}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">path_links</code>, and{' '}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">background_opacity</code>.
       </>
     ),
   },
@@ -92,7 +118,11 @@ const FAQ = [
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',
-    a: 'GPU-first rendering via GPUI, Zed-shaped settings, Finder-aware paste, and a compact native chrome — without an account or cloud features.',
+    a: 'GPU-first rendering via GPUI, Zed-shaped settings, Finder-aware paste, multi-window, pane zoom, path links, and light shell integration — without an account, cloud features, or a shell-suite installer.',
+  },
+  {
+    q: 'Is there AI built in?',
+    a: 'No. Sleipnir stays a clean native terminal: no assistant, no auto-installed shell plugins, no graphics protocol platform.',
   },
 ]
 
@@ -161,9 +191,10 @@ export default function App() {
             <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.4rem] md:leading-[1.04]">
               A fast native terminal for macOS.
             </h1>
-            <p className="mt-5 max-w-[36rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-              GPU-rendered through GPUI, with real tabs and splits, adaptive themes,
-              Finder-aware paste, and session restore — entirely on your machine.
+            <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
+              GPU-rendered through GPUI — tabs, splits, multi-window, adaptive themes,
+              Finder-aware paste, path links, and session restore. Built for daily work,
+              entirely on your machine.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
               <DownloadMenu

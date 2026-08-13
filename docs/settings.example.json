@@ -1,6 +1,10 @@
 {
   "theme": "auto",
   "restore_session": true,
+  "confirm_close": "dirty",
+  "path_links": true,
+  "background_opacity": 1.0,
+  "notify_on_command_finish_secs": 5,
   "key_bindings": [
     {
       "key": "cmd-alt-t",

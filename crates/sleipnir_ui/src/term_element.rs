@@ -8,8 +8,12 @@ use gpui::{
     relative, size,
 };
 use itertools::Itertools;
-use sleipnir_settings::{TerminalPalette, TerminalSettings, get_color_at_index};
+use crate::cursor_blink_alpha;
+use sleipnir_settings::{
+    TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index,
+};
 use std::ops::Range as StdRange;
+use std::time::Instant;
 use terminal::{
     Cell, Color, CursorShape, IndexedCell, NamedColor, Range as TerminalRange, Terminal,
     TerminalBounds, is_default_background_color,
@@ -19,15 +23,31 @@ pub struct TermElement {
     terminal: Entity<Terminal>,
     focus: FocusHandle,
     focused: bool,
+    /// Window-scoped zoom override; `None` uses settings font size.
+    font_size_override: Option<Pixels>,
+    /// Last input time for blink solid window (M11).
+    last_input_at: Instant,
+    /// App-reported blink preference (M11).
+    terminal_wants_blink: bool,
     interactivity: gpui::Interactivity,
 }
 
 impl TermElement {
-    pub fn new(terminal: Entity<Terminal>, focus: FocusHandle, focused: bool) -> Self {
+    pub fn new(
+        terminal: Entity<Terminal>,
+        focus: FocusHandle,
+        focused: bool,
+        font_size_override: Option<Pixels>,
+        last_input_at: Instant,
+        terminal_wants_blink: bool,
+    ) -> Self {
         Self {
             terminal,
             focus: focus.clone(),
             focused,
+            font_size_override,
+            last_input_at,
+            terminal_wants_blink,
             interactivity: Default::default(),
         }
         .track_focus(&focus)
@@ -116,10 +136,18 @@ pub struct LayoutState {
     backgrounds: Vec<BgRect>,
     selection: Vec<BgRect>,
     search_rects: Vec<BgRect>,
+    /// Underlines for the hovered hyperlink (M11).
+    hover_underlines: Vec<BgRect>,
     background_color: gpui::Hsla,
     /// Column, display line, cell char, shape — `None` when the app hid the cursor.
     cursor: Option<(usize, i32, char, CursorShape)>,
     ime_cursor_bounds: Option<Bounds<Pixels>>,
+    /// True when a hyperlink is under the pointer (⌘+hover).
+    hover_link: bool,
+    /// Cursor blink opacity for this frame (M11).
+    blink_alpha: f32,
+    /// Whether to request another animation frame (M11).
+    blink_animating: bool,
 }
 
 impl Element for TermElement {
@@ -164,6 +192,12 @@ impl Element for TermElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let font_size_override = self.font_size_override;
+        let last_input_at = self.last_input_at;
+        let terminal_wants_blink = self.terminal_wants_blink;
+        let focused = self.focused;
+        let terminal = self.terminal.clone();
+
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -171,28 +205,35 @@ impl Element for TermElement {
             bounds.size,
             window,
             cx,
-            |_, _, hitbox, window, cx| {
+            move |_, _, hitbox, window, cx| {
                 let hitbox = hitbox.unwrap();
                 let settings = TerminalSettings::get_global(cx);
                 let palette = TerminalPalette::get_global(cx);
-
+                let blinking = settings.blinking;
                 let font_family = settings
                     .font_family
                     .clone()
                     .unwrap_or_else(|| "Menlo".into());
-                let font_size = settings.font_size.unwrap_or(px(14.)).max(px(8.));
+                let font_size = font_size_override
+                    .or(settings.font_size)
+                    .unwrap_or(px(14.))
+                    .max(px(8.));
                 let line_height_factor = settings.line_height.value().max(1.0);
+                let font_features = settings
+                    .font_features
+                    .clone()
+                    .unwrap_or_else(gpui::FontFeatures::disable_ligatures);
+                let font_weight = settings.font_weight.unwrap_or_default();
+                let font_fallbacks = settings.font_fallbacks.clone();
+                let foreground = palette.foreground;
 
                 let text_style = TextStyle {
                     font_family: font_family.into(),
-                    font_features: settings
-                        .font_features
-                        .clone()
-                        .unwrap_or_else(gpui::FontFeatures::disable_ligatures),
-                    font_weight: settings.font_weight.unwrap_or_default(),
+                    font_features,
+                    font_weight,
                     font_size: font_size.into(),
-                    font_fallbacks: settings.font_fallbacks.clone(),
-                    color: palette.foreground,
+                    font_fallbacks,
+                    color: foreground,
                     ..Default::default()
                 };
 
@@ -222,7 +263,7 @@ impl Element for TermElement {
                     },
                 );
 
-                let content = self.terminal.update(cx, |terminal, cx| {
+                let content = terminal.update(cx, |terminal, cx| {
                     terminal.set_size(dimensions);
                     terminal.sync(window, cx);
                     terminal.last_content().clone()
@@ -249,11 +290,23 @@ impl Element for TermElement {
                     .unwrap_or_default();
 
                 // Search highlights (M10): paint under selection, above cell bg.
-                let search_matches = self.terminal.read(cx).matches.clone();
+                let search_matches = terminal.read(cx).matches.clone();
                 let match_color = palette.selection.opacity(0.35);
                 let mut search_rects = Vec::new();
                 for m in search_matches {
                     search_rects.extend(range_rects(m, content.display_offset, match_color));
+                }
+
+                // URL / path hover underline (M11).
+                let link_color = palette.ansi[4].opacity(0.85);
+                let mut hover_underlines = Vec::new();
+                let hover_link = content.last_hovered_word.is_some();
+                if let Some(hovered) = content.last_hovered_word.as_ref() {
+                    hover_underlines.extend(range_rects(
+                        hovered.word_match,
+                        content.display_offset,
+                        link_color,
+                    ));
                 }
 
                 let cursor_point = content.cursor.point;
@@ -279,6 +332,18 @@ impl Element for TermElement {
                     )),
                 };
 
+                let blink_alpha = cursor_blink_alpha(
+                    last_input_at.elapsed(),
+                    terminal_wants_blink,
+                    blinking,
+                );
+                let blink_animating = focused
+                    && match blinking {
+                        TerminalBlink::Off => false,
+                        TerminalBlink::On => true,
+                        TerminalBlink::TerminalControlled => terminal_wants_blink,
+                    };
+
                 LayoutState {
                     hitbox,
                     dimensions,
@@ -286,9 +351,18 @@ impl Element for TermElement {
                     backgrounds,
                     selection,
                     search_rects,
-                    background_color: palette.background,
+                    hover_underlines,
+                    background_color: {
+                        let op = TerminalSettings::get_global(cx)
+                            .background_opacity
+                            .clamp(0.15, 1.0);
+                        palette.background.opacity(op)
+                    },
                     cursor,
                     ime_cursor_bounds,
+                    hover_link,
+                    blink_alpha,
+                    blink_animating,
                 }
             },
         )
@@ -324,7 +398,12 @@ impl Element for TermElement {
                 cx,
                 |_, window, cx| {
                     window.handle_input(&self.focus, input_handler, cx);
-                    window.set_cursor_style(gpui::CursorStyle::IBeam, &layout.hitbox);
+                    let cursor_style = if layout.hover_link {
+                        gpui::CursorStyle::PointingHand
+                    } else {
+                        gpui::CursorStyle::IBeam
+                    };
+                    window.set_cursor_style(cursor_style, &layout.hitbox);
 
                     for bg in &layout.search_rects {
                         paint_bg(origin, bg, &layout.dimensions, window);
@@ -334,6 +413,10 @@ impl Element for TermElement {
                     }
                     for bg in &layout.backgrounds {
                         paint_bg(origin, bg, &layout.dimensions, window);
+                    }
+                    // Hover link underlines (M11): thin strip at bottom of each cell span.
+                    for ul in &layout.hover_underlines {
+                        paint_underline(origin, ul, &layout.dimensions, window);
                     }
                     for batch in &layout.batches {
                         batch.paint(origin, &layout.dimensions, window, cx);
@@ -352,10 +435,16 @@ impl Element for TermElement {
                                 ch,
                                 origin,
                                 &layout.dimensions,
+                                layout.blink_alpha,
                                 window,
                                 cx,
                             );
                         }
+                    }
+
+                    // Keep the blink animation running at ~display refresh (M11).
+                    if layout.blink_animating {
+                        window.request_animation_frame();
                     }
                 },
             );
@@ -447,6 +536,28 @@ fn paint_bg(origin: GpuiPoint<Pixels>, bg: &BgRect, dimensions: &TerminalBounds,
             ((bg.end_col - bg.start_col + 1) as f32) * dimensions.cell_width,
             dimensions.line_height,
         ),
+    );
+    window.paint_quad(fill(rect, bg.color));
+}
+
+/// 1px-ish underline along the bottom of a cell span (URL hover).
+fn paint_underline(
+    origin: GpuiPoint<Pixels>,
+    bg: &BgRect,
+    dimensions: &TerminalBounds,
+    window: &mut Window,
+) {
+    let h = (dimensions.line_height * 0.08).max(px(1.));
+    let width_cells = (bg.end_col - bg.start_col + 1).max(1) as f32;
+    // Cap absurd LINE_END spans to the visible width.
+    let max_cols = dimensions.num_columns() as f32;
+    let cols = width_cells.min(max_cols);
+    let rect = Bounds::new(
+        point(
+            origin.x + bg.start_col as f32 * dimensions.cell_width,
+            origin.y + (bg.line as f32 + 1.0) * dimensions.line_height - h,
+        ),
+        size(cols * dimensions.cell_width, h),
     );
     window.paint_quad(fill(rect, bg.color));
 }
@@ -608,10 +719,12 @@ fn paint_terminal_cursor(
     ch: char,
     origin: GpuiPoint<Pixels>,
     dimensions: &TerminalBounds,
+    blink_alpha: f32,
     window: &mut Window,
     cx: &mut App,
 ) {
     let palette = TerminalPalette::get_global(cx);
+    let cursor_color = palette.cursor.opacity(blink_alpha.clamp(0.0, 1.0));
     let cell_origin = point(
         origin.x + col as f32 * dimensions.cell_width,
         origin.y + line as f32 * dimensions.line_height,
@@ -626,38 +739,41 @@ fn paint_terminal_cursor(
                 // Outline only: leave cell content visible.
                 window.paint_quad(gpui::outline(
                     cursor_bounds,
-                    palette.cursor,
+                    cursor_color,
                     gpui::BorderStyle::Solid,
                 ));
             } else {
-                window.paint_quad(fill(cursor_bounds, palette.cursor));
-                let style = TextRun {
-                    len: ch.len_utf8(),
-                    font: window.text_style().font(),
-                    color: palette.background,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                let font_size = TerminalSettings::get_global(cx)
-                    .font_size
-                    .unwrap_or(px(14.));
-                let _ = window
-                    .text_system()
-                    .shape_line(
-                        ch.to_string().into(),
-                        font_size,
-                        &[style],
-                        Some(dimensions.cell_width),
-                    )
-                    .paint(
-                        cursor_bounds.origin,
-                        dimensions.line_height,
-                        gpui::TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
+                window.paint_quad(fill(cursor_bounds, cursor_color));
+                // Only paint inverse glyph when cursor is mostly solid.
+                if blink_alpha > 0.2 {
+                    let style = TextRun {
+                        len: ch.len_utf8(),
+                        font: window.text_style().font(),
+                        color: palette.background.opacity(blink_alpha.clamp(0.0, 1.0)),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let font_size = TerminalSettings::get_global(cx)
+                        .font_size
+                        .unwrap_or(px(14.));
+                    let _ = window
+                        .text_system()
+                        .shape_line(
+                            ch.to_string().into(),
+                            font_size,
+                            &[style],
+                            Some(dimensions.cell_width),
+                        )
+                        .paint(
+                            cursor_bounds.origin,
+                            dimensions.line_height,
+                            gpui::TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
+                }
             }
         }
         CursorShape::Underline => {
@@ -669,12 +785,12 @@ fn paint_terminal_cursor(
                 ),
                 size(dimensions.cell_width, h),
             );
-            window.paint_quad(fill(underline, palette.cursor));
+            window.paint_quad(fill(underline, cursor_color));
         }
         CursorShape::Bar => {
             let w = (dimensions.cell_width * 0.15).max(px(1.));
             let bar = Bounds::new(cell_origin, size(w, dimensions.line_height));
-            window.paint_quad(fill(bar, palette.cursor));
+            window.paint_quad(fill(bar, cursor_color));
         }
     }
 }

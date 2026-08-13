@@ -42,6 +42,21 @@ pub enum TerminalBell {
     #[default]
     Off,
     System,
+    /// Flash the tab chrome briefly (no audio).
+    Visual,
+}
+
+/// When to prompt before closing a pane, tab, or window (M12).
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmClose {
+    /// Confirm only when a non-shell foreground job is running.
+    #[default]
+    Dirty,
+    /// Always confirm before close.
+    Always,
+    /// Never confirm (previous behavior).
+    Never,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
@@ -133,6 +148,15 @@ pub struct TerminalSettings {
     pub font_ligatures: bool,
     /// Optional key binding overrides loaded from settings (M9).
     pub key_bindings: Vec<KeyBindingSpec>,
+    /// When to confirm before closing a pane/tab (M12). Default: dirty.
+    pub confirm_close: ConfirmClose,
+    /// Open path-like navigation targets (cmd-click) in the default app (M12).
+    pub path_links: bool,
+    /// Window content opacity 0.15..=1.0 (M15). Default 1.0 (fully opaque).
+    pub background_opacity: f32,
+    /// Notify when a long-running foreground job finishes while unfocused (M14).
+    /// Seconds; `0` disables. Default 5.
+    pub notify_on_command_finish_secs: u64,
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -177,6 +201,10 @@ impl Default for TerminalSettings {
             restore_session: true,
             font_ligatures: false,
             key_bindings: Vec::new(),
+            confirm_close: ConfirmClose::Dirty,
+            path_links: true,
+            background_opacity: 1.0,
+            notify_on_command_finish_secs: 5,
         }
     }
 }
@@ -258,6 +286,18 @@ impl TerminalSettings {
         }
     }
 
+    /// Toggle copy-on-select and persist under `terminal.copy_on_select`.
+    pub fn set_copy_on_select(enabled: bool, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.copy_on_select = enabled;
+        apply_loaded(settings, cx);
+        if let Err(err) = persist_terminal_bool("copy_on_select", enabled) {
+            log::warn!("failed to persist copy_on_select={enabled}: {err}");
+        } else {
+            log::info!("copy_on_select -> {enabled} (persisted)");
+        }
+    }
+
     /// Record a new system appearance and re-resolve the palette (for `Auto`).
     pub fn set_appearance(appearance: Appearance, cx: &mut App) {
         cx.set_global(AppearanceGlobal(appearance));
@@ -301,6 +341,18 @@ struct SettingsFile {
     /// Extra key bindings layered on top of the built-in map.
     #[serde(default)]
     key_bindings: Option<Vec<KeyBindingSpec>>,
+    /// Confirm close policy: dirty | always | never (M12).
+    #[serde(default)]
+    confirm_close: Option<ConfirmClose>,
+    /// Open path-like targets on cmd-click (M12). Default true.
+    #[serde(default)]
+    path_links: Option<bool>,
+    /// Content background opacity 0.15–1.0 (M15). Default 1.0.
+    #[serde(default)]
+    background_opacity: Option<f32>,
+    /// Notify after unfocused commands longer than N seconds (M14). 0 = off.
+    #[serde(default)]
+    notify_on_command_finish_secs: Option<u64>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
@@ -361,6 +413,18 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
     if let Some(bindings) = file.key_bindings {
         settings.key_bindings = bindings;
+    }
+    if let Some(v) = file.confirm_close {
+        settings.confirm_close = v;
+    }
+    if let Some(v) = file.path_links {
+        settings.path_links = v;
+    }
+    if let Some(v) = file.background_opacity {
+        settings.background_opacity = v.clamp(0.15, 1.0);
+    }
+    if let Some(v) = file.notify_on_command_finish_secs {
+        settings.notify_on_command_finish_secs = v;
     }
     let t = file.terminal;
     if let Some(size) = t.font_size {
@@ -434,6 +498,10 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         theme: Some(ThemeName::Mocha),
         restore_session: Some(true),
         key_bindings: None,
+        confirm_close: Some(ConfirmClose::Dirty),
+        path_links: Some(true),
+        background_opacity: Some(1.0),
+        notify_on_command_finish_secs: Some(5),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some("Menlo".into()),
@@ -606,5 +674,61 @@ mod tests {
         assert_eq!(v["restore_session"], false);
         assert_eq!(v["terminal"]["font_size"], 14);
         assert_eq!(v["terminal"]["font_ligatures"], true);
+    }
+
+    #[test]
+    fn m12_keys_default_when_absent() {
+        let settings = TerminalSettings::default();
+        assert_eq!(settings.confirm_close, ConfirmClose::Dirty);
+        assert!(settings.path_links);
+        assert_eq!(settings.bell, TerminalBell::Off);
+        assert!(!settings.copy_on_select);
+    }
+
+    #[test]
+    fn m12_keys_parse_from_settings_json() {
+        let raw = r#"{
+  "confirm_close": "always",
+  "path_links": false,
+  "terminal": {
+    "bell": "visual",
+    "copy_on_select": true
+  }
+}"#;
+        let file: SettingsFile = serde_json::from_str(raw).expect("parse settings");
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.confirm_close, ConfirmClose::Always);
+        assert!(!settings.path_links);
+        assert_eq!(settings.bell, TerminalBell::Visual);
+        assert!(settings.copy_on_select);
+    }
+
+    #[test]
+    fn m12_confirm_close_variants_roundtrip() {
+        for (json, expected) in [
+            ("dirty", ConfirmClose::Dirty),
+            ("always", ConfirmClose::Always),
+            ("never", ConfirmClose::Never),
+        ] {
+            let raw = format!(r#"{{"confirm_close":"{json}"}}"#);
+            let file: SettingsFile = serde_json::from_str(&raw).unwrap();
+            let mut settings = TerminalSettings::default();
+            merge_file(&mut settings, file);
+            assert_eq!(settings.confirm_close, expected);
+        }
+    }
+
+    #[test]
+    fn m12_bell_visual_parses() {
+        let raw = r#"{"terminal":{"bell":"visual"}}"#;
+        let file: SettingsFile = serde_json::from_str(raw).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.bell, TerminalBell::Visual);
+        assert_eq!(
+            serde_json::to_string(&TerminalBell::Visual).unwrap(),
+            "\"visual\""
+        );
     }
 }

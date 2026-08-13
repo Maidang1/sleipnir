@@ -3,10 +3,12 @@
 //! Mirrors the discoverability surface of Terminal.app / Kaku / iTerm2, wiring
 //! existing GPUI actions so menu items and keybindings share one code path.
 
-use gpui::{Menu, MenuItem, SystemMenuType, actions};
+use gpui::{actions, Menu, MenuItem, SystemMenuType};
 use sleipnir_ui::{
-    CheckForUpdates, CloseTab, CycleTheme, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, NewTab, NextTab, OpenSettings, PrevTab, ReloadSettings, SplitDown, SplitRight,
+    CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab,
+    NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize,
+    SplitDown, SplitRight, ToggleBroadcast, TogglePaneZoom, ToggleQuickSelect,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -41,6 +43,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Quit Sleipnir", Quit),
         ]),
         Menu::new("Shell").items([
+            MenuItem::action("New Window", NewWindow),
             MenuItem::action("New Tab", NewTab),
             MenuItem::action("Close", CloseTab),
             MenuItem::separator(),
@@ -68,11 +71,26 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Reload Settings", ReloadSettings),
             MenuItem::action("Cycle Theme", CycleTheme),
             MenuItem::separator(),
+            MenuItem::action("Increase Font Size", IncreaseFontSize),
+            MenuItem::action("Decrease Font Size", DecreaseFontSize),
+            MenuItem::action("Reset Font Size", ResetFontSize),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Pane Zoom", TogglePaneZoom),
+            MenuItem::action("Toggle Broadcast Input", ToggleBroadcast),
+            MenuItem::separator(),
+            MenuItem::action("Previous Prompt", JumpPrevPrompt),
+            MenuItem::action("Next Prompt", JumpNextPrompt),
+            MenuItem::separator(),
+            MenuItem::action("Quick Select", ToggleQuickSelect),
+            MenuItem::action("Quick Terminal", OpenQuickTerminal),
+            MenuItem::separator(),
             MenuItem::action("Toggle Vi Mode", ToggleViMode),
         ]),
         // Name must be exactly "Window" so GPUI registers it as the system
         // Windows menu (Minimize / Zoom / Bring All to Front are added by AppKit).
         Menu::new("Window").items([
+            MenuItem::action("New Window", NewWindow),
+            MenuItem::separator(),
             MenuItem::action("Next Tab", NextTab),
             MenuItem::action("Previous Tab", PrevTab),
         ]),

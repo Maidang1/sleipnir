@@ -1,8 +1,11 @@
 mod mappings;
 
 mod alacritty;
+mod osc133;
 mod pty_info;
 pub mod terminal_settings;
+
+pub use osc133::{Osc133Kind, Osc133Marker, Osc133Scanner, scan_osc133};
 
 #[cfg(not(windows))]
 use anyhow::Context as _;
@@ -697,6 +700,8 @@ pub enum Event {
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
+    /// Selection text was written to the system clipboard (⌘C or copy-on-select).
+    CopiedToClipboard,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1038,6 +1043,10 @@ impl TerminalBuilder {
             child_exited: None,
             keyboard_input_sent: false,
             init_command_startup_marker: None,
+            osc133: Osc133Scanner::new(),
+            prompt_markers: Vec::new(),
+            last_busy: false,
+            busy_since: None,
             init_command_startup_tx: None,
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
@@ -1313,6 +1322,10 @@ impl TerminalBuilder {
                 child_exited: None,
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
+                osc133: Osc133Scanner::new(),
+                prompt_markers: Vec::new(),
+                last_busy: false,
+                busy_since: None,
                 init_command_startup_tx: None,
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
@@ -1522,6 +1535,14 @@ pub struct Terminal {
     child_exited: Option<ExitStatus>,
     keyboard_input_sent: bool,
     init_command_startup_marker: Option<String>,
+    /// OSC 133 scanner (M14 shell integration detect).
+    osc133: Osc133Scanner,
+    /// Prompt/command markers with scrollback lines for jump navigation.
+    prompt_markers: Vec<Osc133Marker>,
+    /// Last known busy state for command-finish notify (M14).
+    last_busy: bool,
+    /// When the current foreground job became busy, if any.
+    busy_since: Option<Instant>,
     init_command_startup_tx: Option<Sender<()>>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
@@ -1774,7 +1795,10 @@ impl Terminal {
             InternalEvent::Copy(keep_selection) => {
                 trace!("Copying selection: keep_selection={keep_selection:?}");
                 if let Some(txt) = selection_text(term) {
-                    cx.write_to_clipboard(ClipboardItem::new_string(txt));
+                    if !txt.is_empty() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(txt));
+                        cx.emit(Event::CopiedToClipboard);
+                    }
                     if !keep_selection.unwrap_or_else(|| {
                         let settings = TerminalSettings::get_global(cx);
                         settings.keep_selection_on_copy
@@ -1939,11 +1963,119 @@ impl Terminal {
         let mut previous_byte_was_cr = false;
         let converted = convert_lf_to_crlf(bytes, &mut previous_byte_was_cr);
 
+        self.ingest_osc133(&converted);
+
         let mut term = self.term.lock();
         self.output_processor.advance(&mut *term, &converted);
         drop(term);
         self.detect_init_command_startup_marker();
         cx.emit(Event::Wakeup);
+    }
+
+    /// Feed OSC 133 scanner and record prompt markers at the current cursor line.
+    pub fn ingest_osc133(&mut self, bytes: &[u8]) {
+        let kinds = self.osc133.push(bytes);
+        if kinds.is_empty() {
+            return;
+        }
+        let line = {
+            let term = self.term.lock_unfair();
+            let cursor = term.grid().cursor.point;
+            Some(cursor.line.0 + term.history_size() as i32)
+        };
+        for kind in kinds {
+            // Keep prompt starts and command finishes for jump navigation.
+            if matches!(
+                kind,
+                Osc133Kind::PromptStart | Osc133Kind::CommandFinished { .. }
+            ) {
+                self.prompt_markers.push(Osc133Marker { kind, line });
+                // Bound memory.
+                if self.prompt_markers.len() > 500 {
+                    let drain = self.prompt_markers.len() - 500;
+                    self.prompt_markers.drain(0..drain);
+                }
+            }
+            if matches!(kind, Osc133Kind::CommandFinished { .. }) {
+                // Command ended via shell integration; clear busy timer.
+                self.last_busy = false;
+                self.busy_since = None;
+            }
+        }
+    }
+
+    /// Scrollback lines that mark prompt starts (for jump navigation).
+    pub fn prompt_marker_lines(&self) -> Vec<i32> {
+        self.prompt_markers
+            .iter()
+            .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
+            .filter_map(|m| m.line)
+            .collect()
+    }
+
+    /// Jump display to the previous/next prompt marker relative to the viewport.
+    /// `delta` is -1 (prev) or +1 (next). Returns true if scrolled.
+    pub fn jump_prompt(&mut self, delta: i32) -> bool {
+        let lines = self.prompt_marker_lines();
+        if lines.is_empty() {
+            return false;
+        }
+        let current = {
+            let term = self.term.lock_unfair();
+            // Top of viewport in absolute scrollback coords.
+            let offset = term.grid().display_offset() as i32;
+            let history = term.history_size() as i32;
+            history - offset
+        };
+        let target = if delta < 0 {
+            lines.iter().rev().find(|&&l| l < current).copied()
+        } else {
+            lines.iter().find(|&&l| l > current).copied()
+        };
+        let Some(target_line) = target else {
+            return false;
+        };
+        // Scroll so target is near the top of the viewport.
+        let term = self.term.lock_unfair();
+        let history = term.history_size() as i32;
+        drop(term);
+        let target_offset = (history - target_line).max(0) as usize;
+        let mut term = self.term.lock();
+        let now = term.grid().display_offset() as i32;
+        let delta_lines = target_offset as i32 - now;
+        if delta_lines != 0 {
+            scroll_display(&mut term, Scroll::Delta(delta_lines));
+        }
+        true
+    }
+
+    /// Poll busy transitions for command-finish notify.
+    ///
+    /// Returns `Some(duration)` when a previously-busy job just went idle and
+    /// ran at least `min_secs` seconds — caller may show a system notification
+    /// if the window is unfocused.
+    pub fn poll_command_finish(&mut self, min_secs: u64) -> Option<Duration> {
+        let busy = self.looks_busy();
+        let now = Instant::now();
+        match (self.last_busy, busy) {
+            (false, true) => {
+                self.last_busy = true;
+                self.busy_since = Some(now);
+                None
+            }
+            (true, false) => {
+                self.last_busy = false;
+                let started = self.busy_since.take()?;
+                let dur = now.saturating_duration_since(started);
+                if dur.as_secs() >= min_secs {
+                    Some(dur)
+                } else {
+                    None
+                }
+            }
+            (true, true) => None,
+            (false, false) => None,
+        }
     }
 
     pub fn total_lines(&self) -> usize {
@@ -2993,6 +3125,21 @@ impl Terminal {
         }
     }
 
+    /// Whether the PTY has a non-shell foreground job (close-confirm "dirty").
+    ///
+    /// Idle interactive shells alone are **not** dirty; a foreground process
+    /// group that differs from the shell child is dirty (`sleep`, `vim`, …).
+    pub fn looks_busy(&self) -> bool {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => {
+                let shell = info.pid_getter().fallback_pid().as_u32();
+                let fg = info.pid().map(|p| p.as_u32());
+                terminal_looks_busy(fg, shell)
+            }
+            TerminalType::DisplayOnly => false,
+        }
+    }
+
     pub fn task(&self) -> Option<&TaskState> {
         self.task.as_ref()
     }
@@ -3355,6 +3502,18 @@ fn foreground_process_command_from_argv(argv: &[String]) -> Option<String> {
         .or(command)
 }
 
+/// Pure busy predicate for close-confirm (M12).
+///
+/// Returns true when the foreground process group id differs from the shell
+/// child pid (a non-shell job is running). Idle shell → foreground equals
+/// shell → not busy.
+pub fn terminal_looks_busy(foreground_pid: Option<u32>, shell_pid: u32) -> bool {
+    match foreground_pid {
+        Some(fg) if fg > 0 && shell_pid > 0 && fg != shell_pid => true,
+        _ => false,
+    }
+}
+
 fn normalize_script_command_name(argument: &str) -> Option<String> {
     let path = Path::new(argument);
     let file_stem = path
@@ -3400,5 +3559,23 @@ pub fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
 
 #[cfg(test)]
 mod tests {
+    use super::terminal_looks_busy;
+
     // M1: full integration tests disabled (Zed settings stack removed)
+
+    #[test]
+    fn idle_shell_is_not_busy() {
+        // Foreground process group equals the shell child.
+        assert!(!terminal_looks_busy(Some(42), 42));
+        assert!(!terminal_looks_busy(None, 42));
+        assert!(!terminal_looks_busy(Some(0), 42));
+        assert!(!terminal_looks_busy(Some(42), 0));
+    }
+
+    #[test]
+    fn foreground_job_is_busy() {
+        // e.g. shell pid 100, `sleep` in pgid 200.
+        assert!(terminal_looks_busy(Some(200), 100));
+        assert!(terminal_looks_busy(Some(1), 2));
+    }
 }

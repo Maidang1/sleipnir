@@ -20,6 +20,16 @@ pub enum CommandId {
     CheckForUpdates,
     Find,
     ToggleCommandPalette,
+    IncreaseFontSize,
+    DecreaseFontSize,
+    ResetFontSize,
+    NewWindow,
+    TogglePaneZoom,
+    ToggleBroadcast,
+    JumpPrevPrompt,
+    JumpNextPrompt,
+    ToggleQuickSelect,
+    OpenQuickTerminal,
 }
 
 impl CommandId {
@@ -37,6 +47,16 @@ impl CommandId {
             CommandId::CheckForUpdates => "check_for_updates",
             CommandId::Find => "find",
             CommandId::ToggleCommandPalette => "toggle_command_palette",
+            CommandId::IncreaseFontSize => "increase_font_size",
+            CommandId::DecreaseFontSize => "decrease_font_size",
+            CommandId::ResetFontSize => "reset_font_size",
+            CommandId::NewWindow => "new_window",
+            CommandId::TogglePaneZoom => "toggle_pane_zoom",
+            CommandId::ToggleBroadcast => "toggle_broadcast",
+            CommandId::JumpPrevPrompt => "jump_prev_prompt",
+            CommandId::JumpNextPrompt => "jump_next_prompt",
+            CommandId::ToggleQuickSelect => "toggle_quick_select",
+            CommandId::OpenQuickTerminal => "open_quick_terminal",
         }
     }
 
@@ -54,6 +74,16 @@ impl CommandId {
             "check_for_updates" => Some(CommandId::CheckForUpdates),
             "find" | "search" => Some(CommandId::Find),
             "toggle_command_palette" | "command_palette" => Some(CommandId::ToggleCommandPalette),
+            "increase_font_size" | "font_size_up" => Some(CommandId::IncreaseFontSize),
+            "decrease_font_size" | "font_size_down" => Some(CommandId::DecreaseFontSize),
+            "reset_font_size" | "font_size_reset" => Some(CommandId::ResetFontSize),
+            "new_window" => Some(CommandId::NewWindow),
+            "toggle_pane_zoom" | "pane_zoom" => Some(CommandId::TogglePaneZoom),
+            "toggle_broadcast" | "broadcast" => Some(CommandId::ToggleBroadcast),
+            "jump_prev_prompt" | "prev_prompt" => Some(CommandId::JumpPrevPrompt),
+            "jump_next_prompt" | "next_prompt" => Some(CommandId::JumpNextPrompt),
+            "toggle_quick_select" | "quick_select" => Some(CommandId::ToggleQuickSelect),
+            "open_quick_terminal" | "quick_terminal" => Some(CommandId::OpenQuickTerminal),
             _ => None,
         }
     }
@@ -142,6 +172,66 @@ pub fn commands() -> Vec<CommandItem> {
             title: "Toggle Command Palette".into(),
             shortcut: "⌘⇧K".into(),
             keywords: "command palette actions",
+        },
+        CommandItem {
+            id: CommandId::NewWindow,
+            title: "New Window".into(),
+            shortcut: "⌘N".into(),
+            keywords: "window new open",
+        },
+        CommandItem {
+            id: CommandId::IncreaseFontSize,
+            title: "Increase Font Size".into(),
+            shortcut: "⌘+".into(),
+            keywords: "font zoom larger bigger size",
+        },
+        CommandItem {
+            id: CommandId::DecreaseFontSize,
+            title: "Decrease Font Size".into(),
+            shortcut: "⌘-".into(),
+            keywords: "font zoom smaller size",
+        },
+        CommandItem {
+            id: CommandId::ResetFontSize,
+            title: "Reset Font Size".into(),
+            shortcut: "⌘0".into(),
+            keywords: "font zoom reset default size",
+        },
+        CommandItem {
+            id: CommandId::TogglePaneZoom,
+            title: "Toggle Pane Zoom".into(),
+            shortcut: "⌘⇧Enter".into(),
+            keywords: "zoom maximize pane split",
+        },
+        CommandItem {
+            id: CommandId::ToggleBroadcast,
+            title: "Toggle Broadcast Input".into(),
+            shortcut: "⌘⇧B".into(),
+            keywords: "broadcast all panes input",
+        },
+        CommandItem {
+            id: CommandId::JumpPrevPrompt,
+            title: "Jump to Previous Prompt".into(),
+            shortcut: "⌘⇧↑".into(),
+            keywords: "prompt shell osc133 jump previous",
+        },
+        CommandItem {
+            id: CommandId::JumpNextPrompt,
+            title: "Jump to Next Prompt".into(),
+            shortcut: "⌘⇧↓".into(),
+            keywords: "prompt shell osc133 jump next",
+        },
+        CommandItem {
+            id: CommandId::ToggleQuickSelect,
+            title: "Toggle Quick Select".into(),
+            shortcut: "⌘⇧O".into(),
+            keywords: "quick select labels links",
+        },
+        CommandItem {
+            id: CommandId::OpenQuickTerminal,
+            title: "Open Quick Terminal".into(),
+            shortcut: "⌘⇧N".into(),
+            keywords: "quick terminal dropdown window",
         },
     ]
 }
