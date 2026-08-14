@@ -10,7 +10,8 @@
 set -euo pipefail
 
 RESULT="${RESULT_FILE:-/tmp/sleipnir-bench-results.txt}"
-CMD="/Users/bytedance/codes/myself/harbor/scripts/bench/bench-in-shell.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CMD="${BENCH_CMD:-$SCRIPT_DIR/bench-in-shell.sh}"
 rm -f "$RESULT"
 
 echo "[1/3] activating Sleipnir..."
@@ -20,9 +21,9 @@ delay 0.6
 APPLESCRIPT
 
 echo "[2/3] typing benchmark command..."
-osascript <<'APPLESCRIPT'
+osascript <<APPLESCRIPT
 tell application "System Events"
-    keystroke "/Users/bytedance/codes/myself/harbor/scripts/bench/bench-in-shell.sh"
+    keystroke "$CMD"
     key code 36 -- Return
 end tell
 APPLESCRIPT

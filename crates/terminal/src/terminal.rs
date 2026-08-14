@@ -3,16 +3,16 @@ mod mappings;
 mod alacritty;
 mod osc133;
 mod osc_notify;
-mod shell_semantics;
 mod pty_info;
+mod shell_semantics;
 pub mod terminal_settings;
 
-pub use osc133::{Osc133Kind, Osc133Marker, Osc133Scanner, scan_osc133};
 pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
+pub use osc133::{Osc133Kind, Osc133Marker, Osc133Scanner, scan_osc133};
 pub use shell_semantics::{
-    ClickToMove, InjectShell, TripleClickKind, apply_inject_to_shell, click_to_move_sequence,
-    command_output_range, inject_script, triple_click_kind, wrap_shell_for_inject,
-    wrap_shell_for_inject_in,
+    ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
+    click_to_move_sequence, command_output_range, inject_script, triple_click_kind,
+    wrap_shell_for_inject, wrap_shell_for_inject_in,
 };
 
 #[cfg(not(windows))]
@@ -38,9 +38,9 @@ use collections::{HashMap, VecDeque};
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
+use sleipnir_settings::{TerminalPalette, get_color_at_index as palette_get_color};
 use task_types::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
-use sleipnir_settings::{TerminalPalette, get_color_at_index as palette_get_color};
 use urlencoding;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 
@@ -1342,7 +1342,7 @@ impl TerminalBuilder {
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
                 osc133: Osc133Scanner::new(),
-            osc_notify: OscNotifyScanner::new(),
+                osc_notify: OscNotifyScanner::new(),
                 prompt_markers: Vec::new(),
                 last_busy: false,
                 busy_since: None,
@@ -1711,8 +1711,12 @@ impl Terminal {
                 // we might respond with out of date value if a "set color" sequence is immediately
                 // followed by a color request sequence.
 
-                let color = self.term.lock().colors()[index]
-                    .unwrap_or_else(|| to_vte_rgb(palette_get_color(index, TerminalPalette::get_global(cx).as_ref())));
+                let color = self.term.lock().colors()[index].unwrap_or_else(|| {
+                    to_vte_rgb(palette_get_color(
+                        index,
+                        TerminalPalette::get_global(cx).as_ref(),
+                    ))
+                });
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
@@ -2021,11 +2025,8 @@ impl Terminal {
             )
         };
         // Keep A/B/C/D so jump-prompt, click-to-move, and output select share one log.
-        self.prompt_markers.push(Osc133Marker {
-            kind,
-            line,
-            column,
-        });
+        self.prompt_markers
+            .push(Osc133Marker { kind, line, column });
         if self.prompt_markers.len() > 500 {
             let drain = self.prompt_markers.len() - 500;
             self.prompt_markers.drain(0..drain);
@@ -2057,7 +2058,7 @@ impl Terminal {
     /// Option/Alt-click: CSI left/right to the clicked cell when it is inside
     /// the current prompt. `None` if the click should fall through.
     fn click_to_move_bytes(&self, point: Point) -> Option<Vec<u8>> {
-        let prompt_line = self
+        let prompt_line_abs = self
             .prompt_markers
             .iter()
             .rev()
@@ -2067,9 +2068,14 @@ impl Terminal {
             .prompt_markers
             .iter()
             .rev()
-            .find(|m| matches!(m.kind, Osc133Kind::CommandStart) && m.line == prompt_line)
+            .find(|m| matches!(m.kind, Osc133Kind::CommandStart) && m.line == prompt_line_abs)
             .and_then(|m| m.column)
             .unwrap_or(0);
+        // Markers are absolute (cursor.line + history_size); the click and cursor
+        // points are alacritty grid lines. Convert the prompt line to grid so all
+        // three share one coordinate space.
+        let history_size = self.term.lock_unfair().history_size() as i32;
+        let prompt_line = prompt_line_abs.map(|abs| absolute_to_grid_line(abs, history_size));
         let cursor = self.last_content.cursor.point;
         click_to_move_sequence(ClickToMove {
             click_line: point.line,
@@ -2852,17 +2858,16 @@ impl Terminal {
                                     .terminal_bounds
                                     .num_columns()
                                     .saturating_sub(1);
+                                let history_size = self.term.lock_unfair().history_size() as i32;
                                 if let TripleClickKind::CommandOutput(range) = triple_click_kind(
                                     true,
                                     &self.prompt_markers,
                                     point.line,
                                     last_col,
+                                    history_size,
                                 ) {
                                     self.events.push_back(InternalEvent::SetSelection(Some(
-                                        Selection::simple_range(Range::new(
-                                            range.start,
-                                            range.end,
-                                        )),
+                                        Selection::simple_range(Range::new(range.start, range.end)),
                                     )));
                                     return;
                                 }

@@ -1143,15 +1143,17 @@ impl AppShell {
     fn adopt_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         // Drop the placeholder tab `new` created (its shell exits).
         self.tabs.clear();
+        let mut tab = tab;
+        let mut leaves = Vec::new();
+        tab.tree.leaves(&mut leaves);
+        let max_pane = leaves.iter().map(|(id, _)| *id).max().unwrap_or(0);
+        let adopted = rebase_detached_tab(max_pane);
+        tab.id = adopted.tab_id;
+        self.next_id = adopted.next_id;
+        self.next_pane_id = adopted.next_pane_id;
+        let views: Vec<Entity<TermView>> = leaves.into_iter().map(|(_, v)| v.clone()).collect();
         self.tabs.push(tab);
         self.active = 0;
-        let views: Vec<Entity<TermView>> = {
-            let mut leaves = Vec::new();
-            if let Some(tab) = self.tabs.first() {
-                tab.tree.leaves(&mut leaves);
-            }
-            leaves.into_iter().map(|(_, v)| v.clone()).collect()
-        };
         for view in &views {
             self.wire_term_view(view, window, cx);
         }
@@ -3518,9 +3520,29 @@ fn reorder_insert_index(from: usize, target: usize) -> usize {
     }
 }
 
+/// Identity assigned to a tab that just landed in a fresh window.
+///
+/// Source-window tab ids keep growing. A new `AppShell` starts `next_id` at 1,
+/// so keeping the old id lets a later `add_tab` collide. Rebase the tab to 1
+/// and advance both counters past the adopted tree. Pane ids stay as-is
+/// (they remain unique inside the tree).
+struct AdoptedTabIds {
+    tab_id: u64,
+    next_id: u64,
+    next_pane_id: PaneId,
+}
+
+fn rebase_detached_tab(max_pane_id: PaneId) -> AdoptedTabIds {
+    AdoptedTabIds {
+        tab_id: 1,
+        next_id: 2,
+        next_pane_id: max_pane_id.saturating_add(1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::reorder_insert_index;
+    use super::{rebase_detached_tab, reorder_insert_index};
 
     #[test]
     fn reorder_insert_index_places_before_target() {
@@ -3532,6 +3554,24 @@ mod tests {
         assert_eq!(reorder_insert_index(0, 1), 0);
         // Drag onto the immediate left neighbour: lands just before it.
         assert_eq!(reorder_insert_index(1, 0), 0);
+    }
+
+    #[test]
+    fn rebase_detached_tab_restarts_ids_in_the_new_window() {
+        // A high source-window id (tab 5, panes up to 7) must not leak into
+        // the destination window's counters — next add_tab / split would collide.
+        let ids = rebase_detached_tab(7);
+        assert_eq!(ids.tab_id, 1);
+        assert_eq!(ids.next_id, 2);
+        assert_eq!(ids.next_pane_id, 8);
+    }
+
+    #[test]
+    fn rebase_detached_tab_advances_pane_counter_past_a_single_leaf() {
+        let ids = rebase_detached_tab(1);
+        assert_eq!(ids.tab_id, 1);
+        assert_eq!(ids.next_id, 2);
+        assert_eq!(ids.next_pane_id, 2);
     }
 }
 

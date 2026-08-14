@@ -720,11 +720,17 @@ pub fn merge_settings_json(
 
 /// Merge `theme` into an existing settings JSON document, preserving other keys.
 ///
+/// Drops `custom_theme` and nested `terminal.theme` so a picker write cannot
+/// leave a higher-priority override that would resurrect on reload.
+///
 /// Returns pretty-printed JSON with a trailing newline. On empty/invalid input,
 /// starts from an empty object so only `"theme"` is written.
 pub fn merge_theme_into_json(raw: Option<&str>, theme: &ThemeSetting) -> String {
     merge_settings_json(raw, |value| {
         value["theme"] = serde_json::Value::String(theme.as_str());
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("custom_theme");
+        }
         // Prefer top-level theme; drop nested terminal.theme if present so the two
         // cannot disagree after a picker write.
         if let Some(terminal) = value.get_mut("terminal") {
@@ -821,6 +827,25 @@ mod tests {
         assert_eq!(v["theme"], "tokyo_night");
         assert!(v["terminal"].get("theme").is_none());
         assert_eq!(v["terminal"]["font_size"], 12);
+    }
+
+    #[test]
+    fn merge_theme_clears_inline_custom_theme() {
+        // custom_theme wins over theme on load; a picker write must drop it or
+        // the chosen theme comes back as the inline palette after reload.
+        let raw = r##"{
+  "theme": "mocha",
+  "custom_theme": {
+    "background": "#0d1117",
+    "foreground": "#e6edf3"
+  },
+  "restore_session": true
+}"##;
+        let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::Nord));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], "nord");
+        assert!(v.get("custom_theme").is_none());
+        assert_eq!(v["restore_session"], serde_json::Value::Bool(true));
     }
 
     #[test]

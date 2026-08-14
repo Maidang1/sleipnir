@@ -13,6 +13,10 @@ pub struct OscNotify {
     pub message: String,
 }
 
+/// Upper bound on an in-progress OSC 9/777 sequence. Large enough for a
+/// message plus command/cwd context, small enough to bound a runaway sequence.
+const MAX_OSC_NOTIFY_LEN: usize = 4096;
+
 /// Incremental scanner for OSC 9 / 777 notification sequences.
 #[derive(Debug, Default)]
 pub struct OscNotifyScanner {
@@ -40,8 +44,10 @@ impl OscNotifyScanner {
                 continue;
             }
             self.buf.push(b);
-            // Abort oversized garbage.
-            if self.buf.len() > 64 {
+            // Abort a runaway sequence: OSC 9/777 messages can carry command
+            // and cwd context, so cap generously (not 64) but still bounded so
+            // an unterminated sequence cannot grow without limit.
+            if self.buf.len() > MAX_OSC_NOTIFY_LEN {
                 self.reset();
                 continue;
             }
@@ -54,10 +60,7 @@ impl OscNotifyScanner {
                 continue;
             }
             // ESC \ terminator (ST)
-            if self.buf.len() >= 2
-                && self.buf[self.buf.len() - 2] == 0x1b
-                && b == b'\\'
-            {
+            if self.buf.len() >= 2 && self.buf[self.buf.len() - 2] == 0x1b && b == b'\\' {
                 if let Some(n) = parse_osc_notify_payload(&self.buf[..self.buf.len() - 2]) {
                     out.push(n);
                 }
@@ -167,6 +170,39 @@ mod tests {
             s.push(b"tial\x07"),
             vec![OscNotify {
                 message: "partial".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_long_message_beyond_64_bytes() {
+        // Real OSC 9/777 notifications carry command + cwd context and routinely
+        // exceed 64 bytes; they must not be silently dropped.
+        let body = "deploy finished in /Users/someone/very/long/project/path with exit status 0";
+        assert!(body.len() > 64, "fixture must exceed the old cap");
+        let seq = format!("\x1b]9;{body}\x07");
+        assert_eq!(
+            scan_osc_notify(seq.as_bytes()),
+            vec![OscNotify {
+                message: body.into()
+            }]
+        );
+    }
+
+    #[test]
+    fn aborts_runaway_sequence_without_terminator() {
+        // A never-terminated OSC must still be bounded so a hostile or buggy
+        // program cannot grow the buffer without limit.
+        let mut s = OscNotifyScanner::new();
+        let junk = vec![b'x'; 16 * 1024];
+        let mut seq = vec![0x1b, b']', b'9', b';'];
+        seq.extend_from_slice(&junk);
+        assert!(s.push(&seq).is_empty());
+        // A well-formed notification after the abort still parses.
+        assert_eq!(
+            s.push(b"\x1b]9;ok\x07"),
+            vec![OscNotify {
+                message: "ok".into()
             }]
         );
     }

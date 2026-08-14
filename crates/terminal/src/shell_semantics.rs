@@ -151,7 +151,10 @@ pub fn wrap_shell_for_inject_in(
         return (program.to_string(), args);
     };
     if let Err(err) = std::fs::create_dir_all(script_dir) {
-        log::warn!("osc133 inject: cannot create {}: {err}", script_dir.display());
+        log::warn!(
+            "osc133 inject: cannot create {}: {err}",
+            script_dir.display()
+        );
         return (program.to_string(), args);
     }
     env.insert("SLEIPNIR_SHELL_INTEGRATION".into(), "1".into());
@@ -281,6 +284,16 @@ pub fn apply_inject_to_shell(
     }
 }
 
+/// Convert an absolute scrollback line (as stored in OSC 133 markers) to an
+/// alacritty grid line (viewport-relative), given the current scrollback depth.
+///
+/// Markers are recorded as `cursor.line + history_size` so they stay stable as
+/// content scrolls; click/cursor points from the mouse layer are grid lines.
+/// This is the single bridge between the two coordinate spaces.
+pub fn absolute_to_grid_line(absolute_line: i32, history_size: i32) -> i32 {
+    absolute_line - history_size
+}
+
 /// Inputs for Option/Alt-click cursor movement inside the current prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClickToMove {
@@ -334,14 +347,19 @@ pub enum TripleClickKind {
 
 /// Cmd/Ctrl-triple-click uses OSC 133 C/D (or A/B) to bound output.
 /// Without the modifier, or without a containing command, this is [`TripleClickKind::Lines`].
+///
+/// `markers` store absolute scrollback lines (`cursor.line + history_size`),
+/// while `click_line` is an alacritty grid line (viewport-relative). `history_size`
+/// bridges the two so a click matches markers regardless of scrollback depth.
 pub fn triple_click_kind(
     primary_mod: bool,
     markers: &[crate::Osc133Marker],
     click_line: i32,
     last_column: usize,
+    history_size: i32,
 ) -> TripleClickKind {
     if primary_mod {
-        if let Some(range) = command_output_range(markers, click_line, last_column) {
+        if let Some(range) = command_output_range(markers, click_line, last_column, history_size) {
             return TripleClickKind::CommandOutput(range);
         }
     }
@@ -349,11 +367,18 @@ pub fn triple_click_kind(
 }
 
 /// Inclusive cell range of the command output that contains `click_line`.
+///
+/// `markers` carry absolute scrollback lines; `click_line` is a grid line.
+/// The returned [`crate::SelectionRange`] is in grid coordinates, ready to hand
+/// to the alacritty selection.
 pub fn command_output_range(
     markers: &[crate::Osc133Marker],
     click_line: i32,
     last_column: usize,
+    history_size: i32,
 ) -> Option<crate::SelectionRange> {
+    // Compare in the markers' absolute coordinate space.
+    let click_abs = click_line + history_size;
     let marked: Vec<(crate::Osc133Kind, i32)> = markers
         .iter()
         .filter_map(|m| m.line.map(|line| (m.kind, line)))
@@ -362,10 +387,14 @@ pub fn command_output_range(
         return None;
     }
 
-    if let Some(range) = range_from_c_d(&marked, click_line, last_column) {
-        return Some(range);
-    }
-    range_from_prompt_pair(&marked, click_line, last_column)
+    let abs_range = range_from_c_d(&marked, click_abs, last_column)
+        .or_else(|| range_from_prompt_pair(&marked, click_abs, last_column))?;
+    // Convert the range back to grid coordinates for selection.
+    Some(crate::SelectionRange {
+        start: crate::Point::new(abs_range.start.line - history_size, abs_range.start.column),
+        end: crate::Point::new(abs_range.end.line - history_size, abs_range.end.column),
+        is_block: abs_range.is_block,
+    })
 }
 
 fn range_from_c_d(
@@ -408,11 +437,13 @@ fn range_from_prompt_pair(
 ) -> Option<crate::SelectionRange> {
     let starts: Vec<i32> = marked
         .iter()
-        .filter_map(|(kind, line)| {
-            matches!(kind, crate::Osc133Kind::PromptStart).then_some(*line)
-        })
+        .filter_map(|(kind, line)| matches!(kind, crate::Osc133Kind::PromptStart).then_some(*line))
         .collect();
-    let prev = starts.iter().rev().find(|&&line| line < click_line).copied()?;
+    let prev = starts
+        .iter()
+        .rev()
+        .find(|&&line| line < click_line)
+        .copied()?;
     let next = starts.iter().find(|&&line| line > click_line).copied()?;
     let start_line = prev + 1;
     let end_line = next - 1;
@@ -534,7 +565,10 @@ mod tests {
 
     #[test]
     fn from_program_recognizes_supported_shells_only() {
-        assert_eq!(InjectShell::from_program("/bin/zsh"), Some(InjectShell::Zsh));
+        assert_eq!(
+            InjectShell::from_program("/bin/zsh"),
+            Some(InjectShell::Zsh)
+        );
         assert_eq!(
             InjectShell::from_program("/usr/local/bin/bash"),
             Some(InjectShell::Bash)
@@ -574,8 +608,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut env = collections::HashMap::default();
-        let (program, args) =
-            wrap_shell_for_inject_in("zsh", None, &mut env, true, &dir);
+        let (program, args) = wrap_shell_for_inject_in("zsh", None, &mut env, true, &dir);
         assert_eq!(program, "zsh");
         assert!(args.is_none());
         assert_eq!(
@@ -609,18 +642,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut env = collections::HashMap::default();
-        let (program, args) =
-            wrap_shell_for_inject_in("bash", None, &mut env, true, &dir);
+        let (program, args) = wrap_shell_for_inject_in("bash", None, &mut env, true, &dir);
         assert_eq!(program, "bash");
         let args = args.expect("bash --rcfile");
         assert!(args.windows(2).any(|w| w[0] == "--rcfile"));
         let script = std::fs::read_to_string(dir.join("osc133.bash")).unwrap();
         assert!(script.contains("133;C"));
         let rc = std::fs::read_to_string(dir.join("bash.rc")).unwrap();
-        let user_line = last_active_source_line(&rc, ".bashrc")
-            .expect("wrapper must source ~/.bashrc");
-        let inject_line = last_active_source_line(&rc, "osc133.bash")
-            .expect("wrapper must source inject script");
+        let user_line =
+            last_active_source_line(&rc, ".bashrc").expect("wrapper must source ~/.bashrc");
+        let inject_line =
+            last_active_source_line(&rc, "osc133.bash").expect("wrapper must source inject script");
         assert!(
             user_line < inject_line,
             "user bashrc must be sourced before inject so PS1 wrap survives:\n{rc}"
@@ -638,8 +670,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut env = collections::HashMap::default();
-        let (program, args) =
-            wrap_shell_for_inject_in("fish", None, &mut env, true, &dir);
+        let (program, args) = wrap_shell_for_inject_in("fish", None, &mut env, true, &dir);
         assert_eq!(program, "fish");
         let args = args.expect("fish -C");
         assert!(args.iter().any(|a| a == "-C" || a.starts_with("source ")));
@@ -659,8 +690,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut env = collections::HashMap::default();
         let args = Some(vec!["-c".into(), "echo hi".into()]);
-        let (program, out) =
-            wrap_shell_for_inject_in("zsh", args.clone(), &mut env, true, &dir);
+        let (program, out) = wrap_shell_for_inject_in("zsh", args.clone(), &mut env, true, &dir);
         assert_eq!(program, "zsh");
         assert_eq!(out, args);
         assert!(!env.contains_key("SLEIPNIR_SHELL_INTEGRATION"));
@@ -746,26 +776,74 @@ mod tests {
     }
 
     #[test]
+    fn absolute_to_grid_line_subtracts_history() {
+        // No scrollback: absolute == grid.
+        assert_eq!(absolute_to_grid_line(5, 0), 5);
+        // 100 lines of scrollback: absolute row 110 is grid row 10.
+        assert_eq!(absolute_to_grid_line(110, 100), 10);
+        // A prompt scrolled up into history maps to a negative grid line.
+        assert_eq!(absolute_to_grid_line(40, 100), -60);
+    }
+
+    #[test]
+    fn click_to_move_matches_prompt_after_history_is_converted() {
+        // The prompt marker was recorded absolute at row 105 under 100 lines of
+        // scrollback, i.e. grid row 5. The mouse click and cursor are already
+        // grid coordinates at row 5. Converting the prompt line to grid first
+        // is what makes the lines line up.
+        let history_size = 100;
+        let prompt_abs = 105;
+        let mut req = move_req(20, 10);
+        req.click_line = 5;
+        req.cursor_line = 5;
+        req.prompt_line = Some(absolute_to_grid_line(prompt_abs, history_size));
+        let bytes = click_to_move_sequence(req).expect("grid prompt line must match");
+        assert_eq!(bytes, b"\x1b[C".repeat(10));
+    }
+
+    #[test]
     fn command_output_range_from_c_and_d() {
         use crate::Osc133Kind::{CommandExecuted, CommandFinished};
         let markers = [
             marker(CommandExecuted, 10),
             marker(CommandFinished { status: Some(0) }, 20),
         ];
-        let range = command_output_range(&markers, 15, 80).expect("inside output");
+        // No scrollback: absolute marker lines equal grid lines.
+        let range = command_output_range(&markers, 15, 80, 0).expect("inside output");
         assert_eq!(range.start, crate::Point::new(10, 0));
         assert_eq!(range.end, crate::Point::new(20, 80));
         assert!(!range.is_block);
-        assert!(command_output_range(&markers, 25, 80).is_none());
+        assert!(command_output_range(&markers, 25, 80, 0).is_none());
     }
 
     #[test]
     fn command_output_range_falls_back_to_prompt_pair() {
         use crate::Osc133Kind::PromptStart;
         let markers = [marker(PromptStart, 0), marker(PromptStart, 15)];
-        let range = command_output_range(&markers, 8, 40).expect("between prompts");
+        let range = command_output_range(&markers, 8, 40, 0).expect("between prompts");
         assert_eq!(range.start, crate::Point::new(1, 0));
         assert_eq!(range.end, crate::Point::new(14, 40));
+    }
+
+    #[test]
+    fn command_output_range_matches_grid_click_against_absolute_markers() {
+        use crate::Osc133Kind::{CommandExecuted, CommandFinished};
+        // Markers are stored absolute (cursor.line + history_size). With 100
+        // lines of scrollback the command output lives at absolute rows
+        // 110..120, which map to grid rows 10..20.
+        let history_size = 100;
+        let markers = [
+            marker(CommandExecuted, 110),
+            marker(CommandFinished { status: Some(0) }, 120),
+        ];
+        // A grid-coordinate click at row 15 (inside the output) must match, and
+        // the returned range must be back in grid coordinates for selection.
+        let range =
+            command_output_range(&markers, 15, 80, history_size).expect("grid click inside output");
+        assert_eq!(range.start, crate::Point::new(10, 0));
+        assert_eq!(range.end, crate::Point::new(20, 80));
+        // A grid click outside the output must not match.
+        assert!(command_output_range(&markers, 25, 80, history_size).is_none());
     }
 
     #[test]
@@ -775,7 +853,7 @@ mod tests {
             marker(CommandExecuted, 10),
             marker(CommandFinished { status: Some(0) }, 20),
         ];
-        match triple_click_kind(true, &markers, 15, 80) {
+        match triple_click_kind(true, &markers, 15, 80, 0) {
             TripleClickKind::CommandOutput(range) => {
                 assert_eq!(range.start.line, 10);
                 assert_eq!(range.end.line, 20);
@@ -783,11 +861,11 @@ mod tests {
             TripleClickKind::Lines => panic!("modifier triple-click should use output range"),
         }
         assert_eq!(
-            triple_click_kind(false, &markers, 15, 80),
+            triple_click_kind(false, &markers, 15, 80, 0),
             TripleClickKind::Lines
         );
         assert_eq!(
-            triple_click_kind(true, &[], 15, 80),
+            triple_click_kind(true, &[], 15, 80, 0),
             TripleClickKind::Lines
         );
     }

@@ -86,10 +86,7 @@ impl Osc133Scanner {
                 continue;
             }
             // ESC \ terminator (ST)
-            if self.buf.len() >= 2
-                && self.buf[self.buf.len() - 2] == 0x1b
-                && b == b'\\'
-            {
+            if self.buf.len() >= 2 && self.buf[self.buf.len() - 2] == 0x1b && b == b'\\' {
                 if let Some(k) = parse_osc133_payload(&self.buf[..self.buf.len() - 2]) {
                     out.push(k);
                 }
@@ -179,7 +176,10 @@ mod tests {
     #[test]
     fn from_payload_parses_alacritty_event_kinds() {
         assert_eq!(Osc133Kind::from_payload("A"), Some(Osc133Kind::PromptStart));
-        assert_eq!(Osc133Kind::from_payload("B"), Some(Osc133Kind::CommandStart));
+        assert_eq!(
+            Osc133Kind::from_payload("B"),
+            Some(Osc133Kind::CommandStart)
+        );
         assert_eq!(
             Osc133Kind::from_payload("C"),
             Some(Osc133Kind::CommandExecuted)
