@@ -154,6 +154,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
+source = "git+https://github.com/Maidang1/alacritty?rev=561594caa275f00914a039356816fe70467a2d44#561594caa275f00914a039356816fe70467a2d44"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
@@ -168,7 +169,6 @@ dependencies = [
  "rustix 1.1.4",
  "rustix-openpty",
  "serde",
- "serde_json",
  "signal-hook",
  "unicode-width",
  "vte",
@@ -6771,6 +6771,7 @@ dependencies = [
 [[package]]
 name = "vte"
 version = "0.15.0"
+source = "git+https://github.com/Maidang1/vte?rev=94ce0d5fb89392da3b1b243b43e401068fb54937#94ce0d5fb89392da3b1b243b43e401068fb54937"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",

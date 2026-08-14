@@ -772,7 +772,7 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     Exit,
     ChildExit(ExitStatus),
-    /// Shell-integration marker payload from the vendored alacritty handler
+    /// Shell-integration marker payload from the alacritty handler
     /// (`"A"`, `"B"`, `"C"`, `"D;0"`).
     Osc133(String),
     /// Desktop notification from OSC 9 / OSC 777.

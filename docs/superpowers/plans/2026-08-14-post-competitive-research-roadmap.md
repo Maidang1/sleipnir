@@ -57,7 +57,7 @@
 |--------|------|
 | **shell 集成深化**：自动注入脚本 + 新建 tab/split 继承 cwd + 点击移动光标 + 三击选命令输出 | 现在 detect-first、新 tab/split 回 home（源码确认）；Ghostty/iTerm2 的语义层是它们「爽」的根因，也是「对 agent 友好」的关键。**进度：新建 tab/split 继承 cwd ✅；OSC 133 真实 PTY 已接线；`inject_osc133` 自动注入 zsh/bash/fish ✅（默认关）；Option/Alt-click 移光标 ✅；Cmd/Ctrl-三击选输出 ✅** |
 | **滚动回填内存策略**：从「固定 1 万行」升级到字节预算 + 压缩 | Ghostty 已做到省 70–90% 物理内存。**进度：⏳ 待做；压缩需改 alacritty 回填存储（上游 fork 级改动）** |
-| **通知矩阵**：阈值 + 动作组合 + OSC 9/777 | kitty/Ghostty 已有，Sleipnir 只有单一完成通知。**进度：阈值+动作矩阵 ✅（`notify_on_command_finish_mode`）；OSC 9/777 display-only + 真实 PTY ✅（vendor `osc_custom` → `Event::Notify`）** |
+| **通知矩阵**：阈值 + 动作组合 + OSC 9/777 | kitty/Ghostty 已有，Sleipnir 只有单一完成通知。**进度：阈值+动作矩阵 ✅（`notify_on_command_finish_mode`）；OSC 9/777 display-only + 真实 PTY ✅（fork `osc_custom` → `Event::Notify`）** |
 
 ---
 
@@ -78,7 +78,7 @@
 
 ## 关键依赖与阻塞（2026-08-14 排查）
 
-第 2 步 OSC 公共根因 **已修**（ADR-0005）：`vendor/alacritty_terminal` + `vendor/vte` 给 `Handler` 加 `osc_custom`，真实 PTY 的 `EventLoop::parser.advance` 会 emit `Osc133` / `DesktopNotification`，经 `ZedListener` 进入 `record_osc133_marker` / `Event::Notify`。
+第 2 步 OSC 公共根因 **已修**（ADR-0005）：Maidang1/alacritty + Maidang1/vte fork pin 给 `Handler` 加 `osc_custom`，真实 PTY 的 `EventLoop::parser.advance` 会 emit `Osc133` / `DesktopNotification`，经 `ZedListener` 进入 `record_osc133_marker` / `Event::Notify`。
 
 仍待做的第 2 步项：
 - 回填内存字节预算 + 压缩（另一处上游级改动）

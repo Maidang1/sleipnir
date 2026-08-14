@@ -1,4 +1,4 @@
-# Vendored alacritty_terminal to patch OSC dispatch
+# Fork-pin alacritty_terminal to patch OSC dispatch
 
 **Status:** accepted
 
@@ -15,31 +15,42 @@ never exposes the raw bytes.
 
 ## Decision
 
-Vendor `alacritty_terminal` into `vendor/alacritty_terminal` (a snapshot of the
-zed fork at `4c129667ce56611becdc82de6e28218c80e2e88f`, Apache-2.0) and switch
-root `Cargo.toml` to `path = "vendor/alacritty_terminal"`, so we can patch the
-term's `osc_dispatch` to recognize 133/9/777 and emit events through the
-existing `EventProxy` (→ `ZedListener` → `PtyEvent` → our scanners/handlers).
+Pin `alacritty_terminal` and `vte` to personal GitHub forks and keep the OSC
+patch there — do **not** copy either tree into this repo.
+
+| Crate | Fork | Baseline | Branch |
+|-------|------|----------|--------|
+| `alacritty_terminal` | [Maidang1/alacritty](https://github.com/Maidang1/alacritty) | zed-industries/alacritty `4c129667` | `sleipnir-osc-custom` |
+| `vte` | [Maidang1/vte](https://github.com/Maidang1/vte) | alacritty/vte `v0.15.0` | `sleipnir-osc-custom` |
+
+The vte fork adds `Handler::osc_custom` and forwards unhandled OSC to it. The
+alacritty fork implements that hook on `Term` and emits `Event::Osc133` /
+`Event::DesktopNotification` through the existing `EventProxy`
+(→ `ZedListener` → `PtyEvent` → our scanners/handlers).
+
+Root `Cargo.toml` pins both by `rev`. `[patch.crates-io] vte` forces
+`alacritty_terminal`'s crates.io `vte 0.15.0` onto the same fork.
 
 Alternatives considered and rejected:
 
-- **Fork on GitHub + alternate `git` URL** — no fork access/URL available to point
-  Cargo at.
-- **`EventedPty` tee wrapper** — reading the byte stream before vte requires
-  re-implementing `EventedReadWrite` with self-referential reader state; more
-  complex and riskier than vendoring.
+- **Copy the trees into `vendor/`** — the patch is ~100 lines; committing two
+  full crate snapshots makes every upstream bump a recopy + re-apply, and
+  fights this repo's "pin GPUI, don't vendor" rule.
+- **`EventedPty` tee wrapper** — `EventedReadWrite::reader()` returns
+  `&mut Self::Reader` with no lifetime, so a tee reader over the inner PTY
+  becomes self-referential. More complex than a two-repo pin.
 - **Stay unpatched** — leaves jump-prompt broken for real shells and blocks
   click-to-move-cursor, triple-click-select-output, auto-inject, and OSC 9/777.
 
 ## Consequences
 
-- Bumping alacritty means re-copying upstream source over
-  `vendor/alacritty_terminal/src` and re-applying the patch (keep the vendored
-  `Cargo.toml`). See `UPSTREAM.md`.
-- The vendored crate stays Apache-2.0; our patch is minimal and localized to the
-  `Handler for Term` impl + event enum.
-- `vte` is also vendored (`vendor/vte`, 0.15.0) and forced via
-  `[patch.crates-io] vte = { path = "vendor/vte" }` so `Handler::osc_custom`
-  is visible to `alacritty_terminal`. Bump both together.
-- `scripts/upstream-diff.sh` no longer covers `alacritty_terminal` (it is not a
-  git dep anymore); track our diff manually.
+- Bumping means: merge the new upstream rev into `sleipnir-osc-custom` on each
+  fork, re-apply the OSC patch if it conflicts, then update the `rev` values in
+  root `Cargo.toml`. Record both pins in `UPSTREAM.md`.
+- The forks stay on their upstream licenses (alacritty_terminal Apache-2.0; vte
+  Apache-2.0 OR MIT). The patch is localized to `Handler for Term`, the event
+  enum, and vte's unhandled-OSC arm.
+- Bump `alacritty_terminal` and `vte` together: the Term impl requires
+  `Handler::osc_custom`.
+- `scripts/upstream-diff.sh` can compare Zed's alacritty pin against ours; it
+  does not apply the OSC patch for you.

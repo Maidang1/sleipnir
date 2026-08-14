@@ -20,7 +20,7 @@ pub enum Osc133Kind {
 }
 
 impl Osc133Kind {
-    /// Parse a vendored-alacritty event payload (`"A"`, `"B"`, `"C"`, `"D"`, `"D;0"`).
+    /// Parse an alacritty event payload (`"A"`, `"B"`, `"C"`, `"D"`, `"D;0"`).
     pub fn from_payload(payload: &str) -> Option<Self> {
         let mut parts = payload.split(';');
         match parts.next()? {
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn from_payload_parses_vendor_event_kinds() {
+    fn from_payload_parses_alacritty_event_kinds() {
         assert_eq!(Osc133Kind::from_payload("A"), Some(Osc133Kind::PromptStart));
         assert_eq!(Osc133Kind::from_payload("B"), Some(Osc133Kind::CommandStart));
         assert_eq!(

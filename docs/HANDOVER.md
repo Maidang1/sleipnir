@@ -32,7 +32,7 @@
 |------|----------|------|
 | 新 tab/split 继承 cwd | `app_shell.rs`（`active_working_directory`，`add_tab`/`split_active` 走 `spawn_term_view_with_cwd`） | ✅ |
 | 通知矩阵（阈值+模式） | `crates/sleipnir_settings/src/sleipnir_settings.rs`（`NotifyOnCommandFinish` 枚举 + `notify_on_command_finish_mode`）；`sleipnir_ui.rs`（按 never/unfocused/always 判定） | ✅ |
-| OSC 9/777 桌面通知（解析+事件链路） | `crates/terminal/src/osc_notify.rs`（`OscNotifyScanner` + 6 单测）；`terminal.rs`（`Event::Notify`、`ingest_osc_notify` + `TerminalBackendEvent::DesktopNotification`）；`sleipnir_ui.rs`（`Event::Notify` → `notify_message` osascript） | ✅ display-only + 真实 PTY（vendor `osc_custom`） |
+| OSC 9/777 桌面通知（解析+事件链路） | `crates/terminal/src/osc_notify.rs`（`OscNotifyScanner` + 6 单测）；`terminal.rs`（`Event::Notify`、`ingest_osc_notify` + `TerminalBackendEvent::DesktopNotification`）；`sleipnir_ui.rs`（`Event::Notify` → `notify_message` osascript） | ✅ display-only + 真实 PTY（fork `osc_custom`） |
 | shell 语义层（自动注入/点击移光标/三击选） | `shell_semantics.rs` + `terminal.inject_osc133` + `mouse_down` | ✅ 自动注入 zsh/bash/fish（默认关）；Option/Alt-click 移光标；Cmd/Ctrl-三击选命令输出 |
 | 回填内存字节预算+压缩 | — | ⏳ alacritty 回填存储是行数语义，压缩需改上游 grid |
 
@@ -50,7 +50,7 @@
 
 ### 其它产出
 
-- `docs/adr/0004`、`docs/adr/0005`（vendor 决策）、`UPSTREAM.md` 更新（vendor 说明）、`README.md`/`CHANGELOG.md` 逐项更新、`docs/settings.example.json`。
+- `docs/adr/0004`、`docs/adr/0005`（fork pin）、`UPSTREAM.md` 更新、`README.md`/`CHANGELOG.md` 逐项更新、`docs/settings.example.json`。
 
 ---
 
@@ -59,19 +59,19 @@
 1. **OSC 133/9/777 曾在真实 PTY 路径被丢弃**（M14「跳 prompt」对真实 shell 不生效的根因）：
    - `osc133.rs`/`osc_notify.rs` 扫描器只接在 display-only 的 `write_output`。
    - 真实 PTY 走 alacritty `EventLoop` → `vte::ansi::Processor`，上游 `osc_dispatch` 只认识 0/2/4/8/10/11/12/52 等。
-   - **已修：** vendor alacritty_terminal + vte（ADR-0005）给 Handler 加 `osc_custom`，Term 识别 133/9/777 并 emit 事件，经 `ZedListener` 进入 `record_osc133_marker` / `Event::Notify`。
-2. **vendor 决策**：git pin 无法打补丁（无个人 fork URL），`EventedPty` tee 方案需自引用 unsafe，故选 vendor。`vendor/alacritty_terminal`（zed fork @ `4c129667`，Apache-2.0）+ `vendor/vte`（0.15.0，Apache-2.0/MIT）。
+   - **已修：** Maidang1/alacritty + Maidang1/vte fork pin（ADR-0005）给 Handler 加 `osc_custom`，Term 识别 133/9/777 并 emit 事件，经 `ZedListener` 进入 `record_osc133_marker` / `Event::Notify`。
+2. **fork pin 决策**：补丁留在 [Maidang1/alacritty](https://github.com/Maidang1/alacritty) / [Maidang1/vte](https://github.com/Maidang1/vte) 的 `sleipnir-osc-custom` 分支，本仓只 pin `rev`。`EventedPty` tee 方案需自引用，整树 vendor 被否掉（见 ADR-0005）。
 3. **主题数据**：`resources/themes.json` 601 套来自 iterm2-color-schemes（MIT），转换脚本已归档为 `scripts/convert-iterm-schemes.py`。
 
 ---
 
-## 3. alacritty OSC 接线（vendor 方案）—— ✅ 已收尾
+## 3. alacritty OSC 接线（fork pin）—— ✅ 已收尾
 
 **已做：**
-- `vendor/alacritty_terminal/`：zed fork + 补丁（`Event::Osc133` / `DesktopNotification`，`Handler::osc_custom` 识别 133/9/777）。
-- `vendor/vte/`：0.15.0 + `Handler::osc_custom` 钩子；根 `Cargo.toml` `[patch.crates-io] vte = { path = "vendor/vte" }`。
+- [Maidang1/alacritty](https://github.com/Maidang1/alacritty) `sleipnir-osc-custom`：zed fork + 补丁（`Event::Osc133` / `DesktopNotification`，`Handler::osc_custom` 识别 133/9/777）。
+- [Maidang1/vte](https://github.com/Maidang1/vte) `sleipnir-osc-custom`：0.15.0 + `Handler::osc_custom` 钩子；根 `Cargo.toml` `[patch.crates-io]` pin 同一 `rev`。
 - `crates/terminal`：`ZedListener` 映射新事件；`record_osc133_marker` 被 display-only 扫描器和真实 PTY 共用；`DesktopNotification` → `Event::Notify`。
-- 测试：`Osc133Kind::from_payload`、vendor `osc_custom` 喂字节、`ZedListener` 转发。
+- 测试：`Osc133Kind::from_payload`、fork `osc_custom` 喂字节、`ZedListener` 转发。
 - 转换脚本归档：`scripts/convert-iterm-schemes.py`。
 
 **手动验证（接手者在 GUI 里点一次）：**
@@ -79,7 +79,7 @@
 - `printf '\e]9;hello\a'` 触发 macOS 通知。
 
 **风险/注意：**
-- vendor 后 `scripts/upstream-diff.sh` 不覆盖 `alacritty_terminal`；升级 = 重新拷贝源 + 重打补丁（ADR-0005 有说明）。
+- `scripts/upstream-diff.sh` 只对比 Zed 的 alacritty pin；升级 = 在 fork 的 `sleipnir-osc-custom` 上 merge 基线并更新本仓 `rev`（ADR-0005）。
 - `Handler` trait 加了带默认实现的方法，现有其它 `Handler` impl（如 `StdSyncHandler`）不受影响。
 
 ---
