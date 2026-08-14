@@ -9,7 +9,7 @@ What stays **local** (forked or original):
 | Crate | Why local |
 |-------|-----------|
 | `terminal` | Heavily forked: settings/theme/task rewired to `sleipnir_settings` / `task_types` |
-| `gpui_platform` | Slim macOS-only application entry |
+| `gpui_platform` | Slim multi-platform application entry (macOS / Windows / Linux) |
 | `sleipnir`, `sleipnir_ui`, `sleipnir_settings`, `task_types`, `release_channel` | Product code |
 
 ---
@@ -20,7 +20,7 @@ What stays **local** (forked or original):
 |------|--------|
 | Source | `https://github.com/zed-industries/zed` |
 | **Zed `rev`** | `371a7d4ba2fd0064b79a0bc67d28e57a906779dc` (2026-08-09) |
-| Packages from that rev | `gpui`, `gpui_macos`, `collections`, `util`, `util_macros` (+ their transitive Zed crates) |
+| Packages from that rev | `gpui`, `gpui_macos`, `gpui_linux`, `collections`, `util`, `util_macros` (+ their transitive Zed crates) |
 | `alacritty_terminal` | `git = "https://github.com/zed-industries/alacritty"` **rev `4c129667ce56611becdc82de6e28218c80e2e88f`** |
 | Rust toolchain | `1.95.0` (`rust-toolchain.toml`, match Zed) |
 | License | GPUI stack Apache-2.0; terminal path GPL-3.0-or-later |
@@ -74,7 +74,7 @@ Optional dry-run against a local Zed checkout (forks only):
 | `terminal/src/terminal.rs` imports | `task_types`, `sleipnir_settings::TerminalPalette` instead of `task`/`theme` |
 | `get_color_at_index` | Takes palette, not full `Theme` |
 | Integration tests in terminal | Stubbed / disabled |
-| `gpui_platform` | macOS-only application entry (not multi-platform Zed crate) |
+| `gpui_platform` | Multi-platform application entry (macOS / Windows / Linux via `gpui_macos` / `gpui_windows` / `gpui_linux`) |
 | UI | `sleipnir_ui` is original; not Zed `terminal_view` |
 
 ---

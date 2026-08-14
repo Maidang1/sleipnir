@@ -4,7 +4,7 @@
 
 # Sleipnir
 
-**A fast, native terminal emulator for macOS and Windows — GPU-rendered, tab- and split-aware.**
+**A fast, native terminal emulator for macOS, Windows and Linux — GPU-rendered, tab- and split-aware.**
 
 Built on [GPUI](https://gpui.rs) (the UI framework behind [Zed](https://github.com/zed-industries/zed))
 with a forked terminal backend.
@@ -19,12 +19,13 @@ with a forked terminal backend.
 
 Sleipnir is a standalone terminal that renders on the GPU through GPUI, so
 scrolling and redraw stay smooth even under heavy output. It ships with a real PTY
-(ConPTY on Windows), IME support, multi-tab and split panes, multi-window sessions,
-adaptive theming that follows the system appearance, and a file-manager-friendly
-clipboard that turns pasted images into quoted paths.
+(ConPTY on Windows, the host PTY on Linux/macOS), IME support, multi-tab and split
+panes, multi-window sessions, adaptive theming that follows the system appearance,
+and a file-manager-friendly clipboard that turns pasted images into quoted paths.
 
-Prebuilt downloads: macOS `.dmg` / `.zip`, and a Windows x64 `.zip`
-(`Sleipnir-<ver>-windows-x64.zip`). Both ship on
+Prebuilt downloads: macOS `.dmg` / `.zip`, a Windows x64 `.zip`
+(`Sleipnir-<ver>-windows-x64.zip`), and a Linux `.deb` / `.tar.gz`
+(`Sleipnir-<ver>-linux-x86_64.tar.gz`). All ship on
 [GitHub Releases](https://github.com/Maidang1/sleipnir/releases).
 
 The name comes from Norse myth — Odin's eight-legged steed, the fastest horse in the
@@ -33,14 +34,14 @@ prompt.
 
 ## Features
 
-- **GPU rendering** — smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D on Windows); ease-in-out cursor blink.
+- **GPU rendering** — smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D on Windows, Vulkan on Linux); ease-in-out cursor blink.
 - **Tabs, splits & panes** — split right/down, jump tabs, move focus; pane zoom and unfocused dim.
 - **Multi-window** — `⌘N` / `Ctrl+Shift+N` opens an independent window with its own tabs and shells.
 - **Font zoom** — `⌘+` / `Ctrl++` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
   GitHub Dark/Light; `auto` follows the system light/dark appearance.
-- **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder / Explorer
-  selections as quoted paths; force text-only paste when you need it.
+- **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder / Explorer /
+  Nautilus selections as quoted paths; force text-only paste when you need it.
 - **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R` / `Ctrl+Shift+R`.
 - **vi mode** — keyboard-driven selection and navigation.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
@@ -49,7 +50,7 @@ prompt.
 - **Path links & bell** — ⌘-click / Ctrl-click paths open in the default app; optional system/visual bell.
 - **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
 - **Shell collaboration** — OSC 133 prompt jump; optional notify when a long command finishes
-  while unfocused (macOS notification; Windows logs only for now).
+  while unfocused (macOS notification; Windows logs only; Linux via libnotify).
 - **Quick Terminal / Quick Select** — open a spare window fast; link-oriented mode.
 
 ## Install
@@ -99,17 +100,44 @@ in the Dock with no windows).
 
 Or build from source (see below).
 
+### Linux (Ubuntu 22.04+ / Debian 12+)
+
+Latest GitHub Release, as a native package:
+
+```bash
+# Download sleipnir_<ver>_amd64.deb from Releases, then:
+sudo apt install ./sleipnir_<ver>_amd64.deb
+sleipnir
+```
+
+Or use the portable tarball `Sleipnir-<ver>-linux-x86_64.tar.gz`, which bundles the
+binary plus a `.desktop` file and README. It needs a Vulkan driver:
+
+```bash
+sudo apt install libvulkan1 mesa-vulkan-drivers
+tar -xzf Sleipnir-<ver>-linux-x86_64.tar.gz
+cd Sleipnir-<ver>-linux-x86_64 && ./sleipnir
+```
+
+The `.deb` installs a desktop entry and hicolor icons, so you can launch Sleipnir
+from the app menu. Sleipnir prefers Wayland when `WAYLAND_DISPLAY` is set and falls
+back to X11 otherwise (set `WAYLAND_DISPLAY=` to force X11).
+
 ## Requirements
 
 To **run** a release build:
 
 - macOS 14.0+ (Sonoma)
 - Windows 10 1809+ (ConPTY) with a Direct3D 11 GPU
+- Linux (Ubuntu 22.04+ / Debian 12+) with a Vulkan driver, X11 or Wayland,
+  and `xdg-open` (from `xdg-utils`) for opening links/paths
 
 To **build** from source, also:
 
 - Rust **1.95.0** (see `rust-toolchain.toml`)
 - macOS: Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+- Linux (Ubuntu): `pkg-config`, `libfontconfig-dev`, `libfreetype-dev`,
+  `libxkbcommon-dev`, `libwayland-dev`, and `libvulkan1` at runtime
 
 ## Build & run
 
@@ -117,6 +145,7 @@ To **build** from source, also:
 cargo run -p sleipnir
 # macOS binary: target/debug/sleipnir
 # Windows binary: target/debug/sleipnir.exe
+# Linux binary:  target/debug/sleipnir
 ```
 
 ## Config
@@ -127,9 +156,10 @@ Zed-compatible `terminal.*` keys plus Sleipnir extensions:
 |----|--------------------|
 | macOS | `~/.config/sleipnir/settings.json` and `session.json` |
 | Windows | `%APPDATA%\sleipnir\settings.json` and `session.json` |
+| Linux | `~/.config/sleipnir/settings.json` and `session.json` |
 
-Default font is **Menlo** on macOS and **Cascadia Mono** (then Consolas, Courier New)
-on Windows.
+Default font is **Menlo** on macOS, **Cascadia Mono** (then Consolas, Courier New)
+on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linux.
 
 | Key | Meaning |
 |-----|---------|
@@ -152,20 +182,20 @@ See [`docs/settings.example.json`](docs/settings.example.json).
 
 | Clipboard | Paste behavior (`⌘V` / `Ctrl+V` / `Ctrl+Shift+V`) |
 |-----------|----------------|
-| Image (screenshot, etc.) | Write to a temp file; paste a quoted absolute path (POSIX on macOS, PowerShell on Windows) |
-| Finder / Explorer file paths | Paste space-separated quoted paths |
+| Image (screenshot, etc.) | Write to a temp file; paste a quoted absolute path (POSIX on macOS/Linux, PowerShell on Windows) |
+| Finder / Explorer / Nautilus file paths | Paste space-separated quoted paths |
 | Text | Normal paste (bracketed paste when the app enables it) |
 
 Force **text-only** paste (skip image→path conversion) with `⌃⌘V` on macOS or
-`Ctrl+Alt+V` on Windows.
+`Ctrl+Alt+V` on Windows/Linux.
 
-On Windows, plain `Ctrl+C` still goes to the PTY (interrupt). Copy is
+On Windows and Linux, plain `Ctrl+C` still goes to the PTY (interrupt). Copy is
 `Ctrl+Shift+C`.
 
 ## Shortcuts
 
-Windows follows Windows Terminal / Zed conventions: app chords use Ctrl+Shift so
-`Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
+Windows and Linux follow Windows Terminal / Zed conventions: app chords use
+Ctrl+Shift so `Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
 
 | Action | macOS | Windows |
 |--------|-------|---------|
@@ -204,12 +234,25 @@ Windows follows Windows Terminal / Zed conventions: app chords use Ctrl+Shift so
 
 See [`docs/M6.md`](docs/M6.md) for the full macOS terminal list.
 
+Linux uses the same Ctrl+Shift app chords as Windows (so `Ctrl+C`/`Ctrl+V` stay
+with the shell), with these differences:
+
+| Action | Linux |
+|--------|-------|
+| Copy | `Ctrl+Shift+C` / `Ctrl+Insert` |
+| Paste | `Ctrl+Shift+V` / `Shift+Insert` |
+| Paste text only | `Ctrl+Alt+V` |
+| Quit | `Ctrl+Shift+Q` |
+| Scroll to top / bottom | `Shift+Home` / `Shift+End` |
+| Word back / forward | `Alt+←` / `Alt+→` (also `Alt+B` / `Alt+F`) |
+| Delete word / rest of line | `Alt+Delete` / `Ctrl+Delete` (sent to the PTY as escape sequences) |
+
 ## Auto-update
 
 Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sleipnir/releases).
 
-In-place install is **macOS-only**. On Windows, Check for Updates still queries
-GitHub, then opens the releases page.
+In-place install is **macOS-only**. On Windows and Linux, Check for Updates still
+queries GitHub, then opens the releases page.
 
 - Open the update dialog via **Sleipnir → Check for Updates…** (`⌘⇧U` / `Ctrl+Shift+U`).
   Sleipnir does **not** check for updates automatically on launch.
@@ -253,7 +296,7 @@ Implementation plan: [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadma
 ## Upstream
 
 The GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a
-fixed `rev` (`gpui`, `gpui_macos`, `gpui_windows`, `collections`, `util`, …). Local forks:
+fixed `rev` (`gpui`, `gpui_macos`, `gpui_linux`, `gpui_windows`, `collections`, `util`, …). Local forks:
 `terminal`, a slim `gpui_platform`, and the Sleipnir app crates. See [`UPSTREAM.md`](UPSTREAM.md)
 to bump the pin.
 
@@ -266,18 +309,23 @@ to bump the pin.
 ### Local build
 
 ```bash
-# Build and package as .app + .zip
+# Build and package as .app + .zip (macOS)
 ./scripts/make-app.sh
 
-# With developer certificate signing
+# With developer certificate signing (macOS)
 ./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)"
 
 # Create a .dmg (requires signing)
 ./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --dmg
+
+# Linux: build and package as .tar.gz + .deb
+./scripts/make-linux-package.sh
 ```
 
-The bundle uses [`resources/AppIcon.icns`](resources/AppIcon.icns), generated from
-[`resources/appicon.svg`](resources/appicon.svg).
+The macOS bundle uses [`resources/AppIcon.icns`](resources/AppIcon.icns), generated from
+[`resources/appicon.svg`](resources/appicon.svg). The Linux packages embed hicolor icons
+resized from [`resources/appicon_preview.png`](resources/appicon_preview.png) and a
+[`.desktop`](resources/linux/sleipnir.desktop) entry.
 
 ### Publish to GitHub Releases (via `gh` CLI)
 
@@ -294,8 +342,9 @@ git push origin v0.2.0
 ### CI (GitHub Actions)
 
 Triggered automatically on git tags (`v*`). Also supports manual dispatch.
-The same workflow builds and tests `-p sleipnir` on `windows-latest` and attaches
-`Sleipnir-<ver>-windows-x64.zip` (plus `.sha256`) to the GitHub Release.
+The same workflow builds and tests `-p sleipnir` on `windows-latest` (`.zip`) and
+`ubuntu-latest` (`.tar.gz` + `.deb`); the macOS job creates the GitHub Release and
+each job attaches its assets to it.
 
 ```bash
 gh workflow run build-and-release.yml \
