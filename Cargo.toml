@@ -26,9 +26,10 @@ edition = "2024"
 # Pin recorded in UPSTREAM.md — keep in sync when changing rev.
 # Zed: 371a7d4ba2fd0064b79a0bc67d28e57a906779dc (2026-08-09)
 
-gpui = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false, features = ["font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_macos = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false, features = ["font-kit"] }
 gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false }
+gpui_linux = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc", default-features = false, features = ["wayland", "x11"] }
 collections = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc" }
 util = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc" }
 util_macros = { git = "https://github.com/zed-industries/zed", rev = "371a7d4ba2fd0064b79a0bc67d28e57a906779dc" }

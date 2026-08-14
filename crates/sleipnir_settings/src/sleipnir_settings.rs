@@ -174,7 +174,16 @@ pub struct KeyBindingSpec {
 
 /// Default monospace family for this OS.
 pub fn default_font_family() -> &'static str {
-    default_font_family_for(cfg!(windows))
+    #[cfg(target_os = "linux")]
+    {
+        // Ubuntu Mono ships with Ubuntu; DejaVu Sans Mono is the universal
+        // fallback (fontconfig), so this always resolves on Ubuntu desktops.
+        "Ubuntu Mono"
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        default_font_family_for(cfg!(windows))
+    }
 }
 
 /// Default monospace family. `windows = true` selects Cascadia Mono.
@@ -183,6 +192,21 @@ pub fn default_font_family_for(windows: bool) -> &'static str {
         "Cascadia Mono"
     } else {
         "Menlo"
+    }
+}
+
+/// Fallback families for this OS (Linux prefers system monospace).
+pub fn default_font_fallbacks() -> Option<FontFallbacks> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(FontFallbacks::from_fonts(vec![
+            "DejaVu Sans Mono".into(),
+            "Liberation Mono".into(),
+        ]))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        default_font_fallbacks_for(cfg!(windows))
     }
 }
 
@@ -210,7 +234,7 @@ impl Default for TerminalSettings {
             working_directory: WorkingDirectory::AlwaysHome,
             font_size: Some(px(14.)),
             font_family: Some(default_font_family().into()),
-            font_fallbacks: default_font_fallbacks_for(cfg!(windows)),
+            font_fallbacks: default_font_fallbacks(),
             font_features: Some(FontFeatures::disable_ligatures()),
             font_weight: None,
             line_height: TerminalLineHeight::default(),

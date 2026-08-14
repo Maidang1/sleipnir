@@ -307,7 +307,9 @@ pub fn open_sleipnir_window(cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                traffic_light_position: if cfg!(windows) {
+                // macOS reserves the leading pad for traffic lights; Windows and
+                // Linux have no traffic lights, so the custom chrome starts flush.
+                traffic_light_position: if cfg!(windows) || cfg!(target_os = "linux") {
                     None
                 } else {
                     Some(geo.traffic_light_position)

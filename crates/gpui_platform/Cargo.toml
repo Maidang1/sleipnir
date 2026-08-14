@@ -19,8 +19,8 @@ font-kit = []
 test-support = ["gpui/test-support"]
 screen-capture = ["gpui/screen-capture"]
 runtime_shaders = []
-wayland = []
-x11 = []
+wayland = ["gpui_linux/wayland"]
+x11 = ["gpui_linux/x11"]
 
 [dependencies]
 gpui.workspace = true
@@ -31,3 +31,6 @@ gpui_macos = { workspace = true, features = ["font-kit"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_windows.workspace = true
 gpui = { workspace = true, features = ["windows-manifest"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gpui_linux.workspace = true
