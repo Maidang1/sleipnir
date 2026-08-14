@@ -32,10 +32,20 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
         )
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        gpui_linux::current_platform(headless)
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd"
+    )))]
     {
         let _ = headless;
-        compile_error!("sleipnir gpui_platform supports macOS and Windows only");
+        compile_error!("sleipnir gpui_platform supports macOS, Windows, and Linux only");
     }
 }
 
@@ -59,6 +69,14 @@ mod tests {
         assert!(
             src.contains("target_os = \"macos\""),
             "macOS constructor must be cfg-gated"
+        );
+        assert!(
+            src.contains("gpui_linux::current_platform"),
+            "linux backend must stay wired"
+        );
+        assert!(
+            src.contains("target_os = \"linux\""),
+            "Linux constructor must be cfg-gated"
         );
     }
 }

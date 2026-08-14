@@ -735,7 +735,24 @@ fn notify_command_finished(dur: std::time::Duration) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        log::info!("command finished after {}s", dur.as_secs());
+        #[cfg(target_os = "linux")]
+        {
+            // Desktop notification via XDG D-Bus (notify-rust); falls back to a
+            // log line when no notification daemon is running.
+            let secs = dur.as_secs();
+            let result = notify_rust::Notification::new()
+                .summary("Sleipnir")
+                .body(&format!("Command finished after {secs}s"))
+                .appname("Sleipnir")
+                .show();
+            if let Err(err) = result {
+                log::info!("command finished after {secs}s (notification failed: {err})");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            log::info!("command finished after {}s", dur.as_secs());
+        }
     }
 }
 
@@ -942,9 +959,13 @@ pub fn path_opener_program() -> Option<&'static str> {
     {
         None
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
         Some("open")
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        Some("xdg-open")
     }
 }
 
@@ -961,7 +982,12 @@ fn open_existing_path(candidate: &Path) {
     }
     #[cfg(not(windows))]
     {
-        match std::process::Command::new("open").arg(candidate).spawn() {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        match std::process::Command::new(opener).arg(candidate).spawn() {
             Ok(_) => {}
             Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
         }
@@ -1262,8 +1288,16 @@ mod tests {
     #[test]
     fn font_zoom_shipped_keystrokes_parse_as_platform_keys() {
         let bindings = font_zoom_key_bindings();
-        let want_plus = if cfg!(windows) { "ctrl-+" } else { "cmd-+" };
-        let want_minus = if cfg!(windows) { "ctrl--" } else { "cmd--" };
+        let want_plus = if cfg!(windows) || cfg!(target_os = "linux") {
+            "ctrl-+"
+        } else {
+            "cmd-+"
+        };
+        let want_minus = if cfg!(windows) || cfg!(target_os = "linux") {
+            "ctrl--"
+        } else {
+            "cmd--"
+        };
         assert!(
             bindings
                 .iter()
@@ -1285,7 +1319,7 @@ mod tests {
             let ks = Keystroke::parse(keystroke).unwrap_or_else(|err| {
                 panic!("shipped font-zoom keystroke {keystroke:?} must parse: {err}")
             });
-            if cfg!(windows) {
+            if cfg!(windows) || cfg!(target_os = "linux") {
                 assert!(
                     ks.modifiers.control,
                     "{keystroke} must include ctrl"
@@ -1330,9 +1364,11 @@ mod tests {
 
     #[test]
     fn windows_path_opener_is_not_open_or_osascript() {
-        assert_eq!(path_opener_program().is_some(), !cfg!(windows));
-        if !cfg!(windows) {
-            assert_eq!(path_opener_program(), Some("open"));
+        assert!(path_opener_program().is_some());
+        match path_opener_program() {
+            Some("open") => assert_eq!(cfg!(target_os = "macos"), true),
+            Some("xdg-open") => assert!(cfg!(any(target_os = "linux", target_os = "freebsd"))),
+            _ => assert_eq!(cfg!(windows), true),
         }
         assert_eq!(notify_uses_osascript(), cfg!(target_os = "macos"));
         let src = include_str!("sleipnir_ui.rs");

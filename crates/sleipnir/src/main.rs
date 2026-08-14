@@ -2,7 +2,9 @@
 
 mod app_menus;
 
-use app_menus::{app_menus, Hide, HideOthers, Quit, ShowAll};
+use app_menus::{app_menus, Quit};
+#[cfg(target_os = "macos")]
+use app_menus::{Hide, HideOthers, ShowAll};
 use gpui::{App, KeyBinding};
 use gpui_platform::application;
 use release_channel::AppVersion;
@@ -99,8 +101,15 @@ fn key_bindings_for_builtin(spec: &sleipnir_ui::BuiltinBinding) -> Vec<KeyBindin
 fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBinding {
     match action {
         BuiltinAction::Quit => KeyBinding::new(key, Quit, context),
+        #[cfg(target_os = "macos")]
         BuiltinAction::Hide => KeyBinding::new(key, Hide, context),
+        #[cfg(target_os = "macos")]
         BuiltinAction::HideOthers => KeyBinding::new(key, HideOthers, context),
+        #[cfg(not(target_os = "macos"))]
+        BuiltinAction::Hide | BuiltinAction::HideOthers => {
+            // macOS-only actions; non-macOS keymaps never produce them.
+            unreachable!("Hide/HideOthers are macOS-only actions")
+        }
         BuiltinAction::Copy => KeyBinding::new(key, Copy, context),
         BuiltinAction::Paste => KeyBinding::new(key, Paste, context),
         BuiltinAction::PasteText => KeyBinding::new(key, PasteText, context),

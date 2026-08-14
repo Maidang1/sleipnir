@@ -67,6 +67,10 @@ pub fn traffic_light_leading_pad() -> Pixels {
 pub fn leading_pad_for(windows: bool) -> Pixels {
     if windows {
         px(8.0)
+    } else if cfg!(target_os = "linux") {
+        // No traffic lights on Linux: the custom chrome band starts flush with
+        // the window edge, matching the Windows layout.
+        px(8.0)
     } else if cfg!(macos_sdk_26_or_later) {
         // Match Zed ui::TRAFFIC_LIGHT_PADDING without depending on ui.
         px(78.0)
@@ -78,7 +82,14 @@ pub fn leading_pad_for(windows: bool) -> Pixels {
 /// Space reserved on the right for system window controls.
 #[inline]
 pub fn trailing_pad_for(windows: bool) -> Pixels {
-    if windows {
+    trailing_pad_for_os(windows, cfg!(target_os = "linux"))
+}
+
+/// Trailing inset for a given OS family. `linux` reserves the same caption
+/// trail as Windows so CSD window controls do not sit on top of tabs.
+#[inline]
+pub fn trailing_pad_for_os(windows: bool, linux: bool) -> Pixels {
+    if windows || linux {
         px(138.0)
     } else {
         px(8.0)
@@ -101,6 +112,11 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(pad, px(8.0));
             assert_eq!(g.trailing_pad, px(138.0));
+        } else if cfg!(target_os = "linux") {
+            // No traffic lights: flush leading pad, reserve the caption trail
+            // for CSD window controls.
+            assert_eq!(pad, px(8.0));
+            assert_eq!(g.trailing_pad, px(138.0));
         } else {
             assert!(pad == px(71.0) || pad == px(78.0));
             assert_eq!(g.trailing_pad, px(8.0));
@@ -113,7 +129,22 @@ mod tests {
         assert_eq!(win.leading_pad, px(8.0));
         assert_eq!(win.trailing_pad, px(138.0));
         let mac = ChromeGeometry::standard_for(false);
-        assert!(mac.leading_pad >= px(71.0));
-        assert_eq!(mac.trailing_pad, px(8.0));
+        if cfg!(target_os = "linux") {
+            // Linux has no traffic lights either; the "non-Windows" geometry
+            // falls back to a flush leading pad and still reserves the
+            // caption trail for CSD window controls.
+            assert_eq!(mac.leading_pad, px(8.0));
+            assert_eq!(mac.trailing_pad, px(138.0));
+        } else {
+            assert!(mac.leading_pad >= px(71.0));
+            assert_eq!(mac.trailing_pad, px(8.0));
+        }
+    }
+
+    #[test]
+    fn linux_family_reserves_caption_buttons() {
+        assert_eq!(trailing_pad_for_os(true, false), px(138.0));
+        assert_eq!(trailing_pad_for_os(false, true), px(138.0));
+        assert_eq!(trailing_pad_for_os(false, false), px(8.0));
     }
 }

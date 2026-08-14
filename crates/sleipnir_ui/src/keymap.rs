@@ -76,7 +76,41 @@ pub struct BuiltinBinding {
 
 /// Bindings for the compiling OS.
 pub fn builtin_bindings() -> Vec<BuiltinBinding> {
-    builtin_bindings_for(cfg!(windows))
+    #[cfg(target_os = "linux")]
+    {
+        builtin_bindings_for_linux()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        builtin_bindings_for(cfg!(windows))
+    }
+}
+
+/// Bindings for Linux. Uses Ctrl/Ctrl+Shift like GNOME Terminal / Konsole so
+/// plain Ctrl+C/V/D/W stay with the shell (VT conventions).
+pub fn builtin_bindings_for_linux() -> Vec<BuiltinBinding> {
+    let mut out = linux_static_bindings();
+    for n in 1..=9usize {
+        out.push(BuiltinBinding {
+            key: format!("ctrl-{n}"),
+            action: BuiltinAction::ActivateTab(n),
+            context: BindingContext::Both,
+        });
+    }
+    for (key, action) in font_zoom_key_bindings_for_linux() {
+        let action = match *action {
+            "increase_font_size" => BuiltinAction::IncreaseFontSize,
+            "decrease_font_size" => BuiltinAction::DecreaseFontSize,
+            "reset_font_size" => BuiltinAction::ResetFontSize,
+            _ => continue,
+        };
+        out.push(BuiltinBinding {
+            key: (*key).to_string(),
+            action,
+            context: BindingContext::Both,
+        });
+    }
+    out
 }
 
 /// Bindings for a given OS family. `windows = true` uses Ctrl/Ctrl+Shift.
@@ -240,9 +274,81 @@ fn b(key: &'static str, action: BuiltinAction, context: BindingContext) -> Built
     }
 }
 
+/// Linux bindings follow terminal-desktop conventions: app chords use
+/// Ctrl+Shift (GNOME Terminal / Konsole) and Ctrl+C/D/W stay unbound so the
+/// shell still receives them. Alt-as-Meta handles word navigation.
+fn linux_static_bindings() -> Vec<BuiltinBinding> {
+    use BindingContext::{Both, Global, Terminal};
+    vec![
+        b("ctrl-shift-q", BuiltinAction::Quit, Global),
+        b("ctrl-shift-c", BuiltinAction::Copy, Terminal),
+        b("ctrl-insert", BuiltinAction::Copy, Terminal),
+        b("ctrl-shift-v", BuiltinAction::Paste, Terminal),
+        b("shift-insert", BuiltinAction::Paste, Terminal),
+        b("ctrl-alt-v", BuiltinAction::PasteText, Terminal),
+        b("ctrl-shift-a", BuiltinAction::SelectAll, Terminal),
+        b("ctrl-shift-l", BuiltinAction::Clear, Terminal),
+        b("ctrl-shift-space", BuiltinAction::ToggleViMode, Terminal),
+        b("shift-up", BuiltinAction::ScrollLineUp, Terminal),
+        b("shift-down", BuiltinAction::ScrollLineDown, Terminal),
+        b("shift-pageup", BuiltinAction::ScrollPageUp, Terminal),
+        b("shift-pagedown", BuiltinAction::ScrollPageDown, Terminal),
+        b("shift-home", BuiltinAction::ScrollToTop, Terminal),
+        b("shift-end", BuiltinAction::ScrollToBottom, Terminal),
+        b("alt-left", BuiltinAction::SendText("\u{1b}b"), Terminal),
+        b("alt-right", BuiltinAction::SendText("\u{1b}f"), Terminal),
+        b("alt-b", BuiltinAction::SendText("\u{1b}b"), Terminal),
+        b("alt-f", BuiltinAction::SendText("\u{1b}f"), Terminal),
+        b("alt-delete", BuiltinAction::SendText("\u{1b}d"), Terminal),
+        b("ctrl-delete", BuiltinAction::SendText("\u{1b}[3;5~"), Terminal),
+        b("ctrl-shift-t", BuiltinAction::NewTab, Both),
+        b("ctrl-shift-w", BuiltinAction::CloseTab, Both),
+        b("ctrl-shift-n", BuiltinAction::NewWindow, Both),
+        b("ctrl-tab", BuiltinAction::NextTab, Both),
+        b("ctrl-shift-tab", BuiltinAction::PrevTab, Both),
+        b("ctrl-shift-r", BuiltinAction::ReloadSettings, Both),
+        b("ctrl-,", BuiltinAction::OpenSettings, Both),
+        b("ctrl-shift-p", BuiltinAction::ToggleCommandPalette, Both),
+        b("ctrl-shift-alt-p", BuiltinAction::CycleTheme, Both),
+        b("alt-shift-d", BuiltinAction::SplitRight, Both),
+        b("alt-shift--", BuiltinAction::SplitDown, Both),
+        b("ctrl-alt-left", BuiltinAction::FocusPaneLeft, Both),
+        b("ctrl-alt-right", BuiltinAction::FocusPaneRight, Both),
+        b("ctrl-alt-up", BuiltinAction::FocusPaneUp, Both),
+        b("ctrl-alt-down", BuiltinAction::FocusPaneDown, Both),
+        b("ctrl-shift-u", BuiltinAction::CheckForUpdates, Both),
+        b("ctrl-shift-f", BuiltinAction::Find, Both),
+        b("ctrl-shift-g", BuiltinAction::FindNext, Both),
+        b("ctrl-shift-alt-g", BuiltinAction::FindPrev, Both),
+        b("ctrl-shift-enter", BuiltinAction::TogglePaneZoom, Both),
+        b("ctrl-shift-b", BuiltinAction::ToggleBroadcast, Both),
+        b("ctrl-shift-up", BuiltinAction::JumpPrevPrompt, Both),
+        b("ctrl-shift-down", BuiltinAction::JumpNextPrompt, Both),
+        b("ctrl-shift-o", BuiltinAction::ToggleQuickSelect, Both),
+        b("ctrl-alt-n", BuiltinAction::OpenQuickTerminal, Both),
+    ]
+}
+
 /// Font-zoom keystroke table for the compiling OS.
 pub fn font_zoom_key_bindings() -> &'static [(&'static str, &'static str)] {
-    font_zoom_key_bindings_for(cfg!(windows))
+    #[cfg(target_os = "linux")]
+    {
+        font_zoom_key_bindings_for_linux()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        font_zoom_key_bindings_for(cfg!(windows))
+    }
+}
+
+/// Font-zoom table for Linux (same Ctrl chords as Windows).
+pub fn font_zoom_key_bindings_for_linux() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("ctrl-=", "increase_font_size"),
+        ("ctrl-+", "increase_font_size"),
+        ("ctrl--", "decrease_font_size"),
+        ("ctrl-0", "reset_font_size"),
+    ]
 }
 
 /// Font-zoom keystroke table. `windows = true` uses `ctrl-*`.
@@ -276,7 +382,14 @@ pub fn last_window_close_quits_for(non_macos: bool) -> bool {
 
 /// Human-readable shortcut for a command id on this OS.
 pub fn display_shortcut(id: &str) -> &'static str {
-    display_shortcut_for(id, cfg!(windows))
+    #[cfg(target_os = "linux")]
+    {
+        display_shortcut_for(id, true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        display_shortcut_for(id, cfg!(windows))
+    }
 }
 
 /// Human-readable shortcut for a command id.
@@ -339,6 +452,46 @@ mod tests {
             .into_iter()
             .map(|b| b.key)
             .collect()
+    }
+
+    fn keys_for_linux() -> Vec<String> {
+        builtin_bindings_for_linux()
+            .into_iter()
+            .map(|b| b.key)
+            .collect()
+    }
+
+    #[test]
+    fn linux_bindings_use_ctrl_shift_and_leave_shell_keys() {
+        let keys = keys_for_linux();
+        assert!(keys.iter().any(|k| k == "ctrl-shift-t"));
+        assert!(keys.iter().any(|k| k == "ctrl-shift-w"));
+        assert!(keys.iter().any(|k| k == "ctrl-shift-c"));
+        assert!(keys.iter().any(|k| k == "ctrl-shift-v"));
+        assert!(
+            !keys
+                .iter()
+                .any(|k| k == "ctrl-c" || k == "ctrl-w" || k == "ctrl-d" || k == "ctrl-v"),
+            "Linux table must not steal plain Ctrl+C/W/D/V: {keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k.starts_with("cmd-")),
+            "Linux table must not use cmd-: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn linux_bindings_include_paste_text_only() {
+        let actions: Vec<_> = builtin_bindings_for_linux()
+            .into_iter()
+            .filter(|b| b.key == "ctrl-alt-v")
+            .map(|b| b.action)
+            .collect();
+        assert_eq!(
+            actions,
+            vec![BuiltinAction::PasteText],
+            "Linux must ship Ctrl+Alt+V as paste-text-only"
+        );
     }
 
     #[test]
