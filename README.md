@@ -9,7 +9,7 @@
 Built on [GPUI](https://gpui.rs) (the UI framework behind [Zed](https://github.com/zed-industries/zed))
 with a forked terminal backend.
 
-[Features](#features) · [Install](#install) · [Config](#config) · [Shortcuts](#shortcuts) · [Roadmap](#roadmap)
+[Features](#features) · [Install](#install) · [Config](#config) · [Shortcuts](#shortcuts)
 
 </div>
 
@@ -181,7 +181,7 @@ on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linu
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
 | `path_links` | Open path-like targets on ⌘-click / Ctrl-click (default `true`) |
-| `key_bindings` | Extra key bindings (see [`docs/M9.md`](docs/M9.md)) |
+| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
 | `terminal.bell` | `off` / `system` / `visual` (default `off`) |
@@ -245,10 +245,12 @@ Ctrl+Shift so `Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
 | Line start / end | `⌘←` / `⌘→` | (send to PTY) |
 | Word back / forward | `⌥←` / `⌥→` | `Alt+←` / `Alt+→` |
 | Clear line | `⌘⌫` | (send to PTY) |
+| Delete to end of line | `⌘⌦` | (send to PTY) |
+| Character palette | `⌃⌘Space` | — |
 | Toggle vi mode | `⌃⇧Space` | `Ctrl+Shift+Space` |
 | Quit | `⌘Q` | `Alt+F4` / `Ctrl+Q` (Windows) / `Ctrl+Shift+Q` (Linux) |
 
-See [`docs/M6.md`](docs/M6.md) for the full macOS terminal list.
+Scroll shortcuts are ignored on the alternate screen (full-screen TUI apps).
 
 Linux uses the same Ctrl+Shift app chords as Windows (so `Ctrl+C`/`Ctrl+V` stay
 with the shell), with these differences:
@@ -281,45 +283,11 @@ queries GitHub, then opens the releases page.
   lives somewhere the app can't write (e.g. a protected `/Applications` install owned by
   another user), it falls back to opening the releases page for a manual install.
 
-## Roadmap
+## Status
 
-**Status:** M0–M15 complete (per-pane fonts still deferred inside M10). Next phase planned below.
-
-| Milestone | Goal | Status |
-|-----------|------|:------:|
-| **M0** | GPUI empty window | ✅ |
-| **M1** | Display-only terminal grid paint | ✅ |
-| **M2** | Real PTY + IME + selection/clipboard | ✅ |
-| **M3** | Multi-tab + http(s) open | ✅ |
-| **M4** | Theme/font settings polish | ✅ |
-| **M5** | Upstream port checklist (`UPSTREAM.md`) | ✅ |
-| **M6** | Image paste-as-path + Zed Terminal shortcuts | ✅ |
-| **M7** | Signed & notarized release builds + auto-update | ✅ |
-| **M8** | Session persistence (restore tabs/splits on launch) | ✅ |
-| **M9** | Configurable keymap + command palette | ✅ |
-| **M10** | Ligatures + search-in-scrollback (per-pane fonts deferred) | ✅ |
-| **M11** | Visual polish (cursor fade, URL hover, optional scroll) | ✅ |
-| **M12** | Daily gaps (font zoom, multi-window, close confirm, path open, bell) | ✅ |
-| **M13** | Split professionalism (pane zoom, unfocused dim) | ✅ |
-| **M14** | Shell collaboration (OSC 133, jump prompt, notify) | ✅ |
-| **M15** | Optional differentiators (Quick Terminal, Quick Select) | ✅ |
-
-Legend: ✅ done · 📋 planned.  
-Shipped notes: [`docs/M7.md`](docs/M7.md)–[`docs/M15.md`](docs/M15.md).
-
-### Next phase (post competitive research)
-
-| Step | Scope | Timebox |
-|------|-------|---------|
-| **0 · 性能基线** | 可复现的吞吐 / 输入延迟 / 回填内存基准 + 两个待核查项（🧑‍🌾 ZWJ 宽度、Quick Terminal `⌘⇧N` 全局热键）| 1–2 天 |
-| **1 · 高频 UX 缺口** | 搜索正则/大小写 + scrollback 导出 · tab 拖拽重排/拖新窗口 · 链接/路径 hover 预览 tooltip | 1–2 周 |
-| **2 · 深度能力** | shell 集成深化（自动注入 + 继承 cwd + 点击移光标 + 三击选命令）· 回填内存字节预算+压缩 · 通知矩阵 | 2–4 周 |
-| **3 · 边界重议** | kitty graphics 改「跟踪」· 主题库扩充+导入 · 最小 AppleScript 字典 · 屏幕阅读器 | 选择性 |
-
-**先量再投：** 第 0 步的数字是第 2 步性能项是否必要的判据；第 0 步不完成，不轻易投第 2 步的性能优化。
-
-Competitive research: [`docs/competitive-research-ux-performance.md`](docs/competitive-research-ux-performance.md) · [`docs/competitive-research-features.md`](docs/competitive-research-features.md).  
-Implementation plan: [`docs/superpowers/plans/2026-08-14-post-competitive-research-roadmap.md`](docs/superpowers/plans/2026-08-14-post-competitive-research-roadmap.md) · [`docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md`](docs/superpowers/plans/2026-08-12-post-m10-feature-roadmap.md).
+Shipped through M15 — see [CHANGELOG](CHANGELOG.md). Still open: scrollback
+byte-budget / compression, a fuller VoiceOver tree, and kitty graphics
+(tracked, not implemented: [ADR-0004](docs/adr/0004-kitty-graphics-track-not-implement.md)).
 
 ## Upstream
 

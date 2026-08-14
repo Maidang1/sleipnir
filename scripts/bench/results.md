@@ -6,7 +6,7 @@
 | **机器** | Apple M3 Pro（arm64，6P+6E，12 核），36 GB RAM，macOS 26.6 |
 | **被测二进制** | `target/release/sleipnir`（profile：`codegen-units=1` + thin LTO）与 `target/debug/sleipnir` |
 | **仿真后端** | `alacritty_terminal` v0.26.1-dev（zed fork `4c129667ce`）—— Sleipnir 的解析/仿真核心 |
-| **方法文档** | `docs/perf-baseline.md` · runbook：`scripts/bench/README.md` |
+| **方法 / runbook** | [`README.md`](README.md) |
 
 > **口径说明**：「解析吞吐」是无头、渲染抑制的仿真解析速度（对应 kitty `kitten __benchmark__`）；「端到端 `cat` 吞吐」是在 Sleipnir 窗口里让输出真正灌进 PTY 的耗时。两者不是一回事。输入延迟 / 回填内存增长仍需人在 GUI 前跑（延迟另需硬件），如实标注「未测」。
 

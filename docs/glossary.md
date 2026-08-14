@@ -1,7 +1,7 @@
 # Sleipnir
 
-A standalone terminal emulator built on GPUI (macOS and Windows). This glossary
-fixes the language for the window/tab/pane model and its interaction surface.
+A standalone terminal emulator built on GPUI (macOS, Windows, and Linux). This
+glossary fixes the language for the window/tab/pane model and its interaction surface.
 
 ## Window & layout
 

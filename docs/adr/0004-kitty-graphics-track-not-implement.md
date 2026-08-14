@@ -5,17 +5,15 @@
 ## Context
 
 The M0–M15 non-goals listed "Kitty graphics protocol" as explicitly out of
-scope. The 2026-08-13 competitive research (`docs/competitive-research-ux-performance.md`,
-§2.8/§4) found that boundary is the weakest one we hold: kitty graphics is now
-the de-facto standard for inline images in terminals (Ghostty, WezTerm, kitty
+scope. That boundary is the weakest one we hold: kitty graphics is now the
+de-facto standard for inline images in terminals (Ghostty, WezTerm, kitty
 support it; the tool ecosystem — `yazi`, `nvim` image preview, `chafa`, `mpv`
 `--vo=kitty`, presentation tools — is built on it). Alacritty still ships no
 graphics and remains widely used, so "no graphics" is survivable, but it means
 Sleipnir is incompatible with a growing ecosystem.
 
-This ADR records the integration-cost assessment the roadmap asked for
-("评估它在 GPUI 文本批里的集成成本，再决定要不要上"), so the decision to track
-is explicit rather than an unexamined default.
+This ADR records the integration-cost assessment so the decision to track is
+explicit rather than an unexamined default.
 
 ## Assessment of integration cost
 

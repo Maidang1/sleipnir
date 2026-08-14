@@ -32,4 +32,4 @@ Latest release download links are resolved client-side from the GitHub Releases 
 | One-line install (macOS `curl \| bash` / Windows `irm \| iex` / Linux `curl \| bash`) | `src/components/install-command.tsx` + `INSTALL_COMMANDS` in `src/lib/release.ts` |
 | Download menu | `src/components/download-menu.tsx` + `src/lib/release.ts` |
 | Meta / OG | `index.html` |
-| Product docs (canonical detail) | repo root `README.md`, `docs/M*.md`, `docs/settings.example.json` |
+| Product docs (canonical detail) | repo root `README.md`, `docs/settings.example.json` |

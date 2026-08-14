@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generate deterministic benchmark corpora for the Sleipnir perf baseline.
-# See docs/perf-baseline.md and scripts/bench/README.md.
+# See scripts/bench/README.md.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
