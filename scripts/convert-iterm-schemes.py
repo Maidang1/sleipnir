@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Convert iTerm2-Color-Schemes .itermcolors plists into Sleipnir themes.json.
+"""Convert iTerm2-Color-Schemes .itermcolors plists into a user themes.json.
 
 Usage:
   python3 scripts/convert-iterm-schemes.py \\
       /path/to/iTerm2-Color-Schemes/schemes \\
-      resources/themes.json
+      ~/.config/sleipnir/themes.json
 
 Source catalog: https://github.com/mbadolato/iTerm2-Color-Schemes (MIT).
-The checked-in `resources/themes.json` was generated from that catalog
-(601 complete 16-color palettes). Re-run this script to refresh.
+Sleipnir does not ship that catalog; drop the output in the config dir.
 """
 from __future__ import annotations
 

@@ -39,10 +39,9 @@ prompt.
 - **Multi-window** — `⌘N` / `Ctrl+Shift+N` opens an independent window with its own tabs and shells.
 - **Font zoom** — `⌘+` / `Ctrl++` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
-  GitHub Dark/Light, Dracula, One Dark; `auto` follows the system light/dark appearance;
-  a bundled 600+ scheme catalog (from [iterm2-color-schemes](https://github.com/mbadolato/iTerm2-Color-Schemes), MIT)
-  is searchable in the Settings → theme picker (just type to filter); `themes.json` in the
-  config dir adds or overrides themes (`"theme": "kanagawa"`, see `docs/themes.example.json`).
+  GitHub Dark/Light, Dracula, One Dark; `auto` follows the system light/dark appearance.
+  Extra palettes go in `themes.json` in the config dir (`"theme": "kanagawa"`, see
+  `docs/themes.example.json`).
 - **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder / Explorer /
   Nautilus selections as quoted paths; force text-only paste when you need it.
 - **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R` / `Ctrl+Shift+R`.

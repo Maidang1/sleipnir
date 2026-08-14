@@ -439,24 +439,23 @@ fn resolve_palette(settings: &TerminalSettings, appearance: Appearance, cx: &App
     }
 }
 
-/// Load the theme catalog: the bundled 600+ scheme library (from
-/// `resources/themes.json`, converted from iterm2-color-schemes), overlaid
-/// with any user themes from `themes.json` in the config dir.
+/// Load extra themes from `themes.json` in the config dir.
 fn load_user_themes() -> StdHashMap<String, CustomPalette> {
-    let mut themes: StdHashMap<String, CustomPalette> =
-        serde_json::from_str(include_str!("../../../resources/themes.json")).unwrap_or_default();
     let path = config_dir().join("themes.json");
     match std::fs::read_to_string(&path) {
         Ok(raw) => match serde_json::from_str::<StdHashMap<String, CustomPalette>>(&raw) {
-            Ok(user) => {
-                themes.extend(user);
+            Ok(user) => user,
+            Err(err) => {
+                log::warn!("failed to parse themes.json: {err}");
+                StdHashMap::new()
             }
-            Err(err) => log::warn!("failed to parse themes.json: {err}"),
         },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => log::warn!("failed to read themes.json: {err}"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => StdHashMap::new(),
+        Err(err) => {
+            log::warn!("failed to read themes.json: {err}");
+            StdHashMap::new()
+        }
     }
-    themes
 }
 
 // ── file schema ─────────────────────────────────────────────────────────────
@@ -866,20 +865,6 @@ mod tests {
         merge_file(&mut settings, file);
         assert_eq!(settings.theme, ThemeSetting::Custom("kanagawa".into()));
         assert_eq!(settings.theme.as_str(), "kanagawa");
-    }
-
-    #[test]
-    fn bundled_theme_catalog_parses_and_is_large() {
-        let catalog: StdHashMap<String, CustomPalette> =
-            serde_json::from_str(include_str!("../../../resources/themes.json")).unwrap();
-        assert!(
-            catalog.len() >= 600,
-            "bundled catalog has {} themes",
-            catalog.len()
-        );
-        for name in ["Dracula", "Nord", "Catppuccin Mocha"] {
-            assert!(catalog.contains_key(name), "missing {name}");
-        }
     }
 
     #[test]
