@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils'
 const PLATFORMS: { id: InstallPlatform; label: string }[] = [
   { id: 'macos', label: 'macOS' },
   { id: 'windows', label: 'Windows' },
+  { id: 'linux', label: 'Linux' },
 ]
 
 export function InstallCommand({

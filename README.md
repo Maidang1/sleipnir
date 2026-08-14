@@ -102,26 +102,35 @@ Or build from source (see below).
 
 ### Linux (Ubuntu 22.04+ / Debian 12+)
 
-Latest GitHub Release, as a native package:
+Latest GitHub Release (installs the `.deb` with apt):
 
 ```bash
-# Download sleipnir_<ver>_amd64.deb from Releases, then:
-sudo apt install ./sleipnir_<ver>_amd64.deb
-sleipnir
+curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install-linux.sh | bash
 ```
 
-Or use the portable tarball `Sleipnir-<ver>-linux-x86_64.tar.gz`, which bundles the
-binary plus a `.desktop` file and README. It needs a Vulkan driver:
+The script downloads `sleipnir_<ver>_amd64.deb` and runs `sudo apt install`.
+It needs a Vulkan driver (`sudo apt install libvulkan1 mesa-vulkan-drivers`).
+Prefer the portable tarball, or skip launching:
 
 ```bash
-sudo apt install libvulkan1 mesa-vulkan-drivers
+curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install-linux.sh \
+  | SLEIPNIR_TARBALL=1 PREFIX="$HOME/.local" SLEIPNIR_NO_OPEN=1 bash
+```
+
+Or grab `sleipnir_<ver>_amd64.deb` / `Sleipnir-<ver>-linux-x86_64.tar.gz` from
+[Releases](https://github.com/Maidang1/sleipnir/releases) and install by hand:
+
+```bash
+sudo apt install ./sleipnir_<ver>_amd64.deb
+# or:
 tar -xzf Sleipnir-<ver>-linux-x86_64.tar.gz
 cd Sleipnir-<ver>-linux-x86_64 && ./sleipnir
 ```
 
 The `.deb` installs a desktop entry and hicolor icons, so you can launch Sleipnir
-from the app menu. Sleipnir prefers Wayland when `WAYLAND_DISPLAY` is set and falls
-back to X11 otherwise (set `WAYLAND_DISPLAY=` to force X11).
+from the app menu. The tarball bundles the binary, a `.desktop` file, and a README.
+Sleipnir prefers Wayland when `WAYLAND_DISPLAY` is set and falls back to X11
+otherwise (set `WAYLAND_DISPLAY=` to force X11).
 
 ## Requirements
 
@@ -197,10 +206,10 @@ On Windows and Linux, plain `Ctrl+C` still goes to the PTY (interrupt). Copy is
 Windows and Linux follow Windows Terminal / Zed conventions: app chords use
 Ctrl+Shift so `Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
 
-| Action | macOS | Windows |
+| Action | macOS | Windows / Linux |
 |--------|-------|---------|
 | Copy | `⌘C` / `⌃⇧C` | `Ctrl+Shift+C` / `Ctrl+Insert` |
-| Paste (image → path) | `⌘V` / `⌃⇧V` | `Ctrl+V` / `Ctrl+Shift+V` / `Shift+Insert` |
+| Paste (image → path) | `⌘V` / `⌃⇧V` | `Ctrl+V` (Windows) / `Ctrl+Shift+V` / `Shift+Insert` |
 | Paste text only | `⌃⌘V` | `Ctrl+Alt+V` |
 | Select all | `⌘A` | `Ctrl+Shift+A` |
 | Clear | `⌘K` | `Ctrl+Shift+L` |
@@ -230,7 +239,7 @@ Ctrl+Shift so `Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
 | Word back / forward | `⌥←` / `⌥→` | `Alt+←` / `Alt+→` |
 | Clear line | `⌘⌫` | (send to PTY) |
 | Toggle vi mode | `⌃⇧Space` | `Ctrl+Shift+Space` |
-| Quit | `⌘Q` | `Alt+F4` / `Ctrl+Q` |
+| Quit | `⌘Q` | `Alt+F4` / `Ctrl+Q` (Windows) / `Ctrl+Shift+Q` (Linux) |
 
 See [`docs/M6.md`](docs/M6.md) for the full macOS terminal list.
 

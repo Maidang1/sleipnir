@@ -40,7 +40,7 @@ const FEATURES = [
   {
     icon: Zap,
     title: 'Native down to the frame',
-    body: 'Rust and GPUI, the GPU framework behind Zed. Metal on macOS, Direct3D on Windows. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output. No Electron tax.',
+    body: 'Rust and GPUI, the GPU framework behind Zed. Metal on macOS, Direct3D on Windows, Vulkan on Linux. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output. No Electron tax.',
   },
   {
     icon: Columns2,
@@ -60,12 +60,12 @@ const FEATURES = [
   {
     icon: ImageIcon,
     title: 'Paste that understands the file manager',
-    body: 'A screenshot on the clipboard becomes a quoted temp path. Finder or Explorer selections paste as quoted paths. ⌃⌘V / Ctrl+Alt+V forces text-only.',
+    body: 'A screenshot on the clipboard becomes a quoted temp path. Finder, Explorer, or Nautilus selections paste as quoted paths. ⌃⌘V / Ctrl+Alt+V forces text-only.',
   },
   {
     icon: Keyboard,
     title: 'Keyboard first',
-    body: 'Command palette (⌘⇧K / Ctrl+Shift+P), vi mode, configurable key bindings, find in scrollback, close confirm when a job is running. Windows chords stay off Ctrl+C / Ctrl+W / Ctrl+D so the shell keeps them.',
+    body: 'Command palette (⌘⇧K / Ctrl+Shift+P), vi mode, configurable key bindings, find in scrollback, close confirm when a job is running. Windows and Linux chords stay off Ctrl+C / Ctrl+W / Ctrl+D so the shell keeps them.',
   },
   {
     icon: Link2,
@@ -75,25 +75,25 @@ const FEATURES = [
   {
     icon: Maximize2,
     title: 'Daily extras without bloat',
-    body: 'Quick Terminal, Quick Select mode, optional content opacity, and (on macOS) notify when a long command finishes while you are in another app.',
+    body: 'Quick Terminal, Quick Select mode, optional content opacity, and notify when a long command finishes while you are in another app (macOS notification, Linux via libnotify).',
   },
   {
     icon: RefreshCw,
     title: 'Quietly current',
-    body: 'Check for updates when you want (⌘⇧U / Ctrl+Shift+U). macOS downloads verify against a published SHA-256 sidecar before install. Session layout restores on launch.',
+    body: 'Check for updates when you want (⌘⇧U / Ctrl+Shift+U). macOS downloads verify against a published SHA-256 sidecar before install. Windows and Linux open the releases page. Session layout restores on launch.',
   },
 ]
 
 const FAQ = [
   {
     q: 'Is this another Electron app?',
-    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS and Direct3D on Windows, not a browser engine.',
+    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS, Direct3D on Windows, and Vulkan on Linux, not a browser engine.',
   },
   {
     q: 'Where does config live?',
     a: (
       <>
-        macOS:{' '}
+        macOS and Linux:{' '}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           ~/.config/sleipnir/settings.json
         </code>
@@ -118,7 +118,7 @@ const FAQ = [
   },
   {
     q: 'Does it auto-update on launch?',
-    a: 'No. Updates are manual via Sleipnir → Check for Updates… (⌘⇧U / Ctrl+Shift+U). macOS artifacts are verified with a .zip.sha256 sidecar before install. On Windows the dialog opens the releases page.',
+    a: 'No. Updates are manual via Sleipnir → Check for Updates… (⌘⇧U / Ctrl+Shift+U). macOS artifacts are verified with a .zip.sha256 sidecar before install. On Windows and Linux the dialog opens the releases page.',
   },
   {
     q: 'macOS says the app is from an unidentified developer.',
@@ -126,11 +126,11 @@ const FAQ = [
   },
   {
     q: 'What about Windows and Linux?',
-    a: 'Windows has a portable x64 zip on GitHub Releases (unzip and run sleipnir.exe). You can also build from source. Linux is not available.',
+    a: 'Both ship prebuilt. Windows is a portable x64 zip (unzip and run sleipnir.exe). Linux is a .deb for Ubuntu 22.04+ / Debian 12+, plus a portable .tar.gz. Linux needs a Vulkan driver. The one-line installers cover all three platforms.',
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',
-    a: 'GPU-first rendering via GPUI, Zed-shaped settings, Finder-aware paste, multi-window, pane zoom, path links, and light shell integration — without an account, cloud features, or a shell-suite installer.',
+    a: 'GPU-first rendering via GPUI, Zed-shaped settings, file-manager paste, multi-window, pane zoom, path links, and light shell integration, without an account, cloud features, or a shell-suite installer.',
   },
   {
     q: 'Is there AI built in?',
@@ -200,15 +200,14 @@ export default function App() {
           <section className="px-5 pt-14 pb-14 md:px-10 md:pt-24">
             <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
               <Command className="size-3.5" />
-              Built on GPUI · macOS · Windows
+              Built on GPUI · macOS · Windows · Linux
             </div>
             <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.4rem] md:leading-[1.04]">
-              A fast native terminal for macOS and Windows.
+              A fast native terminal for macOS, Windows, and Linux.
             </h1>
             <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-              GPU-rendered through GPUI: tabs, splits, multi-window, adaptive themes,
-              file-manager paste, path links, and session restore. Prebuilt installers
-              are macOS .dmg/.zip and a Windows x64 zip.
+              GPU-rendered through GPUI. Tabs, splits, multi-window, adaptive themes,
+              and session restore. Prebuilt for macOS, Windows, and Linux.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
               <DownloadMenu
@@ -253,7 +252,7 @@ export default function App() {
               alt="Sleipnir running Claude Code and lazygit side by side"
               width={2000}
               height={1146}
-              className="block h-auto w-full"
+              className="block h-auto w-full outline outline-1 outline-black/10 dark:outline-white/10"
             />
           </section>
 
@@ -283,7 +282,7 @@ export default function App() {
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">Get Sleipnir</h2>
             <p className="mt-2 max-w-lg text-sm text-muted-foreground">
               Free and open source. Pick your platform below for the one-line
-              install, or use the Download menu for a .dmg / .zip.
+              install, or use Download for a .dmg, .zip, .deb, or .tar.gz.
             </p>
             <InstallCommand
               className="mt-6"

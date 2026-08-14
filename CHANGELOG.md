@@ -1,14 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.1.11
 
 ### Features
 - **Linux from source:** GPUI `LinuxPlatform` (X11 + Wayland), Vulkan rendering, Ctrl/Ctrl+Shift keymap (does not steal `Ctrl+C` / `Ctrl+W` / `Ctrl+D`), `~/.config/sleipnir/` settings/session, Ubuntu Mono default font, `xdg-open` for paths, and libnotify completion notifications
 - `make-linux-package.sh` produces a portable `Sleipnir-<ver>-linux-x86_64.tar.gz` and a native `sleipnir_<ver>_amd64.deb` (`.desktop` entry + hicolor icons)
 - CI `ubuntu-latest` job builds/tests `-p sleipnir` and attaches the `.tar.gz` + `.deb` to the GitHub Release
+- One-line Linux install (`curl | bash`) downloads the latest `.deb` and installs it with apt (`SLEIPNIR_TARBALL=1` for the portable tarball)
 
 ### Changes
-- README documents Linux install (`sudo apt install ./sleipnir_<ver>_amd64.deb` or the portable tarball); GitHub Releases ship the `.deb` and `.tar.gz`
+- README and website treat Linux as a shipped platform: one-line install, `.deb` / `.tar.gz` downloads, Vulkan/Wayland notes, and Linux shortcuts
 - In-place auto-update stays macOS-only; Linux Check for Updates opens the releases page
 
 ## 0.1.10
