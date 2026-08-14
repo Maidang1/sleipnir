@@ -47,6 +47,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             libfontconfig-dev libfreetype-dev \
+            libx11-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libglib2.0-dev \
             python3-pil \
@@ -80,7 +81,7 @@ jobs:
           path: |
             build/Sleipnir-*-linux-*.tar.gz
             build/Sleipnir-*-linux-*.tar.gz.sha256
-            build/sleipnir_*_amd64.deb
+            build/sleipnir_*.deb
 
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
@@ -91,12 +92,21 @@ jobs:
           VER="${{ steps.version.outputs.version }}"
           TAG="v${VER}"
           # macOS job creates the release; wait until it exists.
+          # Globs (not hardcoded x86_64) so dpkg amd64 → trio x86_64 stays in sync.
           for i in $(seq 1 36); do
             if gh release view "${TAG}" >/dev/null 2>&1; then
-              gh release upload "${TAG}" \
-                "build/Sleipnir-${VER}-linux-x86_64.tar.gz" \
-                "build/Sleipnir-${VER}-linux-x86_64.tar.gz.sha256" \
-                "build/sleipnir_${VER}_amd64.deb" --clobber
+              shopt -s nullglob
+              assets=(
+                build/Sleipnir-${VER}-linux-*.tar.gz
+                build/Sleipnir-${VER}-linux-*.tar.gz.sha256
+                build/sleipnir_${VER}_*.deb
+              )
+              if (( ${#assets[@]} < 3 )); then
+                echo "ERROR: missing Linux release assets for ${VER}" >&2
+                ls -la build || true
+                exit 1
+              fi
+              gh release upload "${TAG}" "${assets[@]}" --clobber
               echo "Uploaded Linux assets to ${TAG}"
               exit 0
             fi

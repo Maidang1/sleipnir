@@ -24,6 +24,16 @@
 
 set -euo pipefail
 
+# Map dpkg/uname arch names onto the trio used in portable tarball names.
+# ubuntu `dpkg --print-architecture` reports amd64, not x86_64.
+linux_trio_arch() {
+    case "${1:-}" in
+        x86_64|amd64) printf '%s\n' x86_64 ;;
+        aarch64|arm64) printf '%s\n' aarch64 ;;
+        *) printf '%s\n' "${1:-}" ;;
+    esac
+}
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
@@ -42,6 +52,10 @@ while [[ $# -gt 0 ]]; do
         --no-tar)     MAKE_TAR=false; shift ;;
         --no-strip)   STRIP_BIN=false; shift ;;
         --out)        OUT_DIR="$2"; shift 2 ;;
+        --print-trio-arch)
+            linux_trio_arch "${2:-}"
+            exit 0
+            ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -54,21 +68,17 @@ else
 fi
 
 ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-if [[ "${ARCH}" == "x86_64" ]]; then
-    TRIO_ARCH="x86_64"
-else
-    TRIO_ARCH="${ARCH}"
-fi
+TRIO_ARCH="$(linux_trio_arch "${ARCH}")"
 
 echo "=== sleipnir make-linux-package  v${VERSION} (${ARCH}) ==="
 echo "  release=${RELEASE}  deb=${MAKE_DEB}  tar=${MAKE_TAR}  strip=${STRIP_BIN}  out=${OUT_DIR}"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 if [[ "${RELEASE}" == "true" ]]; then
-    cargo build --release -p sleipnir 2>&1 | tail -3
+    cargo build --release -p sleipnir
     BIN="${ROOT}/target/release/sleipnir"
 else
-    cargo build -p sleipnir 2>&1 | tail -3
+    cargo build -p sleipnir
     BIN="${ROOT}/target/debug/sleipnir"
 fi
 

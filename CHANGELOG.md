@@ -8,7 +8,7 @@
 - CI `ubuntu-latest` job builds/tests `-p sleipnir` and attaches the `.tar.gz` + `.deb` to the GitHub Release
 
 ### Changes
-- README documents Linux install (`sudo apt install ./sleipnir_<ver>_amd64.deb` or the portable tarball); prebuilt installers remain macOS/Windows-only
+- README documents Linux install (`sudo apt install ./sleipnir_<ver>_amd64.deb` or the portable tarball); GitHub Releases ship the `.deb` and `.tar.gz`
 - In-place auto-update stays macOS-only; Linux Check for Updates opens the releases page
 
 ## 0.1.10

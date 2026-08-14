@@ -82,7 +82,14 @@ pub fn leading_pad_for(windows: bool) -> Pixels {
 /// Space reserved on the right for system window controls.
 #[inline]
 pub fn trailing_pad_for(windows: bool) -> Pixels {
-    if windows {
+    trailing_pad_for_os(windows, cfg!(target_os = "linux"))
+}
+
+/// Trailing inset for a given OS family. `linux` reserves the same caption
+/// trail as Windows so CSD window controls do not sit on top of tabs.
+#[inline]
+pub fn trailing_pad_for_os(windows: bool, linux: bool) -> Pixels {
+    if windows || linux {
         px(138.0)
     } else {
         px(8.0)
@@ -106,9 +113,10 @@ mod tests {
             assert_eq!(pad, px(8.0));
             assert_eq!(g.trailing_pad, px(138.0));
         } else if cfg!(target_os = "linux") {
-            // No traffic lights: flush leading pad, no caption-button trail.
+            // No traffic lights: flush leading pad, reserve the caption trail
+            // for CSD window controls.
             assert_eq!(pad, px(8.0));
-            assert_eq!(g.trailing_pad, px(8.0));
+            assert_eq!(g.trailing_pad, px(138.0));
         } else {
             assert!(pad == px(71.0) || pad == px(78.0));
             assert_eq!(g.trailing_pad, px(8.0));
@@ -123,11 +131,20 @@ mod tests {
         let mac = ChromeGeometry::standard_for(false);
         if cfg!(target_os = "linux") {
             // Linux has no traffic lights either; the "non-Windows" geometry
-            // falls back to a flush leading pad.
+            // falls back to a flush leading pad and still reserves the
+            // caption trail for CSD window controls.
             assert_eq!(mac.leading_pad, px(8.0));
+            assert_eq!(mac.trailing_pad, px(138.0));
         } else {
             assert!(mac.leading_pad >= px(71.0));
+            assert_eq!(mac.trailing_pad, px(8.0));
         }
-        assert_eq!(mac.trailing_pad, px(8.0));
+    }
+
+    #[test]
+    fn linux_family_reserves_caption_buttons() {
+        assert_eq!(trailing_pad_for_os(true, false), px(138.0));
+        assert_eq!(trailing_pad_for_os(false, true), px(138.0));
+        assert_eq!(trailing_pad_for_os(false, false), px(8.0));
     }
 }

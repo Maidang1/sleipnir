@@ -1628,6 +1628,54 @@ impl AppShell {
         }
     }
 
+    /// CSD caption buttons for Linux (minimize / zoom / close).
+    fn render_linux_caption_buttons(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("linux-caption-buttons")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .pr_2()
+            .child(self.caption_button("linux-min", "−", tokens, cx, |_, window, _| {
+                window.minimize_window();
+            }))
+            .child(self.caption_button("linux-zoom", "□", tokens, cx, |_, window, _| {
+                window.zoom_window();
+            }))
+            .child(self.caption_button("linux-close", "×", tokens, cx, |_, window, _| {
+                window.remove_window();
+            }))
+    }
+
+    fn caption_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .w(px(36.0))
+            .h(px(28.0))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(tokens.fg_muted)
+            .text_size(px(14.0))
+            .cursor_pointer()
+            .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
+            .child(label)
+            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+    }
+
     /// A pill button for the update dialog.
     fn update_button(
         &self,
@@ -3071,8 +3119,18 @@ impl Render for AppShell {
 
         let trailing_drag = self
             .attach_empty_drag("chrome-drag-trailing", cx)
+            .flex_1();
+        let trailing = div()
+            .id("chrome-trailing")
+            .flex()
+            .flex_row()
+            .items_center()
             .flex_1()
-            .min_w(geo.trailing_pad);
+            .min_w(geo.trailing_pad)
+            .child(trailing_drag)
+            .when(cfg!(target_os = "linux") && !fullscreen, |el| {
+                el.child(self.render_linux_caption_buttons(&tokens, cx))
+            });
 
         let tab_scroll = div()
             .id("tab-scroller")
@@ -3186,7 +3244,7 @@ impl Render for AppShell {
             .bg(tokens.content_bg)
             .child(leading_drag)
             .child(tab_scroll)
-            .child(trailing_drag);
+            .child(trailing);
 
         div()
             .size_full()

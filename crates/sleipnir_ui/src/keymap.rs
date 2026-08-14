@@ -285,6 +285,7 @@ fn linux_static_bindings() -> Vec<BuiltinBinding> {
         b("ctrl-insert", BuiltinAction::Copy, Terminal),
         b("ctrl-shift-v", BuiltinAction::Paste, Terminal),
         b("shift-insert", BuiltinAction::Paste, Terminal),
+        b("ctrl-alt-v", BuiltinAction::PasteText, Terminal),
         b("ctrl-shift-a", BuiltinAction::SelectAll, Terminal),
         b("ctrl-shift-l", BuiltinAction::Clear, Terminal),
         b("ctrl-shift-space", BuiltinAction::ToggleViMode, Terminal),
@@ -476,6 +477,20 @@ mod tests {
         assert!(
             !keys.iter().any(|k| k.starts_with("cmd-")),
             "Linux table must not use cmd-: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn linux_bindings_include_paste_text_only() {
+        let actions: Vec<_> = builtin_bindings_for_linux()
+            .into_iter()
+            .filter(|b| b.key == "ctrl-alt-v")
+            .map(|b| b.action)
+            .collect();
+        assert_eq!(
+            actions,
+            vec![BuiltinAction::PasteText],
+            "Linux must ship Ctrl+Alt+V as paste-text-only"
         );
     }
 
