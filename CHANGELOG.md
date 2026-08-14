@@ -8,6 +8,9 @@
 - CI `ubuntu-latest` job builds/tests `-p sleipnir` and attaches the `.tar.gz` + `.deb` to the GitHub Release
 - One-line Linux install (`curl | bash`) downloads the latest `.deb` and installs it with apt (`SLEIPNIR_TARBALL=1` for the portable tarball)
 
+### Fixes
+- Windows CI: `path_opener_program()` is `None` on Windows (paths open via `cmd /C start`); the unit test no longer requires `Some`
+
 ### Changes
 - README and website treat Linux as a shipped platform: one-line install, `.deb` / `.tar.gz` downloads, Vulkan/Wayland notes, and Linux shortcuts
 - In-place auto-update stays macOS-only; Linux Check for Updates opens the releases page

@@ -1364,7 +1364,11 @@ mod tests {
 
     #[test]
     fn windows_path_opener_is_not_open_or_osascript() {
-        assert!(path_opener_program().is_some());
+        if cfg!(windows) {
+            assert_eq!(path_opener_program(), None);
+        } else {
+            assert!(path_opener_program().is_some());
+        }
         match path_opener_program() {
             Some("open") => assert_eq!(cfg!(target_os = "macos"), true),
             Some("xdg-open") => assert!(cfg!(any(target_os = "linux", target_os = "freebsd"))),
