@@ -72,7 +72,12 @@ Sleipnir 是**你可以离开的终端**。人跑 coding agent 和长任务，Sl
 一个 Pane。字段：`RunId`、命令行文本（脱敏后）、cwd、开始时间（wall clock）、耗时（单调时钟）、
 退出码、状态、`LaunchId`、`PaneKey`、Anchor、是否推断、是否已看过。
 
-其中 **Anchor 与「是否已看过」是内存字段，不进 `runs.json` schema**（Anchor 跨重启必然失效；Attention
+**脱敏时机：入账即脱敏（redact-at-capture）** —— `RunEvent` 转成 Run 时就脱敏，内存与磁盘持有
+同一份文本。所以面板 / tooltip 显示的也是脱敏后的结果，**同一条 Run 在重启前后渲染一致**（若改成
+写盘前才脱敏，就会出现重启前看到原文、重启后变 `…` 的不一致）。`run_ledger_redact: false` 时
+内存与磁盘同样都保留原文。
+
+**Anchor 与「是否已看过」是内存字段，不进 `runs.json` schema**（Anchor 跨重启必然失效；Attention
 不跨重启，见 §3.1）。
 _避免_：Task（本仓库已用于 Zed 派生的 `SpawnInTerminal` / `TaskState`）、Command（命令是文本，
 Run 是一次执行）、Block、Job。
@@ -167,7 +172,10 @@ PTY 字节
 
 - 四态：**● 在跑**（带 `mm:ss` 计时，tabular numerals）/ **✓ 完成未看** / **✗ 失败未看** /
   无徽标（没有待看）。
-- **看过即淡出** —— 徽标是 Attention 的投影，不是永久装饰。
+- 徽标的输入集合是 **Attention ∪ Running**（Attention 只涵盖「已结束未看过」，「在跑」是另一个输入；
+  面板的「进行中 / 待看」分组就是这两个集合）。聚合函数的输入仅此二者。
+- **看过即淡出** —— 徽标是这两个集合的投影，不是永久装饰。
+- focus 一个 Pane **清空该 Pane 全部待看 Run**，不只是最新一条。
 - **Attention 不跨重启**：重启是一次明确的「你回来了」，所以载入的历史 Run 全部视为已看过,
   徽标不会在启动时凭历史数据出现（这也与 Anchor 必然失效自洽 —— 不会出现「有徽标但点不动」）。
   重启后回看历史的唯一入口是 tombstone 横幅与 Ledger 面板。
@@ -282,6 +290,15 @@ ADR-0006 是 proposed，且其两条决策与本设计**直接冲突**，必须�
 | `persist` | 是 | 有 | 读 + 写 | 可用 |
 | `memory` | 是 | 有 | **既不读也不写；磁盘上已有的 `runs.json` 原样保留不动**（切回 `persist` 时还在） | **不可用**（无跨重启数据） |
 | `off` | 否 | 无 | 既不读也不写，文件保留 | 不可用 |
+
+运行时改值（`⌘⇧R` 重载设置，可能正有 Run 在跑）：
+
+- `persist` → `memory`：立即停止写盘，内存台账保留至进程结束，磁盘文件原样不动。
+- `persist`/`memory` → `off`：停止采集，**清空内存台账**并隐藏全部 UI；磁盘文件保留。
+- `off`/`memory` → `persist`：从磁盘读入历史（按§4 的合并规则）并开始写盘。
+- 两种方向下，**进行中的 Run 不受影响**：它结束时按当时生效的模式处理。
+- `restore_session: false` 时（与 ADR-0006 §4 一致）**不写 `pane_key`**，因此 tombstone 不可用；
+  不得为此新建第二条持久化路径。
 
 ## 5. 降级与错误处理
 
