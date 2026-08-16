@@ -6,6 +6,10 @@
   "background_opacity": 1.0,
   "notify_on_command_finish_secs": 5,
   "notify_on_command_finish_mode": "unfocused",
+  "run_ledger": "persist",
+  "run_ledger_retention_days": 7,
+  "run_ledger_max_runs": 500,
+  "run_ledger_redact": true,
   "custom_theme": {
     "background": "#0d1117",
     "foreground": "#e6edf3",
@@ -40,6 +44,6 @@
     "blinking": "terminal_controlled",
     "alternate_scroll": "on",
     "bell": "off",
-    "inject_osc133": false
+    "inject_osc133": true
   }
 }

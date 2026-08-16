@@ -187,6 +187,11 @@ on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linu
 | `background_opacity` | 0.15–1.0 content opacity (default `1.0` opaque) |
 | `notify_on_command_finish_secs` | Long-job notify threshold seconds (default `5`; `0` off) |
 | `notify_on_command_finish_mode` | `never` / `unfocused` / `always` (default `unfocused`) |
+| `run_ledger` | `off` / `memory` / `persist` — collect and show the Run Ledger (default `persist`) |
+| `run_ledger_retention_days` | How long to keep persisted runs (default `7`) |
+| `run_ledger_max_runs` | Cap on persisted runs; oldest dropped first (default `500`) |
+| `run_ledger_redact` | Redact command lines at capture (default `true`; heuristic, not a guarantee) |
+| `terminal.inject_osc133` | Inject OSC 133 A/B/C/D into zsh/bash/fish (default `true`; was `false`) |
 
 Open the in-app theme picker with `⌘,` / `Ctrl+,`, or edit the file and reload
 with `⌘⇧R` / `Ctrl+Shift+R` (key binding overrides apply on next launch).

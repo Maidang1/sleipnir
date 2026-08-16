@@ -108,6 +108,19 @@ impl TerminalLineHeight {
     }
 }
 
+/// Where the Run Ledger keeps its data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RunLedgerMode {
+    /// 不采集、无 UI、不读写 runs.json（文件保留）。
+    Off,
+    /// 采集并显示，但不读写 runs.json（磁盘文件原样保留）。
+    Memory,
+    #[default]
+    /// 采集、显示、读写 runs.json。
+    Persist,
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CursorShape {
@@ -177,9 +190,18 @@ pub struct TerminalSettings {
     pub notify_on_command_finish_secs: u64,
     /// When to fire the command-finish notification: never | unfocused | always.
     pub notify_on_command_finish_mode: NotifyOnCommandFinish,
-    /// Opt-in: source OSC 133 A/B/C/D into newly spawned zsh/bash/fish.
-    /// Off (default) keeps detect-only behavior.
+    /// Source OSC 133 A/B/C/D into newly spawned zsh/bash/fish.
+    /// Default true so the Run Ledger gets real command boundaries.
+    /// Set false to restore detect-only behavior.
     pub inject_osc133: bool,
+    /// Whether the Run Ledger collects, shows, and persists runs.
+    pub run_ledger: RunLedgerMode,
+    /// Retention window for persisted runs, in days.
+    pub run_ledger_retention_days: u64,
+    /// Cap on persisted runs (oldest dropped first).
+    pub run_ledger_max_runs: usize,
+    /// Redact command lines at capture time (heuristic, not a guarantee).
+    pub run_ledger_redact: bool,
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -285,7 +307,11 @@ impl Default for TerminalSettings {
             background_opacity: 1.0,
             notify_on_command_finish_secs: 5,
             notify_on_command_finish_mode: NotifyOnCommandFinish::Unfocused,
-            inject_osc133: false,
+            inject_osc133: true,
+            run_ledger: RunLedgerMode::Persist,
+            run_ledger_retention_days: 7,
+            run_ledger_max_runs: 500,
+            run_ledger_redact: true,
         }
     }
 }
@@ -490,9 +516,18 @@ struct SettingsFile {
     /// When to fire the finish notification (never | unfocused | always).
     #[serde(default)]
     notify_on_command_finish_mode: Option<NotifyOnCommandFinish>,
-    /// Opt-in OSC 133 inject (also accepted at the top level).
+    /// OSC 133 inject (also accepted at the top level). Default true.
     #[serde(default)]
     inject_osc133: Option<bool>,
+    /// Run Ledger mode: off | memory | persist (default persist).
+    #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
+    run_ledger: Option<RunLedgerMode>,
+    #[serde(default)]
+    run_ledger_retention_days: Option<u64>,
+    #[serde(default)]
+    run_ledger_max_runs: Option<usize>,
+    #[serde(default)]
+    run_ledger_redact: Option<bool>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
@@ -522,8 +557,22 @@ struct TerminalSettingsFile {
     env: Option<HashMap<String, String>>,
     /// Optional nested theme override.
     theme: Option<ThemeName>,
-    /// Opt-in: inject OSC 133 A/B/C/D into zsh/bash/fish (default false).
+    /// Inject OSC 133 A/B/C/D into zsh/bash/fish (default true).
     inject_osc133: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
+    run_ledger: Option<RunLedgerMode>,
+    run_ledger_retention_days: Option<u64>,
+    run_ledger_max_runs: Option<usize>,
+    run_ledger_redact: Option<bool>,
+}
+
+/// Unknown `run_ledger` values become `None` so a typo cannot reject the file.
+fn lenient_opt_run_ledger_mode<'de, D>(deserializer: D) -> Result<Option<RunLedgerMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// Directory that holds `settings.json` and `session.json`.
@@ -601,6 +650,18 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.inject_osc133 {
         settings.inject_osc133 = v;
     }
+    if let Some(v) = file.run_ledger {
+        settings.run_ledger = v;
+    }
+    if let Some(v) = file.run_ledger_retention_days {
+        settings.run_ledger_retention_days = v;
+    }
+    if let Some(v) = file.run_ledger_max_runs {
+        settings.run_ledger_max_runs = v;
+    }
+    if let Some(v) = file.run_ledger_redact {
+        settings.run_ledger_redact = v;
+    }
     let t = file.terminal;
     if let Some(size) = t.font_size {
         settings.font_size = Some(px(size));
@@ -661,6 +722,18 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = t.inject_osc133 {
         settings.inject_osc133 = v;
     }
+    if let Some(v) = t.run_ledger {
+        settings.run_ledger = v;
+    }
+    if let Some(v) = t.run_ledger_retention_days {
+        settings.run_ledger_retention_days = v;
+    }
+    if let Some(v) = t.run_ledger_max_runs {
+        settings.run_ledger_max_runs = v;
+    }
+    if let Some(v) = t.run_ledger_redact {
+        settings.run_ledger_redact = v;
+    }
 }
 
 /// Write a default settings file if missing.
@@ -682,7 +755,11 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         background_opacity: Some(1.0),
         notify_on_command_finish_secs: Some(5),
         notify_on_command_finish_mode: Some(NotifyOnCommandFinish::Unfocused),
-        inject_osc133: Some(false),
+        inject_osc133: Some(true),
+        run_ledger: Some(RunLedgerMode::Persist),
+        run_ledger_retention_days: Some(7),
+        run_ledger_max_runs: Some(500),
+        run_ledger_redact: Some(true),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some(default_font_family().into()),
@@ -919,11 +996,36 @@ mod tests {
     }
 
     #[test]
-    fn inject_osc133_defaults_off() {
-        assert!(
-            !TerminalSettings::default().inject_osc133,
-            "inject is opt-in so detect-only remains the default"
-        );
+    fn inject_osc133_defaults_on() {
+        assert!(TerminalSettings::default().inject_osc133);
+    }
+
+    #[test]
+    fn run_ledger_defaults_to_persist() {
+        let s = TerminalSettings::default();
+        assert_eq!(s.run_ledger, RunLedgerMode::Persist);
+        assert_eq!(s.run_ledger_retention_days, 7);
+        assert_eq!(s.run_ledger_max_runs, 500);
+        assert!(s.run_ledger_redact);
+    }
+
+    #[test]
+    fn run_ledger_mode_parses_from_file() {
+        let file: SettingsFile = serde_json::from_str(r#"{"run_ledger":"memory"}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.run_ledger, RunLedgerMode::Memory);
+
+        let file: SettingsFile = serde_json::from_str(r#"{"run_ledger":"off"}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.run_ledger, RunLedgerMode::Off);
+
+        // Illegal value must not panic and must keep the default.
+        let file: SettingsFile = serde_json::from_str(r#"{"run_ledger":"nope"}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.run_ledger, RunLedgerMode::Persist);
     }
 
     #[test]
