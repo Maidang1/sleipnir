@@ -140,7 +140,14 @@ impl LedgerCore {
 
     fn clear(&mut self) {
         self.reset_ledger();
-        self.dirty = self.mode == RunLedgerMode::Persist;
+        self.dirty = false;
+        if self.mode == RunLedgerMode::Persist {
+            if let Err(err) = std::fs::remove_file(&self.path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("failed to delete {}: {err}", self.path.display());
+                }
+            }
+        }
     }
 }
 
@@ -216,14 +223,15 @@ impl RunLedgerGlobal {
         }
     }
 
-    pub fn clear(&mut self, cx: &mut App) {
+    pub fn clear(&mut self, _cx: &mut App) {
         self.core.clear();
-        if self.core.mode == RunLedgerMode::Persist {
-            self.flush_now();
-            if self.core.dirty {
-                self.schedule_flush(cx);
-            }
+    }
+
+    pub fn clear_in(cx: &mut App) {
+        if !cx.has_global::<Self>() {
+            return;
         }
+        cx.update_global(|this: &mut RunLedgerGlobal, cx| this.clear(cx));
     }
 
     pub fn badge_for(&self, panes: &[PaneKey], now_ms: u64) -> Option<Badge> {

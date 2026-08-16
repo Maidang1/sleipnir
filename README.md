@@ -180,7 +180,7 @@ on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linu
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
 | `path_links` | Open path-like targets on ⌘-click / Ctrl-click (default `true`) |
-| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
+| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
 | `terminal.bell` | `off` / `system` / `visual` (default `off`) |

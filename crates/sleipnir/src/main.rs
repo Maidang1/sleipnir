@@ -11,11 +11,12 @@ use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
     BindingContext, BuiltinAction, builtin_bindings, last_window_close_quits, open_sleipnir_window,
-    ActivateTab, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, Find, FindNext, FindPrev,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
-    JumpPrevPrompt, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab,
-    ReloadSettings, ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, ToggleCommandPalette,
-    TogglePaneZoom, ToggleQuickSelect,
+    ActivateTab, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, Find,
+    FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
+    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
+    SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
+    ToggleRunLedger,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -234,6 +235,8 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "scroll_to_bottom" => KeyBinding::new(&spec.key, ScrollToBottom, Some(ctx)),
             "toggle_vi_mode" => KeyBinding::new(&spec.key, ToggleViMode, Some(ctx)),
             "show_character_palette" => KeyBinding::new(&spec.key, ShowCharacterPalette, Some(ctx)),
+            "clear_run_ledger" => KeyBinding::new(&spec.key, ClearRunLedger, Some(ctx)),
+            "toggle_run_ledger" => KeyBinding::new(&spec.key, ToggleRunLedger, Some(ctx)),
             _ => continue,
         };
         out.push(kb);

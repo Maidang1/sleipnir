@@ -5,10 +5,11 @@
 
 use gpui::{actions, Menu, MenuItem, SystemMenuType};
 use sleipnir_ui::{
-    CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback, FocusPaneDown,
-    FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt,
-    NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings,
-    ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, TogglePaneZoom, ToggleQuickSelect,
+    CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
+    JumpPrevPrompt, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab,
+    ReloadSettings, ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, TogglePaneZoom,
+    ToggleQuickSelect,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -138,6 +139,7 @@ fn macos_menus() -> Vec<Menu> {
             MenuItem::action("Clear", Clear),
             MenuItem::separator(),
             MenuItem::action("Export Scrollback…", ExportScrollback),
+            MenuItem::action("Clear Run Ledger", ClearRunLedger),
         ]),
         edit,
         view,
@@ -166,6 +168,7 @@ fn windows_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Clear", Clear),
             MenuItem::action("Export Scrollback…", ExportScrollback),
+            MenuItem::action("Clear Run Ledger", ClearRunLedger),
             MenuItem::separator(),
             MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
@@ -199,6 +202,7 @@ fn linux_menus() -> Vec<Menu> {
             ])),
             MenuItem::separator(),
             MenuItem::action("Clear", Clear),
+            MenuItem::action("Clear Run Ledger", ClearRunLedger),
             MenuItem::separator(),
             MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),

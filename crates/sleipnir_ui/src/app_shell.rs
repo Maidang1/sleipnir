@@ -96,6 +96,10 @@ actions!(
         OpenQuickTerminal,
         /// Export the active pane's scrollback to a temp file and open it.
         ExportScrollback,
+        /// Clear the Run Ledger (memory + runs.json). Palette / menu only.
+        ClearRunLedger,
+        /// Toggle the Run Ledger panel (P1). Name is registered for key_bindings.
+        ToggleRunLedger,
     ]
 );
 
@@ -317,10 +321,18 @@ pub struct AppShell {
     _quit_subscription: Option<gpui::Subscription>,
 }
 
-/// Pending close confirmation dialog.
+/// What the shared confirm dialog is asking about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfirmKind {
+    ClosePane,
+    ClearRunLedger,
+}
+
+/// Pending confirmation dialog (close pane, or clear the Run Ledger).
 struct CloseConfirmState {
-    /// Human-readable what will close.
+    /// Human-readable what will happen.
     message: SharedString,
+    kind: ConfirmKind,
 }
 
 impl Focusable for AppShell {
@@ -1439,6 +1451,7 @@ impl AppShell {
         if needs_confirm {
             self.close_confirm = Some(CloseConfirmState {
                 message: "A process is still running. Close this pane anyway?".into(),
+                kind: ConfirmKind::ClosePane,
             });
             cx.notify();
         } else {
@@ -1446,9 +1459,47 @@ impl AppShell {
         }
     }
 
+    fn request_clear_run_ledger(&mut self, cx: &mut Context<Self>) {
+        if self.close_confirm.is_some() {
+            return;
+        }
+        self.close_confirm = Some(CloseConfirmState {
+            message: "This deletes the recorded command history from this machine. The terminal is not affected.".into(),
+            kind: ConfirmKind::ClearRunLedger,
+        });
+        cx.notify();
+    }
+
     fn confirm_close_proceed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_confirm = None;
-        self.close_active_pane(window, cx);
+        let kind = self.close_confirm.take().map(|s| s.kind);
+        match kind {
+            Some(ConfirmKind::ClearRunLedger) => self.clear_run_ledger(cx),
+            _ => self.close_active_pane(window, cx),
+        }
+    }
+
+    fn clear_run_ledger(&mut self, cx: &mut Context<Self>) {
+        RunLedgerGlobal::clear_in(cx);
+        cx.notify();
+    }
+
+    fn on_clear_run_ledger(
+        &mut self,
+        _: &ClearRunLedger,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_clear_run_ledger(cx);
+    }
+
+    fn on_toggle_run_ledger(
+        &mut self,
+        _: &ToggleRunLedger,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // P1: open/close the Run Ledger panel. The name is registered so
+        // user key_bindings for "toggle_run_ledger" resolve without error.
     }
 
     fn confirm_close_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1634,6 +1685,8 @@ impl AppShell {
             CommandId::ExportScrollback => {
                 self.on_export_scrollback(&ExportScrollback, window, cx)
             }
+            CommandId::ClearRunLedger => self.request_clear_run_ledger(cx),
+            CommandId::ToggleRunLedger => {}
         }
     }
 
@@ -3967,6 +4020,8 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_toggle_quick_select))
             .on_action(cx.listener(Self::on_open_quick_terminal))
             .on_action(cx.listener(Self::on_export_scrollback))
+            .on_action(cx.listener(Self::on_clear_run_ledger))
+            .on_action(cx.listener(Self::on_toggle_run_ledger))
             .child(chrome_band)
             .when(self.broadcast, |el| {
                 el.child(
@@ -4042,11 +4097,15 @@ impl AppShell {
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let message = self
-            .close_confirm
-            .as_ref()
-            .map(|s| s.message.clone())
-            .unwrap_or_else(|| "Close this pane?".into());
+        let (title, message, ok_label) = match self.close_confirm.as_ref() {
+            Some(s) if s.kind == ConfirmKind::ClearRunLedger => (
+                "Clear Run Ledger?",
+                s.message.clone(),
+                "Clear",
+            ),
+            Some(s) => ("Close pane?", s.message.clone(), "Close"),
+            None => ("Close pane?", SharedString::from("Close this pane?"), "Close"),
+        };
 
         let panel = div()
             .id("close-confirm-panel")
@@ -4071,7 +4130,7 @@ impl AppShell {
                     .text_size(px(15.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(tokens.fg)
-                    .child("Close pane?"),
+                    .child(title),
             )
             .child(
                 div()
@@ -4114,7 +4173,7 @@ impl AppShell {
                             .cursor_pointer()
                             .text_size(px(13.0))
                             .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
-                            .child("Close")
+                            .child(ok_label)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.confirm_close_proceed(window, cx);
                             })),

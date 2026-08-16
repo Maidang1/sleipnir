@@ -31,6 +31,8 @@ pub enum CommandId {
     ToggleQuickSelect,
     OpenQuickTerminal,
     ExportScrollback,
+    ClearRunLedger,
+    ToggleRunLedger,
 }
 
 impl CommandId {
@@ -59,6 +61,8 @@ impl CommandId {
             CommandId::ToggleQuickSelect => "toggle_quick_select",
             CommandId::OpenQuickTerminal => "open_quick_terminal",
             CommandId::ExportScrollback => "export_scrollback",
+            CommandId::ClearRunLedger => "clear_run_ledger",
+            CommandId::ToggleRunLedger => "toggle_run_ledger",
         }
     }
 
@@ -87,6 +91,8 @@ impl CommandId {
             "toggle_quick_select" | "quick_select" => Some(CommandId::ToggleQuickSelect),
             "open_quick_terminal" | "quick_terminal" => Some(CommandId::OpenQuickTerminal),
             "export_scrollback" | "export_scrollback_to_file" => Some(CommandId::ExportScrollback),
+            "clear_run_ledger" => Some(CommandId::ClearRunLedger),
+            "toggle_run_ledger" => Some(CommandId::ToggleRunLedger),
             _ => None,
         }
     }
@@ -248,6 +254,12 @@ pub fn commands_for(windows: bool) -> Vec<CommandItem> {
             shortcut: display_shortcut_for("export_scrollback", windows).into(),
             keywords: "export scrollback save file editor dump",
         },
+        CommandItem {
+            id: CommandId::ClearRunLedger,
+            title: "Clear Run Ledger".into(),
+            shortcut: "".into(),
+            keywords: "clear run ledger history runs delete",
+        },
     ]
 }
 
@@ -337,5 +349,23 @@ mod tests {
             .find(|i| i.id == CommandId::NewTab)
             .expect("new tab");
         assert_eq!(new_tab.shortcut.as_ref(), "⌘T");
+    }
+
+    #[test]
+    fn clear_run_ledger_is_a_known_action_name() {
+        assert_eq!(
+            CommandId::from_str("clear_run_ledger"),
+            Some(CommandId::ClearRunLedger)
+        );
+        assert_eq!(
+            CommandId::from_str("toggle_run_ledger"),
+            Some(CommandId::ToggleRunLedger)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::ClearRunLedger),
+            "Clear Run Ledger must appear in the palette"
+        );
     }
 }

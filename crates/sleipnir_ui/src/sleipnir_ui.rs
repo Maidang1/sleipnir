@@ -13,12 +13,12 @@ mod term_element;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 
 pub use app_shell::{
-    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback,
-    Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
+    ActivateTab, AppShell, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize,
+    ExportScrollback, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
     SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
-    UpdateUiState, open_sleipnir_window,
+    ToggleRunLedger, UpdateUiState, open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
