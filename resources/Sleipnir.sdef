@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="Sleipnir Terminology">
+    <suite name="Standard Suite" code="aevt" description="Common commands and read-only properties (handled by the system).">
+        <command name="quit" code="aevtquit" description="Quit Sleipnir."/>
+        <class name="application" code="capp" description="The application.">
+            <cocoa class="NSApplication"/>
+            <property name="name" code="pnam" type="text" access="r" description="The application's name."/>
+            <property name="version" code="vers" type="text" access="r" description="The application's version."/>
+            <property name="frontmost" code="pisf" type="boolean" access="r" description="Whether the application is frontmost."/>
+        </class>
+    </suite>
+</dictionary>

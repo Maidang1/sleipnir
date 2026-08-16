@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Schema version for forward-compatible loaders.
 pub const SESSION_VERSION: u32 = 1;
@@ -46,6 +47,10 @@ pub enum SessionNode {
         id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// Stable identity for this Pane across restarts (Run Ledger ownership key).
+        /// `None` for sessions written before the Run Ledger.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_key: Option<Uuid>,
     },
     Split {
         axis: SessionAxis,
@@ -105,11 +110,7 @@ impl SessionNode {
 
 /// Default session file path, next to `settings.json`.
 pub fn session_path() -> PathBuf {
-    session_path_for(cfg!(windows))
-}
-
-pub fn session_path_for(windows: bool) -> PathBuf {
-    sleipnir_settings::config_dir_for(windows).join("session.json")
+    sleipnir_settings::config_dir().join("session.json")
 }
 
 /// Load a session from disk. Returns `None` if the file is missing, empty,
@@ -177,6 +178,12 @@ fn sanitize_ratios(node: &mut SessionNode) {
     }
 }
 
+/// Restore a stored pane_key, or mint a new one for pre-ledger sessions.
+/// New panes that never had a key just will not match historical Runs.
+pub fn restore_pane_key(stored: Option<Uuid>) -> Uuid {
+    stored.unwrap_or_else(Uuid::new_v4)
+}
+
 /// Validate that a cwd string points at an existing directory; otherwise `None`.
 pub fn resolve_cwd(cwd: Option<&str>) -> Option<PathBuf> {
     let raw = cwd?.trim();
@@ -212,10 +219,12 @@ mod tests {
                     first: Box::new(SessionNode::Leaf {
                         id: 1,
                         cwd: Some("/tmp".into()),
+                        pane_key: None,
                     }),
                     second: Box::new(SessionNode::Leaf {
                         id: 2,
                         cwd: None,
+                        pane_key: None,
                     }),
                 },
             }],
@@ -270,15 +279,72 @@ mod tests {
     }
 
     #[test]
+    fn leaf_without_pane_key_still_loads() {
+        let json = r#"{
+            "version": 1,
+            "active_tab": 0,
+            "tabs": [{
+                "active_pane": 1,
+                "tree": { "type": "leaf", "id": 1, "cwd": "/tmp" }
+            }]
+        }"#;
+        let file: SessionFile = serde_json::from_str(json).expect("old session JSON");
+        match &file.tabs[0].tree {
+            SessionNode::Leaf { id, cwd, pane_key } => {
+                assert_eq!(*id, 1);
+                assert_eq!(cwd.as_deref(), Some("/tmp"));
+                assert_eq!(*pane_key, None);
+            }
+            other => panic!("expected leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_key_round_trips() {
+        let key = Uuid::new_v4();
+        let s = SessionFile {
+            version: SESSION_VERSION,
+            active_tab: 0,
+            tabs: vec![SessionTab {
+                custom_title: None,
+                active_pane: 1,
+                tree: SessionNode::Leaf {
+                    id: 1,
+                    cwd: Some("/tmp".into()),
+                    pane_key: Some(key),
+                },
+            }],
+        };
+        let bytes = serde_json::to_vec_pretty(&s).unwrap();
+        let back: SessionFile = serde_json::from_slice(&bytes).unwrap();
+        match &back.tabs[0].tree {
+            SessionNode::Leaf { pane_key, .. } => assert_eq!(*pane_key, Some(key)),
+            other => panic!("expected leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_preserves_pane_key_and_new_panes_get_fresh_ones() {
+        let key = Uuid::new_v4();
+        let first = restore_pane_key(Some(key));
+        let second = restore_pane_key(Some(key));
+        assert_eq!(first, key);
+        assert_eq!(second, key, "the same stored key must restore identically");
+
+        let minted_a = restore_pane_key(None);
+        let minted_b = restore_pane_key(None);
+        assert_ne!(minted_a, key);
+        assert_ne!(minted_b, key);
+        assert_ne!(minted_a, minted_b, "new panes must get distinct keys");
+    }
+
+    #[test]
     fn session_file_sits_beside_settings() {
-        let unix = session_path_for(false);
+        let path = session_path();
         assert!(
-            unix.ends_with(".config/sleipnir/session.json"),
+            path.ends_with(".config/sleipnir/session.json"),
             "{}",
-            unix.display()
+            path.display()
         );
-        let win = session_path_for(true);
-        assert_eq!(win.file_name().and_then(|s| s.to_str()), Some("session.json"));
-        assert_eq!(win.parent(), Some(sleipnir_settings::config_dir_for(true).as_path()));
     }
 }

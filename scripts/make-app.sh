@@ -79,6 +79,9 @@ cp "${BIN}" "${APP}/Contents/MacOS/sleipnir"
 plist="${ROOT}/resources/Info.plist"
 sed -e "s|0.1.0|${VERSION}|g" "${plist}" > "${APP}/Contents/Info.plist"
 
+# Copy the AppleScript scripting definition (minimal read-only + quit suite).
+cp "${ROOT}/resources/Sleipnir.sdef" "${APP}/Contents/Resources/Sleipnir.sdef"
+
 # Copy app icon (.icns preferred; fall back to building from iconset)
 if [[ -f "${ROOT}/resources/AppIcon.icns" ]]; then
     cp "${ROOT}/resources/AppIcon.icns" "${APP}/Contents/Resources/AppIcon.icns"

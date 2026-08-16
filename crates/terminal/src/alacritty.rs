@@ -1,6 +1,3 @@
-#[cfg(target_os = "windows")]
-use std::num::NonZeroU32;
-#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
 
@@ -32,8 +29,6 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use util::paths::PathStyle;
 use vte::ansi::Handler;
-#[cfg(target_os = "windows")]
-use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use crate::{
     Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
@@ -61,23 +56,9 @@ pub(super) struct AlacrittySearch {
     search: RegexSearch,
 }
 
-#[cfg(unix)]
 impl From<&AlacrittyPty> for ProcessIdGetter {
     fn from(pty: &AlacrittyPty) -> Self {
         Self::new(pty.file().as_raw_fd(), pty.child().id())
-    }
-}
-
-#[cfg(windows)]
-impl From<&AlacrittyPty> for ProcessIdGetter {
-    fn from(pty: &AlacrittyPty) -> Self {
-        let child = pty.child_watcher();
-        let handle = child.raw_handle();
-        let fallback_pid = child.pid().unwrap_or_else(|| unsafe {
-            NonZeroU32::new_unchecked(GetProcessId(HANDLE(handle as _)))
-        });
-
-        Self::new(handle as i32, u32::from(fallback_pid))
     }
 }
 
@@ -152,7 +133,6 @@ pub(super) fn apply_config(term: &AlacrittyTermLock, config: &AlacrittyTermConfi
     term.lock().set_options(config.clone());
 }
 
-#[cfg(not(windows))]
 pub(super) fn current_child_signal_mask() -> io::Result<tty::SignalMask> {
     tty::SignalMask::current()
 }
@@ -161,18 +141,14 @@ pub(super) fn pty_options(
     shell: Option<(String, Vec<String>)>,
     working_directory: Option<PathBuf>,
     env: impl IntoIterator<Item = (String, String)>,
-    #[cfg(not(windows))] child_signal_mask: Option<tty::SignalMask>,
-    #[cfg(windows)] escape_args: bool,
+    child_signal_mask: Option<tty::SignalMask>,
 ) -> tty::Options {
     tty::Options {
         shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
         working_directory,
         drain_on_exit: true,
         env: env.into_iter().collect(),
-        #[cfg(not(windows))]
         child_signal_mask,
-        #[cfg(windows)]
-        escape_args,
     }
 }
 
@@ -318,6 +294,8 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::Bell => Self::Bell,
             AlacTermEvent::Exit => Self::Exit,
             AlacTermEvent::ChildExit(status) => Self::ChildExit(status),
+            AlacTermEvent::Osc133(kind) => Self::Osc133(kind),
+            AlacTermEvent::DesktopNotification(msg) => Self::DesktopNotification(msg),
         }
     }
 }
@@ -855,6 +833,33 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// Inclusive grid range as plain text. Used to recover the command line
+/// between an OSC 133 B marker and the cursor at C.
+pub(super) fn grid_text_range(
+    term: &Term<ZedListener>,
+    start_line: i32,
+    start_col: usize,
+    end_line: i32,
+    end_col: usize,
+) -> String {
+    let start = AlacPoint::new(Line(start_line), Column(start_col));
+    let end = AlacPoint::new(Line(end_line), Column(end_col));
+    term.bounds_to_string(start, end)
+}
+
+/// The currently visible screen (scrollback excluded), for accessibility.
+pub(super) fn visible_screen_text(term: &Term<ZedListener>) -> String {
+    let offset = term.grid().display_offset() as i32;
+    let screen = term.screen_lines() as i32;
+    // Visible rows in grid coordinates: the top row is `-offset` (0 = the
+    // bottom of the scrollback / top of the viewport when scrolled to bottom).
+    let top = Line(-offset);
+    let bottom = Line((-offset + screen - 1).max(top.0));
+    let start = AlacPoint::new(top, Column(0));
+    let end = AlacPoint::new(bottom, term.last_column());
+    term.bounds_to_string(start, end)
+}
+
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }
@@ -1121,5 +1126,82 @@ mod tests {
         set_selection(&mut term, Some(&selection));
 
         assert_eq!(selection_text(&term).as_deref(), Some("zms-demo.target"));
+    }
+
+    #[test]
+    fn visible_screen_text_excludes_scrollback() {
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        // The debug screen is 100×6 cells; 130 five-char lines overflow it and
+        // scroll the first rows off.
+        for i in 0..130 {
+            for c in format!("line{i}").chars() {
+                term.input(c);
+            }
+        }
+        let text = visible_screen_text(&term);
+        assert!(text.contains("line129"), "last line visible: {text:?}");
+        assert!(!text.contains("line0"), "first line scrolled off: {text:?}");
+    }
+
+    #[test]
+    fn search_inline_flags_override_smart_case() {
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        for character in "Hello WORLD".chars() {
+            term.input(character);
+        }
+
+        // `(?i)` forces case-insensitive even though the query has uppercase,
+        // defeating alacritty's smart-case (which would otherwise be sensitive).
+        let insensitive = Search::new("(?i)HELLO").expect("valid regex");
+        assert!(!search_matches(&term, insensitive).is_empty());
+
+        // `(?-i)` forces case-sensitive: lowercase query misses the capital H…
+        let sensitive = Search::new("(?-i)hello").expect("valid regex");
+        assert!(search_matches(&term, sensitive).is_empty());
+
+        // …and the correctly-cased query matches.
+        let exact = Search::new("(?-i)Hello").expect("valid regex");
+        assert!(!search_matches(&term, exact).is_empty());
+    }
+
+    #[test]
+    fn maps_osc133_and_desktop_notification_events() {
+        match TerminalBackendEvent::from(AlacTermEvent::Osc133("A".into())) {
+            TerminalBackendEvent::Osc133(kind) => assert_eq!(kind, "A"),
+            other => panic!("unexpected {other:?}"),
+        }
+        match TerminalBackendEvent::from(AlacTermEvent::DesktopNotification("hi".into())) {
+            TerminalBackendEvent::DesktopNotification(msg) => assert_eq!(msg, "hi"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn processor_emits_osc133_and_notify_through_zed_listener() {
+        use vte::ansi::{Processor, StdSyncHandler};
+
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        let mut processor = Processor::<StdSyncHandler>::new();
+        processor.advance(&mut term, b"\x1b]133;A\x07");
+        processor.advance(&mut term, b"\x1b]9;hello\x07");
+        processor.advance(&mut term, b"\x1b]777;notify;done\x07");
+
+        let mut kinds = Vec::new();
+        let mut notes = Vec::new();
+        while let Ok(PtyEvent::Event(ev)) = events_rx.try_recv() {
+            match ev {
+                TerminalBackendEvent::Osc133(k) => kinds.push(k),
+                TerminalBackendEvent::DesktopNotification(m) => notes.push(m),
+                _ => {}
+            }
+        }
+        assert_eq!(kinds, ["A"]);
+        assert_eq!(notes, ["hello", "done"]);
     }
 }

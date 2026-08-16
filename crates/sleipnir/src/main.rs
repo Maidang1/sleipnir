@@ -1,21 +1,24 @@
 //! Sleipnir — standalone terminal (HIG-aligned window chrome).
 
+#[cfg(not(target_os = "macos"))]
+compile_error!("Sleipnir is macOS-only");
+
 mod app_menus;
 
-use app_menus::{app_menus, Quit};
-#[cfg(target_os = "macos")]
-use app_menus::{Hide, HideOthers, ShowAll};
+use app_menus::{Hide, HideOthers, ShowAll, app_menus, Quit};
 use gpui::{App, KeyBinding};
 use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    BindingContext, BuiltinAction, builtin_bindings, last_window_close_quits, open_sleipnir_window,
-    ActivateTab, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, Find, FindNext, FindPrev,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
-    JumpPrevPrompt, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab,
-    ReloadSettings, ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, ToggleCommandPalette,
-    TogglePaneZoom, ToggleQuickSelect,
+    BindingContext, BuiltinAction, builtin_bindings, open_sleipnir_window, tmux_preset_bindings,
+    ActivateTab, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, Find,
+    FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
+    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
+    SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
+    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
+    ToggleRunLedger, ToggleTabPlacement,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -27,51 +30,43 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let app = application();
-    // Last-window close does not quit on macOS. Dock / Cmd-Tab reactivation
+    // Last-window close does not quit. Dock / Cmd-Tab reactivation
     // fires `applicationShouldHandleReopen` with no visible windows; without
     // this callback the click is a no-op and the process stays headless.
-    #[cfg(target_os = "macos")]
-    {
-        app.on_reopen(|cx| {
-            if cx.windows().is_empty() {
-                open_sleipnir_window(cx);
-                return;
-            }
-            // All windows may be minimized; AppKit reports no visible windows and
-            // GPUI still holds the handles — bring one back instead of spawning.
-            if let Some(handle) = cx.windows().first().copied() {
-                let _ = handle.update(cx, |_, window, _| window.activate_window());
-            }
-        });
-    }
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            open_sleipnir_window(cx);
+            return;
+        }
+        // All windows may be minimized; AppKit reports no visible windows and
+        // GPUI still holds the handles — bring one back instead of spawning.
+        if let Some(handle) = cx.windows().first().copied() {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+    });
     app.run(|cx: &mut App| {
         AppVersion::init_with(env!("CARGO_PKG_VERSION"), cx);
         sleipnir_settings::init(cx);
 
         // App-menu actions (always available so validation enables the items).
         cx.on_action(|_: &Quit, cx| cx.quit());
-        #[cfg(target_os = "macos")]
-        {
-            cx.on_action(|_: &Hide, cx| cx.hide());
-            cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
-            cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-        }
+        cx.on_action(|_: &Hide, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
         // AppShell's NewWindow handler dies with the last window; keep
         // New Window working while the process is still up.
         cx.on_action(|_: &NewWindow, cx| open_sleipnir_window(cx));
 
-        if last_window_close_quits() {
-            cx.on_window_closed(|cx, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-        }
-
         let mut keys = Vec::new();
         for spec in builtin_bindings() {
             keys.extend(key_bindings_for_builtin(&spec));
+        }
+        if sleipnir_settings::TerminalSettings::get_global(cx).keybinding_preset
+            == sleipnir_settings::KeybindingPreset::Tmux
+        {
+            for spec in tmux_preset_bindings() {
+                keys.extend(key_bindings_for_builtin(&spec));
+            }
         }
         cx.bind_keys(keys);
 
@@ -101,15 +96,8 @@ fn key_bindings_for_builtin(spec: &sleipnir_ui::BuiltinBinding) -> Vec<KeyBindin
 fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBinding {
     match action {
         BuiltinAction::Quit => KeyBinding::new(key, Quit, context),
-        #[cfg(target_os = "macos")]
         BuiltinAction::Hide => KeyBinding::new(key, Hide, context),
-        #[cfg(target_os = "macos")]
         BuiltinAction::HideOthers => KeyBinding::new(key, HideOthers, context),
-        #[cfg(not(target_os = "macos"))]
-        BuiltinAction::Hide | BuiltinAction::HideOthers => {
-            // macOS-only actions; non-macOS keymaps never produce them.
-            unreachable!("Hide/HideOthers are macOS-only actions")
-        }
         BuiltinAction::Copy => KeyBinding::new(key, Copy, context),
         BuiltinAction::Paste => KeyBinding::new(key, Paste, context),
         BuiltinAction::PasteText => KeyBinding::new(key, PasteText, context),
@@ -150,6 +138,9 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::JumpNextPrompt => KeyBinding::new(key, JumpNextPrompt, context),
         BuiltinAction::ToggleQuickSelect => KeyBinding::new(key, ToggleQuickSelect, context),
         BuiltinAction::OpenQuickTerminal => KeyBinding::new(key, OpenQuickTerminal, context),
+        BuiltinAction::ToggleRunLedger => KeyBinding::new(key, ToggleRunLedger, context),
+        BuiltinAction::ToggleHistorySearch => KeyBinding::new(key, ToggleHistorySearch, context),
+        BuiltinAction::ToggleDiff => KeyBinding::new(key, ToggleDiff, context),
         BuiltinAction::IncreaseFontSize => KeyBinding::new(key, IncreaseFontSize, context),
         BuiltinAction::DecreaseFontSize => KeyBinding::new(key, DecreaseFontSize, context),
         BuiltinAction::ResetFontSize => KeyBinding::new(key, ResetFontSize, context),
@@ -234,6 +225,24 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "scroll_to_bottom" => KeyBinding::new(&spec.key, ScrollToBottom, Some(ctx)),
             "toggle_vi_mode" => KeyBinding::new(&spec.key, ToggleViMode, Some(ctx)),
             "show_character_palette" => KeyBinding::new(&spec.key, ShowCharacterPalette, Some(ctx)),
+            "clear_run_ledger" => KeyBinding::new(&spec.key, ClearRunLedger, Some(ctx)),
+            "toggle_run_ledger" => KeyBinding::new(&spec.key, ToggleRunLedger, Some(ctx)),
+            "mark_tab_seen" | "mark_as_seen" => {
+                KeyBinding::new(&spec.key, MarkTabSeen, Some(ctx))
+            }
+            "toggle_pane_facts" | "pane_facts" => {
+                KeyBinding::new(&spec.key, TogglePaneFacts, Some(ctx))
+            }
+            "send_selection" => KeyBinding::new(&spec.key, SendSelection, Some(ctx)),
+            "pipe_selection" => KeyBinding::new(&spec.key, PipeSelection, Some(ctx)),
+            "send_git_diff" => KeyBinding::new(&spec.key, SendGitDiff, Some(ctx)),
+            "toggle_history_search" | "history_search" => {
+                KeyBinding::new(&spec.key, ToggleHistorySearch, Some(ctx))
+            }
+            "toggle_tab_placement" | "tab_placement" => {
+                KeyBinding::new(&spec.key, ToggleTabPlacement, Some(ctx))
+            }
+            "toggle_diff" => KeyBinding::new(&spec.key, ToggleDiff, Some(ctx)),
             _ => continue,
         };
         out.push(kb);

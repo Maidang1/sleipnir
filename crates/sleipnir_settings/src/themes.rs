@@ -23,6 +23,12 @@ pub enum ThemeName {
     GithubDark,
     /// Primer-based GitHub Light (canvas `#ffffff`).
     GithubLight,
+    /// Dracula (canvas `#282a36`).
+    Dracula,
+    /// Atom One Dark (canvas `#282c34`).
+    OneDark,
+    /// A user-defined palette from `custom_theme` (not cycled).
+    Custom,
 }
 
 impl ThemeName {
@@ -39,6 +45,8 @@ impl ThemeName {
         ThemeName::SolarizedLight,
         ThemeName::GithubDark,
         ThemeName::GithubLight,
+        ThemeName::Dracula,
+        ThemeName::OneDark,
     ];
 
     /// Snake_case settings key (`"mocha"`, `"tokyo_night"`, …).
@@ -55,6 +63,9 @@ impl ThemeName {
             ThemeName::SolarizedLight => "solarized_light",
             ThemeName::GithubDark => "github_dark",
             ThemeName::GithubLight => "github_light",
+            ThemeName::Dracula => "dracula",
+            ThemeName::OneDark => "one_dark",
+            ThemeName::Custom => "custom",
         }
     }
 
@@ -72,6 +83,9 @@ impl ThemeName {
             ThemeName::SolarizedLight => "Solarized Light",
             ThemeName::GithubDark => "GitHub Dark",
             ThemeName::GithubLight => "GitHub Light",
+            ThemeName::Dracula => "Dracula",
+            ThemeName::OneDark => "One Dark",
+            ThemeName::Custom => "Custom",
         }
     }
 
@@ -79,6 +93,49 @@ impl ThemeName {
     pub fn next(self) -> ThemeName {
         let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
         Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    /// Parse a settings key back into a built-in name (`"mocha"`, `"auto"`, …).
+    pub fn from_str(s: &str) -> Option<ThemeName> {
+        Self::ALL.iter().copied().find(|t| t.as_str() == s)
+    }
+}
+
+/// A theme reference: a built-in name or a user/imported theme name.
+///
+/// Serializes as a plain string (the built-in key, or a free-form name for
+/// themes from the user `themes.json` catalog), so `"theme": "mocha"` and
+/// `"theme": "kanagawa"` both work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ThemeSetting {
+    Builtin(ThemeName),
+    Custom(String),
+}
+
+impl ThemeSetting {
+    /// Settings key / JSON value.
+    pub fn as_str(&self) -> String {
+        match self {
+            ThemeSetting::Builtin(name) => name.as_str().to_string(),
+            ThemeSetting::Custom(name) => name.clone(),
+        }
+    }
+
+    /// Human-readable label.
+    pub fn display_name(&self) -> String {
+        match self {
+            ThemeSetting::Builtin(name) => name.display_name().to_string(),
+            ThemeSetting::Custom(name) => name.clone(),
+        }
+    }
+
+    /// Next theme for cycle shortcuts: steps through built-ins; a custom theme
+    /// wraps back to `Auto`.
+    pub fn next(&self) -> ThemeSetting {
+        match self {
+            ThemeSetting::Custom(_) => ThemeSetting::Builtin(ThemeName::Auto),
+            ThemeSetting::Builtin(name) => ThemeSetting::Builtin(name.next()),
+        }
     }
 }
 
@@ -125,6 +182,11 @@ pub fn palette_for_theme(name: ThemeName, appearance: Appearance) -> TerminalPal
         ThemeName::SolarizedLight => solarized_light(),
         ThemeName::GithubDark => github_dark(),
         ThemeName::GithubLight => github_light(),
+        ThemeName::Dracula => dracula(),
+        ThemeName::OneDark => one_dark(),
+        // Custom palettes are resolved by `resolve_palette` before this; the
+        // fallback keeps the match total and gives a sane palette if misused.
+        ThemeName::Custom => mocha(),
     }
 }
 
@@ -520,6 +582,86 @@ fn github_light() -> TerminalPalette {
     }
 }
 
+/// Dracula — the popular dark theme (canvas `#282a36`).
+fn dracula() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::Dracula,
+        background: hex(0x282a36),
+        foreground: hex(0xf8f8f2),
+        bright_foreground: hex(0xffffff),
+        cursor: hex(0xf8f8f2),
+        selection: hex(0x44475a),
+        ansi: [
+            hex(0x21222c), // black
+            hex(0xff5555), // red
+            hex(0x50fa7b), // green
+            hex(0xf1fa8c), // yellow
+            hex(0xbd93f9), // blue
+            hex(0xff79c6), // magenta
+            hex(0x8be9fd), // cyan
+            hex(0xf8f8f2), // white
+            hex(0x6272a4), // bright black
+            hex(0xff6e6e), // bright red
+            hex(0x69ff94), // bright green
+            hex(0xffffa5), // bright yellow
+            hex(0xd6acff), // bright blue
+            hex(0xff92df), // bright magenta
+            hex(0xa4ffff), // bright cyan
+            hex(0xffffff), // bright white
+        ],
+        dim: [
+            hex(0x21222c),
+            hex(0xff5555),
+            hex(0x50fa7b),
+            hex(0xf1fa8c),
+            hex(0xbd93f9),
+            hex(0xff79c6),
+            hex(0x8be9fd),
+            hex(0xf8f8f2),
+        ],
+    }
+}
+
+/// Atom One Dark (canvas `#282c34`).
+fn one_dark() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::OneDark,
+        background: hex(0x282c34),
+        foreground: hex(0xabb2bf),
+        bright_foreground: hex(0xffffff),
+        cursor: hex(0x528bff),
+        selection: hex(0x3e4451),
+        ansi: [
+            hex(0x282c34), // black
+            hex(0xe06c75), // red
+            hex(0x98c379), // green
+            hex(0xe5c07b), // yellow
+            hex(0x61afef), // blue
+            hex(0xc678dd), // magenta
+            hex(0x56b6c2), // cyan
+            hex(0xabb2bf), // white
+            hex(0x5c6370), // bright black
+            hex(0xe06c75), // bright red
+            hex(0x98c379), // bright green
+            hex(0xe5c07b), // bright yellow
+            hex(0x61afef), // bright blue
+            hex(0xc678dd), // bright magenta
+            hex(0x56b6c2), // bright cyan
+            hex(0xffffff), // bright white
+        ],
+        dim: [
+            hex(0x282c34),
+            hex(0xe06c75),
+            hex(0x98c379),
+            hex(0xe5c07b),
+            hex(0x61afef),
+            hex(0xc678dd),
+            hex(0x56b6c2),
+            hex(0xabb2bf),
+        ],
+    }
+}
+
 /// Convert an 8-bit ANSI color index to HSLA (alacritty-compatible indices).
 pub fn get_color_at_index(index: usize, palette: &TerminalPalette) -> Hsla {
     match index {
@@ -564,4 +706,132 @@ fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
         a: 1.,
     }
     .into()
+}
+
+/// Parse a hex color (`#rrggbb`, `#rgb`, or bare `rrggbb`) into opaque HSLA.
+pub fn parse_hex_color(s: &str) -> Option<Hsla> {
+    let s = s.trim().trim_start_matches('#');
+    let (r, g, b) = match s.len() {
+        3 => {
+            let chars: Vec<char> = s.chars().collect();
+            let d = |c: char| c.to_digit(16).map(|v| (v * 17) as u8);
+            (d(chars[0])?, d(chars[1])?, d(chars[2])?)
+        }
+        6 => (
+            u8::from_str_radix(&s[0..2], 16).ok()?,
+            u8::from_str_radix(&s[2..4], 16).ok()?,
+            u8::from_str_radix(&s[4..6], 16).ok()?,
+        ),
+        _ => return None,
+    };
+    Some(rgba_color(r, g, b))
+}
+
+/// A user-supplied palette (hex colors) from `custom_theme` in settings.json.
+///
+/// Missing colors fall back to Mocha so a partial definition still works.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CustomPalette {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bright_foreground: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    /// 16 ANSI colors: normal 0–7, then bright 8–15.
+    #[serde(default)]
+    pub ansi: Vec<String>,
+}
+
+impl CustomPalette {
+    /// Resolve into a full palette, borrowing Mocha for any missing color.
+    pub fn to_palette(&self) -> TerminalPalette {
+        let base = mocha();
+        let background = self
+            .background
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(base.background);
+        let foreground = self
+            .foreground
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(base.foreground);
+        let bright_foreground = self
+            .bright_foreground
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(foreground);
+        let cursor = self
+            .cursor
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(foreground);
+        let selection = self
+            .selection
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(base.selection);
+
+        let mut ansi = base.ansi;
+        for (i, hex) in self.ansi.iter().enumerate().take(16) {
+            if let Some(color) = parse_hex_color(hex) {
+                ansi[i] = color;
+            }
+        }
+        let mut dim = base.dim;
+        dim.copy_from_slice(&ansi[..8]);
+
+        TerminalPalette {
+            name: ThemeName::Custom,
+            background,
+            foreground,
+            bright_foreground,
+            cursor,
+            selection,
+            ansi,
+            dim,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_accepts_hash_rgb_and_bare() {
+        assert_eq!(parse_hex_color("#ff0000").map(|c| c.to_rgb().r), Some(1.0));
+        assert_eq!(parse_hex_color("00ff00").map(|c| c.to_rgb().g), Some(1.0));
+        // #abc expands each nibble.
+        assert_eq!(parse_hex_color("#abc").map(|c| c.to_rgb().b), Some(0.8));
+        assert!(parse_hex_color("#xyz").is_none());
+        assert!(parse_hex_color("#12345").is_none());
+    }
+
+    #[test]
+    fn custom_palette_fills_missing_from_mocha_and_parses_ansi() {
+        let custom = CustomPalette {
+            background: Some("#0d1117".into()),
+            foreground: Some("e6edf3".into()),
+            bright_foreground: None,
+            cursor: None,
+            selection: None,
+            ansi: vec!["ff0000".into(), "00ff00".into(), "0000ff".into()],
+        };
+        let p = custom.to_palette();
+        assert_eq!(p.name, ThemeName::Custom);
+        assert_eq!(p.background.to_rgb(), parse_hex_color("#0d1117").unwrap().to_rgb());
+        assert_eq!(p.foreground.to_rgb(), parse_hex_color("#e6edf3").unwrap().to_rgb());
+        // Red, green, blue overwrote ansi[0..3]; the rest inherit Mocha.
+        assert_eq!(p.ansi[0].to_rgb(), parse_hex_color("#ff0000").unwrap().to_rgb());
+        assert_eq!(p.ansi[1].to_rgb(), parse_hex_color("#00ff00").unwrap().to_rgb());
+        assert_eq!(p.ansi[2].to_rgb(), parse_hex_color("#0000ff").unwrap().to_rgb());
+        assert_eq!(p.ansi[3].to_rgb(), mocha().ansi[3].to_rgb());
+        assert_eq!(p.dim[0].to_rgb(), p.ansi[0].to_rgb());
+    }
 }

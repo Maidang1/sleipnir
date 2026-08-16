@@ -150,6 +150,13 @@ mod tests {
             ThemeName::Macchiato,
             ThemeName::Frappe,
             ThemeName::Latte,
+            ThemeName::Dracula,
+            ThemeName::OneDark,
+            ThemeName::TokyoNight,
+            ThemeName::Nord,
+            ThemeName::GruvboxDark,
+            ThemeName::GithubDark,
+            ThemeName::GithubLight,
         ] {
             let p = palette_for_theme(name, Appearance::Dark);
             let t = ChromeTokens::from_palette(&p, true);

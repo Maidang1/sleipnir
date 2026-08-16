@@ -2,14 +2,25 @@ mod mappings;
 
 mod alacritty;
 mod osc133;
+mod osc_notify;
 mod pty_info;
+mod run_tracker;
+mod shell_semantics;
 pub mod terminal_settings;
 
-pub use osc133::{Osc133Kind, Osc133Marker, Osc133Scanner, scan_osc133};
+pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
+pub use osc133::{
+    GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
+    gutter_marks_from_markers, scan_osc133,
+};
+pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
+pub use shell_semantics::{
+    ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
+    click_to_move_sequence, command_output_range, inject_script, triple_click_kind,
+    wrap_shell_for_inject, wrap_shell_for_inject_in,
+};
 
-#[cfg(not(windows))]
-use anyhow::Context as _;
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use futures_lite::future::yield_now;
 use log::trace;
 
@@ -30,13 +41,12 @@ use collections::{HashMap, VecDeque};
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
+use sleipnir_settings::{TerminalPalette, get_color_at_index as palette_get_color};
 use task_types::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
-use sleipnir_settings::{TerminalPalette, get_color_at_index as palette_get_color};
 use urlencoding;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 
-#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
     borrow::Cow,
@@ -62,18 +72,19 @@ use gpui::{
     Point as GpuiPoint, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, px,
 };
 
-#[cfg(not(windows))]
-use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
+    current_child_signal_mask,
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
+    display_only_term_config, find_from_terminal_point, full_content_range, grid_text_range,
+    last_non_empty_lines,
     make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
     scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
     set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
     toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
     update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    visible_screen_text as term_visible_screen_text,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -702,6 +713,20 @@ pub enum Event {
     Open(MaybeNavigationTarget),
     /// Selection text was written to the system clipboard (⌘C or copy-on-select).
     CopiedToClipboard,
+    /// A desktop-notification request via OSC 9 / OSC 777.
+    Notify(String),
+    /// A command started in this terminal (Run Ledger).
+    RunStarted {
+        command: String,
+        cwd: Option<PathBuf>,
+        inferred: bool,
+        line: Option<i32>,
+        column: Option<usize>,
+    },
+    /// The current command finished. `exit_code` is `None` when unknown.
+    RunFinished { exit_code: Option<i32> },
+    /// Overlay triangle on a command start/end line was clicked.
+    GutterClicked { line: i32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -761,6 +786,11 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     Exit,
     ChildExit(ExitStatus),
+    /// Shell-integration marker payload from the alacritty handler
+    /// (`"A"`, `"B"`, `"C"`, `"D;0"`).
+    Osc133(String),
+    /// Desktop notification from OSC 9 / OSC 777.
+    DesktopNotification(String),
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -779,6 +809,8 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
+            Self::Osc133(kind) => write!(f, "Osc133({kind})"),
+            Self::DesktopNotification(msg) => write!(f, "DesktopNotification({msg})"),
         }
     }
 }
@@ -1027,8 +1059,6 @@ impl TerminalBuilder {
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
-            #[cfg(windows)]
-            shell_program: None,
             activation_script: Vec::new(),
             template: CopyTemplate {
                 shell: Shell::System,
@@ -1044,9 +1074,12 @@ impl TerminalBuilder {
             keyboard_input_sent: false,
             init_command_startup_marker: None,
             osc133: Osc133Scanner::new(),
+            osc_notify: OscNotifyScanner::new(),
             prompt_markers: Vec::new(),
             last_busy: false,
             busy_since: None,
+            run_tracker: RunTracker::default(),
+            started_at: Instant::now(),
             init_command_startup_tx: None,
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
@@ -1088,7 +1121,6 @@ impl TerminalBuilder {
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
         let no_pty = HeadlessTerminal::is_enabled(cx);
-        #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
         {
@@ -1134,17 +1166,7 @@ impl TerminalBuilder {
             }
 
             let shell_params = match shell.clone() {
-                Shell::System => {
-                    if cfg!(windows) {
-                        Some(ShellParams::new(
-                            util::shell::get_windows_system_shell(),
-                            None,
-                            None,
-                        ))
-                    } else {
-                        None
-                    }
-                }
+                Shell::System => None,
                 Shell::Program(program) => Some(ShellParams::new(program, None, None)),
                 Shell::WithArguments {
                     program,
@@ -1155,21 +1177,7 @@ impl TerminalBuilder {
             let terminal_title_override =
                 shell_params.as_ref().and_then(|e| e.title_override.clone());
 
-            #[cfg(windows)]
-            let shell_program = shell_params.as_ref().map(|params| {
-                use util::ResultExt;
-
-                Self::resolve_path(&params.program)
-                    .log_err()
-                    .unwrap_or(params.program.clone())
-            });
-
-            // Note: when remoting, this shell_kind will scrutinize `ssh` or
-            // `wsl.exe` as a shell and fall back to posix or powershell based on
-            // the compilation target. This is fine right now due to the restricted
-            // way we use the return value, but would become incorrect if we
-            // supported remoting into windows.
-            let shell_kind = shell.shell_kind(cfg!(windows));
+            let shell_kind = shell.shell_kind(false);
 
             let scrolling_history = if task.is_some() {
                 // Tasks like `cargo build --all` may produce a lot of output, ergo allow maximum scrolling.
@@ -1241,10 +1249,7 @@ impl TerminalBuilder {
                     // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
                     // otherwise the terminal would inherit the background executor's signal mask which blocks
                     // some terminal signals
-                    #[cfg(not(windows))]
                     child_signal_mask,
-                    #[cfg(windows)]
-                    shell_kind.tty_escape_args(),
                 );
 
                 //Setup the pty...
@@ -1306,8 +1311,6 @@ impl TerminalBuilder {
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
-                #[cfg(windows)]
-                shell_program,
                 activation_script: activation_script.clone(),
                 template: CopyTemplate {
                     shell,
@@ -1323,9 +1326,12 @@ impl TerminalBuilder {
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
                 osc133: Osc133Scanner::new(),
+                osc_notify: OscNotifyScanner::new(),
                 prompt_markers: Vec::new(),
                 last_busy: false,
                 busy_since: None,
+                run_tracker: RunTracker::default(),
+                started_at: Instant::now(),
                 init_command_startup_tx: None,
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
@@ -1469,24 +1475,6 @@ impl TerminalBuilder {
         });
         self.terminal
     }
-
-    #[cfg(windows)]
-    fn resolve_path(path: &str) -> Result<String> {
-        use windows::Win32::Storage::FileSystem::SearchPathW;
-        use windows::core::HSTRING;
-
-        let path = if path.starts_with(r"\\?\") || !path.contains(&['/', '\\']) {
-            path.to_string()
-        } else {
-            r"\\?\".to_string() + path
-        };
-
-        let required_length = unsafe { SearchPathW(None, &HSTRING::from(&path), None, None, None) };
-        let mut buf = vec![0u16; required_length as usize];
-        let size = unsafe { SearchPathW(None, &HSTRING::from(&path), None, Some(&mut buf), None) };
-
-        Ok(String::from_utf16(&buf[..size as usize])?)
-    }
 }
 
 enum TerminalType {
@@ -1528,8 +1516,6 @@ pub struct Terminal {
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
-    #[cfg(windows)]
-    shell_program: Option<String>,
     template: CopyTemplate,
     activation_script: Vec<String>,
     child_exited: Option<ExitStatus>,
@@ -1537,12 +1523,17 @@ pub struct Terminal {
     init_command_startup_marker: Option<String>,
     /// OSC 133 scanner (M14 shell integration detect).
     osc133: Osc133Scanner,
+    osc_notify: OscNotifyScanner,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
     /// Last known busy state for command-finish notify (M14).
     last_busy: bool,
     /// When the current foreground job became busy, if any.
     busy_since: Option<Instant>,
+    /// OSC 133 / busy-probe → Run start/finish. Pure; emit happens at cx sites.
+    run_tracker: RunTracker,
+    /// Monotonic origin for Run duration math.
+    started_at: Instant,
     init_command_startup_tx: Option<Sender<()>>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
@@ -1624,18 +1615,6 @@ impl Terminal {
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         match event {
             TerminalBackendEvent::Title(title) => {
-                // ignore default shell program title change as windows always sends those events
-                // and it would end up showing the shell executable path in breadcrumbs
-                #[cfg(windows)]
-                if self
-                    .shell_program
-                    .as_ref()
-                    .map(|e| *e == title)
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-
                 self.breadcrumb_text = title;
                 cx.emit(Event::BreadcrumbsChanged);
             }
@@ -1690,12 +1669,33 @@ impl Terminal {
                 // we might respond with out of date value if a "set color" sequence is immediately
                 // followed by a color request sequence.
 
-                let color = self.term.lock().colors()[index]
-                    .unwrap_or_else(|| to_vte_rgb(palette_get_color(index, TerminalPalette::get_global(cx).as_ref())));
+                let color = self.term.lock().colors()[index].unwrap_or_else(|| {
+                    to_vte_rgb(palette_get_color(
+                        index,
+                        TerminalPalette::get_global(cx).as_ref(),
+                    ))
+                });
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
+                if let Some(out) = self
+                    .run_tracker
+                    .on_marker(Osc133Kind::CommandFinished { status: None }, self.mono_ms())
+                {
+                    self.emit_tracker_out(out, cx);
+                }
                 self.register_task_finished(Some(exit_status), cx);
+            }
+            TerminalBackendEvent::Osc133(payload) => {
+                if let Some(kind) = Osc133Kind::from_payload(&payload) {
+                    self.record_osc133_marker(kind);
+                    if let Some(out) = self.run_tracker.take_output() {
+                        self.emit_tracker_out(out, cx);
+                    }
+                }
+            }
+            TerminalBackendEvent::DesktopNotification(msg) => {
+                cx.emit(Event::Notify(msg));
             }
         }
     }
@@ -1749,11 +1749,6 @@ impl Terminal {
                 if self.vi_mode_enabled {
                     update_vi_cursor_for_scroll(term, *scroll);
                     if let Some(selection_head) = update_selection_to_vi_cursor(term) {
-                        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                        if let Some(selection_text) = selection_text(term) {
-                            cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                        }
-
                         self.selection_head = Some(selection_head);
                         cx.emit(Event::SelectionsChanged)
                     }
@@ -1762,11 +1757,6 @@ impl Terminal {
             InternalEvent::SetSelection(selection) => {
                 trace!("Setting selection: selection={selection:?}");
                 set_term_selection(term, selection.as_ref());
-
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                if let Some(selection_text) = selection_text(term) {
-                    cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                }
 
                 if let Some(selection) = selection {
                     self.selection_head = Some(selection.head);
@@ -1782,11 +1772,6 @@ impl Terminal {
                 );
 
                 if update_term_selection(term, point, side) {
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    if let Some(selection_text) = selection_text(term) {
-                        cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                    }
-
                     self.selection_head = Some(point);
                     cx.emit(Event::SelectionsChanged)
                 }
@@ -1964,6 +1949,7 @@ impl Terminal {
         let converted = convert_lf_to_crlf(bytes, &mut previous_byte_was_cr);
 
         self.ingest_osc133(&converted);
+        self.ingest_osc_notify(&converted, cx);
 
         let mut term = self.term.lock();
         self.output_processor.advance(&mut *term, &converted);
@@ -1974,33 +1960,141 @@ impl Terminal {
 
     /// Feed OSC 133 scanner and record prompt markers at the current cursor line.
     pub fn ingest_osc133(&mut self, bytes: &[u8]) {
-        let kinds = self.osc133.push(bytes);
-        if kinds.is_empty() {
-            return;
+        for kind in self.osc133.push(bytes) {
+            self.record_osc133_marker(kind);
         }
-        let line = {
+    }
+
+    /// Record a parsed OSC 133 marker against the current cursor line.
+    /// Shared by the display-only scanner and the real-PTY event path.
+    pub fn record_osc133_marker(&mut self, kind: Osc133Kind) {
+        let (line, column) = {
             let term = self.term.lock_unfair();
             let cursor = term.grid().cursor.point;
-            Some(cursor.line.0 + term.history_size() as i32)
+            (
+                Some(cursor.line.0 + term.history_size() as i32),
+                Some(cursor.column.0),
+            )
         };
-        for kind in kinds {
-            // Keep prompt starts and command finishes for jump navigation.
-            if matches!(
-                kind,
-                Osc133Kind::PromptStart | Osc133Kind::CommandFinished { .. }
-            ) {
-                self.prompt_markers.push(Osc133Marker { kind, line });
-                // Bound memory.
-                if self.prompt_markers.len() > 500 {
-                    let drain = self.prompt_markers.len() - 500;
-                    self.prompt_markers.drain(0..drain);
-                }
+        // Keep A/B/C/D so jump-prompt, click-to-move, and output select share one log.
+        self.prompt_markers
+            .push(Osc133Marker { kind, line, column });
+        if self.prompt_markers.len() > 500 {
+            let drain = self.prompt_markers.len() - 500;
+            self.prompt_markers.drain(0..drain);
+        }
+        let at_ms = self.mono_ms();
+        match kind {
+            Osc133Kind::CommandExecuted => {
+                let command = self.read_command_between_start_and_cursor();
+                self.run_tracker
+                    .on_marker_with_command(kind, at_ms, command);
             }
-            if matches!(kind, Osc133Kind::CommandFinished { .. }) {
-                // Command ended via shell integration; clear busy timer.
-                self.last_busy = false;
-                self.busy_since = None;
+            other => {
+                self.run_tracker.on_marker(other, at_ms);
             }
+        }
+        if matches!(kind, Osc133Kind::CommandFinished { .. }) {
+            // Command ended via shell integration; clear busy timer.
+            self.last_busy = false;
+            self.busy_since = None;
+        }
+    }
+
+    fn mono_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    fn emit_tracker_out(&mut self, out: TrackerOut, cx: &mut Context<Self>) {
+        match out {
+            TrackerOut::Started {
+                command, inferred, ..
+            } => {
+                let (line, column) = if inferred {
+                    (None, None)
+                } else {
+                    self.prompt_markers
+                        .iter()
+                        .rev()
+                        .find(|m| matches!(m.kind, Osc133Kind::CommandExecuted))
+                        .map(|m| (m.line, m.column))
+                        .unwrap_or((None, None))
+                };
+                cx.emit(Event::RunStarted {
+                    command,
+                    cwd: self.working_directory(),
+                    inferred,
+                    line,
+                    column,
+                });
+            }
+            TrackerOut::Finished { exit_code, .. } => {
+                cx.emit(Event::RunFinished { exit_code });
+            }
+        }
+    }
+
+    /// Scroll so `absolute` line (OSC 133 marker coords) is near the top.
+    pub fn scroll_to_absolute(&mut self, absolute: i32, column: usize) {
+        let history = self.term.lock_unfair().history_size() as i32;
+        let grid_line = absolute_to_grid_line(absolute, history);
+        self.events
+            .push_back(InternalEvent::ScrollToPoint(Point::new(grid_line, column)));
+    }
+
+    pub fn history_size(&self) -> usize {
+        self.term.lock_unfair().history_size()
+    }
+
+    pub fn is_alt_screen(&self) -> bool {
+        self.last_content.mode.contains(Modes::ALT_SCREEN)
+    }
+
+    /// Overlay triangles for command start/end. Empty on the alt screen.
+    pub fn gutter_overlay(&self) -> Vec<GutterMark> {
+        if self.is_alt_screen() {
+            return Vec::new();
+        }
+        gutter_marks_from_markers(&self.prompt_markers)
+    }
+
+    pub fn emit_gutter_click(&mut self, line: i32, cx: &mut Context<Self>) {
+        cx.emit(Event::GutterClicked { line });
+    }
+
+    /// Grid text from the most recent OSC 133 B (command start) to the cursor.
+    fn read_command_between_start_and_cursor(&self) -> Option<String> {
+        let start = self
+            .prompt_markers
+            .iter()
+            .rev()
+            .find(|m| matches!(m.kind, Osc133Kind::CommandStart))?;
+        let start_abs = start.line?;
+        let start_col = start.column.unwrap_or(0);
+        let term = self.term.lock_unfair();
+        let history = term.history_size() as i32;
+        let cursor = term.grid().cursor.point;
+        let start_line = absolute_to_grid_line(start_abs, history);
+        let text = grid_text_range(
+            &term,
+            start_line,
+            start_col,
+            cursor.line.0,
+            cursor.column.0,
+        );
+        drop(term);
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Feed OSC 9 / 777 desktop-notification requests from a byte stream,
+    /// emitting `Event::Notify` for each.
+    pub fn ingest_osc_notify(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        for n in self.osc_notify.push(bytes) {
+            cx.emit(Event::Notify(n.message));
         }
     }
 
@@ -2011,6 +2105,39 @@ impl Terminal {
             .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
             .filter_map(|m| m.line)
             .collect()
+    }
+
+    /// Option/Alt-click: CSI left/right to the clicked cell when it is inside
+    /// the current prompt. `None` if the click should fall through.
+    fn click_to_move_bytes(&self, point: Point) -> Option<Vec<u8>> {
+        let prompt_line_abs = self
+            .prompt_markers
+            .iter()
+            .rev()
+            .find(|m| matches!(m.kind, Osc133Kind::PromptStart))
+            .and_then(|m| m.line);
+        let prompt_prefix_cols = self
+            .prompt_markers
+            .iter()
+            .rev()
+            .find(|m| matches!(m.kind, Osc133Kind::CommandStart) && m.line == prompt_line_abs)
+            .and_then(|m| m.column)
+            .unwrap_or(0);
+        // Markers are absolute (cursor.line + history_size); the click and cursor
+        // points are alacritty grid lines. Convert the prompt line to grid so all
+        // three share one coordinate space.
+        let history_size = self.term.lock_unfair().history_size() as i32;
+        let prompt_line = prompt_line_abs.map(|abs| absolute_to_grid_line(abs, history_size));
+        let cursor = self.last_content.cursor.point;
+        click_to_move_sequence(ClickToMove {
+            click_line: point.line,
+            click_column: point.column,
+            cursor_line: cursor.line,
+            cursor_column: cursor.column,
+            prompt_line,
+            prompt_prefix_cols,
+            alt_screen: self.last_content.mode.contains(Modes::ALT_SCREEN),
+        })
     }
 
     /// Jump display to the previous/next prompt marker relative to the viewport.
@@ -2054,17 +2181,32 @@ impl Terminal {
     /// Returns `Some(duration)` when a previously-busy job just went idle and
     /// ran at least `min_secs` seconds — caller may show a system notification
     /// if the window is unfocused.
-    pub fn poll_command_finish(&mut self, min_secs: u64) -> Option<Duration> {
+    pub fn poll_command_finish(
+        &mut self,
+        min_secs: u64,
+        cx: &mut Context<Self>,
+    ) -> Option<Duration> {
         let busy = self.looks_busy();
         let now = Instant::now();
+        let at_ms = self.mono_ms();
         match (self.last_busy, busy) {
             (false, true) => {
                 self.last_busy = true;
                 self.busy_since = Some(now);
+                if let Some(out) = self.run_tracker.on_busy_change(
+                    true,
+                    self.foreground_process_command_name(),
+                    at_ms,
+                ) {
+                    self.emit_tracker_out(out, cx);
+                }
                 None
             }
             (true, false) => {
                 self.last_busy = false;
+                if let Some(out) = self.run_tracker.on_busy_change(false, None, at_ms) {
+                    self.emit_tracker_out(out, cx);
+                }
                 let started = self.busy_since.take()?;
                 let dur = now.saturating_duration_since(started);
                 if dur.as_secs() >= min_secs {
@@ -2080,6 +2222,17 @@ impl Terminal {
 
     pub fn total_lines(&self) -> usize {
         total_lines(&self.term.lock_unfair())
+    }
+
+    /// Full contents — retained scrollback plus the visible screen — as plain
+    /// text, for "export scrollback".
+    pub fn scrollback_text(&self) -> String {
+        content_text(&self.term.lock_unfair())
+    }
+
+    /// The currently visible screen (scrollback excluded), for accessibility.
+    pub fn visible_screen_text(&self) -> String {
+        term_visible_screen_text(&self.term.lock_unfair())
     }
 
     pub fn viewport_lines(&self) -> usize {
@@ -2723,6 +2876,15 @@ impl Terminal {
             self.last_content.display_offset,
         );
 
+        if e.button == MouseButton::Left && e.modifiers.alt && !e.modifiers.secondary() {
+            if let Some(bytes) = self.click_to_move_bytes(point) {
+                if !bytes.is_empty() {
+                    self.write_to_pty(bytes);
+                }
+                return;
+            }
+        }
+
         if e.button == MouseButton::Left
             && e.modifiers.secondary()
             && (TerminalSettings::get_global(cx).open_links_in_mouse_mode
@@ -2756,7 +2918,29 @@ impl Terminal {
                         0 => return, //This is a release
                         1 => Some(SelectionType::Simple),
                         2 => Some(SelectionType::Semantic),
-                        3 => Some(SelectionType::Lines),
+                        3 => {
+                            if e.modifiers.secondary() {
+                                let last_col = self
+                                    .last_content
+                                    .terminal_bounds
+                                    .num_columns()
+                                    .saturating_sub(1);
+                                let history_size = self.term.lock_unfair().history_size() as i32;
+                                if let TripleClickKind::CommandOutput(range) = triple_click_kind(
+                                    true,
+                                    &self.prompt_markers,
+                                    point.line,
+                                    last_col,
+                                    history_size,
+                                ) {
+                                    self.events.push_back(InternalEvent::SetSelection(Some(
+                                        Selection::simple_range(Range::new(range.start, range.end)),
+                                    )));
+                                    return;
+                                }
+                            }
+                            Some(SelectionType::Lines)
+                        }
                         _ => None,
                     };
 
@@ -2782,13 +2966,6 @@ impl Terminal {
                     if let Some(selection) = selection {
                         self.events
                             .push_back(InternalEvent::SetSelection(Some(selection)));
-                    }
-                }
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                MouseButton::Middle => {
-                    if let Some(item) = cx.read_from_primary() {
-                        let text = item.text().unwrap_or_default();
-                        self.paste(&text);
                     }
                 }
                 _ => {}
@@ -3118,6 +3295,17 @@ impl Terminal {
         }
     }
 
+    /// The spawned shell child (tree root), not the foreground job group.
+    pub fn shell_pid(&self) -> Option<u32> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => {
+                let pid = info.pid_getter().fallback_pid().as_u32();
+                (pid > 0).then_some(pid)
+            }
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => Some(info.pid_getter()),
@@ -3267,10 +3455,7 @@ fn task_summary(task: &TaskState, exit_status: Option<ExitStatus>) -> (bool, Str
     let (success, task_line) = match exit_status {
         Some(status) => {
             let code = status.code();
-            #[cfg(unix)]
             let signal = status.signal();
-            #[cfg(not(unix))]
-            let signal: Option<i32> = None;
 
             match (code, signal) {
                 (Some(0), _) => (true, task_label("finished successfully")),

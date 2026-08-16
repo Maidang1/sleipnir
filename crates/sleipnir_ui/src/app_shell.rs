@@ -1,27 +1,34 @@
 //! Single-window multi-tab shell for sleipnir (HIG-aligned chrome).
 
+use crate::chrome::tab_sidebar;
 use gpui::{
-    App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
-    ParentElement as _, Pixels, Render, ScrollHandle, SharedString, size,
+    App, AppContext as _, BorrowAppContext, Bounds, ClickEvent, Context, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas, deferred, div, point,
-    prelude::FluentBuilder as _, px, relative,
+    prelude::FluentBuilder as _, px, relative, size,
 };
+use run_ledger::{PaneKey, RunEvent};
 use sleipnir_settings::{
-    Appearance, ConfirmClose, TerminalPalette, TerminalSettings, ThemeName, palette_for_theme,
+    Appearance, ConfirmClose, TabPlacement, TerminalPalette, TerminalSettings, ThemeName,
+    ThemeSetting, palette_for_theme,
 };
 
 use crate::TermView;
 use crate::chrome::{ChromeGeometry, ChromeTokens, active_after_close};
-use crate::command_palette::{CommandId, CommandItem, commands as palette_commands, filter_commands};
+use crate::command_palette::{
+    CommandId, CommandItem, commands as palette_commands, filter_commands,
+};
 use crate::pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
     neighbor,
 };
+use crate::tab_convert::{TabView, extract_pane, merge_tab};
+use crate::run_ledger_global::RunLedgerGlobal;
 use crate::session::{
-    SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, sanitize_session,
-    save_session, session_path,
+    SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, restore_pane_key,
+    sanitize_session, save_session, session_path,
 };
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
@@ -91,6 +98,28 @@ actions!(
         ToggleQuickSelect,
         /// Open Quick Terminal window — M15.
         OpenQuickTerminal,
+        /// Export the active pane's scrollback to a temp file and open it.
+        ExportScrollback,
+        /// Clear the Run Ledger (memory + runs.json). Palette / menu only.
+        ClearRunLedger,
+        /// Toggle the Run Ledger panel (P1). Name is registered for key_bindings.
+        ToggleRunLedger,
+        /// Clear Attention on every pane in the active tab. Does not delete Runs.
+        MarkTabSeen,
+        /// Toggle the focused-pane facts overlay (cwd / process tree / ports).
+        TogglePaneFacts,
+        /// Paste the terminal selection into the focused pane.
+        SendSelection,
+        /// Pipe the selection through `pipe_selection_command`.
+        PipeSelection,
+        /// Paste `git diff` wrapped as a review prompt.
+        SendGitDiff,
+        /// Fuzzy search shell history in chrome (does not take the PTY line).
+        ToggleHistorySearch,
+        /// Switch tab chrome between the side rail and the top strip.
+        ToggleTabPlacement,
+        /// Toggle the git diff inspector overlay.
+        ToggleDiff,
     ]
 );
 
@@ -99,10 +128,10 @@ actions!(
 #[action(namespace = sleipnir, no_json)]
 pub struct ActivateTab(pub usize);
 
-struct Tab {
-    id: u64,
+pub(crate) struct Tab {
+    pub(crate) id: u64,
     /// Recursive pane layout; a fresh tab is a single leaf.
-    tree: PaneNode,
+    pub(crate) tree: PaneNode,
     /// The pane that currently holds focus within this tab.
     active_pane: PaneId,
     /// User-assigned title (via right-click rename). When set, it overrides the
@@ -112,10 +141,39 @@ struct Tab {
     zoomed_pane: Option<PaneId>,
 }
 
+/// Ghost chip rendered under the pointer while dragging a tab to reorder it.
+pub(crate) struct TabDragPreview {
+    pub(crate) title: SharedString,
+}
+
+/// Drag payload for pulling a pane out onto the tab list.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PaneDrag {
+    pub pane_id: PaneId,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = TerminalPalette::get_global(cx);
+        let tokens = ChromeTokens::from_palette(&palette, window.is_window_active());
+        div()
+            .px_3()
+            .py_1()
+            .rounded(px(6.0))
+            .bg(tokens.hover)
+            .border_1()
+            .border_color(tokens.border)
+            .shadow_lg()
+            .text_sm()
+            .text_color(tokens.fg)
+            .child(self.title.clone())
+    }
+}
+
 impl Tab {
-    /// Title shown on the tab chip: the user-assigned title if set, otherwise
-    /// the active pane's title.
-    fn title(&self, cx: &App) -> SharedString {
+    /// Title shown on the side-rail chip and the window: user rename, else the
+    /// active pane's process title.
+    pub(crate) fn title(&self, cx: &App) -> SharedString {
         if let Some(custom) = self.custom_title.as_ref() {
             if !custom.is_empty() {
                 return custom.clone();
@@ -124,8 +182,35 @@ impl Tab {
         self.pane_title(cx)
     }
 
+    /// Top-strip chip label: user rename, else the last two cwd components.
+    pub(crate) fn path_label(&self, cx: &App) -> SharedString {
+        if let Some(custom) = self.custom_title.as_ref() {
+            if !custom.is_empty() {
+                return custom.clone();
+            }
+        }
+        crate::chrome::workspace::tab_path_label(self.workspace_cwd(cx).as_deref()).into()
+    }
+
+    /// The focused leaf in this tab (falls back to the first leaf).
+    pub(crate) fn active_pane_id(&self) -> PaneId {
+        self.active_pane
+    }
+
+    /// Working directory of the active pane, when the PTY reports one.
+    pub(crate) fn workspace_cwd(&self, cx: &App) -> Option<std::path::PathBuf> {
+        let mut leaves = Vec::new();
+        self.tree.leaves(&mut leaves);
+        let view = leaves
+            .iter()
+            .find(|(id, _)| *id == self.active_pane)
+            .or_else(|| leaves.first())
+            .map(|(_, view)| *view)?;
+        view.read(cx).working_directory(cx)
+    }
+
     /// The active pane's own title (ignores any custom override).
-    fn pane_title(&self, cx: &App) -> SharedString {
+    pub(crate) fn pane_title(&self, cx: &App) -> SharedString {
         let mut leaves = Vec::new();
         self.tree.leaves(&mut leaves);
         let view = leaves
@@ -141,9 +226,9 @@ impl Tab {
 
 /// In-progress inline tab rename triggered by a right-click on a tab.
 #[derive(Clone)]
-struct RenameState {
-    tab_id: u64,
-    buffer: String,
+pub(crate) struct RenameState {
+    pub(crate) tab_id: u64,
+    pub(crate) buffer: String,
 }
 
 /// Top-level section inside the settings panel (WezTerm-style tabs).
@@ -227,17 +312,17 @@ pub enum UpdateUiState {
 
 /// Window root: unified chrome band + active terminal.
 pub struct AppShell {
-    tabs: Vec<Tab>,
-    active: usize,
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active: usize,
     next_id: u64,
     /// Monotonic id source for panes across all tabs.
     next_pane_id: PaneId,
     focus_handle: FocusHandle,
     /// Empty-region drag: true after mouse-down on a drag strip until move/up.
     should_move: bool,
-    tab_scroll_handle: ScrollHandle,
+    pub(crate) tab_scroll_handle: ScrollHandle,
     /// Tab id currently under the pointer (for hover close / hover fill).
-    hovered_tab: Option<u64>,
+    pub(crate) hovered_tab: Option<u64>,
     /// Pane rects from the last render, for keyboard neighbor navigation.
     pane_rects: Vec<PaneRect>,
     /// Content area bounds captured last frame (origin + size), for analytic
@@ -246,11 +331,13 @@ pub struct AppShell {
     /// Active divider drag, if any.
     drag: Option<DragState>,
     /// In-progress inline tab rename, if any.
-    rename: Option<RenameState>,
+    pub(crate) rename: Option<RenameState>,
     /// Whether the settings overlay is visible.
     settings_open: bool,
     /// Active section tab inside the settings panel.
     settings_section: SettingsSection,
+    /// Type-to-filter query for the theme picker (empty = all).
+    theme_query: String,
     /// Auto-update lifecycle state (drives the update dialog).
     update_state: UpdateUiState,
     /// Whether the update dialog is visible.
@@ -267,26 +354,51 @@ pub struct AppShell {
     find_query: String,
     find_match_count: usize,
     find_active_index: usize,
+    /// Regex mode: treat the query as a raw regex instead of a literal (⌥⌘R).
+    find_regex: bool,
+    /// Match case (⌥⌘C). Off = case-insensitive; on = case-sensitive.
+    find_match_case: bool,
     /// Window-scoped font size override (M12 zoom); not written to settings.
-    font_size_override: Option<Pixels>,
+    pub(crate) font_size_override: Option<Pixels>,
     /// Close-confirm dialog pending (M12).
     close_confirm: Option<CloseConfirmState>,
     /// Tab ids currently flashing for visual bell (M12).
-    bell_flash_tabs: std::collections::HashSet<u64>,
+    pub(crate) bell_flash_tabs: std::collections::HashSet<u64>,
     /// Fan-out keystrokes to all panes in the active tab (M13).
     broadcast: bool,
     /// Quick Select overlay active (M15).
     quick_select_open: bool,
+    /// Focused-pane facts overlay (cwd / tree / ports).
+    facts_open: bool,
+    facts: Option<crate::chrome::pane_facts::PaneFacts>,
+    facts_at: Option<std::time::Instant>,
+    ledger_open: bool,
+    tombstone_gate: crate::chrome::tombstone::TombstoneGate,
+    history_open: bool,
+    history_query: String,
+    history_selected: usize,
+    /// Git diff inspector (ADR-0012). Not a Pane.
+    pub(crate) diff_open: bool,
+    pub(crate) diff_view: Option<crate::diff::DiffView>,
+    diff_gen: u64,
     /// Debounced session save task.
     _session_save_task: Option<Task<()>>,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
 }
 
-/// Pending close confirmation dialog.
+/// What the shared confirm dialog is asking about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfirmKind {
+    ClosePane,
+    ClearRunLedger,
+}
+
+/// Pending confirmation dialog (close pane, or clear the Run Ledger).
 struct CloseConfirmState {
-    /// Human-readable what will close.
+    /// Human-readable what will happen.
     message: SharedString,
+    kind: ConfirmKind,
 }
 
 impl Focusable for AppShell {
@@ -307,13 +419,7 @@ pub fn open_sleipnir_window(cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                // macOS reserves the leading pad for traffic lights; Windows and
-                // Linux have no traffic lights, so the custom chrome starts flush.
-                traffic_light_position: if cfg!(windows) || cfg!(target_os = "linux") {
-                    None
-                } else {
-                    Some(geo.traffic_light_position)
-                },
+                traffic_light_position: Some(geo.traffic_light_position),
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -321,6 +427,37 @@ pub fn open_sleipnir_window(cx: &mut App) {
             ..Default::default()
         },
         |window, cx| cx.new(|cx| AppShell::new(window, cx)),
+    ) {
+        log::error!("failed to open window: {err:#}");
+    }
+}
+
+/// Open a new window and move `tab` into it (detach tab to a new window).
+/// The tab's panes keep their live PTYs; observers are re-wired to the new
+/// window's `AppShell`.
+fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
+    let geo = ChromeGeometry::standard();
+    let bounds = Bounds::centered(None, size(px(1024.0), px(680.0)), cx);
+    if let Err(err) = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Sleipnir".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(geo.traffic_light_position),
+            }),
+            app_owns_titlebar_drag: true,
+            window_background: WindowBackgroundAppearance::Opaque,
+            window_min_size: Some(size(px(360.0), px(240.0))),
+            ..Default::default()
+        },
+        move |window, cx| {
+            cx.new(|cx| {
+                let mut shell = AppShell::new(window, cx);
+                shell.adopt_tab(tab, window, cx);
+                shell
+            })
+        },
     ) {
         log::error!("failed to open window: {err:#}");
     }
@@ -343,6 +480,7 @@ impl AppShell {
             rename: None,
             settings_open: false,
             settings_section: SettingsSection::Theme,
+            theme_query: String::new(),
             update_state: UpdateUiState::Idle,
             update_open: false,
             staged_zip: None,
@@ -354,11 +492,24 @@ impl AppShell {
             find_query: String::new(),
             find_match_count: 0,
             find_active_index: 0,
+            find_regex: false,
+            find_match_case: false,
             font_size_override: None,
             close_confirm: None,
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
             quick_select_open: false,
+            facts_open: false,
+            ledger_open: false,
+            tombstone_gate: crate::chrome::tombstone::TombstoneGate::default(),
+            history_open: false,
+            history_query: String::new(),
+            history_selected: 0,
+            diff_open: false,
+            diff_view: None,
+            diff_gen: 0,
+            facts: None,
+            facts_at: None,
             _session_save_task: None,
             _quit_subscription: None,
         };
@@ -372,9 +523,15 @@ impl AppShell {
             })
             .detach();
 
-        // Persist session on quit (M8).
+        RunLedgerGlobal::init(cx);
+        crate::control_surface::init(cx);
+        crate::attention_chrome::refresh(cx);
+
+        // Persist session on quit (M8) and flush the Run Ledger.
         shell._quit_subscription = Some(cx.on_app_quit(|this, cx| {
+            this.emit_all_panes_closed(cx);
             this.persist_session_now(cx);
+            RunLedgerGlobal::flush_now_in(cx);
             async {}
         }));
 
@@ -386,6 +543,8 @@ impl AppShell {
         };
         if !restored {
             shell.add_tab(window, cx);
+        } else {
+            shell.sync_ledger_focus(window, cx);
         }
         shell
     }
@@ -401,14 +560,6 @@ impl AppShell {
 
     /// Create a fresh `TermView` and wire the observers a pane needs
     /// (repaint on change, window-title sync on title change, event routing).
-    fn spawn_term_view(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<TermView> {
-        self.spawn_term_view_with_cwd(None, window, cx)
-    }
-
     fn spawn_term_view_with_cwd(
         &mut self,
         cwd: Option<std::path::PathBuf>,
@@ -423,55 +574,129 @@ impl AppShell {
             }
             v
         });
-        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        self.wire_term_view(&view, window, cx);
+        view
+    }
+
+    /// Observe a pane's `TermView` so its events route to this AppShell. The
+    /// ownership guard makes stale subscriptions harmless once a pane is
+    /// detached into another window (re-wired there via `adopt_tab`).
+    fn wire_term_view(
+        &mut self,
+        view: &Entity<TermView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(view, |this, view, cx| {
+            // Only *visible* panes may drive a window repaint. A pane in a
+            // background tab (or hidden behind pane zoom) is not part of the
+            // element tree at all, so notifying for it repaints the whole
+            // window for content nobody can see. That matters a lot when a
+            // long-running agent streams output in a background tab: without
+            // this guard it steals ~250 repaints/second (the PTY event loop
+            // coalesces into 4 ms batches) from the pane the user is typing in.
+            if this.is_pane_visible(&view) {
+                cx.notify();
+            }
+        })
+        .detach();
         cx.subscribe_in(
-            &view,
+            view,
             window,
-            |this, view, event: &crate::TermViewEvent, window, cx| match event {
-                crate::TermViewEvent::TitleChanged => {
-                    this.sync_window_title(window, cx);
-                    cx.notify();
+            |this, view, event: &crate::TermViewEvent, window, cx| {
+                // Events from panes we no longer own (detached) are stale.
+                if this.tab_id_for_view(view, cx).is_none() {
+                    return;
                 }
-                crate::TermViewEvent::RequestNewTab => {
-                    this.add_tab(window, cx);
-                }
-                crate::TermViewEvent::RequestNextTab => {
-                    this.next_tab(window, cx);
-                }
-                crate::TermViewEvent::RequestPrevTab => {
-                    this.prev_tab(window, cx);
-                }
-                crate::TermViewEvent::RequestReloadSettings => {
-                    // Reload clears window font zoom override (plan risk mitigation).
-                    this.font_size_override = None;
-                    this.apply_font_override_to_all_panes(cx);
-                    TerminalSettings::reload(cx);
-                    cx.notify();
-                }
-                crate::TermViewEvent::RequestCycleTheme => {
-                    let next = TerminalSettings::get_global(cx).theme.next();
-                    TerminalSettings::set_theme(next, cx);
-                    cx.notify();
-                }
-                crate::TermViewEvent::RequestOpenSettings => {
-                    this.toggle_settings(window, cx);
-                }
-                crate::TermViewEvent::Bell => {
-                    this.on_term_bell(view, cx);
+                match event {
+                    crate::TermViewEvent::TitleChanged => {
+                        this.sync_window_title(window, cx);
+                        cx.notify();
+                    }
+                    crate::TermViewEvent::RequestNewTab => {
+                        this.add_tab(window, cx);
+                    }
+                    crate::TermViewEvent::RequestNextTab => {
+                        this.next_tab(window, cx);
+                    }
+                    crate::TermViewEvent::RequestPrevTab => {
+                        this.prev_tab(window, cx);
+                    }
+                    crate::TermViewEvent::RequestReloadSettings => {
+                        // Reload clears window font zoom override (plan risk mitigation).
+                        this.font_size_override = None;
+                        this.apply_font_override_to_all_panes(cx);
+                        TerminalSettings::reload(cx);
+                        RunLedgerGlobal::reload_settings_in(cx);
+                        crate::control_surface::reload(cx);
+                        crate::attention_chrome::refresh(cx);
+                        cx.notify();
+                    }
+                    crate::TermViewEvent::RequestCycleTheme => {
+                        let next = TerminalSettings::get_global(cx).theme.next();
+                        TerminalSettings::set_theme(next, cx);
+                        cx.notify();
+                    }
+                    crate::TermViewEvent::RequestOpenSettings => {
+                        this.toggle_settings(window, cx);
+                    }
+                    crate::TermViewEvent::Bell => {
+                        this.on_term_bell(view, cx);
+                    }
+                    crate::TermViewEvent::RunStarted {
+                        command,
+                        cwd,
+                        inferred,
+                        line,
+                        column,
+                    } => {
+                        if let Some(pane) = this.pane_key_for_view(view) {
+                            let cwd = cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
+                            let anchor = line.map(|line| run_ledger::Anchor {
+                                line,
+                                column: column.unwrap_or(0),
+                            });
+                            this.apply_run_event(
+                                RunEvent::Started {
+                                    pane,
+                                    command: command.clone(),
+                                    cwd,
+                                    at_ms: 0, // stamped in apply_run_event
+                                    inferred: *inferred,
+                                    anchor,
+                                },
+                                cx,
+                            );
+                        }
+                        cx.notify();
+                    }
+                    crate::TermViewEvent::RunFinished { exit_code } => {
+                        if let Some(pane) = this.pane_key_for_view(view) {
+                            this.apply_run_event(RunEvent::finished(pane, *exit_code, 0), cx);
+                        }
+                        cx.notify();
+                    }
+                    crate::TermViewEvent::GutterClicked { line } => {
+                        if let Some(pane) = this.pane_key_for_view(view) {
+                            this.jump_to_gutter(pane, *line, window, cx);
+                        }
+                    }
+                    crate::TermViewEvent::UserTyped => {
+                        if let Some(pane) = this.pane_key_for_view(view) {
+                            this.tombstone_gate.dismiss(pane);
+                            cx.notify();
+                        }
+                    }
                 }
             },
         )
         .detach();
-        view
     }
 
     /// Flash the tab that owns `view` when visual bell is enabled.
     fn on_term_bell(&mut self, view: &Entity<TermView>, cx: &mut Context<Self>) {
         use sleipnir_settings::TerminalBell;
-        if !matches!(
-            TerminalSettings::get_global(cx).bell,
-            TerminalBell::Visual
-        ) {
+        if !matches!(TerminalSettings::get_global(cx).bell, TerminalBell::Visual) {
             return;
         }
         let Some(tab_id) = self.tab_id_for_view(view, cx) else {
@@ -492,6 +717,25 @@ impl AppShell {
         .detach();
     }
 
+    /// Whether this pane is currently on screen: it must live in the active
+    /// tab, and — if that tab has a zoomed pane — be the zoomed one. Mirrors
+    /// exactly what [`Self::render_content`] puts into the element tree.
+    ///
+    /// Used to suppress repaints driven by off-screen panes. Anything the
+    /// chrome shows *about* a background pane (tab title, visual bell) arrives
+    /// through low-frequency `TermViewEvent`s instead, not through this path.
+    fn is_pane_visible(&self, view: &Entity<TermView>) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let mut leaves = Vec::new();
+        tab.tree.leaves(&mut leaves);
+        leaves
+            .iter()
+            .find(|(_, leaf)| *leaf == view)
+            .is_some_and(|(id, _)| pane_is_on_screen(tab.zoomed_pane, *id))
+    }
+
     fn tab_id_for_view(&self, view: &Entity<TermView>, _cx: &App) -> Option<u64> {
         for tab in &self.tabs {
             let mut leaves = Vec::new();
@@ -503,6 +747,66 @@ impl AppShell {
             }
         }
         None
+    }
+
+    fn pane_key_for_view(&self, view: &Entity<TermView>) -> Option<PaneKey> {
+        self.tabs
+            .iter()
+            .find_map(|tab| tab.tree.pane_key_for_view(view))
+    }
+
+    fn active_pane_key(&self) -> Option<PaneKey> {
+        let tab = self.tabs.get(self.active)?;
+        tab.tree.pane_key_for_id(tab.active_pane)
+    }
+
+    fn apply_run_event(&self, mut event: RunEvent, cx: &mut App) {
+        if !cx.has_global::<RunLedgerGlobal>() {
+            return;
+        }
+        cx.update_global(|g: &mut RunLedgerGlobal, cx| {
+            let at_ms = g.now_ms();
+            match &mut event {
+                RunEvent::Started { at_ms: slot, .. }
+                | RunEvent::Finished { at_ms: slot, .. }
+                | RunEvent::PaneClosed { at_ms: slot, .. } => {
+                    *slot = at_ms;
+                }
+            }
+            g.apply(event, cx);
+        });
+        crate::attention_chrome::refresh(cx);
+    }
+
+    fn apply_pane_closed(&self, pane: PaneKey, cx: &mut App) {
+        self.apply_run_event(RunEvent::PaneClosed { pane, at_ms: 0 }, cx);
+    }
+
+    fn emit_all_panes_closed(&self, cx: &mut App) {
+        let keys: Vec<PaneKey> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.tree.all_pane_keys())
+            .collect();
+        for pane in keys {
+            self.apply_pane_closed(pane, cx);
+        }
+    }
+
+    fn sync_ledger_focus(&self, window: &Window, cx: &mut App) {
+        if !cx.has_global::<RunLedgerGlobal>() {
+            return;
+        }
+        let pane = self.active_pane_key();
+        let active = window.is_window_active();
+        cx.update_global(|g: &mut RunLedgerGlobal, _cx| {
+            g.set_focus(pane, active);
+            if active {
+                if let Some(pane) = pane {
+                    g.mark_pane_seen(pane);
+                }
+            }
+        });
     }
 
     fn apply_font_override_to_all_panes(&self, cx: &mut Context<Self>) {
@@ -645,6 +949,34 @@ impl AppShell {
         open_sleipnir_window(cx);
     }
 
+    fn on_export_scrollback(
+        &mut self,
+        _: &ExportScrollback,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        let Some(term) = view.read(cx).terminal_entity().cloned() else {
+            return;
+        };
+        let text = term.read(cx).scrollback_text();
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("sleipnir-scrollback-{stamp}.txt"));
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                log::info!("exported scrollback to {}", path.display());
+                crate::open_existing_path(&path);
+            }
+            Err(err) => log::error!("export scrollback failed: {err:#}"),
+        }
+    }
+
     // ── session persistence (M8) ────────────────────────────────────────────
 
     fn try_restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -710,9 +1042,9 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> PaneNode {
         match node {
-            SessionNode::Leaf { id, cwd } => {
+            SessionNode::Leaf { id, cwd, pane_key } => {
                 let view = self.spawn_term_view_with_cwd(resolve_cwd(cwd.as_deref()), window, cx);
-                PaneNode::leaf(*id, view)
+                PaneNode::leaf_with_key(*id, restore_pane_key(*pane_key), view)
             }
             SessionNode::Split {
                 axis,
@@ -786,7 +1118,8 @@ impl AppShell {
             }
             this.update(cx, |this, cx| {
                 this.persist_session_now(cx);
-            }).ok();
+            })
+            .ok();
         }));
     }
 
@@ -802,12 +1135,22 @@ impl AppShell {
             .or_else(|| leaves.first().map(|(_, v)| (*v).clone()))
     }
 
-    fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The active pane's working directory, when its PTY reports one. New tabs
+    /// and splits inherit this so they open where you are instead of in `$HOME`.
+    fn active_working_directory(&self, cx: &App) -> Option<std::path::PathBuf> {
+        self.active_view(cx)
+            .and_then(|view| view.read(cx).working_directory(cx))
+    }
+
+    pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let view = self.spawn_term_view(window, cx);
+        let cwd = self
+            .active_working_directory(cx)
+            .map(|cwd| crate::chrome::workspace::spawn_cwd(&cwd));
+        let view = self.spawn_term_view_with_cwd(cwd, window, cx);
         self.tabs.push(Tab {
             id,
             tree: PaneNode::leaf(pane_id, view),
@@ -817,26 +1160,31 @@ impl AppShell {
         });
         self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
+        self.sync_ledger_focus(window, cx);
         self.sync_window_title(window, cx);
         self.tab_scroll_handle.scroll_to_item(self.active);
         self.schedule_session_save(cx);
         cx.notify();
     }
 
-
     /// Begin an inline rename for the given tab, seeding the editable buffer
-    /// with its current title.
-    fn begin_rename(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+    /// with the text currently shown on the chip.
+    pub(crate) fn begin_rename(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
-        let buffer = tab.title(cx).to_string();
+        let buffer = if TerminalSettings::get_global(cx).tab_placement == TabPlacement::Side {
+            tab.title(cx).to_string()
+        } else {
+            tab.path_label(cx).to_string()
+        };
         self.rename = Some(RenameState { tab_id, buffer });
         cx.notify();
     }
 
     /// Commit the in-progress rename to the target tab. An empty buffer clears
-    /// the custom title so the tab falls back to the pane's own title.
+    /// the custom title so the tab falls back to the pane title (side) or cwd
+    /// path (top).
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = self.rename.take() {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == state.tab_id) {
@@ -915,6 +1263,10 @@ impl AppShell {
                 self.rename = None;
             }
         }
+        let closed_keys = self.tabs[index].tree.all_pane_keys();
+        for pane in closed_keys {
+            self.apply_pane_closed(pane, cx);
+        }
         match active_after_close(self.active, index, self.tabs.len()) {
             None => {
                 self.tabs.remove(index);
@@ -925,6 +1277,7 @@ impl AppShell {
                 self.tabs.remove(index);
                 self.active = new_active;
                 self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
                 self.sync_window_title(window, cx);
                 self.tab_scroll_handle.scroll_to_item(self.active);
                 self.schedule_session_save(cx);
@@ -941,15 +1294,207 @@ impl AppShell {
         self.close_tab_at(idx, window, cx);
     }
 
-    fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active = index;
             self.focus_active(window, cx);
+            self.sync_ledger_focus(window, cx);
             self.sync_window_title(window, cx);
             self.tab_scroll_handle.scroll_to_item(self.active);
             self.schedule_session_save(cx);
             cx.notify();
         }
+    }
+
+    /// Move the dragged tab so it sits immediately before `target_id` (tab drag
+    /// reorder). `active` follows the previously-active tab to its new index.
+    pub(crate) fn reorder_tab(
+        &mut self,
+        dragged_id: u64,
+        target_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(from) = self.tabs.iter().position(|t| t.id == dragged_id) else {
+            return;
+        };
+        let Some(target) = self.tabs.iter().position(|t| t.id == target_id) else {
+            return;
+        };
+        if dragged_id == target_id {
+            return;
+        }
+        let active_id = self.tabs.get(self.active).map(|t| t.id);
+        let tab = self.tabs.remove(from);
+        // Insertion index: dropping on a target to the right shifts it left by
+        // one once the dragged tab is removed.
+        let to = reorder_insert_index(from, target);
+        self.tabs.insert(to, tab);
+        if let Some(active_id) = active_id {
+            self.active = self
+                .tabs
+                .iter()
+                .position(|t| t.id == active_id)
+                .unwrap_or(0);
+        }
+        self.focus_active(window, cx);
+        self.sync_window_title(window, cx);
+        self.tab_scroll_handle.scroll_to_item(self.active);
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
+    /// Move a tab out of this window into a fresh window (drag tab to the
+    /// content area). Keeps ≥1 tab here; the detached tab's panes keep running.
+    fn detach_tab_to_new_window(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(new_active) = active_after_close(self.active, idx, self.tabs.len()) else {
+            return;
+        };
+        let tab = self.tabs.remove(idx);
+        self.active = new_active;
+        self.focus_active(window, cx);
+        self.sync_window_title(window, cx);
+        self.tab_scroll_handle.scroll_to_item(self.active);
+        self.schedule_session_save(cx);
+        cx.notify();
+        open_sleipnir_window_with_tab(tab, cx);
+    }
+
+    /// Tab dropped on the visible pane area: a *different* tab merges in as a
+    /// pane; dropping the visible tab itself still detaches it to a new window.
+    fn on_tab_dropped_on_pane_area(
+        &mut self,
+        dragged_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(visible_id) = self.tabs.get(self.active).map(|t| t.id) else {
+            return;
+        };
+        if dragged_id == visible_id {
+            self.detach_tab_to_new_window(dragged_id, window, cx);
+        } else {
+            self.merge_tab_into_visible(dragged_id, window, cx);
+        }
+    }
+
+    fn take_tab_views(&mut self) -> Vec<TabView<PaneNode>> {
+        std::mem::take(&mut self.tabs)
+            .into_iter()
+            .map(|tab| TabView {
+                id: tab.id,
+                tree: tab.tree,
+                active_pane: tab.active_pane,
+                custom_title: tab.custom_title.map(|s| s.to_string()),
+                zoomed_pane: tab.zoomed_pane,
+            })
+            .collect()
+    }
+
+    fn restore_tab_views(&mut self, views: Vec<TabView<PaneNode>>) {
+        self.tabs = views
+            .into_iter()
+            .map(|view| Tab {
+                id: view.id,
+                tree: view.tree,
+                active_pane: view.active_pane,
+                custom_title: view.custom_title.map(Into::into),
+                zoomed_pane: view.zoomed_pane,
+            })
+            .collect();
+    }
+
+    fn merge_tab_into_visible(
+        &mut self,
+        source_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dest_id) = self.tabs.get(self.active).map(|t| t.id) else {
+            return;
+        };
+        let mut views = self.take_tab_views();
+        match merge_tab(&mut views, source_id, dest_id) {
+            Ok(dest_idx) => {
+                self.restore_tab_views(views);
+                if self.tabs.is_empty() {
+                    return;
+                }
+                self.active = dest_idx.min(self.tabs.len() - 1);
+                self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
+                self.sync_window_title(window, cx);
+                self.tab_scroll_handle.scroll_to_item(self.active);
+                self.schedule_session_save(cx);
+                cx.notify();
+            }
+            Err(_) => self.restore_tab_views(views),
+        }
+    }
+
+    /// Drop a pane onto the tab list at `insert_at` (clamped).
+    pub(crate) fn extract_pane_to_tab(
+        &mut self,
+        pane_id: PaneId,
+        insert_at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let new_id = self.next_id;
+        let mut views = self.take_tab_views();
+        match extract_pane(&mut views, pane_id, insert_at, new_id) {
+            Ok(idx) => {
+                self.next_id += 1;
+                self.restore_tab_views(views);
+                if self.tabs.is_empty() {
+                    return;
+                }
+                self.active = idx.min(self.tabs.len() - 1);
+                self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
+                self.sync_window_title(window, cx);
+                self.tab_scroll_handle.scroll_to_item(self.active);
+                self.schedule_session_save(cx);
+                cx.notify();
+            }
+            Err(_) => self.restore_tab_views(views),
+        }
+    }
+
+    /// Replace this window's placeholder tab with a detached `tab` and re-wire
+    /// each pane's observers to route events here.
+    fn adopt_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        // Drop the placeholder tab `new` created (its shell exits).
+        self.tabs.clear();
+        let mut tab = tab;
+        let mut leaves = Vec::new();
+        tab.tree.leaves(&mut leaves);
+        let max_pane = leaves.iter().map(|(id, _)| *id).max().unwrap_or(0);
+        let adopted = rebase_detached_tab(max_pane);
+        tab.id = adopted.tab_id;
+        self.next_id = adopted.next_id;
+        self.next_pane_id = adopted.next_pane_id;
+        let views: Vec<Entity<TermView>> = leaves.into_iter().map(|(_, v)| v.clone()).collect();
+        self.tabs.push(tab);
+        self.active = 0;
+        for view in &views {
+            self.wire_term_view(view, window, cx);
+        }
+        self.focus_active(window, cx);
+        self.sync_window_title(window, cx);
+        self.schedule_session_save(cx);
+        cx.notify();
     }
 
     fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -981,35 +1526,27 @@ impl AppShell {
 
     /// Split the active pane along `axis`, placing a new pane on the far side
     /// and focusing it.
-    fn split_active(
-        &mut self,
-        axis: SplitAxis,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn split_active(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.tabs.get(self.active).map(|t| t.active_pane) else {
             return;
         };
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let view = self.spawn_term_view(window, cx);
+        let cwd = self.active_working_directory(cx);
+        let view = self.spawn_term_view_with_cwd(cwd, window, cx);
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.tree.split(target, axis, new_id, view) {
                 tab.active_pane = new_id;
             }
         }
         self.focus_active(window, cx);
+        self.sync_ledger_focus(window, cx);
         self.schedule_session_save(cx);
         cx.notify();
     }
 
     /// Move focus to the neighboring pane in `direction`, if one exists.
-    fn focus_pane(
-        &mut self,
-        direction: Direction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn focus_pane(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
@@ -1018,6 +1555,7 @@ impl AppShell {
                 tab.active_pane = next;
             }
             self.focus_active(window, cx);
+            self.sync_ledger_focus(window, cx);
             self.schedule_session_save(cx);
             cx.notify();
         }
@@ -1034,22 +1572,33 @@ impl AppShell {
             return;
         };
         let target = tab.active_pane;
-        match tab.tree.close(target) {
+        let closed_key = tab.tree.pane_key_for_id(target);
+        let outcome = tab.tree.close(target);
+        match outcome {
             CloseOutcome::TreeEmpty => {
                 self.close_active_tab(window, cx);
             }
             CloseOutcome::NotFound => {
                 // Stale active_pane id: recover focus instead of nuking the tab.
-                tab.active_pane = tab.tree.first_leaf_id();
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = tab.tree.first_leaf_id();
+                }
                 self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
                 cx.notify();
             }
             CloseOutcome::Closed => {
+                if let Some(pane) = closed_key {
+                    self.apply_pane_closed(pane, cx);
+                }
                 // Surviving subtree: focus its first leaf (the collapsed sibling
                 // when the closed pane was a direct child of a split).
-                tab.active_pane = tab.tree.first_leaf_id();
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = tab.tree.first_leaf_id();
+                }
                 self.sync_window_title(window, cx);
                 self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
                 self.schedule_session_save(cx);
                 cx.notify();
             }
@@ -1068,9 +1617,40 @@ impl AppShell {
         if let Some((_, view)) = leaves.iter().find(|(id, _)| *id == tab.active_pane) {
             return view.read(cx).looks_busy(cx);
         }
-        leaves
+        leaves.iter().any(|(_, view)| view.read(cx).looks_busy(cx))
+    }
+
+    /// Foreground process name of the pane that would be closed, when it is busy.
+    fn active_busy_process_name(&self, cx: &App) -> Option<String> {
+        let tab = self.tabs.get(self.active)?;
+        let mut leaves = Vec::new();
+        tab.tree.leaves(&mut leaves);
+        let view = leaves
             .iter()
-            .any(|(_, view)| view.read(cx).looks_busy(cx))
+            .find(|(id, _)| *id == tab.active_pane)
+            .or_else(|| leaves.first())
+            .map(|(_, view)| *view)?;
+        if !view.read(cx).looks_busy(cx) {
+            return None;
+        }
+        view.read(cx).foreground_process_command_name(cx)
+    }
+
+    fn mark_active_tab_seen(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let keys = tab.tree.all_pane_keys();
+        if !cx.has_global::<RunLedgerGlobal>() {
+            return;
+        }
+        cx.update_global(|g: &mut RunLedgerGlobal, _cx| {
+            for pane in keys {
+                g.mark_pane_seen(pane);
+            }
+        });
+        crate::attention_chrome::refresh(cx);
+        cx.notify();
     }
 
     /// Gate close on `confirm_close` setting; may open a modal instead of closing.
@@ -1085,8 +1665,15 @@ impl AppShell {
             ConfirmClose::Dirty => self.active_pane_is_dirty(cx),
         };
         if needs_confirm {
+            let name = self.active_busy_process_name(cx);
+            let message = if policy == ConfirmClose::Dirty || name.is_some() {
+                crate::chrome::close_copy::close_confirm_message(name.as_deref())
+            } else {
+                "Close this pane anyway?".into()
+            };
             self.close_confirm = Some(CloseConfirmState {
-                message: "A process is still running. Close this pane anyway?".into(),
+                message: message.into(),
+                kind: ConfirmKind::ClosePane,
             });
             cx.notify();
         } else {
@@ -1094,9 +1681,559 @@ impl AppShell {
         }
     }
 
+    fn request_clear_run_ledger(&mut self, cx: &mut Context<Self>) {
+        if self.close_confirm.is_some() {
+            return;
+        }
+        self.close_confirm = Some(CloseConfirmState {
+            message: "This deletes the recorded command history from this machine. The terminal is not affected.".into(),
+            kind: ConfirmKind::ClearRunLedger,
+        });
+        cx.notify();
+    }
+
     fn confirm_close_proceed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_confirm = None;
-        self.close_active_pane(window, cx);
+        let kind = self.close_confirm.take().map(|s| s.kind);
+        match kind {
+            Some(ConfirmKind::ClearRunLedger) => self.clear_run_ledger(cx),
+            _ => self.close_active_pane(window, cx),
+        }
+    }
+
+    fn clear_run_ledger(&mut self, cx: &mut Context<Self>) {
+        RunLedgerGlobal::clear_in(cx);
+        cx.notify();
+    }
+
+    fn on_clear_run_ledger(
+        &mut self,
+        _: &ClearRunLedger,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_clear_run_ledger(cx);
+    }
+
+    fn on_toggle_run_ledger(
+        &mut self,
+        _: &ToggleRunLedger,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ledger_open = !self.ledger_open;
+        cx.notify();
+    }
+
+    fn toggle_tab_placement(&mut self, cx: &mut Context<Self>) {
+        let next = TerminalSettings::get_global(cx).tab_placement.toggle();
+        TerminalSettings::set_tab_placement(next, cx);
+        cx.notify();
+    }
+
+    fn on_toggle_tab_placement(
+        &mut self,
+        _: &ToggleTabPlacement,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_tab_placement(cx);
+    }
+
+    fn on_send_selection(
+        &mut self,
+        _: &SendSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_selection_to_pty(cx);
+    }
+
+    fn on_pipe_selection(
+        &mut self,
+        _: &PipeSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pipe_selection(cx);
+    }
+
+    fn on_send_git_diff(&mut self, _: &SendGitDiff, _window: &mut Window, cx: &mut Context<Self>) {
+        self.send_git_diff_to_pty(cx);
+    }
+
+    fn on_toggle_diff(&mut self, _: &ToggleDiff, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_diff(window, cx);
+    }
+
+    pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.diff_open {
+            self.close_diff(window, cx);
+            return;
+        }
+        self.diff_open = true;
+        self.refresh_diff(false, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.diff_open {
+            return;
+        }
+        self.diff_open = false;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_diff(&mut self, force: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self
+            .active_working_directory(cx)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+        let root = crate::chrome::workspace::git_root(&cwd).unwrap_or_else(|| cwd.clone());
+        if !force {
+            if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_ref() {
+                if session.still_fresh(&root) {
+                    self.diff_open = true;
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        let mode = match &self.diff_view {
+            Some(crate::diff::DiffView::Ready(session)) => session.mode,
+            _ => crate::diff::ViewMode::default(),
+        };
+        let minimap_visible = match &self.diff_view {
+            Some(crate::diff::DiffView::Ready(session)) => session.minimap_visible,
+            _ => true,
+        };
+        self.diff_gen = self.diff_gen.wrapping_add(1);
+        let generation = self.diff_gen;
+        let title = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
+        self.diff_view = Some(crate::diff::DiffView::Loading {
+            title,
+            generation,
+        });
+        self.diff_open = true;
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move { crate::diff::fetch_worktree_diff(&cwd) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.diff_gen != generation {
+                    return;
+                }
+                this.diff_view = Some(match outcome {
+                    crate::diff::FetchOutcome::Ready(ready) => {
+                        let root = ready.root.clone();
+                        let jobs: Vec<crate::diff::upgrade::UpgradeJob> = ready
+                            .parsed
+                            .files
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, f)| {
+                                f.status != diff_core::FileStatus::Binary && !f.hunks.is_empty()
+                            })
+                            .map(|(ix, f)| crate::diff::upgrade::UpgradeJob {
+                                file_ix: ix,
+                                old_path: f.old_path.clone(),
+                                new_path: f.new_path.clone(),
+                                status: f.status,
+                            })
+                            .collect();
+                        let mut session = crate::diff::DiffSession::from_ready(ready, mode);
+                        session.minimap_visible = minimap_visible;
+                        if !jobs.is_empty() {
+                            this.spawn_diff_upgrade(generation, root, jobs, cx);
+                        }
+                        crate::diff::DiffView::Ready(session)
+                    }
+                    crate::diff::FetchOutcome::Clean { title } => crate::diff::DiffView::Message {
+                        title,
+                        body: "Working tree clean".into(),
+                    },
+                    crate::diff::FetchOutcome::Failed { title, message } => {
+                        crate::diff::DiffView::Message {
+                            title,
+                            body: message,
+                        }
+                    }
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn spawn_diff_upgrade(
+        &mut self,
+        generation: u64,
+        root: std::path::PathBuf,
+        jobs: Vec<crate::diff::upgrade::UpgradeJob>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let files = cx
+                .background_spawn(async move { crate::diff::upgrade::run_upgrade(&root, jobs) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.diff_gen != generation {
+                    return;
+                }
+                if let Some(crate::diff::DiffView::Ready(session)) = this.diff_view.as_mut() {
+                    session.apply_upgrades(files);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn expand_diff_gap(
+        &mut self,
+        file_ix: usize,
+        gap_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() else {
+            return;
+        };
+        let Some((gap_row, inserted)) = session.expand_gap(file_ix, gap_ix) else {
+            return;
+        };
+        if session.cursor > gap_row {
+            session.cursor += inserted;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_diff_minimap(&mut self, cx: &mut Context<Self>) {
+        if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+            session.minimap_visible = !session.minimap_visible;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_diff_mode(&mut self, cx: &mut Context<Self>) {
+        if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+            let next = session.mode.toggle();
+            session.set_mode(next);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn jump_diff_file(&mut self, row: usize, cx: &mut Context<Self>) {
+        if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+            session.jump_to_row(row);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn send_open_diff_to_pty(&mut self, cx: &mut Context<Self>) {
+        let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_ref() else {
+            self.send_git_diff_to_pty(cx);
+            return;
+        };
+        let Some(payload) = crate::chrome::send_context::git_diff_payload(&session.patch) else {
+            return;
+        };
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        view.update(cx, |v, cx| v.input_bytes(payload.into_bytes(), cx));
+        cx.notify();
+    }
+
+    fn handle_diff_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.diff_open {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.close_diff(window, cx);
+                true
+            }
+            "n" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.hunk_rows.clone();
+                    session.jump_next(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "p" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.hunk_rows.clone();
+                    session.jump_prev(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "]" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.file_rows.clone();
+                    session.jump_next(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "[" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.file_rows.clone();
+                    session.jump_prev(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "v" => {
+                self.toggle_diff_mode(cx);
+                true
+            }
+            "m" => {
+                self.toggle_diff_minimap(cx);
+                true
+            }
+            "r" => {
+                self.refresh_diff(true, window, cx);
+                true
+            }
+            "home" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    session.jump_home();
+                }
+                cx.notify();
+                true
+            }
+            "end" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    session.jump_end();
+                }
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn on_toggle_history_search(
+        &mut self,
+        _: &ToggleHistorySearch,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.history_open = !self.history_open;
+        if !self.history_open {
+            self.history_query.clear();
+            self.history_selected = 0;
+        }
+        cx.notify();
+    }
+
+    fn send_selection_to_pty(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        let Some(text) = crate::chrome::send_context::selection_payload(
+            &view.read(cx).selection_text(cx).unwrap_or_default(),
+        ) else {
+            return;
+        };
+        view.update(cx, |v, cx| v.input_bytes(text.into_bytes(), cx));
+        cx.notify();
+    }
+
+    fn pipe_selection(&mut self, cx: &mut Context<Self>) {
+        let settings = TerminalSettings::get_global(cx);
+        let Some(template) = settings.pipe_selection_command.clone() else {
+            return;
+        };
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        let Some(payload) = crate::chrome::send_context::selection_payload(
+            &view.read(cx).selection_text(cx).unwrap_or_default(),
+        ) else {
+            return;
+        };
+        let Ok(argv) = crate::chrome::send_context::format_pipe_command(&template, &payload) else {
+            return;
+        };
+        if argv.is_empty() {
+            return;
+        }
+        let program = argv[0].clone();
+        let args: Vec<String> = argv.into_iter().skip(1).collect();
+        let _ = std::process::Command::new(program).args(args).spawn();
+    }
+
+    fn send_git_diff_to_pty(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.active_working_directory(cx);
+        let output = std::process::Command::new("git")
+            .args(["diff", "HEAD"])
+            .current_dir(cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()))
+            .output();
+        let Ok(out) = output else {
+            return;
+        };
+        let diff = String::from_utf8_lossy(&out.stdout);
+        let Some(payload) = crate::chrome::send_context::git_diff_payload(&diff) else {
+            return;
+        };
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        view.update(cx, |v, cx| v.input_bytes(payload.into_bytes(), cx));
+        cx.notify();
+    }
+
+    fn jump_to_ledger_row(
+        &mut self,
+        pane: run_ledger::PaneKey,
+        run_id: Option<run_ledger::RunId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = self.tabs.iter().enumerate().find_map(|(ix, tab)| {
+            tab.tree.pane_id_for_key(pane).map(|id| (ix, id))
+        });
+        let Some((ix, id)) = found else {
+            return;
+        };
+        self.activate(ix, window, cx);
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.active_pane = id;
+        }
+        self.focus_active(window, cx);
+        let anchor = run_id.and_then(|id| {
+            if !cx.has_global::<RunLedgerGlobal>() {
+                return None;
+            }
+            cx.global::<RunLedgerGlobal>()
+                .snapshot()
+                .into_iter()
+                .find(|run| run.id == id)
+                .and_then(|run| run.anchor)
+        });
+        if let Some(anchor) = anchor {
+            if let Some(view) = self.view_for_pane(pane) {
+                view.update(cx, |v, cx| v.scroll_to_anchor(anchor.line, anchor.column, cx));
+            }
+        }
+        crate::attention_chrome::refresh(cx);
+    }
+
+    fn jump_to_gutter(
+        &mut self,
+        pane: run_ledger::PaneKey,
+        line: i32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ledger_open = true;
+        let run_id = if cx.has_global::<RunLedgerGlobal>() {
+            let snapshot = cx.global::<RunLedgerGlobal>().snapshot();
+            run_id_for_gutter(&snapshot, pane, line)
+        } else {
+            None
+        };
+        if let Some(id) = run_id {
+            if cx.has_global::<RunLedgerGlobal>() {
+                cx.update_global(|g: &mut RunLedgerGlobal, _| {
+                    g.mark_run_seen(id);
+                });
+            }
+        }
+        self.jump_to_ledger_row(pane, run_id, window, cx);
+        if run_id.is_none() {
+            if let Some(view) = self.view_for_pane(pane) {
+                view.update(cx, |v, cx| v.scroll_to_anchor(line, 0, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn view_for_pane(&self, pane: run_ledger::PaneKey) -> Option<Entity<TermView>> {
+        for tab in &self.tabs {
+            let mut out = Vec::new();
+            tab.tree.leaves_with_keys(&mut out);
+            if let Some((_, view)) = out.into_iter().find(|(key, _)| *key == pane) {
+                return Some(view);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn all_live_panes(&self) -> Vec<(PaneKey, Entity<TermView>)> {
+        let mut out = Vec::new();
+        for tab in &self.tabs {
+            tab.tree.leaves_with_keys(&mut out);
+        }
+        out
+    }
+
+    fn on_mark_tab_seen(
+        &mut self,
+        _: &MarkTabSeen,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mark_active_tab_seen(cx);
+    }
+
+    fn on_toggle_pane_facts(
+        &mut self,
+        _: &TogglePaneFacts,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_pane_facts(cx);
+    }
+
+    fn toggle_pane_facts(&mut self, cx: &mut Context<Self>) {
+        self.facts_open = !self.facts_open;
+        if self.facts_open {
+            self.refresh_pane_facts(cx);
+        } else {
+            self.facts = None;
+            self.facts_at = None;
+        }
+        cx.notify();
+    }
+
+    fn refresh_pane_facts(&mut self, cx: &App) {
+        let view = self.active_view(cx);
+        let cwd = view.as_ref().and_then(|v| v.read(cx).working_directory(cx));
+        let foreground = view
+            .as_ref()
+            .and_then(|v| v.read(cx).foreground_process_command_name(cx));
+        let root = view.as_ref().and_then(|v| v.read(cx).shell_pid(cx));
+        self.facts = Some(crate::chrome::pane_facts::collect_live_facts(
+            cwd, foreground, root,
+        ));
+        self.facts_at = Some(std::time::Instant::now());
+    }
+
+    fn refresh_pane_facts_if_stale(&mut self, cx: &App) {
+        if !self.facts_open {
+            return;
+        }
+        let stale = self.facts_at.is_none_or(|at| {
+            std::time::Instant::now().duration_since(at) >= std::time::Duration::from_secs(1)
+        });
+        if stale {
+            self.refresh_pane_facts(cx);
+        }
     }
 
     fn confirm_close_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1160,7 +2297,12 @@ impl AppShell {
         self.prev_tab(window, cx);
     }
 
-    fn on_activate_tab(&mut self, action: &ActivateTab, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_activate_tab(
+        &mut self,
+        action: &ActivateTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // 1-based index from ⌘1..⌘9; ignore out-of-range.
         if let Some(index) = action.0.checked_sub(1) {
             if index < self.tabs.len() {
@@ -1179,6 +2321,9 @@ impl AppShell {
         self.font_size_override = None;
         self.apply_font_override_to_all_panes(cx);
         TerminalSettings::reload(cx);
+        RunLedgerGlobal::reload_settings_in(cx);
+        crate::control_surface::reload(cx);
+        crate::attention_chrome::refresh(cx);
         cx.notify();
     }
 
@@ -1244,6 +2389,9 @@ impl AppShell {
                 self.font_size_override = None;
                 self.apply_font_override_to_all_panes(cx);
                 TerminalSettings::reload(cx);
+                RunLedgerGlobal::reload_settings_in(cx);
+                crate::control_surface::reload(cx);
+                crate::attention_chrome::refresh(cx);
                 cx.notify();
             }
             CommandId::CycleTheme => {
@@ -1277,6 +2425,23 @@ impl AppShell {
             CommandId::OpenQuickTerminal => {
                 self.on_open_quick_terminal(&OpenQuickTerminal, window, cx)
             }
+            CommandId::ExportScrollback => self.on_export_scrollback(&ExportScrollback, window, cx),
+            CommandId::ClearRunLedger => self.request_clear_run_ledger(cx),
+            CommandId::ToggleRunLedger => self.ledger_open = !self.ledger_open,
+            CommandId::MarkTabSeen => self.mark_active_tab_seen(cx),
+            CommandId::SendSelection => self.send_selection_to_pty(cx),
+            CommandId::PipeSelection => self.pipe_selection(cx),
+            CommandId::SendGitDiff => self.send_git_diff_to_pty(cx),
+            CommandId::ToggleHistorySearch => {
+                self.history_open = !self.history_open;
+                if !self.history_open {
+                    self.history_query.clear();
+                    self.history_selected = 0;
+                }
+            }
+            CommandId::TogglePaneFacts => self.toggle_pane_facts(cx),
+            CommandId::ToggleTabPlacement => self.toggle_tab_placement(cx),
+            CommandId::ToggleDiff => self.toggle_diff(window, cx),
         }
     }
 
@@ -1378,6 +2543,25 @@ impl AppShell {
         self.find_active_index = 0;
     }
 
+    /// Resolve the raw query into the regex handed to alacritty's search.
+    ///
+    /// Literal mode escapes regex metacharacters; regex mode passes the query
+    /// through unchanged. Case is controlled with the `(?i)` / `(?-i)` inline
+    /// flags, which alacritty's regex engine honours regardless of its
+    /// smart-case default.
+    fn find_pattern(&self, query: &str) -> String {
+        let pattern = if self.find_regex {
+            query.to_owned()
+        } else {
+            regex_escape_literal(query)
+        };
+        if self.find_match_case {
+            format!("(?-i){pattern}")
+        } else {
+            format!("(?i){pattern}")
+        }
+    }
+
     fn run_find(&mut self, cx: &mut Context<Self>) {
         let query = self.find_query.clone();
         if query.is_empty() {
@@ -1385,7 +2569,7 @@ impl AppShell {
             cx.notify();
             return;
         }
-        let Some(search) = terminal::Search::new(&regex_escape_literal(&query)) else {
+        let Some(search) = terminal::Search::new(&self.find_pattern(&query)) else {
             self.clear_find_matches(cx);
             cx.notify();
             return;
@@ -1476,6 +2660,17 @@ impl AppShell {
             }
             "backspace" => {
                 self.find_query.pop();
+                self.run_find(cx);
+                true
+            }
+            // ⌥⌘C toggles match-case; ⌥⌘R toggles regex (macOS find-bar convention).
+            "c" if event.keystroke.modifiers.alt && event.keystroke.modifiers.platform => {
+                self.find_match_case = !self.find_match_case;
+                self.run_find(cx);
+                true
+            }
+            "r" if event.keystroke.modifiers.alt && event.keystroke.modifiers.platform => {
+                self.find_regex = !self.find_regex;
                 self.run_find(cx);
                 true
             }
@@ -1615,8 +2810,7 @@ impl AppShell {
                 Ok(()) => cx.quit(),
                 Err(err) => {
                     log::warn!("install failed: {err:#}");
-                    self.update_state =
-                        UpdateUiState::Failed(format!("Install failed: {err}"));
+                    self.update_state = UpdateUiState::Failed(format!("Install failed: {err}"));
                     cx.open_url(updater::RELEASES_PAGE);
                     cx.notify();
                 }
@@ -1626,54 +2820,6 @@ impl AppShell {
                 cx.open_url(updater::RELEASES_PAGE);
             }
         }
-    }
-
-    /// CSD caption buttons for Linux (minimize / zoom / close).
-    fn render_linux_caption_buttons(
-        &self,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id("linux-caption-buttons")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .pr_2()
-            .child(self.caption_button("linux-min", "−", tokens, cx, |_, window, _| {
-                window.minimize_window();
-            }))
-            .child(self.caption_button("linux-zoom", "□", tokens, cx, |_, window, _| {
-                window.zoom_window();
-            }))
-            .child(self.caption_button("linux-close", "×", tokens, cx, |_, window, _| {
-                window.remove_window();
-            }))
-    }
-
-    fn caption_button(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .w(px(36.0))
-            .h(px(28.0))
-            .rounded_md()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(tokens.fg_muted)
-            .text_size(px(14.0))
-            .cursor_pointer()
-            .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
-            .child(label)
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
     }
 
     /// A pill button for the update dialog.
@@ -1725,9 +2871,16 @@ impl AppShell {
                     "You’re up to date".into(),
                     format!("Sleipnir {current} is the latest version.").into(),
                     vec![
-                        self.update_button("upd-close", "Close", tokens, true, cx, |this, _, cx| {
-                            this.close_update(cx);
-                        })
+                        self.update_button(
+                            "upd-close",
+                            "Close",
+                            tokens,
+                            true,
+                            cx,
+                            |this, _, cx| {
+                                this.close_update(cx);
+                            },
+                        )
                         .into_any_element(),
                     ],
                 ),
@@ -1744,9 +2897,16 @@ impl AppShell {
                             |_, _, cx| cx.open_url(updater::RELEASES_PAGE),
                         )
                         .into_any_element(),
-                        self.update_button("upd-later", "Later", tokens, false, cx, |this, _, cx| {
-                            this.close_update(cx);
-                        })
+                        self.update_button(
+                            "upd-later",
+                            "Later",
+                            tokens,
+                            false,
+                            cx,
+                            |this, _, cx| {
+                                this.close_update(cx);
+                            },
+                        )
                         .into_any_element(),
                         self.update_button(
                             "upd-install",
@@ -1766,12 +2926,22 @@ impl AppShell {
                 ),
                 UpdateUiState::ReadyToRestart(u) => (
                     "Ready to install".into(),
-                    format!("Sleipnir {} is verified. Restart to finish updating.", u.version)
-                        .into(),
+                    format!(
+                        "Sleipnir {} is verified. Restart to finish updating.",
+                        u.version
+                    )
+                    .into(),
                     vec![
-                        self.update_button("upd-later2", "Later", tokens, false, cx, |this, _, cx| {
-                            this.close_update(cx);
-                        })
+                        self.update_button(
+                            "upd-later2",
+                            "Later",
+                            tokens,
+                            false,
+                            cx,
+                            |this, _, cx| {
+                                this.close_update(cx);
+                            },
+                        )
                         .into_any_element(),
                         self.update_button(
                             "upd-restart",
@@ -1788,9 +2958,16 @@ impl AppShell {
                     "Update failed".into(),
                     msg.clone().into(),
                     vec![
-                        self.update_button("upd-close2", "Close", tokens, true, cx, |this, _, cx| {
-                            this.close_update(cx);
-                        })
+                        self.update_button(
+                            "upd-close2",
+                            "Close",
+                            tokens,
+                            true,
+                            cx,
+                            |this, _, cx| {
+                                this.close_update(cx);
+                            },
+                        )
                         .into_any_element(),
                     ],
                 ),
@@ -1866,15 +3043,9 @@ impl AppShell {
         )
     }
 
-    fn on_open_settings(
-        &mut self,
-        _: &OpenSettings,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_settings(window, cx);
     }
-
 
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
@@ -1882,6 +3053,7 @@ impl AppShell {
             // Always land on Theme when reopening; future sections can restore.
             self.settings_section = SettingsSection::Theme;
         } else {
+            self.theme_query.clear();
             self.focus_active(window, cx);
         }
         cx.notify();
@@ -1890,6 +3062,7 @@ impl AppShell {
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_open {
             self.settings_open = false;
+            self.theme_query.clear();
             self.focus_active(window, cx);
             cx.notify();
         }
@@ -1903,18 +3076,22 @@ impl AppShell {
     }
 
     fn select_theme(&mut self, theme: ThemeName, cx: &mut Context<Self>) {
-        TerminalSettings::set_theme(theme, cx);
+        TerminalSettings::set_theme(ThemeSetting::Builtin(theme), cx);
         cx.notify();
     }
 
-    fn attach_empty_drag(
+    fn select_custom_theme(&mut self, name: String, cx: &mut Context<Self>) {
+        TerminalSettings::set_theme(ThemeSetting::Custom(name), cx);
+        cx.notify();
+    }
+
+    pub(crate) fn attach_empty_drag(
         &self,
         id: impl Into<ElementId>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
-            .h_full()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
@@ -1943,6 +3120,33 @@ impl AppShell {
             }))
     }
 
+    fn pane_extract_grip(&self, pane_id: PaneId, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(("pane-grip", pane_id))
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(12.0))
+            .flex()
+            .justify_center()
+            .items_center()
+            .cursor_grab()
+            .on_drag(
+                PaneDrag { pane_id },
+                move |dragged, _offset, _window, cx| {
+                    let title: SharedString = format!("pane {}", dragged.pane_id).into();
+                    cx.new(move |_| TabDragPreview { title })
+                },
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(gpui::hsla(0.0, 0.0, 0.6, 0.7))
+                    .child("···"),
+            )
+    }
+
     /// Width/height of a divider's draggable hit strip.
     const DIVIDER_HIT: f32 = 8.0;
 
@@ -1957,7 +3161,10 @@ impl AppShell {
     ) {
         match tree {
             PaneNode::Leaf { id, .. } => {
-                panes.push(PaneRect { id: *id, bounds: area });
+                panes.push(PaneRect {
+                    id: *id,
+                    bounds: area,
+                });
             }
             PaneNode::Split {
                 axis,
@@ -1970,10 +3177,8 @@ impl AppShell {
                     SplitAxis::Horizontal => {
                         let w = f32::from(area.size.width);
                         let first_w = (w * *ratio).max(0.0);
-                        let first_area = Bounds::new(
-                            area.origin,
-                            gpui::size(px(first_w), area.size.height),
-                        );
+                        let first_area =
+                            Bounds::new(area.origin, gpui::size(px(first_w), area.size.height));
                         let second_area = Bounds::new(
                             point(px(f32::from(area.origin.x) + first_w), area.origin.y),
                             gpui::size(px(w - first_w), area.size.height),
@@ -1990,16 +3195,26 @@ impl AppShell {
                                 gpui::size(hit, area.size.height),
                             ),
                         });
-                        Self::compute_layout(first, first_area, path.child(Branch::First), panes, dividers);
-                        Self::compute_layout(second, second_area, path.child(Branch::Second), panes, dividers);
+                        Self::compute_layout(
+                            first,
+                            first_area,
+                            path.child(Branch::First),
+                            panes,
+                            dividers,
+                        );
+                        Self::compute_layout(
+                            second,
+                            second_area,
+                            path.child(Branch::Second),
+                            panes,
+                            dividers,
+                        );
                     }
                     SplitAxis::Vertical => {
                         let h = f32::from(area.size.height);
                         let first_h = (h * *ratio).max(0.0);
-                        let first_area = Bounds::new(
-                            area.origin,
-                            gpui::size(area.size.width, px(first_h)),
-                        );
+                        let first_area =
+                            Bounds::new(area.origin, gpui::size(area.size.width, px(first_h)));
                         let second_area = Bounds::new(
                             point(area.origin.x, px(f32::from(area.origin.y) + first_h)),
                             gpui::size(area.size.width, px(h - first_h)),
@@ -2016,8 +3231,20 @@ impl AppShell {
                                 gpui::size(area.size.width, hit),
                             ),
                         });
-                        Self::compute_layout(first, first_area, path.child(Branch::First), panes, dividers);
-                        Self::compute_layout(second, second_area, path.child(Branch::Second), panes, dividers);
+                        Self::compute_layout(
+                            first,
+                            first_area,
+                            path.child(Branch::First),
+                            panes,
+                            dividers,
+                        );
+                        Self::compute_layout(
+                            second,
+                            second_area,
+                            path.child(Branch::Second),
+                            panes,
+                            dividers,
+                        );
                     }
                 }
             }
@@ -2084,14 +3311,20 @@ impl AppShell {
         // A 0×0 measure (collapsed canvas) must not drive absolute pane layout.
         let mut pane_rects = Vec::new();
         let mut dividers = Vec::new();
-        let usable_bounds = self.content_bounds.filter(|area| {
-            f32::from(area.size.width) > 1.0 && f32::from(area.size.height) > 1.0
-        });
+        let usable_bounds = self
+            .content_bounds
+            .filter(|area| f32::from(area.size.width) > 1.0 && f32::from(area.size.height) > 1.0);
         if let Some(area) = usable_bounds {
             // Lay out relative to a zero origin; absolute children are positioned
             // relative to the content container, not the window.
             let local = Bounds::new(point(px(0.0), px(0.0)), area.size);
-            Self::compute_layout(&tab.tree, local, SplitPath::new(), &mut pane_rects, &mut dividers);
+            Self::compute_layout(
+                &tab.tree,
+                local,
+                SplitPath::new(),
+                &mut pane_rects,
+                &mut dividers,
+            );
         }
         // Record rects (with true screen origin) for neighbor navigation.
         self.pane_rects = if let Some(area) = usable_bounds {
@@ -2114,6 +3347,7 @@ impl AppShell {
 
         // Single pane: render the view directly, still capturing bounds.
         let single = leaves.len() == 1;
+        let allow_pane_extract = leaves.len() > 1;
 
         // Measure the content area with a full-size absolute canvas (Zed pattern).
         // Without size_full the canvas collapses to 0×0, which makes multi-pane
@@ -2124,6 +3358,11 @@ impl AppShell {
             .size_full()
             .min_h_0()
             .relative()
+            // Drop a *different* tab here to merge it as a pane. Dropping the
+            // visible tab still detaches it into a new window.
+            .on_drop::<u64>(cx.listener(move |this, dragged: &u64, window, cx| {
+                this.on_tab_dropped_on_pane_area(*dragged, window, cx);
+            }))
             .child(
                 canvas(
                     {
@@ -2179,8 +3418,12 @@ impl AppShell {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .relative()
                     .overflow_hidden()
-                    .child(view.clone().into_any_element());
+                    .child(view.clone().into_any_element())
+                    .when(allow_pane_extract, |el| {
+                        el.child(self.pane_extract_grip(pane_id, cx))
+                    });
                 if !is_active {
                     pane = pane.border_1().border_color(tokens.border);
                 } else {
@@ -2218,6 +3461,9 @@ impl AppShell {
                 .h(b.size.height)
                 .overflow_hidden()
                 .child(view.clone().into_any_element())
+                .when(allow_pane_extract, |el| {
+                    el.child(self.pane_extract_grip(pane_id, cx))
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
@@ -2281,13 +3527,17 @@ impl AppShell {
                         // Recover this divider's live container in screen space.
                         let screen_container = this
                             .content_bounds
-                            .map(|area| Bounds::new(
-                                point(
-                                    px(f32::from(area.origin.x) + f32::from(container_bounds.origin.x)),
-                                    px(f32::from(area.origin.y) + f32::from(container_bounds.origin.y)),
-                                ),
-                                container_bounds.size,
-                            ))
+                            .map(|area| {
+                                Bounds::new(
+                                    point(
+                                        px(f32::from(area.origin.x)
+                                            + f32::from(container_bounds.origin.x)),
+                                        px(f32::from(area.origin.y)
+                                            + f32::from(container_bounds.origin.y)),
+                                    ),
+                                    container_bounds.size,
+                                )
+                            })
                             .unwrap_or(container_bounds);
                         this.drag = Some(DragState {
                             tab_id,
@@ -2327,7 +3577,9 @@ impl AppShell {
 
     /// Update the dragged split's ratio from the pointer position.
     fn update_drag(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(drag) = self.drag.clone() else { return };
+        let Some(drag) = self.drag.clone() else {
+            return;
+        };
         let Some(idx) = self.tabs.iter().position(|t| t.id == drag.tab_id) else {
             return;
         };
@@ -2356,32 +3608,49 @@ impl AppShell {
     ) -> impl IntoElement {
         let section = self.settings_section;
 
-        // ── Section tab strip ────────────────────────────────────────────
-        let mut section_tabs = div()
-            .id("settings-section-tabs")
+        // ── macOS-style segmented control ────────────────────────────────
+        let seg_bg = tokens.hover;
+        let seg_active_bg = tokens.surface;
+        let mut segmented_control = div()
+            .id("settings-segment")
             .flex()
             .flex_row()
-            .items_end()
-            .gap_4()
-            .w_full()
-            .px_4()
-            .pt_1();
+            .items_center()
+            .rounded(px(8.0))
+            .bg(seg_bg)
+            .p(px(3.0))
+            .gap(px(2.0));
 
         for &s in SettingsSection::ALL {
             let active = s == section;
             let tab_id: ElementId = format!("settings-section-{}", s.id()).into();
             let label: SharedString = s.label().into();
-            section_tabs = section_tabs.child(
+            segmented_control = segmented_control.child(
                 div()
                     .id(tab_id)
                     .cursor_pointer()
-                    .pb_1p5()
-                    .text_size(px(13.0))
+                    .px(px(16.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .when(active, |el| {
-                        el.text_color(tokens.accent)
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .border_b_2()
-                            .border_color(tokens.accent)
+                        el.bg(seg_active_bg).text_color(tokens.fg).shadow(vec![
+                            gpui::BoxShadow {
+                                color: Hsla::black().opacity(0.08),
+                                offset: gpui::point(px(0.0), px(1.0)),
+                                blur_radius: px(3.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            },
+                            gpui::BoxShadow {
+                                color: Hsla::black().opacity(0.04),
+                                offset: gpui::point(px(0.0), px(0.5)),
+                                blur_radius: px(1.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            },
+                        ])
                     })
                     .when(!active, |el| {
                         el.text_color(tokens.fg_muted)
@@ -2396,17 +3665,15 @@ impl AppShell {
 
         // ── Body for the active section ──────────────────────────────────
         let body = match section {
-            SettingsSection::Theme => {
-                self.render_settings_theme_section(tokens, window, cx)
-                    .into_any_element()
-            }
-            SettingsSection::General => {
-                self.render_settings_general_section(tokens, cx)
-                    .into_any_element()
-            }
+            SettingsSection::Theme => self
+                .render_settings_theme_section(tokens, window, cx)
+                .into_any_element(),
+            SettingsSection::General => self
+                .render_settings_general_section(tokens, cx)
+                .into_any_element(),
         };
 
-        // ── Footer: key hints (reference: WezTerm settings) ──────────────
+        // ── Footer ─────────────────────────────────────────────────────────
         let footer = div()
             .id("settings-footer")
             .flex()
@@ -2414,8 +3681,8 @@ impl AppShell {
             .items_center()
             .justify_between()
             .w_full()
-            .px_4()
-            .py_2()
+            .px(px(20.0))
+            .py(px(12.0))
             .border_t_1()
             .border_color(tokens.border)
             .child(
@@ -2423,35 +3690,26 @@ impl AppShell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap(px(12.0))
                     .text_size(px(11.0))
                     .text_color(tokens.fg_muted)
                     .child(
                         div()
                             .flex()
                             .flex_row()
-                            .gap_1()
+                            .items_center()
+                            .gap(px(4.0))
                             .child(
                                 div()
-                                    .px_1()
-                                    .rounded(px(3.0))
+                                    .px(px(5.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
                                     .bg(tokens.hover)
+                                    .border_1()
+                                    .border_color(tokens.border)
+                                    .text_size(px(10.0))
                                     .text_color(tokens.fg)
-                                    .child("click"),
-                            )
-                            .child("apply"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .px_1()
-                                    .rounded(px(3.0))
-                                    .bg(tokens.hover)
-                                    .text_color(tokens.fg)
+                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .child("esc"),
                             )
                             .child("close"),
@@ -2466,40 +3724,57 @@ impl AppShell {
 
         let panel = div()
             .id("settings-panel")
-            .w(px(560.0))
-            .max_w(px(720.0))
-            .h(px(480.0))
-            .max_h(px(560.0))
+            .w(px(520.0))
+            .max_w(px(640.0))
+            .h(px(500.0))
+            .max_h(px(580.0))
             .flex()
             .flex_col()
-            .rounded(px(10.0))
+            .rounded(px(12.0))
             .bg(tokens.surface)
             .border_1()
             .border_color(tokens.border)
             .text_color(tokens.fg)
             .overflow_hidden()
+            .shadow(vec![
+                gpui::BoxShadow {
+                    color: Hsla::black().opacity(0.25),
+                    offset: gpui::point(px(0.0), px(8.0)),
+                    blur_radius: px(32.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                },
+                gpui::BoxShadow {
+                    color: Hsla::black().opacity(0.12),
+                    offset: gpui::point(px(0.0), px(2.0)),
+                    blur_radius: px(8.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                },
+            ])
             // Keep clicks inside the panel from reaching the backdrop.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            // Title
+            // Header: title + segmented control
             .child(
                 div()
-                    .px_4()
-                    .pt_3()
-                    .pb_1()
-                    .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(tokens.fg)
-                    .child("settings"),
-            )
-            // Section tabs
-            .child(section_tabs)
-            // Divider under tabs
-            .child(
-                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
                     .w_full()
-                    .h(px(1.0))
-                    .bg(tokens.border),
+                    .pt(px(20.0))
+                    .pb(px(16.0))
+                    .gap(px(14.0))
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg)
+                            .child("Settings"),
+                    )
+                    .child(segmented_control),
             )
+            // Separator
+            .child(div().w_full().h(px(1.0)).bg(tokens.border))
             // Scrollable body
             .child(
                 div()
@@ -2508,8 +3783,8 @@ impl AppShell {
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
-                    .px_4()
-                    .py_3()
+                    .px(px(20.0))
+                    .py(px(16.0))
                     .child(body),
             )
             // Footer
@@ -2535,7 +3810,7 @@ impl AppShell {
                         .top_0()
                         .left_0()
                         .size_full()
-                        .bg(Hsla::black().opacity(0.5))
+                        .bg(Hsla::black().opacity(0.45))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| {
@@ -2557,107 +3832,276 @@ impl AppShell {
         let restore = settings.restore_session;
         let ligatures = settings.font_ligatures;
 
+        // Card background: slightly elevated from surface
+        let card_bg = tokens.hover;
+
         div()
             .id("settings-general")
             .flex()
             .flex_col()
-            .gap_3()
+            .gap(px(20.0))
             .w_full()
+            // ── Application group ─────────────────────────────────────────
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(tokens.fg_muted)
-                    .child("Application"),
-            )
-            .child(self.settings_toggle_row(
-                "restore-session",
-                "Restore session on launch",
-                "Reopen tabs, splits, and working directories from the last quit",
-                restore,
-                tokens,
-                cx,
-                |this, cx| {
-                    let next = !TerminalSettings::get_global(cx).restore_session;
-                    TerminalSettings::set_restore_session(next, cx);
-                    // Drop session file writes immediately when turned off so a
-                    // later quit does not overwrite with a stale layout.
-                    if next {
-                        this.schedule_session_save(cx);
-                    }
-                    cx.notify();
-                },
-            ))
-            .child(
-                div()
-                    .mt_2()
-                    .text_size(px(11.0))
-                    .text_color(tokens.fg_muted)
-                    .child("Terminal"),
-            )
-            .child(self.settings_toggle_row(
-                "font-ligatures",
-                "Font ligatures",
-                "Enable OpenType ligatures when the font supports them (e.g. JetBrains Mono)",
-                ligatures,
-                tokens,
-                cx,
-                |_this, cx| {
-                    let next = !TerminalSettings::get_global(cx).font_ligatures;
-                    TerminalSettings::set_font_ligatures(next, cx);
-                    cx.notify();
-                },
-            ))
-            .child(self.settings_toggle_row(
-                "copy-on-select",
-                "Copy on select",
-                "Copy selected text when you release the mouse; shows a brief “copied to clipboard” toast",
-                TerminalSettings::get_global(cx).copy_on_select,
-                tokens,
-                cx,
-                |_this, cx| {
-                    let next = !TerminalSettings::get_global(cx).copy_on_select;
-                    TerminalSettings::set_copy_on_select(next, cx);
-                    cx.notify();
-                },
-            ))
-            .child(
-                div()
-                    .mt_3()
-                    .p_3()
-                    .rounded(px(6.0))
-                    .bg(tokens.hover)
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg_muted)
+                            .pl(px(2.0))
+                            .child("APPLICATION"),
+                    )
+                    .child(
+                        div()
+                            .rounded(px(10.0))
+                            .bg(card_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .overflow_hidden()
+                            .child(self.settings_toggle_row(
+                                "restore-session",
+                                "Restore session on launch",
+                                "Reopen tabs, splits, and working directories from the last quit",
+                                restore,
+                                tokens,
+                                cx,
+                                |this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).restore_session;
+                                    TerminalSettings::set_restore_session(next, cx);
+                                    if next {
+                                        this.schedule_session_save(cx);
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pl(px(14.0))
+                                    .child(div().w_full().h(px(1.0)).bg(tokens.border)),
+                            )
+                            .child(self.settings_tab_placement_row(tokens, cx)),
+                    ),
+            )
+            // ── Terminal group ────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg_muted)
+                            .pl(px(2.0))
+                            .child("TERMINAL"),
+                    )
+                    .child(
+                        div()
+                            .rounded(px(10.0))
+                            .bg(card_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .overflow_hidden()
+                            .child(self.settings_toggle_row(
+                                "font-ligatures",
+                                "Font ligatures",
+                                "Enable OpenType ligatures when the font supports them (e.g. JetBrains Mono)",
+                                ligatures,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).font_ligatures;
+                                    TerminalSettings::set_font_ligatures(next, cx);
+                                    cx.notify();
+                                },
+                            ))
+                            // Separator between rows
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pl(px(14.0))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(1.0))
+                                            .bg(tokens.border),
+                                    ),
+                            )
+                            .child(self.settings_toggle_row(
+                                "copy-on-select",
+                                "Copy on select",
+                                "Copy selected text when you release the mouse; shows a brief \u{201c}copied to clipboard\u{201d} toast",
+                                TerminalSettings::get_global(cx).copy_on_select,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).copy_on_select;
+                                    TerminalSettings::set_copy_on_select(next, cx);
+                                    cx.notify();
+                                },
+                            )),
+                    ),
+            )
+            // ── Advanced card ────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg_muted)
+                            .pl(px(2.0))
+                            .child("ADVANCED"),
+                    )
+                    .child(
+                        div()
+                            .rounded(px(10.0))
+                            .bg(card_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .px(px(14.0))
+                            .py(px(12.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(tokens.fg_muted)
+                                    .child(
+                                        format!(
+                                            "Custom key bindings, font family/size, and shell options live in settings.json. Reload with {}.",
+                                            crate::display_shortcut("reload_settings")
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(tokens.accent)
+                                    .child(sleipnir_settings::config_path().display().to_string()),
+                            ),
+                    ),
+            )
+    }
+
+    fn settings_tab_placement_row(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let current = TerminalSettings::get_global(cx).tab_placement;
+        div()
+            .id("tab-placement")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .w_full()
+            .px(px(14.0))
+            .py(px(10.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
                             .text_color(tokens.fg)
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("Advanced"),
+                            .child("Tab placement"),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
                             .text_color(tokens.fg_muted)
-                            .child(
-                                format!(
-                                    "Custom key bindings, font family/size, and shell options live in settings.json. Open the file and reload with {} (key bindings apply on next launch).",
-                                    crate::display_shortcut("reload_settings")
-                                ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_size(px(11.0))
-                            .text_color(tokens.accent)
-                            .child(sleipnir_settings::config_path().display().to_string()),
+                            .child("Side rail or top strip — same tab features either way"),
                     ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(tokens.border)
+                    .overflow_hidden()
+                    .child(self.settings_choice_chip(
+                        "tab-placement-side",
+                        "Side",
+                        current == TabPlacement::Side,
+                        tokens,
+                        cx,
+                        |_, cx| {
+                            TerminalSettings::set_tab_placement(TabPlacement::Side, cx);
+                            cx.notify();
+                        },
+                    ))
+                    .child(self.settings_choice_chip(
+                        "tab-placement-top",
+                        "Top",
+                        current == TabPlacement::Top,
+                        tokens,
+                        cx,
+                        |_, cx| {
+                            TerminalSettings::set_tab_placement(TabPlacement::Top, cx);
+                            cx.notify();
+                        },
+                    )),
             )
     }
 
-    /// One toggle row: title + description + on/off marker. `on_toggle` runs on click.
+    fn settings_choice_chip(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        selected: bool,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .px(px(10.0))
+            .py(px(4.0))
+            .text_size(px(12.0))
+            .cursor_pointer()
+            .bg(if selected {
+                tokens.accent.opacity(0.85)
+            } else {
+                gpui::hsla(0.0, 0.0, 0.0, 0.0)
+            })
+            .text_color(if selected {
+                Hsla::white()
+            } else {
+                tokens.fg_muted
+            })
+            .hover(|el| {
+                if selected {
+                    el
+                } else {
+                    el.bg(tokens.hover).text_color(tokens.fg)
+                }
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                on_click(this, cx);
+            }))
+            .child(SharedString::from(label))
+    }
+
+    /// One toggle row: macOS-style with inline toggle switch.
     fn settings_toggle_row(
         &self,
         id: &'static str,
@@ -2668,39 +4112,40 @@ impl AppShell {
         cx: &mut Context<Self>,
         on_toggle: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
-        let check: SharedString = if enabled { "●".into() } else { "○".into() };
-        let state: SharedString = if enabled { "On".into() } else { "Off".into() };
-        let state_color = if enabled { tokens.accent } else { tokens.fg_muted };
+        // Toggle switch colors
+        let track_bg = if enabled {
+            tokens.accent
+        } else {
+            tokens.border
+        };
+        let knob_bg = if enabled {
+            Hsla::white()
+        } else {
+            Hsla::white().opacity(0.9)
+        };
+        let knob_offset = if enabled { px(16.0) } else { px(2.0) };
 
         div()
             .id(id)
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap(px(12.0))
             .w_full()
-            .px_2()
-            .py_2()
-            .rounded(px(6.0))
+            .px(px(14.0))
+            .py(px(10.0))
             .cursor_pointer()
-            .hover(|el| el.bg(tokens.hover))
+            .hover(|el| el.bg(Hsla::white().opacity(0.03)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 on_toggle(this, cx);
             }))
-            .child(
-                div()
-                    .w(px(18.0))
-                    .text_size(px(14.0))
-                    .text_color(state_color)
-                    .child(check),
-            )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap_0p5()
+                    .gap(px(2.0))
                     .child(
                         div()
                             .text_size(px(13.0))
@@ -2714,39 +4159,90 @@ impl AppShell {
                             .child(SharedString::from(description)),
                     ),
             )
+            // macOS-style toggle switch
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(state_color)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(state),
+                    .flex_shrink_0()
+                    .w(px(34.0))
+                    .h(px(20.0))
+                    .rounded(px(10.0))
+                    .bg(track_bg)
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(2.0))
+                            .left(knob_offset)
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(px(8.0))
+                            .bg(knob_bg)
+                            .shadow(vec![gpui::BoxShadow {
+                                color: Hsla::black().opacity(0.15),
+                                offset: gpui::point(px(0.0), px(1.0)),
+                                blur_radius: px(2.0),
+                                spread_radius: px(0.0),
+                                inset: false,
+                            }]),
+                    ),
             )
     }
 
-    /// Theme section body: selectable list with ANSI swatches.
+    /// Theme section body: selectable list with ANSI swatches (type to filter).
     fn render_settings_theme_section(
         &self,
         tokens: &ChromeTokens,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let current = TerminalSettings::get_global(cx).theme;
+        let current = TerminalSettings::get_global(cx).theme.clone();
         let appearance = appearance_of(window.appearance());
+        let query = self.theme_query.trim().to_lowercase();
+        let matches = |hay: &str| query.is_empty() || hay.to_lowercase().contains(&query);
 
         let mut list = div()
             .id("settings-theme-list")
             .flex()
             .flex_col()
-            .gap_0p5()
+            .gap(px(2.0))
             .w_full();
 
+        // Type-to-filter: macOS-style search field.
+        let filter_text: SharedString = if self.theme_query.is_empty() {
+            "Search themes…".into()
+        } else {
+            format!("{}|", self.theme_query).into()
+        };
+        list = list.child(
+            div()
+                .px(px(10.0))
+                .py(px(7.0))
+                .mb(px(8.0))
+                .rounded(px(8.0))
+                .bg(tokens.hover)
+                .border_1()
+                .border_color(tokens.border)
+                .text_size(px(12.0))
+                .text_color(if self.theme_query.is_empty() {
+                    tokens.fg_muted
+                } else {
+                    tokens.fg
+                })
+                .child(filter_text),
+        );
+
+        let mut rendered = 0;
         for &theme in ThemeName::ALL {
-            let selected = theme == current;
+            if !matches(theme.display_name()) && !matches(theme.as_str()) {
+                continue;
+            }
+            rendered += 1;
+            let selected = ThemeSetting::Builtin(theme) == current;
             let preview = palette_for_theme(theme, appearance);
             let label: SharedString = theme.display_name().into();
             let row_id: ElementId = format!("theme-row-{}", theme.as_str()).into();
 
-            let mut swatches = div().flex().flex_row().items_center().gap_1();
+            let mut swatches = div().flex().flex_row().items_center().gap(px(3.0));
             let swatch_colors = [
                 preview.background,
                 preview.ansi[1],
@@ -2760,41 +4256,52 @@ impl AppShell {
                 swatches = swatches.child(
                     div()
                         .id(format!("swatch-{}-{}", theme.as_str(), i))
-                        .w(px(11.0))
-                        .h(px(11.0))
-                        .rounded(px(2.0))
+                        .w(px(12.0))
+                        .h(px(12.0))
+                        .rounded(px(3.0))
                         .bg(color)
                         .border_1()
-                        .border_color(tokens.border),
+                        .border_color(Hsla::black().opacity(0.1)),
                 );
             }
 
-            // Marker: ▸ + check for active (WezTerm-like), empty space otherwise.
-            let marker: SharedString = if selected { "▸".into() } else { " ".into() };
-            let check: SharedString = if selected { "✓".into() } else { "".into() };
+            // Radio-style selection indicator
+            let radio = div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded(px(8.0))
+                .border_2()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |el| {
+                    el.border_color(tokens.accent).child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(tokens.accent),
+                    )
+                })
+                .when(!selected, |el| el.border_color(tokens.fg_muted));
 
             let row = div()
                 .id(row_id)
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap(px(10.0))
                 .w_full()
-                .px_2()
-                .py_1p5()
-                .rounded(px(4.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
                 .cursor_pointer()
                 .when(selected, |el| el.bg(tokens.hover))
                 .hover(|el| el.bg(tokens.hover))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.select_theme(theme, cx);
                 }))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .text_color(tokens.accent)
-                        .child(marker),
-                )
+                .child(radio)
                 .child(
                     div()
                         .flex_1()
@@ -2803,15 +4310,119 @@ impl AppShell {
                         .text_color(tokens.fg)
                         .child(label),
                 )
-                .child(
-                    div()
-                        .w(px(16.0))
-                        .text_color(tokens.accent)
-                        .child(check),
-                )
                 .child(swatches);
 
             list = list.child(row);
+        }
+
+        // User theme catalog (`themes.json`), listed after the built-ins.
+        let catalog = TerminalSettings::user_themes(cx);
+        if !catalog.is_empty() {
+            let mut names: Vec<&String> = catalog.keys().collect();
+            names.sort();
+            list = list.child(
+                div()
+                    .px(px(10.0))
+                    .pt(px(12.0))
+                    .pb(px(4.0))
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(tokens.fg_muted)
+                    .child(SharedString::from("USER THEMES")),
+            );
+            for name in names {
+                if !matches(name) {
+                    continue;
+                }
+                rendered += 1;
+                let name = name.clone();
+                let selected = current == ThemeSetting::Custom(name.clone());
+                let preview = catalog[&name].to_palette();
+                let label: SharedString = name.clone().into();
+                let row_id: ElementId = format!("theme-row-custom-{name}").into();
+
+                let mut swatches = div().flex().flex_row().items_center().gap(px(3.0));
+                let swatch_colors = [
+                    preview.background,
+                    preview.ansi[1],
+                    preview.ansi[2],
+                    preview.ansi[3],
+                    preview.ansi[4],
+                    preview.ansi[5],
+                    preview.ansi[6],
+                ];
+                for (i, color) in swatch_colors.into_iter().enumerate() {
+                    swatches = swatches.child(
+                        div()
+                            .id(format!("swatch-custom-{name}-{i}"))
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .rounded(px(3.0))
+                            .bg(color)
+                            .border_1()
+                            .border_color(Hsla::black().opacity(0.1)),
+                    );
+                }
+
+                let radio = div()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .rounded(px(8.0))
+                    .border_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |el| {
+                        el.border_color(tokens.accent).child(
+                            div()
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .rounded(px(4.0))
+                                .bg(tokens.accent),
+                        )
+                    })
+                    .when(!selected, |el| el.border_color(tokens.fg_muted));
+
+                let row = div()
+                    .id(row_id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .when(selected, |el| el.bg(tokens.hover))
+                    .hover(|el| el.bg(tokens.hover))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.select_custom_theme(name.clone(), cx);
+                    }))
+                    .child(radio)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.0))
+                            .text_color(tokens.fg)
+                            .child(label),
+                    )
+                    .child(swatches);
+
+                list = list.child(row);
+            }
+        }
+
+        if rendered == 0 {
+            list = list.child(
+                div()
+                    .px(px(10.0))
+                    .py(px(12.0))
+                    .text_size(px(12.0))
+                    .text_color(tokens.fg_muted)
+                    .child(SharedString::from("No themes match")),
+            );
         }
 
         list
@@ -2875,18 +4486,8 @@ impl AppShell {
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.run_command(id, window, cx);
                         }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(tokens.fg)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(tokens.fg_muted)
-                                .child(shortcut),
-                        ),
+                        .child(div().text_sm().text_color(tokens.fg).child(title))
+                        .child(div().text_xs().text_color(tokens.fg_muted).child(shortcut)),
                 );
             }
         }
@@ -2938,11 +4539,7 @@ impl AppShell {
         )
     }
 
-    fn render_find_bar(
-        &self,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_find_bar(&self, tokens: &ChromeTokens, cx: &mut Context<Self>) -> impl IntoElement {
         let query_display: SharedString = if self.find_query.is_empty() {
             "Find in scrollback…".into()
         } else {
@@ -2958,12 +4555,13 @@ impl AppShell {
         } else if self.find_match_count == 0 {
             "0 matches".into()
         } else {
-            format!(
-                "{}/{}",
-                self.find_active_index + 1,
-                self.find_match_count
-            )
-            .into()
+            format!("{}/{}", self.find_active_index + 1, self.find_match_count).into()
+        };
+        // Legible on-accent foreground for the active toggle buttons.
+        let on_accent = if tokens.accent.l < 0.5 {
+            Hsla::white()
+        } else {
+            Hsla::black()
         };
 
         div()
@@ -2995,6 +4593,48 @@ impl AppShell {
                     .text_sm()
                     .text_color(query_color)
                     .child(query_display),
+            )
+            .child(
+                div()
+                    .id("find-match-case")
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tokens.hover))
+                    .when(self.find_match_case, |el| el.bg(tokens.accent))
+                    .text_xs()
+                    .text_color(if self.find_match_case {
+                        on_accent
+                    } else {
+                        tokens.fg_muted
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.find_match_case = !this.find_match_case;
+                        this.run_find(cx);
+                    }))
+                    .child(SharedString::from("Aa")),
+            )
+            .child(
+                div()
+                    .id("find-regex")
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tokens.hover))
+                    .when(self.find_regex, |el| el.bg(tokens.accent))
+                    .text_xs()
+                    .text_color(if self.find_regex {
+                        on_accent
+                    } else {
+                        tokens.fg_muted
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.find_regex = !this.find_regex;
+                        this.run_find(cx);
+                    }))
+                    .child(SharedString::from(".*")),
             )
             .child(
                 div()
@@ -3051,6 +4691,29 @@ impl AppShell {
     }
 }
 
+fn facts_section(tokens: &ChromeTokens, title: &str, lines: Vec<String>) -> impl IntoElement {
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(tokens.fg_muted)
+                .child(SharedString::from(title.to_string())),
+        );
+    for line in lines {
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(tokens.fg)
+                .child(SharedString::from(line)),
+        );
+    }
+    col
+}
+
 /// Escape a literal string for use inside a regex (alacritty search is regex-based).
 fn regex_escape_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
@@ -3072,14 +4735,106 @@ fn tree_contains(tree: &PaneNode, id: PaneId) -> bool {
     leaves.iter().any(|(leaf, _)| *leaf == id)
 }
 
+/// Whether a pane of the *active* tab is actually painted, given the tab's
+/// zoom state. Pane zoom shows exactly one leaf, so every other leaf is
+/// off-screen even though it is still in the tree and still draining its PTY.
+///
+/// This is the render contract [`AppShell::render_content`] implements; keep
+/// the two in sync, because [`AppShell::is_pane_visible`] uses this to decide
+/// whether a pane's change may request a window repaint.
+fn pane_is_on_screen(zoomed: Option<PaneId>, pane: PaneId) -> bool {
+    match zoomed {
+        Some(zoomed_pane) => zoomed_pane == pane,
+        None => true,
+    }
+}
+
+/// Insertion index for a tab-drag reorder: after removing the tab at `from`,
+/// dropping it on `target` places it immediately before the target. When the
+/// dragged tab sits left of the target, the target shifts left by one.
+fn reorder_insert_index(from: usize, target: usize) -> usize {
+    if from < target { target - 1 } else { target }
+}
+
+/// Identity assigned to a tab that just landed in a fresh window.
+///
+/// Source-window tab ids keep growing. A new `AppShell` starts `next_id` at 1,
+/// so keeping the old id lets a later `add_tab` collide. Rebase the tab to 1
+/// and advance both counters past the adopted tree. Pane ids stay as-is
+/// (they remain unique inside the tree).
+struct AdoptedTabIds {
+    tab_id: u64,
+    next_id: u64,
+    next_pane_id: PaneId,
+}
+
+fn rebase_detached_tab(max_pane_id: PaneId) -> AdoptedTabIds {
+    AdoptedTabIds {
+        tab_id: 1,
+        next_id: 2,
+        next_pane_id: max_pane_id.saturating_add(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pane_is_on_screen, rebase_detached_tab, reorder_insert_index};
+
+    #[test]
+    fn every_leaf_is_on_screen_without_zoom() {
+        assert!(pane_is_on_screen(None, 1));
+        assert!(pane_is_on_screen(None, 2));
+    }
+
+    #[test]
+    fn zoom_hides_every_pane_but_the_zoomed_one() {
+        // Pane 2 is zoomed: 1 and 3 keep draining their PTYs but are not
+        // painted, so their output must not request a window repaint.
+        assert!(pane_is_on_screen(Some(2), 2));
+        assert!(!pane_is_on_screen(Some(2), 1));
+        assert!(!pane_is_on_screen(Some(2), 3));
+    }
+
+    #[test]
+    fn reorder_insert_index_places_before_target() {
+        // [A, B, C, D]: drag A onto C → insert at 1 → [B, A, C, D].
+        assert_eq!(reorder_insert_index(0, 2), 1);
+        // [A, B, C, D]: drag D onto B → insert at 1 → [A, D, B, C].
+        assert_eq!(reorder_insert_index(3, 1), 1);
+        // Drag onto the immediate right neighbour: stays in place.
+        assert_eq!(reorder_insert_index(0, 1), 0);
+        // Drag onto the immediate left neighbour: lands just before it.
+        assert_eq!(reorder_insert_index(1, 0), 0);
+    }
+
+    #[test]
+    fn rebase_detached_tab_restarts_ids_in_the_new_window() {
+        // A high source-window id (tab 5, panes up to 7) must not leak into
+        // the destination window's counters — next add_tab / split would collide.
+        let ids = rebase_detached_tab(7);
+        assert_eq!(ids.tab_id, 1);
+        assert_eq!(ids.next_id, 2);
+        assert_eq!(ids.next_pane_id, 8);
+    }
+
+    #[test]
+    fn rebase_detached_tab_advances_pane_counter_past_a_single_leaf() {
+        let ids = rebase_detached_tab(1);
+        assert_eq!(ids.tab_id, 1);
+        assert_eq!(ids.next_id, 2);
+        assert_eq!(ids.next_pane_id, 2);
+    }
+}
+
 fn snapshot_tree(node: &PaneNode, cx: &App) -> SessionNode {
     match node {
-        PaneNode::Leaf { id, view } => SessionNode::Leaf {
+        PaneNode::Leaf { id, pane_key, view } => SessionNode::Leaf {
             id: *id,
             cwd: view
                 .read(cx)
                 .working_directory(cx)
                 .map(|p| p.to_string_lossy().into_owned()),
+            pane_key: Some(*pane_key),
         },
         PaneNode::Split {
             axis,
@@ -3100,151 +4855,26 @@ fn snapshot_tree(node: &PaneNode, cx: &App) -> SessionNode {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_ledger_focus(window, cx);
+        self.refresh_pane_facts_if_stale(cx);
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
-        let geo = ChromeGeometry::standard();
-        let active = self.active;
-        let hovered = self.hovered_tab;
+        let settings = TerminalSettings::get_global(cx);
+        let geo = ChromeGeometry::standard().with_sidebar_width(settings.sidebar_width);
+        let side = tab_sidebar::is_side_placement(cx);
         let fullscreen = window.is_fullscreen();
         let leading = if fullscreen {
             ChromeGeometry::fullscreen_leading_pad()
         } else {
             geo.leading_pad
         };
-
-        let leading_drag = self
-            .attach_empty_drag("chrome-drag-leading", cx)
-            .w(leading);
-
-        let trailing_drag = self
-            .attach_empty_drag("chrome-drag-trailing", cx)
-            .flex_1();
-        let trailing = div()
-            .id("chrome-trailing")
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_1()
-            .min_w(geo.trailing_pad)
-            .child(trailing_drag)
-            .when(cfg!(target_os = "linux") && !fullscreen, |el| {
-                el.child(self.render_linux_caption_buttons(&tokens, cx))
-            });
-
-        let tab_scroll = div()
-            .id("tab-scroller")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(geo.tab_gap)
-            .h_full()
-            .min_w_0()
-            .flex_shrink(1.)
-            .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll_handle)
-            .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
-                let title: SharedString = tab.title(cx);
-                let is_active = ix == active;
-                let is_hovered = hovered == Some(tab.id);
-                let tab_id = tab.id;
-                let rename_buffer = self
-                    .rename
-                    .as_ref()
-                    .filter(|s| s.tab_id == tab_id)
-                    .map(|s| s.buffer.clone());
-                let is_renaming = rename_buffer.is_some();
-
-                let is_bell = self.bell_flash_tabs.contains(&tab_id);
-                let bg = if is_bell {
-                    tokens.accent.opacity(0.35)
-                } else if is_active {
-                    tokens.active_tab_bg()
-                } else if is_hovered {
-                    tokens.hover
-                } else {
-                    // Transparent over the chrome band
-                    gpui::hsla(0.0, 0.0, 0.0, 0.0)
-                };
-                let fg = if is_active || is_bell || is_hovered {
-                    tokens.fg
-                } else {
-                    tokens.fg_muted
-                };
-
-                div()
-                    .id(("tab", tab_id))
-                    .h(geo.tab_height)
-                    .min_w(geo.tab_min_width)
-                    .max_w(geo.tab_max_width)
-                    .px(geo.tab_px)
-                    .rounded(geo.tab_radius)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .bg(bg)
-                    .text_color(fg)
-                    .text_sm()
-                    .cursor_pointer()
-                    .overflow_hidden()
-                    .when(is_renaming, |el| {
-                        el.border_1().border_color(tokens.accent)
-                    })
-                    .when(is_bell, |el| el.border_1().border_color(tokens.accent))
-                    .on_hover(cx.listener(move |this, hovered, _, cx| {
-                        if *hovered {
-                            this.hovered_tab = Some(tab_id);
-                        } else if this.hovered_tab == Some(tab_id) {
-                            this.hovered_tab = None;
-                        }
-                        cx.notify();
-                    }))
-                    // Right-click a tab to rename it inline.
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, _, _, cx| {
-                            this.begin_rename(tab_id, cx);
-                        }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // While renaming, a click shouldn't switch tabs.
-                        if this.rename.as_ref().is_some_and(|s| s.tab_id == tab_id) {
-                            return;
-                        }
-                        this.activate(ix, window, cx);
-                    }))
-                    .child(if let Some(buffer) = rename_buffer {
-                        let text: SharedString = format!("{buffer}|").into();
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_color(tokens.fg)
-                            .child(text)
-                    } else {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(title)
-                    })
-            }));
-
-        let chrome_band = div()
-            .id("chrome-band")
-            .h(geo.height)
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .bg(tokens.content_bg)
-            .child(leading_drag)
-            .child(tab_scroll)
-            .child(trailing);
+        let chrome_h = geo.height;
+        let banner_top = if side {
+            geo.content_title_height
+        } else {
+            chrome_h
+        };
 
         div()
             .size_full()
@@ -3261,66 +4891,114 @@ impl Render for AppShell {
             .key_context("AppShell")
             // Intercept keys during overlays / rename before the focused terminal
             // sees them (capture phase runs top-down).
-            .capture_key_down(cx.listener(
-                |this, event: &gpui::KeyDownEvent, window, cx| {
-                    if this.close_confirm.is_some() {
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.close_confirm.is_some() {
+                    match event.keystroke.key.as_str() {
+                        "escape" => {
+                            this.confirm_close_cancel(window, cx);
+                            cx.stop_propagation();
+                        }
+                        "enter" => {
+                            this.confirm_close_proceed(window, cx);
+                            cx.stop_propagation();
+                        }
+                        _ => {
+                            if !event.keystroke.modifiers.platform {
+                                cx.stop_propagation();
+                            }
+                        }
+                    }
+                    return;
+                }
+                if this.update_open {
+                    if event.keystroke.key.as_str() == "escape" {
+                        this.close_update(cx);
+                        cx.stop_propagation();
+                    }
+                    if !event.keystroke.modifiers.platform {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this.facts_open && event.keystroke.key.as_str() == "escape" {
+                    this.facts_open = false;
+                    this.facts = None;
+                    this.facts_at = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.palette_open {
+                    if this.palette_key_down(event, window, cx) {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this.find_open {
+                    if this.find_key_down(event, window, cx) {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this.settings_open {
+                    // Type-to-filter the theme picker when that section is
+                    // active; escape clears the filter before closing.
+                    if this.settings_section == SettingsSection::Theme {
                         match event.keystroke.key.as_str() {
                             "escape" => {
-                                this.confirm_close_cancel(window, cx);
+                                if !this.theme_query.is_empty() {
+                                    this.theme_query.clear();
+                                    cx.notify();
+                                } else {
+                                    this.close_settings(window, cx);
+                                }
                                 cx.stop_propagation();
+                                return;
                             }
-                            "enter" => {
-                                this.confirm_close_proceed(window, cx);
+                            "backspace" => {
+                                this.theme_query.pop();
+                                cx.notify();
                                 cx.stop_propagation();
+                                return;
                             }
                             _ => {
-                                if !event.keystroke.modifiers.platform {
-                                    cx.stop_propagation();
+                                if !event.keystroke.modifiers.platform
+                                    && let Some(ch) = event.keystroke.key_char.as_ref()
+                                    && !ch.is_empty()
+                                    && !ch.chars().any(|c| c.is_control())
+                                {
+                                    this.theme_query.push_str(ch);
+                                    cx.notify();
                                 }
                             }
                         }
-                        return;
                     }
-                    if this.update_open {
-                        if event.keystroke.key.as_str() == "escape" {
-                            this.close_update(cx);
-                            cx.stop_propagation();
-                        }
-                        if !event.keystroke.modifiers.platform {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    }
-                    if this.palette_open {
-                        if this.palette_key_down(event, window, cx) {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    }
-                    if this.find_open {
-                        if this.find_key_down(event, window, cx) {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    }
-                    if this.settings_open {
-                        if event.keystroke.key.as_str() == "escape" {
-                            this.close_settings(window, cx);
-                            cx.stop_propagation();
-                        }
-                        // Swallow other keys while the settings panel is open
-                        // so they don't reach the terminal underneath.
-                        // ⌘, (OpenSettings) still fires via on_action.
-                        if !event.keystroke.modifiers.platform {
-                            cx.stop_propagation();
-                        }
-                        return;
-                    }
-                    if this.rename_key_down(event, window, cx) {
+                    if event.keystroke.key.as_str() == "escape" {
+                        this.close_settings(window, cx);
                         cx.stop_propagation();
                     }
-                },
-            ))
+                    // Swallow other keys while the settings panel is open
+                    // so they don't reach the terminal underneath.
+                    // ⌘, (OpenSettings) still fires via on_action.
+                    if !event.keystroke.modifiers.platform {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this.diff_open {
+                    if this.handle_diff_key(event, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if !event.keystroke.modifiers.platform {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this.rename_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             // Clicking anywhere else (terminal, another tab) commits the
             // in-progress rename.
             .capture_any_mouse_down(cx.listener(
@@ -3359,13 +5037,83 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_jump_next_prompt))
             .on_action(cx.listener(Self::on_toggle_quick_select))
             .on_action(cx.listener(Self::on_open_quick_terminal))
-            .child(chrome_band)
+            .on_action(cx.listener(Self::on_export_scrollback))
+            .on_action(cx.listener(Self::on_clear_run_ledger))
+            .on_action(cx.listener(Self::on_toggle_run_ledger))
+            .on_action(cx.listener(Self::on_mark_tab_seen))
+            .on_action(cx.listener(Self::on_toggle_pane_facts))
+            .on_action(cx.listener(Self::on_send_selection))
+            .on_action(cx.listener(Self::on_pipe_selection))
+            .on_action(cx.listener(Self::on_send_git_diff))
+            .on_action(cx.listener(Self::on_toggle_diff))
+            .on_action(cx.listener(Self::on_toggle_history_search))
+            .on_action(cx.listener(Self::on_toggle_tab_placement))
+            .when(!side, |el| {
+                let leading_drag = self
+                    .attach_empty_drag("chrome-drag-leading", cx)
+                    .h_full()
+                    .w(leading);
+                let trailing_drag = self
+                    .attach_empty_drag("chrome-drag-trailing", cx)
+                    .h_full()
+                    .flex_1()
+                    .min_w(geo.trailing_pad);
+                let tab_scroll = self.render_tab_strip(&tokens, &geo, window, cx);
+                let chrome_band = div()
+                    .id("chrome-band")
+                    .h(chrome_h)
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .bg(tokens.content_bg)
+                    .child(leading_drag)
+                    .child(tab_scroll)
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px_2()
+                            .child(self.render_diff_chrome_button(&tokens, &palette, cx)),
+                    )
+                    .child(trailing_drag);
+                el.child(chrome_band)
+                    .when(self.find_open, |el| {
+                        el.child(self.render_find_bar(&tokens, cx))
+                    })
+                    .child(self.render_content(&tokens, window, cx))
+            })
+            .when(side, |el| {
+                el.child(
+                    div()
+                        .id("side-layout")
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(self.render_tab_sidebar(&tokens, &geo, window, cx))
+                        .child(
+                            div()
+                                .id("side-content")
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .child(self.render_content_title(&tokens, &geo, cx))
+                                .when(self.find_open, |el| {
+                                    el.child(self.render_find_bar(&tokens, cx))
+                                })
+                                .child(self.render_content(&tokens, window, cx)),
+                        ),
+                )
+            })
             .when(self.broadcast, |el| {
                 el.child(
                     div()
                         .id("broadcast-banner")
                         .absolute()
-                        .top(px(36.0))
+                        .top(banner_top)
                         .left_0()
                         .right_0()
                         .flex()
@@ -3409,10 +5157,6 @@ impl Render for AppShell {
                         ),
                 )
             })
-            .when(self.find_open, |el| {
-                el.child(self.render_find_bar(&tokens, cx))
-            })
-            .child(self.render_content(&tokens, window, cx))
             .when(self.settings_open, |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))
             })
@@ -3425,20 +5169,354 @@ impl Render for AppShell {
             .when(self.close_confirm.is_some(), |el| {
                 el.child(self.render_close_confirm(&tokens, cx))
             })
+            .when(self.facts_open, |el| {
+                el.child(self.render_pane_facts(&tokens, cx))
+            })
+            .when(self.ledger_open, |el| {
+                el.child(self.render_run_ledger(&tokens, window, cx))
+            })
+            .when(self.history_open, |el| {
+                el.child(self.render_history_search(&tokens, cx))
+            })
+            .when(self.diff_open, |el| {
+                el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
+            })
+            .when_some(self.active_tombstone(cx), |el, stone| {
+                el.child(self.render_tombstone(&tokens, stone))
+            })
     }
 }
 
 impl AppShell {
+    fn render_pane_facts(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::chrome::pane_facts::localhost_copy;
+        let facts = self.facts.clone().unwrap_or_default();
+
+        let mut body = div()
+            .id("pane-facts-body")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .pb_3()
+            .overflow_y_scroll();
+
+        if let Some(cwd) = facts.cwd.as_ref() {
+            body = body.child(facts_section(
+                tokens,
+                "Directory",
+                vec![cwd.display().to_string()],
+            ));
+        }
+        if let Some(name) = facts.foreground.as_ref() {
+            body = body.child(facts_section(tokens, "Foreground", vec![name.clone()]));
+        }
+        if !facts.tree.is_empty() {
+            let lines: Vec<String> = facts
+                .tree
+                .iter()
+                .map(|row| {
+                    let pad = "  ".repeat(row.depth);
+                    match row.name.as_deref() {
+                        Some(name) => format!("{pad}{name}  {}", row.pid),
+                        None => format!("{pad}{}", row.pid),
+                    }
+                })
+                .collect();
+            body = body.child(facts_section(tokens, "Processes", lines));
+        }
+        if !facts.ports.is_empty() {
+            let mut port_col = div().flex().flex_col().gap_1();
+            for port in &facts.ports {
+                let label: SharedString = port.addr.clone().into();
+                let copy = localhost_copy(&port.addr);
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().text_color(tokens.fg).child(label));
+                if let Some(text) = copy {
+                    row = row.child(
+                        div()
+                            .id(("copy-port", port.pid as u64))
+                            .text_xs()
+                            .text_color(tokens.accent)
+                            .cursor_pointer()
+                            .child("copy")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                            })),
+                    );
+                }
+                port_col = port_col.child(row);
+            }
+            body = body
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(tokens.fg_muted)
+                        .child("Ports"),
+                )
+                .child(port_col);
+        }
+
+        deferred(
+            div()
+                .id("pane-facts-overlay")
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(280.0))
+                .flex()
+                .flex_col()
+                .bg(tokens.surface)
+                .border_l_1()
+                .border_color(tokens.border)
+                .occlude()
+                .child(
+                    div()
+                        .id("pane-facts-header")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px_3()
+                        .py_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(tokens.fg)
+                                .child("Pane"),
+                        )
+                        .child(
+                            div()
+                                .id("pane-facts-close")
+                                .text_xs()
+                                .text_color(tokens.fg_muted)
+                                .cursor_pointer()
+                                .child("Esc")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.facts_open = false;
+                                    this.facts = None;
+                                    this.facts_at = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(body),
+        )
+    }
+
+    fn active_tombstone(&self, cx: &App) -> Option<crate::chrome::tombstone::Tombstone> {
+        if !TerminalSettings::get_global(cx).show_tombstone {
+            return None;
+        }
+        let tab = self.tabs.get(self.active)?;
+        let pane = tab.tree.pane_key_for_id(tab.active_pane)?;
+        let ledger = cx.try_global::<RunLedgerGlobal>()?;
+        self.tombstone_gate
+            .banner(&ledger.snapshot(), pane, ledger.launch_id())
+    }
+
+    fn render_tombstone(
+        &self,
+        tokens: &ChromeTokens,
+        stone: crate::chrome::tombstone::Tombstone,
+    ) -> impl IntoElement {
+        div()
+            .id("tombstone-banner")
+            .absolute()
+            .top(px(4.0))
+            .left_4()
+            .right_4()
+            .px_3()
+            .py_1()
+            .rounded(px(6.0))
+            .bg(tokens.surface)
+            .border_1()
+            .border_color(tokens.border)
+            .text_xs()
+            .text_color(tokens.fg_muted)
+            .child(stone.summary)
+    }
+
+    fn render_run_ledger(
+        &self,
+        tokens: &ChromeTokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::run_ledger_panel::{can_jump, group_label, row_summary, rows_from_runs};
+        let ledger = cx.try_global::<RunLedgerGlobal>();
+        let (rows, launch) = match ledger {
+            Some(g) => (rows_from_runs(&g.snapshot()), g.launch_id()),
+            None => (Vec::new(), run_ledger::LaunchId::nil()),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut body = div()
+            .id("run-ledger-body")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .pb_3()
+            .overflow_y_scroll();
+        let mut last_group = "";
+        for (i, row) in rows.iter().enumerate() {
+            let group = group_label(row, now, launch);
+            if group != last_group {
+                last_group = group;
+                body = body.child(
+                    div()
+                        .pt_2()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(tokens.fg_muted)
+                        .child(group),
+                );
+            }
+            let summary: SharedString = row_summary(row).into();
+            let pane = row.pane;
+            let id = row.id;
+            let jump = can_jump(row, launch);
+            body = body.child(
+                div()
+                    .id(("ledger-row", i))
+                    .text_xs()
+                    .text_color(if jump { tokens.fg } else { tokens.fg_muted })
+                    .cursor_pointer()
+                    .child(summary)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if cx.has_global::<RunLedgerGlobal>() {
+                            cx.update_global(|g: &mut RunLedgerGlobal, _| {
+                                g.mark_run_seen(id);
+                            });
+                        }
+                        this.jump_to_ledger_row(pane, Some(id), window, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        let _ = window;
+        deferred(
+            div()
+                .id("run-ledger-overlay")
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(300.0))
+                .flex()
+                .flex_col()
+                .bg(tokens.surface)
+                .border_l_1()
+                .border_color(tokens.border)
+                .occlude()
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(tokens.fg)
+                        .child("Run Ledger"),
+                )
+                .child(body),
+        )
+    }
+
+    fn render_history_search(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::chrome::history_search::{filter_history, parse_history_file};
+        let text = std::env::var("HISTFILE")
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .or_else(|| {
+                dirs::home_dir().and_then(|h| {
+                    std::fs::read_to_string(h.join(".zsh_history"))
+                        .ok()
+                        .or_else(|| std::fs::read_to_string(h.join(".bash_history")).ok())
+                })
+            })
+            .unwrap_or_default();
+        let hits = parse_history_file(&text);
+        let shown = filter_history(&hits, &self.history_query, 20);
+        let mut list = div().flex().flex_col().gap_1().px_3().pb_3();
+        for (i, hit) in shown.iter().enumerate() {
+            let cmd = hit.command.clone();
+            list = list.child(
+                div()
+                    .id(("hist", i))
+                    .text_xs()
+                    .text_color(tokens.fg)
+                    .cursor_pointer()
+                    .child(hit.command.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(view) = this.active_view(cx) {
+                            view.update(cx, |v, cx| v.input_bytes(cmd.clone().into_bytes(), cx));
+                        }
+                        this.history_open = false;
+                        this.history_query.clear();
+                        cx.notify();
+                    })),
+            );
+        }
+        deferred(
+            div()
+                .id("history-search-overlay")
+                .absolute()
+                .top(px(48.0))
+                .left_0()
+                .right_0()
+                .mx_auto()
+                .w(px(420.0))
+                .bg(tokens.surface)
+                .border_1()
+                .border_color(tokens.border)
+                .rounded(px(8.0))
+                .occlude()
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(tokens.fg_muted)
+                        .child(format!("History · {}", self.history_query)),
+                )
+                .child(list),
+        )
+    }
+
     fn render_close_confirm(
         &self,
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let message = self
-            .close_confirm
-            .as_ref()
-            .map(|s| s.message.clone())
-            .unwrap_or_else(|| "Close this pane?".into());
+        let (title, message, ok_label) = match self.close_confirm.as_ref() {
+            Some(s) if s.kind == ConfirmKind::ClearRunLedger => {
+                ("Clear Run Ledger?", s.message.clone(), "Clear")
+            }
+            Some(s) => ("Close pane?", s.message.clone(), "Close"),
+            None => (
+                "Close pane?",
+                SharedString::from("Close this pane?"),
+                "Close",
+            ),
+        };
 
         let panel = div()
             .id("close-confirm-panel")
@@ -3463,7 +5541,7 @@ impl AppShell {
                     .text_size(px(15.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(tokens.fg)
-                    .child("Close pane?"),
+                    .child(title),
             )
             .child(
                 div()
@@ -3506,7 +5584,7 @@ impl AppShell {
                             .cursor_pointer()
                             .text_size(px(13.0))
                             .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
-                            .child("Close")
+                            .child(ok_label)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.confirm_close_proceed(window, cx);
                             })),
@@ -3543,5 +5621,62 @@ impl AppShell {
                 )
                 .child(panel),
         )
+    }
+}
+
+fn run_id_for_gutter(
+    snapshot: &[run_ledger::Run],
+    pane: PaneKey,
+    line: i32,
+) -> Option<run_ledger::RunId> {
+    if let Some(run) = snapshot.iter().rev().find(|run| {
+        run.pane == pane && run.anchor.is_some_and(|anchor| anchor.line == line)
+    }) {
+        return Some(run.id);
+    }
+    snapshot
+        .iter()
+        .rev()
+        .filter(|run| run.pane == pane)
+        .filter_map(|run| run.anchor.map(|anchor| (run.id, anchor.line)))
+        .filter(|(_, start)| *start <= line)
+        .max_by_key(|(_, start)| *start)
+        .map(|(id, _)| id)
+}
+
+#[cfg(test)]
+mod gutter_jump_tests {
+    use super::run_id_for_gutter;
+    use run_ledger::{Anchor, LaunchId, Ledger, PaneKey, RunEvent};
+
+    #[test]
+    fn prefers_exact_start_line_then_nearest_preceding() {
+        let pane = PaneKey::new_v4();
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        ledger.set_redact(false);
+        ledger.apply(RunEvent::started_at(
+            pane,
+            "first",
+            None,
+            0,
+            false,
+            Some(Anchor { line: 10, column: 0 }),
+        ));
+        ledger.apply(RunEvent::finished(pane, Some(0), 5));
+        ledger.apply(RunEvent::started_at(
+            pane,
+            "second",
+            None,
+            10,
+            false,
+            Some(Anchor { line: 20, column: 0 }),
+        ));
+        let snap = ledger.snapshot();
+        let first = snap.iter().find(|r| r.command == "first").unwrap().id;
+        let second = snap.iter().find(|r| r.command == "second").unwrap().id;
+        assert_eq!(run_id_for_gutter(&snap, pane, 10), Some(first));
+        assert_eq!(run_id_for_gutter(&snap, pane, 20), Some(second));
+        assert_eq!(run_id_for_gutter(&snap, pane, 24), Some(second));
+        assert_eq!(run_id_for_gutter(&snap, pane, 15), Some(first));
     }
 }

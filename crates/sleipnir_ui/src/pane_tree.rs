@@ -5,11 +5,14 @@
 //! a single `Leaf`, so the no-split case is the degenerate tree.
 
 use gpui::{Bounds, Entity, Pixels};
+use uuid::Uuid;
 
 use crate::TermView;
 
 /// Stable identity for a leaf pane within a tab.
 pub type PaneId = u64;
+/// Stable identity for a Pane across restarts; persisted in `session.json`.
+pub type PaneKey = Uuid;
 
 /// Split orientation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +37,7 @@ pub enum Direction {
 pub enum PaneNode {
     Leaf {
         id: PaneId,
+        pane_key: PaneKey,
         view: Entity<TermView>,
     },
     Split {
@@ -51,7 +55,11 @@ pub const MIN_RATIO: f32 = 0.1;
 
 impl PaneNode {
     pub fn leaf(id: PaneId, view: Entity<TermView>) -> Self {
-        PaneNode::Leaf { id, view }
+        Self::leaf_with_key(id, Uuid::new_v4(), view)
+    }
+
+    pub fn leaf_with_key(id: PaneId, pane_key: PaneKey, view: Entity<TermView>) -> Self {
+        PaneNode::Leaf { id, pane_key, view }
     }
 
     /// Number of leaf panes in this subtree.
@@ -65,10 +73,62 @@ impl PaneNode {
     /// Collect `(PaneId, &Entity<TermView>)` for every leaf, in tree order.
     pub fn leaves<'a>(&'a self, out: &mut Vec<(PaneId, &'a Entity<TermView>)>) {
         match self {
-            PaneNode::Leaf { id, view } => out.push((*id, view)),
+            PaneNode::Leaf { id, view, .. } => out.push((*id, view)),
             PaneNode::Split { first, second, .. } => {
                 first.leaves(out);
                 second.leaves(out);
+            }
+        }
+    }
+
+    pub fn pane_key_for_view(&self, view: &Entity<TermView>) -> Option<PaneKey> {
+        match self {
+            PaneNode::Leaf { pane_key, view: leaf, .. } if leaf == view => Some(*pane_key),
+            PaneNode::Split { first, second, .. } => first
+                .pane_key_for_view(view)
+                .or_else(|| second.pane_key_for_view(view)),
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
+    pub fn pane_id_for_key(&self, key: PaneKey) -> Option<PaneId> {
+        match self {
+            PaneNode::Leaf { id, pane_key, .. } if *pane_key == key => Some(*id),
+            PaneNode::Split { first, second, .. } => first
+                .pane_id_for_key(key)
+                .or_else(|| second.pane_id_for_key(key)),
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
+    pub fn pane_key_for_id(&self, id: PaneId) -> Option<PaneKey> {
+        match self {
+            PaneNode::Leaf { id: leaf, pane_key, .. } if *leaf == id => Some(*pane_key),
+            PaneNode::Split { first, second, .. } => first
+                .pane_key_for_id(id)
+                .or_else(|| second.pane_key_for_id(id)),
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
+    pub fn all_pane_keys(&self) -> Vec<PaneKey> {
+        match self {
+            PaneNode::Leaf { pane_key, .. } => vec![*pane_key],
+            PaneNode::Split { first, second, .. } => {
+                let mut keys = first.all_pane_keys();
+                keys.extend(second.all_pane_keys());
+                keys
+            }
+        }
+    }
+
+    /// Collect `(PaneKey, TermView)` for every leaf, in tree order.
+    pub fn leaves_with_keys(&self, out: &mut Vec<(PaneKey, Entity<TermView>)>) {
+        match self {
+            PaneNode::Leaf { pane_key, view, .. } => out.push((*pane_key, view.clone())),
+            PaneNode::Split { first, second, .. } => {
+                first.leaves_with_keys(out);
+                second.leaves_with_keys(out);
             }
         }
     }
@@ -82,10 +142,59 @@ impl PaneNode {
     }
 
     /// Whether this subtree contains a leaf with `id`.
-    fn contains(&self, id: PaneId) -> bool {
+    pub fn contains_leaf(&self, id: PaneId) -> bool {
         match self {
             PaneNode::Leaf { id: leaf, .. } => *leaf == id,
-            PaneNode::Split { first, second, .. } => first.contains(id) || second.contains(id),
+            PaneNode::Split { first, second, .. } => {
+                first.contains_leaf(id) || second.contains_leaf(id)
+            }
+        }
+    }
+
+    fn contains(&self, id: PaneId) -> bool {
+        self.contains_leaf(id)
+    }
+
+    /// Pull `target` out of this tree, collapsing its parent split.
+    /// The leaf's `TermView` handle is cloned (same entity, no new PTY).
+    pub fn take_leaf(&mut self, target: PaneId) -> Result<PaneNode, TakeLeafError> {
+        if let PaneNode::Leaf { id, .. } = self {
+            return if *id == target {
+                Err(TakeLeafError::LastPane)
+            } else {
+                Err(TakeLeafError::NotFound)
+            };
+        }
+
+        let (first_is_target, second_is_target) = match self {
+            PaneNode::Split { first, second, .. } => {
+                (first.is_leaf(target), second.is_leaf(target))
+            }
+            PaneNode::Leaf { .. } => (false, false),
+        };
+
+        if first_is_target || second_is_target {
+            let taken = match self {
+                PaneNode::Split { first, second, .. } => {
+                    if first_is_target {
+                        first.as_ref().clone()
+                    } else {
+                        second.as_ref().clone()
+                    }
+                }
+                PaneNode::Leaf { .. } => return Err(TakeLeafError::NotFound),
+            };
+            take_and_collapse(self, first_is_target);
+            return Ok(taken);
+        }
+
+        if let PaneNode::Split { first, second, .. } = self {
+            match first.take_leaf(target) {
+                Err(TakeLeafError::NotFound) => second.take_leaf(target),
+                other => other,
+            }
+        } else {
+            Err(TakeLeafError::NotFound)
         }
     }
 
@@ -100,9 +209,10 @@ impl PaneNode {
         new_view: Entity<TermView>,
     ) -> bool {
         match self {
-            PaneNode::Leaf { id, view } if *id == target => {
+            PaneNode::Leaf { id, pane_key, view } if *id == target => {
                 // Rebuild this leaf as a split: first = old leaf, second = new.
-                let old = PaneNode::leaf(*id, view.clone());
+                // Keep the original pane_key so Run Ledger ownership stays put.
+                let old = PaneNode::leaf_with_key(*id, *pane_key, view.clone());
                 *self = PaneNode::Split {
                     axis,
                     ratio: 0.5,
@@ -197,6 +307,15 @@ fn take_and_collapse(node: &mut PaneNode, keep_second: bool) {
         };
         *node = survivor;
     }
+}
+
+/// Result of trying to lift a leaf out of a tree without closing the tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TakeLeafError {
+    /// The pane is the only leaf; extracting it would empty the tab.
+    LastPane,
+    /// No pane with that id exists in this tree.
+    NotFound,
 }
 
 /// Result of closing a pane.

@@ -24,6 +24,14 @@ log.workspace = true
 util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+run_ledger.workspace = true
+diff_core.workspace = true
+syntax.workspace = true
+sleipnir_ctl.workspace = true
+sysinfo.workspace = true
+async-channel.workspace = true
+objc = "0.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-notify-rust = "4"
+[dev-dependencies]
+tempfile.workspace = true

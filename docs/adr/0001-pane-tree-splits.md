@@ -1,7 +1,6 @@
 # Split panes via a recursive PaneTree
 
-**Status:** accepted (supersedes the "no split panes" Non-Goal in
-`docs/ui-chrome-hig-redesign.md`)
+**Status:** accepted
 
 To match modern terminals (iTerm2, Warp), a Tab may now contain multiple terminal
 sessions arranged by splitting. We model each Tab's contents as a recursive
@@ -17,7 +16,5 @@ closing the last Pane in a Tab closes the Tab.
 
 - Focus, keyboard routing, and layout must operate on the tree, not on a single
   active `TermView` — exactly one **Active Pane** per Window receives input.
-- The `docs/ui-chrome-hig-redesign.md` design doc listed split panes as a
-  Non-Goal; this decision deliberately overrides that. That doc's chrome work
-  (unified title band, connected active tab) still stands — only the "no splits"
-  boundary is reversed.
+- This decision overrides an earlier "no split panes" product boundary.
+  Chrome work (unified title band, connected active tab) is unchanged.

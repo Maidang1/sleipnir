@@ -1,51 +1,61 @@
 //! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
 mod app_shell;
+mod attention_chrome;
 mod blink;
 mod chrome;
 mod command_palette;
+mod control_surface;
+mod diff;
 mod keymap;
 mod pane_tree;
+mod run_ledger_global;
+mod run_ledger_panel;
+mod tab_convert;
 mod session;
 mod term_element;
 
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 
 pub use app_shell::{
-    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, Find,
-    FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
-    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
-    SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
+    ActivateTab, AppShell, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize,
+    ExportScrollback, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
+    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown, SplitRight,
+    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleBroadcast,
+    ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
+    ToggleQuickSelect, ToggleRunLedger, ToggleTabPlacement,
     UpdateUiState, open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
 pub use keymap::{
-    BindingContext, BuiltinAction, BuiltinBinding, builtin_bindings, builtin_bindings_for,
-    display_shortcut, font_zoom_key_bindings, font_zoom_key_bindings_for, last_window_close_quits,
+    BindingContext, BuiltinAction, BuiltinBinding, builtin_bindings, display_shortcut,
+    font_zoom_key_bindings, tmux_preset_bindings,
 };
 pub use pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
     neighbor,
 };
+pub use run_ledger_global::RunLedgerGlobal;
 pub use session::{SessionFile, SessionNode, SessionTab, load_session, save_session, session_path};
 pub use term_element::TermElement;
 
 use collections::HashMap;
+use gpui::Pixels;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, div, rgb,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, rgb,
 };
-use gpui::Pixels;
-use gpui::prelude::FluentBuilder as _;
 use sleipnir_settings::{
-    AlternateScroll, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
+    AlternateScroll, NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette,
+    TerminalSettings,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use terminal::{
     Clear, Copy, Event, MaybeNavigationTarget, Modes, Paste, PasteText, ScrollLineDown,
     ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
@@ -71,6 +81,24 @@ pub enum TermViewEvent {
     RequestOpenSettings,
     /// Terminal BEL — shell may flash tab chrome (visual bell).
     Bell,
+    /// A command started in this pane (Run Ledger).
+    RunStarted {
+        command: String,
+        cwd: Option<PathBuf>,
+        inferred: bool,
+        line: Option<i32>,
+        column: Option<usize>,
+    },
+    /// The current command in this pane finished.
+    RunFinished {
+        exit_code: Option<i32>,
+    },
+    /// Overlay triangle on a command start/end line was clicked.
+    GutterClicked {
+        line: i32,
+    },
+    /// The user sent input to this pane (keystroke, paste, IME).
+    UserTyped,
 }
 
 impl EventEmitter<TermViewEvent> for TermView {}
@@ -94,8 +122,26 @@ pub struct TermView {
     last_input_at: Instant,
     /// Bottom toast after copy / copy-on-select.
     copy_toast: Option<CopyToast>,
+    /// Last time `render` ran, i.e. the last time this pane was actually in the
+    /// window's element tree. `AppShell::render_content` only emits the active
+    /// tab's panes (and, under pane zoom, only the zoomed one), so a stale value
+    /// means "off screen" — see [`Self::offscreen_repaint_is_throttled`].
+    last_render_at: Option<Instant>,
+    /// Last repaint we requested while off screen (throttle bookkeeping).
+    last_offscreen_notify_at: Option<Instant>,
     _spawn: Task<()>,
 }
+
+/// A pane that rendered within this window is treated as on screen. Must stay
+/// comfortably above one frame interval (8.3 ms at 120 Hz) so a visible pane is
+/// never mistaken for a hidden one.
+const ONSCREEN_WINDOW: Duration = Duration::from_millis(250);
+
+/// While off screen, request at most one repaint per this interval. Throttling
+/// rather than suppressing keeps the path self-healing: if this heuristic is ever
+/// wrong about visibility, the pane still refreshes within this bound instead of
+/// freezing.
+const OFFSCREEN_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 struct CopyToast {
     /// Hide task; dropping it cancels a previous toast.
@@ -126,11 +172,16 @@ impl TermView {
         for (k, v) in &settings.env {
             env.insert(k.clone(), v.clone());
         }
+        let shell = terminal::apply_inject_to_shell(
+            settings.shell.clone(),
+            &mut env,
+            settings.inject_osc133,
+        );
 
         let builder_task = TerminalBuilder::new(
             cwd,
             None,
-            settings.shell.clone(),
+            shell,
             env,
             settings.cursor_shape,
             settings.alternate_scroll,
@@ -169,14 +220,96 @@ impl TermView {
             terminal_wants_blink: true,
             last_input_at: Instant::now(),
             copy_toast: None,
+            last_render_at: None,
+            last_offscreen_notify_at: None,
             _spawn: spawn,
         }
+    }
+
+    /// Whether this pane looks like it is on screen, judged by whether `render`
+    /// ran recently. `AppShell::render_content` only builds elements for the
+    /// active tab's panes (and only the zoomed pane when a tab is zoomed), so a
+    /// pane that has not rendered inside [`ONSCREEN_WINDOW`] is hidden.
+    fn looks_onscreen(&self) -> bool {
+        self.last_render_at
+            .is_some_and(|at| at.elapsed() < ONSCREEN_WINDOW)
+    }
+
+    /// Whether a grid change may request a window repaint right now.
+    ///
+    /// On screen: always. Off screen: at most once per
+    /// [`OFFSCREEN_REPAINT_INTERVAL`], so a background pane costs a trickle of
+    /// repaints instead of one per PTY batch. Throttling instead of suppressing
+    /// is deliberate — a pane that is wrongly judged hidden still refreshes
+    /// within that bound rather than freezing.
+    fn request_repaint_allowed(&mut self) -> bool {
+        if self.looks_onscreen() {
+            return true;
+        }
+        let now = Instant::now();
+        let due = self
+            .last_offscreen_notify_at
+            .is_none_or(|at| now.duration_since(at) >= OFFSCREEN_REPAINT_INTERVAL);
+        if due {
+            self.last_offscreen_notify_at = Some(now);
+        }
+        due
     }
 
     /// Working directory of the attached PTY, if known.
     pub fn working_directory(&self, cx: &App) -> Option<PathBuf> {
         self.terminal_entity()
             .and_then(|t| t.read(cx).working_directory())
+    }
+
+    /// Normalized foreground process / script name, if the PTY has one.
+    pub fn foreground_process_command_name(&self, cx: &App) -> Option<String> {
+        self.terminal_entity()
+            .and_then(|t| t.read(cx).foreground_process_command_name())
+    }
+
+    /// Spawned shell pid for this pane, when the PTY is local.
+    pub fn shell_pid(&self, cx: &App) -> Option<u32> {
+        self.terminal_entity()
+            .and_then(|t| t.read(cx).shell_pid())
+    }
+
+    /// Current grid selection, if any.
+    pub fn selection_text(&self, cx: &App) -> Option<String> {
+        self.terminal_entity()
+            .and_then(|t| t.read(cx).last_content().selection_text.clone())
+    }
+
+    /// Type into this pane's PTY.
+    pub fn input_bytes(&self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        let typed = !bytes.is_empty();
+        if let Some(term) = self.terminal_entity().cloned() {
+            term.update(cx, |term, _| term.input(bytes));
+        }
+        if typed {
+            self.note_user_typed(cx);
+        }
+    }
+
+    fn note_user_typed(&self, cx: &mut Context<Self>) {
+        cx.emit(TermViewEvent::UserTyped);
+    }
+
+    /// Visible screen (no scrollback), for the control surface `capture` verb.
+    pub fn visible_screen_text(&self, cx: &App) -> String {
+        self.terminal_entity()
+            .map(|t| t.read(cx).visible_screen_text())
+            .unwrap_or_default()
+    }
+
+    /// Scroll this pane to an OSC 133 absolute line (Run Ledger Anchor).
+    pub fn scroll_to_anchor(&self, line: i32, column: usize, cx: &mut App) {
+        if let Some(term) = self.terminal_entity().cloned() {
+            term.update(cx, |term, cx| {
+                term.scroll_to_absolute(line, column);
+                cx.notify();
+            });
+        }
     }
 
     /// Keep display-only path for tests/demos.
@@ -201,6 +334,8 @@ impl TermView {
             terminal_wants_blink: true,
             last_input_at: Instant::now(),
             copy_toast: None,
+            last_render_at: None,
+            last_offscreen_notify_at: None,
             _spawn: Task::ready(()),
         };
         this.attach_terminal(terminal, window, cx);
@@ -218,19 +353,36 @@ impl TermView {
             window,
             |this, terminal, event, window, cx| match event {
                 Event::Wakeup | Event::SelectionsChanged => {
-                    // Poll command-finish notify (M14) when unfocused.
-                    let min_secs =
-                        TerminalSettings::get_global(cx).notify_on_command_finish_secs;
-                    if min_secs > 0 {
+                    // Poll command-finish notify (M14 → matrix).
+                    let (min_secs, mode) = {
+                        let settings = TerminalSettings::get_global(cx);
+                        (
+                            settings.notify_on_command_finish_secs,
+                            settings.notify_on_command_finish_mode,
+                        )
+                    };
+                    if min_secs > 0 && mode != NotifyOnCommandFinish::Never {
                         if let Some(dur) =
-                            terminal.update(cx, |t, _| t.poll_command_finish(min_secs))
+                            terminal.update(cx, |t, cx| t.poll_command_finish(min_secs, cx))
                         {
-                            if !window.is_window_active() {
+                            let should_notify = match mode {
+                                NotifyOnCommandFinish::Never => false,
+                                NotifyOnCommandFinish::Unfocused => !window.is_window_active(),
+                                NotifyOnCommandFinish::Always => true,
+                            };
+                            if should_notify {
                                 notify_command_finished(dur);
                             }
                         }
                     }
-                    cx.notify();
+                    // A pane that is not on screen must not drive the window's
+                    // repaint loop: a coding agent streaming in a background tab
+                    // otherwise requests ~250 repaints/second (one per 4 ms PTY
+                    // batch) while the user types in a different pane. The grid
+                    // is still updated — only the repaint request is throttled.
+                    if this.request_repaint_allowed() {
+                        cx.notify();
+                    }
                 }
                 Event::BlinkChanged(blinking) => {
                     this.terminal_wants_blink = *blinking;
@@ -257,6 +409,32 @@ impl TermView {
                 Event::NewNavigationTarget(_) => {}
                 Event::Open(target) => {
                     open_navigation_target(target, cx);
+                }
+                Event::Notify(message) => {
+                    notify_message("Sleipnir", message);
+                }
+                Event::RunStarted {
+                    command,
+                    cwd,
+                    inferred,
+                    line,
+                    column,
+                } => {
+                    cx.emit(TermViewEvent::RunStarted {
+                        command: command.clone(),
+                        cwd: cwd.clone(),
+                        inferred: *inferred,
+                        line: *line,
+                        column: *column,
+                    });
+                }
+                Event::RunFinished { exit_code } => {
+                    cx.emit(TermViewEvent::RunFinished {
+                        exit_code: *exit_code,
+                    });
+                }
+                Event::GutterClicked { line } => {
+                    cx.emit(TermViewEvent::GutterClicked { line: *line });
                 }
             },
         )
@@ -328,6 +506,7 @@ impl TermView {
             term.try_keystroke(&event.keystroke, option_as_meta)
         });
         if handled {
+            self.note_user_typed(cx);
             cx.notify();
         }
     }
@@ -397,6 +576,7 @@ impl TermView {
                     Ok(path) => {
                         let text = format!("{} ", shell_quote_path(&path));
                         terminal.update(cx, |term, _| term.paste(&text));
+                        self.note_user_typed(cx);
                         cx.notify();
                     }
                     Err(err) => {
@@ -408,12 +588,14 @@ impl TermView {
                 let text = format_external_paths(paths.paths());
                 if !text.trim().is_empty() {
                     terminal.update(cx, |term, _| term.paste(&text));
+                    self.note_user_typed(cx);
                     cx.notify();
                 }
             }
             _ => {
                 if let Some(text) = clipboard.text() {
                     terminal.update(cx, |term, _| term.paste(&text));
+                    self.note_user_typed(cx);
                     cx.notify();
                 }
             }
@@ -427,6 +609,7 @@ impl TermView {
         };
         if let Some(terminal) = self.terminal_entity().cloned() {
             terminal.update(cx, |term, _| term.paste(&text));
+            self.note_user_typed(cx);
             cx.notify();
         }
     }
@@ -539,6 +722,7 @@ impl TermView {
     fn send_text(&mut self, text: &SendText, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(terminal) = self.terminal_entity().cloned() {
             terminal.update(cx, |term, _| term.input(text.0.as_bytes().to_vec()));
+            self.note_user_typed(cx);
             cx.notify();
         }
     }
@@ -558,6 +742,7 @@ impl TermView {
             let handled =
                 terminal.update(cx, |term, _| term.try_keystroke(&keystroke, option_as_meta));
             if handled {
+                self.note_user_typed(cx);
                 cx.notify();
             }
         }
@@ -599,16 +784,49 @@ impl TermView {
     }
 }
 
+/// Hover tooltip previewing the hyperlink/path under the pointer (M16).
+struct LinkPreview {
+    text: SharedString,
+}
+
+impl Render for LinkPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = TerminalPalette::get_global(cx);
+        let bg = palette
+            .background
+            .blend(gpui::Hsla::black().opacity(0.4))
+            .alpha(1.0);
+        div()
+            .px_2()
+            .py_1()
+            .rounded(gpui::px(4.0))
+            .bg(bg)
+            .text_color(palette.foreground)
+            .text_size(gpui::px(12.0))
+            .font_family(sleipnir_settings::default_font_family())
+            .child(self.text.clone())
+    }
+}
+
 impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Being rendered *is* the visibility signal: only panes that
+        // `AppShell::render_content` emits get here (see `looks_onscreen`).
+        self.last_render_at = Some(Instant::now());
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
         // Toast chrome: dark surface, lime border/dot (matches common terminal UX).
-        let toast_bg = palette.background.blend(gpui::Hsla::black().opacity(0.35)).alpha(1.0);
+        let toast_bg = palette
+            .background
+            .blend(gpui::Hsla::black().opacity(0.35))
+            .alpha(1.0);
         let toast_border = palette.ansi[2].opacity(0.9);
         let toast_dot = palette.ansi[2];
-        let toast_fg = palette.foreground.blend(palette.ansi[3].opacity(0.15)).alpha(1.0);
+        let toast_fg = palette
+            .foreground
+            .blend(palette.ansi[3].opacity(0.15))
+            .alpha(1.0);
 
         div()
             .size_full()
@@ -663,19 +881,45 @@ impl Render for TermView {
                     .text_color(rgb(0xf38ba8))
                     .child(err.clone())
                     .into_any_element(),
-                TerminalSlot::Ready(terminal) => div()
-                    .id("term-view-body")
-                    .size_full()
-                    .p_2()
-                    .child(TermElement::new(
+                TerminalSlot::Ready(terminal) => {
+                    let hovered = terminal
+                        .read(cx)
+                        .last_content()
+                        .last_hovered_word
+                        .as_ref()
+                        .map(|w| w.word.clone());
+
+                    let a11y_text: SharedString = terminal.read(cx).visible_screen_text().into();
+                    let body = div()
+                        .id("term-view-body")
+                        .size_full()
+                        .p_2()
+                        // Read-only accessibility: VoiceOver reads the visible
+                        // screen as the terminal's value (Ghostty-parity, opt-in
+                        // there; we keep it always-on and read-only).
+                        .role(gpui::Role::MultilineTextInput)
+                        .aria_label("Terminal")
+                        .aria_value(a11y_text);
+                    let body = if let Some(word) = hovered {
+                        body.tooltip(move |_window, cx| {
+                            let text: SharedString = word.clone().into();
+                            cx.new(move |_| LinkPreview { text }).into()
+                        })
+                    } else {
+                        body
+                    };
+
+                    body.child(TermElement::new(
                         terminal.clone(),
+                        cx.entity(),
                         self.focus_handle.clone(),
                         focused,
                         self.font_size_override,
                         self.last_input_at,
                         self.terminal_wants_blink,
                     ))
-                    .into_any_element(),
+                    .into_any_element()
+                }
             })
             .when(show_copy_toast, |el| {
                 el.child(
@@ -702,12 +946,7 @@ impl Render for TermView {
                                 .border_1()
                                 .border_color(toast_border)
                                 .shadow_md()
-                                .child(
-                                    div()
-                                        .size(gpui::px(7.0))
-                                        .rounded_full()
-                                        .bg(toast_dot),
-                                )
+                                .child(div().size(gpui::px(7.0)).rounded_full().bg(toast_dot))
                                 .child(
                                     div()
                                         .text_size(gpui::px(12.0))
@@ -723,50 +962,23 @@ impl Render for TermView {
 
 /// Best-effort notification when a long-running command finishes (M14).
 fn notify_command_finished(dur: std::time::Duration) {
-    #[cfg(target_os = "macos")]
-    {
-        let secs = dur.as_secs();
-        let script = format!(
-            "display notification \"Command finished after {secs}s\" with title \"Sleipnir\""
-        );
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        #[cfg(target_os = "linux")]
-        {
-            // Desktop notification via XDG D-Bus (notify-rust); falls back to a
-            // log line when no notification daemon is running.
-            let secs = dur.as_secs();
-            let result = notify_rust::Notification::new()
-                .summary("Sleipnir")
-                .body(&format!("Command finished after {secs}s"))
-                .appname("Sleipnir")
-                .show();
-            if let Err(err) = result {
-                log::info!("command finished after {secs}s (notification failed: {err})");
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            log::info!("command finished after {}s", dur.as_secs());
-        }
-    }
+    let secs = dur.as_secs();
+    notify_message("Sleipnir", &format!("Command finished after {secs}s"));
 }
 
-/// Whether command-finish notify shells out to `osascript` on this OS.
-pub fn notify_uses_osascript() -> bool {
-    cfg!(target_os = "macos")
+/// Best-effort macOS desktop notification (OSC 9 / 777 / command finish).
+fn notify_message(title: &str, message: &str) {
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("display notification \"{escaped}\" with title \"{title}\"");
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn();
 }
 
 /// Clamp font size for zoom / settings (pt).
 pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 72.0;
 pub const FONT_SIZE_STEP: f32 = 1.0;
-
-
 
 /// Effective font size from optional override + settings.
 pub fn effective_font_size(override_size: Option<Pixels>, cx: &App) -> Pixels {
@@ -794,28 +1006,13 @@ fn handle_bell(window: &mut Window, cx: &mut Context<TermView>) {
 /// Plain `Ctrl+C` / `Ctrl+V` must **not** match so they reach the PTY as ETX/SYN
 /// and can interrupt or pass control sequences to foreground programs.
 fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
-    is_clipboard_shortcut_for(keystroke, cfg!(windows))
-}
-
-/// Clipboard reservation. `windows = true` treats plain Ctrl+V as paste
-/// (Windows Terminal) while leaving plain Ctrl+C for the PTY.
-pub fn is_clipboard_shortcut_for(keystroke: &Keystroke, windows: bool) -> bool {
     let modifiers = &keystroke.modifiers;
     let is_c = keystroke.key.eq_ignore_ascii_case("c");
     let is_v = keystroke.key.eq_ignore_ascii_case("v");
 
-    // Cmd+C/V and Ctrl+Cmd+V (PasteText) are covered by the platform branch.
-    let reserved = (modifiers.platform && (is_c || is_v))
-        || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v));
-    if reserved {
-        return true;
-    }
-    // Windows: Ctrl+V (no shift, no Win) is paste. Ctrl+C is never reserved.
-    windows
-        && is_v
-        && modifiers.control
-        && !modifiers.shift
-        && !modifiers.platform
+    // Cmd+C/V and Ctrl+Shift+C/V. Plain Ctrl+C / Ctrl+V stay with the PTY.
+    (modifiers.platform && (is_c || is_v))
+        || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v))
 }
 
 /// Open web URLs, and path-like targets when `path_links` is enabled (M12).
@@ -858,11 +1055,7 @@ pub fn parse_path_line_col(input: &str) -> ParsedPathTarget {
     }
     // Strip a single leading slash after host-less file: (//path → /path already)
     let (path, line, column) = split_path_line_col(s);
-    ParsedPathTarget {
-        path,
-        line,
-        column,
-    }
+    ParsedPathTarget { path, line, column }
 }
 
 fn split_path_line_col(s: &str) -> (String, Option<u32>, Option<u32>) {
@@ -953,44 +1146,15 @@ fn open_path_like_target(path: &terminal::PathLikeTarget) {
     open_existing_path(&candidate);
 }
 
-/// Program used to open paths, if any. Windows uses `cmd /C start` instead.
+/// Program used to open paths.
 pub fn path_opener_program() -> Option<&'static str> {
-    #[cfg(windows)]
-    {
-        None
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Some("open")
-    }
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    {
-        Some("xdg-open")
-    }
+    Some("open")
 }
 
-fn open_existing_path(candidate: &Path) {
-    #[cfg(windows)]
-    {
-        match std::process::Command::new("cmd")
-            .args(["/C", "start", "", &candidate.to_string_lossy()])
-            .spawn()
-        {
-            Ok(_) => {}
-            Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        match std::process::Command::new(opener).arg(candidate).spawn() {
-            Ok(_) => {}
-            Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
-        }
+pub(crate) fn open_existing_path(candidate: &Path) {
+    match std::process::Command::new("open").arg(candidate).spawn() {
+        Ok(_) => {}
+        Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
     }
 }
 
@@ -1034,11 +1198,11 @@ fn write_clipboard_image_to_temp(image: &gpui::Image) -> Result<PathBuf, String>
 
 /// Quote a filesystem path for safe insertion into a shell command line.
 fn shell_quote_path(path: &Path) -> String {
-    quote_path_for_shell(path, cfg!(windows))
+    quote_path_for_shell(path)
 }
 
-/// Quote `path` for POSIX (`windows = false`) or PowerShell (`windows = true`).
-pub fn quote_path_for_shell(path: &Path, windows: bool) -> String {
+/// Quote `path` for POSIX shells.
+pub fn quote_path_for_shell(path: &Path) -> String {
     let s = path.to_string_lossy();
     if s.is_empty() {
         return "''".to_string();
@@ -1046,16 +1210,11 @@ pub fn quote_path_for_shell(path: &Path, windows: bool) -> String {
     let safe = s.chars().all(|c| {
         c.is_ascii_alphanumeric()
             || matches!(c, '/' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
-            || (windows && c == '\\')
     });
     if safe {
         return s.into_owned();
     }
-    if windows {
-        format!("'{}'", s.replace('\'', "''"))
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Format Finder/file-manager paths for paste: leading space, quoted paths, trailing space.
@@ -1080,17 +1239,9 @@ mod tests {
     }
 
     #[test]
-    fn plain_control_c_is_sent_to_the_terminal() {
+    fn plain_control_c_and_v_are_sent_to_the_terminal() {
         assert!(!is_clipboard_shortcut(&parse("ctrl-c")));
-        assert!(!is_clipboard_shortcut_for(&parse("ctrl-c"), true));
-        assert!(!is_clipboard_shortcut_for(&parse("ctrl-c"), false));
-    }
-
-    #[test]
-    fn windows_ctrl_v_is_paste_but_macos_sends_it_to_pty() {
-        assert!(is_clipboard_shortcut_for(&parse("ctrl-v"), true));
-        assert!(!is_clipboard_shortcut_for(&parse("ctrl-v"), false));
-        assert_eq!(is_clipboard_shortcut(&parse("ctrl-v")), cfg!(windows));
+        assert!(!is_clipboard_shortcut(&parse("ctrl-v")));
     }
 
     #[test]
@@ -1148,9 +1299,7 @@ mod tests {
 
         let mut plain_ctrl_v = parse("ctrl-v");
         plain_ctrl_v.key = "V".into();
-        assert_eq!(is_clipboard_shortcut(&plain_ctrl_v), cfg!(windows));
-        assert!(is_clipboard_shortcut_for(&plain_ctrl_v, true));
-        assert!(!is_clipboard_shortcut_for(&plain_ctrl_v, false));
+        assert!(!is_clipboard_shortcut(&plain_ctrl_v));
 
         let mut cmd_c = parse("cmd-c");
         cmd_c.key = "C".into();
@@ -1160,30 +1309,18 @@ mod tests {
     #[test]
     fn shell_quote_path_quotes_unsafe_paths() {
         assert_eq!(
-            quote_path_for_shell(Path::new("/tmp/safe-name"), false),
+            quote_path_for_shell(Path::new("/tmp/safe-name")),
             "/tmp/safe-name"
         );
         assert_eq!(
-            quote_path_for_shell(Path::new("/tmp/has space"), false),
+            quote_path_for_shell(Path::new("/tmp/has space")),
             "'/tmp/has space'"
         );
         assert_eq!(
-            quote_path_for_shell(Path::new("/tmp/o'reilly"), false),
+            quote_path_for_shell(Path::new("/tmp/o'reilly")),
             "'/tmp/o'\\''reilly'"
         );
-        assert_eq!(quote_path_for_shell(Path::new(""), false), "''");
-        assert_eq!(
-            quote_path_for_shell(Path::new(r"C:\Program Files\x"), true),
-            r"'C:\Program Files\x'"
-        );
-        assert_eq!(
-            quote_path_for_shell(Path::new(r"C:\o'reilly"), true),
-            r"'C:\o''reilly'"
-        );
-        assert_eq!(
-            quote_path_for_shell(Path::new(r"C:\safe"), true),
-            r"C:\safe"
-        );
+        assert_eq!(quote_path_for_shell(Path::new("")), "''");
     }
 
     #[test]
@@ -1270,10 +1407,7 @@ mod tests {
             resolve_path("src/main.rs", Some(cwd)),
             PathBuf::from("/project/src/main.rs")
         );
-        assert_eq!(
-            resolve_path("/abs/x", Some(cwd)),
-            PathBuf::from("/abs/x")
-        );
+        assert_eq!(resolve_path("/abs/x", Some(cwd)), PathBuf::from("/abs/x"));
     }
 
     #[test]
@@ -1288,16 +1422,8 @@ mod tests {
     #[test]
     fn font_zoom_shipped_keystrokes_parse_as_platform_keys() {
         let bindings = font_zoom_key_bindings();
-        let want_plus = if cfg!(windows) || cfg!(target_os = "linux") {
-            "ctrl-+"
-        } else {
-            "cmd-+"
-        };
-        let want_minus = if cfg!(windows) || cfg!(target_os = "linux") {
-            "ctrl--"
-        } else {
-            "cmd--"
-        };
+        let want_plus = "cmd-+";
+        let want_minus = "cmd--";
         assert!(
             bindings
                 .iter()
@@ -1311,7 +1437,9 @@ mod tests {
             "shipped table must include {want_minus} for decrease"
         );
         assert!(
-            !bindings.iter().any(|(k, _)| k.ends_with("-plus") || k.ends_with("-minus")),
+            !bindings
+                .iter()
+                .any(|(k, _)| k.ends_with("-plus") || k.ends_with("-minus")),
             "must not use plus/minus key names (never-emitted)"
         );
 
@@ -1319,17 +1447,10 @@ mod tests {
             let ks = Keystroke::parse(keystroke).unwrap_or_else(|err| {
                 panic!("shipped font-zoom keystroke {keystroke:?} must parse: {err}")
             });
-            if cfg!(windows) || cfg!(target_os = "linux") {
-                assert!(
-                    ks.modifiers.control,
-                    "{keystroke} must include ctrl"
-                );
-            } else {
-                assert!(
-                    ks.modifiers.platform,
-                    "{keystroke} must include cmd/platform"
-                );
-            }
+            assert!(
+                ks.modifiers.platform,
+                "{keystroke} must include cmd/platform"
+            );
             match *action {
                 "increase_font_size" => {
                     assert!(
@@ -1363,45 +1484,8 @@ mod tests {
     }
 
     #[test]
-    fn windows_path_opener_is_not_open_or_osascript() {
-        if cfg!(windows) {
-            assert_eq!(path_opener_program(), None);
-        } else {
-            assert!(path_opener_program().is_some());
-        }
-        match path_opener_program() {
-            Some("open") => assert_eq!(cfg!(target_os = "macos"), true),
-            Some("xdg-open") => assert!(cfg!(any(target_os = "linux", target_os = "freebsd"))),
-            _ => assert_eq!(cfg!(windows), true),
-        }
-        assert_eq!(notify_uses_osascript(), cfg!(target_os = "macos"));
-        let src = include_str!("sleipnir_ui.rs");
-        // The Windows `open_existing_path` arm must not spawn `open`/`osascript`.
-        let win_marker = "#[cfg(windows)]";
-        let win_idx = src
-            .find("fn open_existing_path")
-            .expect("open_existing_path");
-        let win_fn = &src[win_idx..];
-        let win_arm_start = win_fn.find(win_marker).expect("windows arm");
-        let win_arm = &win_fn[win_arm_start..win_fn.find("#[cfg(not(windows))]").unwrap_or(win_fn.len())];
-        assert!(
-            !win_arm.contains("\"open\"") && !win_arm.contains("osascript"),
-            "Windows open path must not call open/osascript"
-        );
-        let notify_start = src
-            .find("fn notify_command_finished")
-            .expect("notify fn");
-        let notify_fn = &src[notify_start..];
-        let notify_end = notify_fn.find("\npub fn notify_uses_osascript").unwrap_or(400);
-        let notify_body = &notify_fn[..notify_end];
-        let non_mac = notify_body
-            .split("#[cfg(not(target_os = \"macos\"))]")
-            .nth(1)
-            .unwrap_or("");
-        assert!(
-            !non_mac.contains("Command::new(\"osascript\")"),
-            "non-macOS notify arm must not spawn osascript: {non_mac}"
-        );
+    fn path_opener_is_open() {
+        assert_eq!(path_opener_program(), Some("open"));
     }
 
     /// Regression: clicking Close on the confirm dialog must not hit the
@@ -1458,5 +1542,41 @@ mod tests {
                 "{id} must .occlude() so wheel events do not reach TermElement under the overlay"
             );
         }
+        let diff_src = include_str!("diff/render.rs");
+        let prefix = overlay_builder_prefix(diff_src, "diff-overlay");
+        assert!(
+            prefix.contains(".occlude()"),
+            "diff-overlay must .occlude() so wheel events do not reach TermElement under the overlay"
+        );
+    }
+
+    #[test]
+    fn chrome_exposes_a_diff_button() {
+        let src = include_str!("chrome/tab_sidebar.rs");
+        assert!(
+            src.contains(r#".id("diff-chrome-button")"#),
+            "content title must ship a clickable Diff control"
+        );
+        assert!(
+            src.contains("toggle_diff"),
+            "Diff chrome button must open the inspector"
+        );
+    }
+
+    /// Empty-region window move lives on `chrome-drag-trailing`. A height-less
+    /// wrapper (the old `chrome-trailing` row) collapses `h_full()` to 0px,
+    /// and `app_owns_titlebar_drag` then leaves no native fallback.
+    #[test]
+    fn chrome_trailing_drag_is_a_direct_band_child() {
+        let src = include_str!("app_shell.rs");
+        assert!(
+            !src.contains(r#".id("chrome-trailing")"#),
+            "do not wrap chrome-drag-trailing in a height-less row"
+        );
+        let band = src.find(r#".id("chrome-band")"#).expect("chrome-band");
+        assert!(
+            src[band..].contains(".child(trailing_drag)"),
+            "chrome-band must parent trailing_drag directly so h_full() resolves against the band height"
+        );
     }
 }

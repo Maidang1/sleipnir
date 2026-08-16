@@ -1,0 +1,28 @@
+{
+  "kanagawa": {
+    "background": "#1f1f28",
+    "foreground": "#dcd7ba",
+    "bright_foreground": "#dcd7ba",
+    "cursor": "#dcd7ba",
+    "selection": "#2d4f67",
+    "ansi": [
+      "#090618", "#c34043", "#769a46", "#c0a36e",
+      "#7e9cd8", "#957fb8", "#6a9589", "#c8c093",
+      "#727169", "#e82424", "#98bb6c", "#e6c384",
+      "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba"
+    ]
+  },
+  "gruvbox-material": {
+    "background": "#282828",
+    "foreground": "#d4be98",
+    "bright_foreground": "#e0cfa7",
+    "cursor": "#d4be98",
+    "selection": "#3c3836",
+    "ansi": [
+      "#3c3836", "#ea6962", "#a9b665", "#d8a657",
+      "#7daea3", "#d3869b", "#89b482", "#d4be98",
+      "#928374", "#ea6962", "#a9b665", "#d8a657",
+      "#7daea3", "#d3869b", "#89b482", "#e0cfa7"
+    ]
+  }
+}

@@ -15,12 +15,13 @@ use sleipnir_settings::{
 use std::ops::Range as StdRange;
 use std::time::Instant;
 use terminal::{
-    Cell, Color, CursorShape, IndexedCell, NamedColor, Range as TerminalRange, Terminal,
-    TerminalBounds, is_default_background_color,
+    Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
+    Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
 };
 
 pub struct TermElement {
     terminal: Entity<Terminal>,
+    view: Entity<crate::TermView>,
     focus: FocusHandle,
     focused: bool,
     /// Window-scoped zoom override; `None` uses settings font size.
@@ -35,6 +36,7 @@ pub struct TermElement {
 impl TermElement {
     pub fn new(
         terminal: Entity<Terminal>,
+        view: Entity<crate::TermView>,
         focus: FocusHandle,
         focused: bool,
         font_size_override: Option<Pixels>,
@@ -43,6 +45,7 @@ impl TermElement {
     ) -> Self {
         Self {
             terminal,
+            view,
             focus: focus.clone(),
             focused,
             font_size_override,
@@ -148,6 +151,13 @@ pub struct LayoutState {
     blink_alpha: f32,
     /// Whether to request another animation frame (M11).
     blink_animating: bool,
+    gutter: Vec<GutterPaint>,
+}
+
+struct GutterPaint {
+    display_line: i32,
+    kind: GutterKind,
+    color: gpui::Hsla,
 }
 
 impl Element for TermElement {
@@ -332,6 +342,38 @@ impl Element for TermElement {
                     )),
                 };
 
+                let gutter = {
+                    use sleipnir_settings::RunLedgerMode;
+                    if content.mode.contains(Modes::ALT_SCREEN)
+                        || TerminalSettings::get_global(cx).run_ledger == RunLedgerMode::Off
+                    {
+                        Vec::new()
+                    } else {
+                        let history = terminal.read(cx).history_size() as i32;
+                        let rows = dimensions.num_lines() as i32;
+                        terminal
+                            .read(cx)
+                            .gutter_overlay()
+                            .into_iter()
+                            .filter_map(|mark| {
+                                let display_line = absolute_to_display_line(
+                                    mark.line,
+                                    history,
+                                    content.display_offset,
+                                );
+                                if display_line < 0 || display_line >= rows {
+                                    return None;
+                                }
+                                Some(GutterPaint {
+                                    display_line,
+                                    kind: mark.kind,
+                                    color: gutter_color(mark.status, palette.as_ref()),
+                                })
+                            })
+                            .collect()
+                    }
+                };
+
                 let blink_alpha = cursor_blink_alpha(
                     last_input_at.elapsed(),
                     terminal_wants_blink,
@@ -363,6 +405,7 @@ impl Element for TermElement {
                     hover_link,
                     blink_alpha,
                     blink_animating,
+                    gutter,
                 }
             },
         )
@@ -386,6 +429,7 @@ impl Element for TermElement {
 
             let input_handler = TerminalInputHandler {
                 terminal: self.terminal.clone(),
+                view: self.view.clone(),
                 cursor_bounds: layout.ime_cursor_bounds,
             };
 
@@ -420,6 +464,14 @@ impl Element for TermElement {
                     }
                     for batch in &layout.batches {
                         batch.paint(origin, &layout.dimensions, window, cx);
+                    }
+                    for mark in &layout.gutter {
+                        paint_gutter_triangle(
+                            origin,
+                            mark,
+                            &layout.dimensions,
+                            window,
+                        );
                     }
 
                     if self.focused
@@ -466,6 +518,9 @@ impl TermElement {
                 let focus = focus.clone();
                 move |e: &MouseDownEvent, window, cx| {
                     window.focus(&focus, cx);
+                    if button == MouseButton::Left && try_gutter_click(&terminal, e, cx) {
+                        return;
+                    }
                     terminal.update(cx, |terminal, cx| {
                         terminal.mouse_down(e, cx);
                         cx.notify();
@@ -560,6 +615,75 @@ fn paint_underline(
         size(cols * dimensions.cell_width, h),
     );
     window.paint_quad(fill(rect, bg.color));
+}
+
+fn gutter_color(status: Option<i32>, palette: &TerminalPalette) -> gpui::Hsla {
+    match status {
+        Some(0) => palette.ansi[2],
+        Some(_) => palette.ansi[1],
+        None => palette.ansi[3],
+    }
+}
+
+fn paint_gutter_triangle(
+    origin: GpuiPoint<Pixels>,
+    mark: &GutterPaint,
+    dimensions: &TerminalBounds,
+    window: &mut Window,
+) {
+    let mid_y = origin.y + (mark.display_line as f32 + 0.5) * dimensions.line_height;
+    let h = dimensions.line_height.min(px(8.0));
+    let step = px(2.0);
+    let x0 = origin.x + px(1.0);
+    for i in 0..3 {
+        let inset = px(i as f32);
+        let hh = h - inset * 2.0;
+        if hh <= px(0.5) {
+            break;
+        }
+        let x = match mark.kind {
+            GutterKind::Start => x0 + step * i as f32,
+            GutterKind::End => x0 + step * (2 - i) as f32,
+        };
+        window.paint_quad(fill(
+            Bounds::new(point(x, mid_y - hh * 0.5), size(step, hh)),
+            mark.color,
+        ));
+    }
+}
+
+fn try_gutter_click(
+    terminal: &Entity<Terminal>,
+    e: &MouseDownEvent,
+    cx: &mut App,
+) -> bool {
+    let content = terminal.read(cx).last_content().clone();
+    if content.mode.contains(Modes::ALT_SCREEN) {
+        return false;
+    }
+    let origin = content.terminal_bounds.bounds.origin;
+    let line_h = content.terminal_bounds.line_height;
+    let x = e.position.x - origin.x;
+    if x < px(0.) || x > px(8.) {
+        return false;
+    }
+    let y = e.position.y - origin.y;
+    if y < px(0.) {
+        return false;
+    }
+    let display_line = (f32::from(y) / f32::from(line_h).max(1.0)).floor() as i32;
+    let history = terminal.read(cx).history_size() as i32;
+    let marks = terminal.read(cx).gutter_overlay();
+    let Some(mark) = marks.into_iter().find(|m| {
+        absolute_to_display_line(m.line, history, content.display_offset) == display_line
+    }) else {
+        return false;
+    };
+    terminal.update(cx, |term, cx| {
+        term.emit_gutter_click(mark.line, cx);
+        cx.notify();
+    });
+    true
 }
 
 fn selection_rects(
@@ -853,6 +977,7 @@ fn is_blank(cell: &Cell) -> bool {
 
 struct TerminalInputHandler {
     terminal: Entity<Terminal>,
+    view: Entity<crate::TermView>,
     cursor_bounds: Option<Bounds<Pixels>>,
 }
 
@@ -895,6 +1020,9 @@ impl InputHandler for TerminalInputHandler {
         }
         self.terminal.update(cx, |term, _| {
             term.input(text.as_bytes().to_vec());
+        });
+        self.view.update(cx, |_, cx| {
+            cx.emit(crate::TermViewEvent::UserTyped);
         });
     }
 

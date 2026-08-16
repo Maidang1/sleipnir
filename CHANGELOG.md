@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- Diff inspector overlay (`⌥⌘G` / command palette / View → Diff Inspector / chrome **Diff** button / rail `+N −M`): `git diff HEAD` of the focused pane's work tree, split (default) or unified (`v`), file tree, full-file upgrade with expandable `⋯ N hidden lines`, tree-sitter on Rust/Python/JS/JSON, minimap (`m`), word-level intra-line highlights, file/hunk jump (`n` `p` `]` `[`). Not a pane. `send_git_diff` still pastes the raw patch into the PTY
+- Tab placement is Side (default left rail) or Top (horizontal strip). Both group by git workspace (no group header), with agent marks, in-group drag, and New tab. Switch in Settings, View → Toggle Tab Placement, or the command palette
+- Side-rail rows stay two lines: title, then branch + dirty `+N −M`
+- Top-strip chips show only the last two cwd components (`myself/harbor`); no branch or dirty mark
+- Tab chrome no longer draws run dots (running ● / succeeded ✓). A tab with failed Attention washes the whole chip a faint red
+- Agent monograms on tabs for known coding-agent processes (`claude`, `codex`, …); no house placeholder when the tab is just a shell; `agent_icons: false` hides them
+- New tabs inherit the workspace git root so they stay in the same group
+- `clear_run_ledger` / `toggle_run_ledger` / `mark_tab_seen` in command palette and menus. Mark Tab as Seen clears Attention without deleting Run records
+- Close-confirm names the busy foreground process when one is known
+- Drag a tab onto another tab's panes to merge it as a split (same sessions); drag a pane grip onto the tab list to extract it as its own tab. Dropping the visible tab on the pane area still detaches it to a new window
+- Pane Facts overlay (View / command palette): cwd, foreground process, descendant process tree, and listening ports for the focused pane
+- Run Ledger overlay (`⌘⇧L`): grouped runs, jump to the pane and scroll to the OSC 133 Anchor
+- Pane gutter triangles on command start/end lines (overlay; hidden on alt screen)
+- Menu-bar Attention item (`show_tray_icon`) and Dock badge of failed Attention count
+- Default-off control surface (ADR-0011): listens when `control_surface: true` or `SLEIPNIR_CONTROL=1`; `sleipnir-ctl ls/send/wait/capture` drive live panes
+- Restore tombstone banner from prior-launch Run metadata (no scrollback); dismisses on type; skips in-flight / unrecognized last commands; `show_tombstone: false` hides it
+- Send Selection / Send Git Diff to the focused pane; optional `pipe_selection_command`
+- Shell history search overlay (`⌘⇧;`) over `HISTFILE` / `~/.zsh_history`
+- `keybinding_preset: tmux` adds `ctrl-b` pane/tab chords
+
+### Fixes
+- Side-rail git dirty mark no longer walks the work tree on the UI thread (tab switches stalled for ~1s+ in repos with `target/` / `node_modules/`)
+- Side-rail `+N −M` is line counts from `git diff --numstat HEAD`, computed off the UI thread (typing no longer flashes the row; the old index parser showed only a bogus delete count)
+
+### Breaking Changes
+- `terminal.inject_osc133` now defaults to `true`
+- New `runs.json` file written to config dir by default (`run_ledger: "off"` disables)
+- **macOS only:** Windows and Linux are no longer supported. Prebuilt `.zip` / `.deb` / `.tar.gz` artifacts, `install.ps1`, `install-linux.sh`, `make-linux-package.sh`, and the Windows/Linux CI jobs are gone. The crate fails to compile on those targets.
+
 ## 0.1.11
 
 ### Features
@@ -14,6 +46,20 @@
 ### Changes
 - README and website treat Linux as a shipped platform: one-line install, `.deb` / `.tar.gz` downloads, Vulkan/Wayland notes, and Linux shortcuts
 - In-place auto-update stays macOS-only; Linux Check for Updates opens the releases page
+
+### Features
+- **Find in scrollback:** regex (`.*`) and match-case (`Aa`) toggles in the find bar (`⌥⌘R` / `⌥⌘C` on macOS). Literal + case-insensitive remains the default; toggling regex passes the query through as a regex, and match-case forces case-sensitive matching via inline flags.
+- **Export scrollback:** **Shell → Export Scrollback…** (macOS) / **File → Export Scrollback…** (Windows), also in the command palette, writes the active pane's scrollback to a timestamped temp file and opens it in the default editor.
+- **Link/path hover preview:** hovering a URL or path shows a small tooltip with the matched text (on top of the M11 underline + pointing hand).
+- **Tab drag reorder + detach:** drag a tab chip onto another to reorder (a ghost chip follows the pointer); drop a tab onto the terminal area to detach it into a new window (its panes keep running).
+- **Shell integration:** new tabs and splits now inherit the active pane's working directory instead of opening in `$HOME`.
+- **Notification matrix:** `notify_on_command_finish_mode` (`never` / `unfocused` / `always`, default `unfocused`) controls when the command-finish notification fires, on top of the existing `notify_on_command_finish_secs` threshold.
+- **Themes:** added Dracula and One Dark built-in palettes; `custom_theme` accepts a full hex palette (background/foreground/ANSI 16/cursor/selection); extra named palettes come from `themes.json` in the config dir; the Settings → theme picker lists built-ins and user themes with swatches and type-to-filter search.
+- **Accessibility:** the terminal now exposes the visible screen as a read-only accessible value (`Role::MultilineTextInput` + label "Terminal"), so VoiceOver can read the current output (Ghostty-parity, read-only AX).
+- **OSC 9/777 desktop notifications:** programs can trigger a macOS notification via `ESC ] 9 ; msg` or kitty's `ESC ] 777 ; notify ; msg` on both the display-only path and the real PTY (fork-pinned alacritty_terminal + vte emit `DesktopNotification` through `ZedListener`).
+- **OSC 133 on the real PTY:** shell-integration markers (`ESC ] 133 ; A/B/C/D`) now reach jump-prompt (`⌘⇧↑`/`⌘⇧↓`) through the same fork-pin hook, not just `write_output`.
+- **Shell semantics:** opt-in `terminal.inject_osc133` sources OSC 133 A/B/C/D into new zsh/bash/fish sessions (skipped if another terminal already injects, or for `shell -c`). Option/Alt-click in the current prompt sends left/right to move the shell cursor; Cmd/Ctrl-triple-click selects the marked command’s output (plain triple-click still selects lines).
+- **AppleScript:** shipped a minimal scripting dictionary (`Sleipnir.sdef`) — read-only `name`/`version`/`frontmost` plus `quit` (Ghostty 1.3.0-style), wired via `NSAppleScriptEnabled` + `OSAScriptingDefinition`.
 
 ## 0.1.10
 

@@ -30,6 +30,17 @@ pub enum CommandId {
     JumpNextPrompt,
     ToggleQuickSelect,
     OpenQuickTerminal,
+    ExportScrollback,
+    ClearRunLedger,
+    ToggleRunLedger,
+    MarkTabSeen,
+    TogglePaneFacts,
+    SendSelection,
+    PipeSelection,
+    SendGitDiff,
+    ToggleHistorySearch,
+    ToggleTabPlacement,
+    ToggleDiff,
 }
 
 impl CommandId {
@@ -57,6 +68,17 @@ impl CommandId {
             CommandId::JumpNextPrompt => "jump_next_prompt",
             CommandId::ToggleQuickSelect => "toggle_quick_select",
             CommandId::OpenQuickTerminal => "open_quick_terminal",
+            CommandId::ExportScrollback => "export_scrollback",
+            CommandId::ClearRunLedger => "clear_run_ledger",
+            CommandId::ToggleRunLedger => "toggle_run_ledger",
+            CommandId::MarkTabSeen => "mark_tab_seen",
+            CommandId::TogglePaneFacts => "toggle_pane_facts",
+            CommandId::SendSelection => "send_selection",
+            CommandId::PipeSelection => "pipe_selection",
+            CommandId::SendGitDiff => "send_git_diff",
+            CommandId::ToggleHistorySearch => "toggle_history_search",
+            CommandId::ToggleTabPlacement => "toggle_tab_placement",
+            CommandId::ToggleDiff => "toggle_diff",
         }
     }
 
@@ -84,6 +106,17 @@ impl CommandId {
             "jump_next_prompt" | "next_prompt" => Some(CommandId::JumpNextPrompt),
             "toggle_quick_select" | "quick_select" => Some(CommandId::ToggleQuickSelect),
             "open_quick_terminal" | "quick_terminal" => Some(CommandId::OpenQuickTerminal),
+            "export_scrollback" | "export_scrollback_to_file" => Some(CommandId::ExportScrollback),
+            "clear_run_ledger" => Some(CommandId::ClearRunLedger),
+            "toggle_run_ledger" => Some(CommandId::ToggleRunLedger),
+            "mark_tab_seen" | "mark_as_seen" => Some(CommandId::MarkTabSeen),
+            "toggle_pane_facts" | "pane_facts" => Some(CommandId::TogglePaneFacts),
+            "send_selection" => Some(CommandId::SendSelection),
+            "pipe_selection" => Some(CommandId::PipeSelection),
+            "send_git_diff" => Some(CommandId::SendGitDiff),
+            "toggle_history_search" | "history_search" => Some(CommandId::ToggleHistorySearch),
+            "toggle_tab_placement" | "tab_placement" => Some(CommandId::ToggleTabPlacement),
+            "toggle_diff" => Some(CommandId::ToggleDiff),
             _ => None,
         }
     }
@@ -98,146 +131,207 @@ pub struct CommandItem {
     pub keywords: &'static str,
 }
 
-/// Built-in command catalog for this OS.
+/// Built-in command catalog.
 pub fn commands() -> Vec<CommandItem> {
-    commands_for(cfg!(windows))
-}
-
-/// Built-in command catalog. `windows = true` shows Ctrl labels.
-pub fn commands_for(windows: bool) -> Vec<CommandItem> {
-    use crate::keymap::display_shortcut_for;
+    use crate::keymap::display_shortcut;
     vec![
         CommandItem {
             id: CommandId::NewTab,
             title: "New Tab".into(),
-            shortcut: display_shortcut_for("new_tab", windows).into(),
+            shortcut: display_shortcut("new_tab").into(),
             keywords: "tab new open",
         },
         CommandItem {
             id: CommandId::ClosePane,
             title: "Close Pane / Tab".into(),
-            shortcut: display_shortcut_for("close_tab", windows).into(),
+            shortcut: display_shortcut("close_tab").into(),
             keywords: "close pane tab",
         },
         CommandItem {
             id: CommandId::NextTab,
             title: "Next Tab".into(),
-            shortcut: display_shortcut_for("next_tab", windows).into(),
+            shortcut: display_shortcut("next_tab").into(),
             keywords: "tab next",
         },
         CommandItem {
             id: CommandId::PrevTab,
             title: "Previous Tab".into(),
-            shortcut: display_shortcut_for("prev_tab", windows).into(),
+            shortcut: display_shortcut("prev_tab").into(),
             keywords: "tab previous prev",
         },
         CommandItem {
             id: CommandId::SplitRight,
             title: "Split Pane Right".into(),
-            shortcut: display_shortcut_for("split_right", windows).into(),
+            shortcut: display_shortcut("split_right").into(),
             keywords: "split right vertical",
         },
         CommandItem {
             id: CommandId::SplitDown,
             title: "Split Pane Down".into(),
-            shortcut: display_shortcut_for("split_down", windows).into(),
+            shortcut: display_shortcut("split_down").into(),
             keywords: "split down horizontal",
         },
         CommandItem {
             id: CommandId::Find,
             title: "Find in Scrollback".into(),
-            shortcut: display_shortcut_for("find", windows).into(),
+            shortcut: display_shortcut("find").into(),
             keywords: "find search scrollback",
         },
         CommandItem {
             id: CommandId::OpenSettings,
             title: "Open Settings".into(),
-            shortcut: display_shortcut_for("open_settings", windows).into(),
+            shortcut: display_shortcut("open_settings").into(),
             keywords: "settings preferences theme",
         },
         CommandItem {
             id: CommandId::ReloadSettings,
             title: "Reload Settings".into(),
-            shortcut: display_shortcut_for("reload_settings", windows).into(),
+            shortcut: display_shortcut("reload_settings").into(),
             keywords: "reload settings config",
         },
         CommandItem {
             id: CommandId::CycleTheme,
             title: "Cycle Theme".into(),
-            shortcut: display_shortcut_for("cycle_theme", windows).into(),
+            shortcut: display_shortcut("cycle_theme").into(),
             keywords: "theme cycle appearance",
         },
         CommandItem {
             id: CommandId::CheckForUpdates,
             title: "Check for Updates".into(),
-            shortcut: display_shortcut_for("check_for_updates", windows).into(),
+            shortcut: display_shortcut("check_for_updates").into(),
             keywords: "update upgrade release",
         },
         CommandItem {
             id: CommandId::ToggleCommandPalette,
             title: "Toggle Command Palette".into(),
-            shortcut: display_shortcut_for("toggle_command_palette", windows).into(),
+            shortcut: display_shortcut("toggle_command_palette").into(),
             keywords: "command palette actions",
         },
         CommandItem {
             id: CommandId::NewWindow,
             title: "New Window".into(),
-            shortcut: display_shortcut_for("new_window", windows).into(),
+            shortcut: display_shortcut("new_window").into(),
             keywords: "window new open",
         },
         CommandItem {
             id: CommandId::IncreaseFontSize,
             title: "Increase Font Size".into(),
-            shortcut: display_shortcut_for("increase_font_size", windows).into(),
+            shortcut: display_shortcut("increase_font_size").into(),
             keywords: "font zoom larger bigger size",
         },
         CommandItem {
             id: CommandId::DecreaseFontSize,
             title: "Decrease Font Size".into(),
-            shortcut: display_shortcut_for("decrease_font_size", windows).into(),
+            shortcut: display_shortcut("decrease_font_size").into(),
             keywords: "font zoom smaller size",
         },
         CommandItem {
             id: CommandId::ResetFontSize,
             title: "Reset Font Size".into(),
-            shortcut: display_shortcut_for("reset_font_size", windows).into(),
+            shortcut: display_shortcut("reset_font_size").into(),
             keywords: "font zoom reset default size",
         },
         CommandItem {
             id: CommandId::TogglePaneZoom,
             title: "Toggle Pane Zoom".into(),
-            shortcut: display_shortcut_for("toggle_pane_zoom", windows).into(),
+            shortcut: display_shortcut("toggle_pane_zoom").into(),
             keywords: "zoom maximize pane split",
         },
         CommandItem {
             id: CommandId::ToggleBroadcast,
             title: "Toggle Broadcast Input".into(),
-            shortcut: display_shortcut_for("toggle_broadcast", windows).into(),
+            shortcut: display_shortcut("toggle_broadcast").into(),
             keywords: "broadcast all panes input",
         },
         CommandItem {
             id: CommandId::JumpPrevPrompt,
             title: "Jump to Previous Prompt".into(),
-            shortcut: display_shortcut_for("jump_prev_prompt", windows).into(),
+            shortcut: display_shortcut("jump_prev_prompt").into(),
             keywords: "prompt shell osc133 jump previous",
         },
         CommandItem {
             id: CommandId::JumpNextPrompt,
             title: "Jump to Next Prompt".into(),
-            shortcut: display_shortcut_for("jump_next_prompt", windows).into(),
+            shortcut: display_shortcut("jump_next_prompt").into(),
             keywords: "prompt shell osc133 jump next",
         },
         CommandItem {
             id: CommandId::ToggleQuickSelect,
             title: "Toggle Quick Select".into(),
-            shortcut: display_shortcut_for("toggle_quick_select", windows).into(),
+            shortcut: display_shortcut("toggle_quick_select").into(),
             keywords: "quick select labels links",
         },
         CommandItem {
             id: CommandId::OpenQuickTerminal,
             title: "Open Quick Terminal".into(),
-            shortcut: display_shortcut_for("open_quick_terminal", windows).into(),
+            shortcut: display_shortcut("open_quick_terminal").into(),
             keywords: "quick terminal dropdown window",
+        },
+        CommandItem {
+            id: CommandId::ExportScrollback,
+            title: "Export Scrollback to File".into(),
+            shortcut: display_shortcut("export_scrollback").into(),
+            keywords: "export scrollback save file editor dump",
+        },
+        CommandItem {
+            id: CommandId::ClearRunLedger,
+            title: "Clear Run Ledger".into(),
+            shortcut: "".into(),
+            keywords: "clear run ledger history runs delete",
+        },
+        CommandItem {
+            id: CommandId::MarkTabSeen,
+            title: "Mark Tab as Seen".into(),
+            shortcut: "".into(),
+            keywords: "mark seen attention unread tab badge",
+        },
+        CommandItem {
+            id: CommandId::TogglePaneFacts,
+            title: "Toggle Pane Facts".into(),
+            shortcut: "".into(),
+            keywords: "pane facts cwd process tree ports info",
+        },
+        CommandItem {
+            id: CommandId::ToggleRunLedger,
+            title: "Toggle Run Ledger".into(),
+            shortcut: "⌘⇧L".into(),
+            keywords: "run ledger panel history attention",
+        },
+        CommandItem {
+            id: CommandId::SendSelection,
+            title: "Send Selection to Pane".into(),
+            shortcut: "".into(),
+            keywords: "send selection paste pty agent",
+        },
+        CommandItem {
+            id: CommandId::PipeSelection,
+            title: "Pipe Selection to Command".into(),
+            shortcut: "".into(),
+            keywords: "pipe selection command external",
+        },
+        CommandItem {
+            id: CommandId::SendGitDiff,
+            title: "Send Git Diff to Pane".into(),
+            shortcut: "".into(),
+            keywords: "git diff send review pane",
+        },
+        CommandItem {
+            id: CommandId::ToggleDiff,
+            title: "Toggle Diff Inspector".into(),
+            shortcut: display_shortcut("toggle_diff").into(),
+            keywords: "git diff inspector review overlay patch",
+        },
+        CommandItem {
+            id: CommandId::ToggleHistorySearch,
+            title: "Search Shell History".into(),
+            shortcut: "".into(),
+            keywords: "history fuzzy search histfile",
+        },
+        CommandItem {
+            id: CommandId::ToggleTabPlacement,
+            title: "Toggle Tab Placement".into(),
+            shortcut: "".into(),
+            keywords: "tabs side top rail strip placement chrome",
         },
     ]
 }
@@ -302,31 +396,68 @@ mod tests {
     }
 
     #[test]
-    fn windows_palette_copy_uses_ctrl() {
-        let items = commands_for(true);
-        let new_tab = items
-            .iter()
-            .find(|i| i.id == CommandId::NewTab)
-            .expect("new tab");
-        assert_eq!(new_tab.shortcut.as_ref(), "Ctrl+Shift+T");
-        let close = items
-            .iter()
-            .find(|i| i.id == CommandId::ClosePane)
-            .expect("close");
-        assert_eq!(close.shortcut.as_ref(), "Ctrl+Shift+W");
-        assert!(
-            items.iter().all(|i| !i.shortcut.to_string().contains('⌘')),
-            "Windows palette must not show ⌘"
-        );
-    }
-
-    #[test]
     fn macos_palette_copy_keeps_cmd() {
-        let items = commands_for(false);
+        let items = commands();
         let new_tab = items
             .iter()
             .find(|i| i.id == CommandId::NewTab)
             .expect("new tab");
         assert_eq!(new_tab.shortcut.as_ref(), "⌘T");
+    }
+
+    #[test]
+    fn clear_run_ledger_is_a_known_action_name() {
+        assert_eq!(
+            CommandId::from_str("clear_run_ledger"),
+            Some(CommandId::ClearRunLedger)
+        );
+        assert_eq!(
+            CommandId::from_str("toggle_run_ledger"),
+            Some(CommandId::ToggleRunLedger)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::ClearRunLedger),
+            "Clear Run Ledger must appear in the palette"
+        );
+        assert_eq!(
+            CommandId::from_str("mark_tab_seen"),
+            Some(CommandId::MarkTabSeen)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::MarkTabSeen),
+            "Mark Tab as Seen must appear in the palette"
+        );
+        assert_eq!(
+            CommandId::from_str("toggle_pane_facts"),
+            Some(CommandId::TogglePaneFacts)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::TogglePaneFacts),
+            "Toggle Pane Facts must appear in the palette"
+        );
+        assert_eq!(
+            CommandId::from_str("toggle_tab_placement"),
+            Some(CommandId::ToggleTabPlacement)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::ToggleTabPlacement),
+            "Toggle Tab Placement must appear in the palette"
+        );
+        assert_eq!(
+            CommandId::from_str("toggle_diff"),
+            Some(CommandId::ToggleDiff)
+        );
+        assert!(
+            commands().iter().any(|i| i.id == CommandId::ToggleDiff),
+            "Toggle Diff Inspector must appear in the palette"
+        );
     }
 }
