@@ -1,5 +1,6 @@
 //! The Ledger: every Run this app has seen, plus the rules for what to show.
 
+use crate::redact::redact_command;
 use crate::run::{LaunchId, PaneKey, Run, RunEvent, RunState};
 
 /// Wall-clock source injected by the caller so tests stay deterministic.
@@ -28,16 +29,31 @@ pub struct Ledger {
     /// Oldest first.
     runs: Vec<Run>,
     now_unix_ms: UnixMillisFn,
+    redact: bool,
 }
 
 impl Ledger {
     pub fn new(launch_id: LaunchId) -> Self {
-        Self { launch_id, runs: Vec::new(), now_unix_ms: default_unix_ms }
+        Self {
+            launch_id,
+            runs: Vec::new(),
+            now_unix_ms: default_unix_ms,
+            redact: true,
+        }
     }
 
     /// Test seam: fixed wall clock.
     pub fn with_clock(launch_id: LaunchId, now_unix_ms: UnixMillisFn) -> Self {
-        Self { launch_id, runs: Vec::new(), now_unix_ms }
+        Self {
+            launch_id,
+            runs: Vec::new(),
+            now_unix_ms,
+            redact: true,
+        }
+    }
+
+    pub fn set_redact(&mut self, on: bool) {
+        self.redact = on;
     }
 
     pub fn runs(&self) -> impl Iterator<Item = &Run> {
@@ -50,6 +66,11 @@ impl Ledger {
                 // One Run per Pane at a time: an unfinished predecessor is Abandoned.
                 self.abandon_running_in(pane, at_ms);
                 let unix_ms = (self.now_unix_ms)();
+                let command = if self.redact {
+                    redact_command(&command)
+                } else {
+                    command
+                };
                 self.runs.push(Run::start(
                     self.launch_id, pane, command, cwd, at_ms, unix_ms, inferred,
                 ));
@@ -163,5 +184,22 @@ mod tests {
         ledger.apply(RunEvent::started(p, "long thing", None, 0));
         ledger.apply(RunEvent::PaneClosed { pane: p, at_ms: 90 });
         assert_eq!(ledger.runs().next().unwrap().state, RunState::Abandoned);
+    }
+
+    #[test]
+    fn redact_off_preserves_original_command() {
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        ledger.set_redact(false);
+        let p = pane();
+        ledger.apply(RunEvent::started(
+            p,
+            "AWS_SECRET_ACCESS_KEY=abc123 aws s3 ls",
+            None,
+            0,
+        ));
+        assert_eq!(
+            ledger.runs().next().unwrap().command,
+            "AWS_SECRET_ACCESS_KEY=abc123 aws s3 ls"
+        );
     }
 }
