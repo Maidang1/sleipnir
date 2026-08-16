@@ -1,6 +1,3 @@
-#[cfg(target_os = "windows")]
-use std::num::NonZeroU32;
-#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
 
@@ -32,8 +29,6 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use util::paths::PathStyle;
 use vte::ansi::Handler;
-#[cfg(target_os = "windows")]
-use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use crate::{
     Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
@@ -61,23 +56,9 @@ pub(super) struct AlacrittySearch {
     search: RegexSearch,
 }
 
-#[cfg(unix)]
 impl From<&AlacrittyPty> for ProcessIdGetter {
     fn from(pty: &AlacrittyPty) -> Self {
         Self::new(pty.file().as_raw_fd(), pty.child().id())
-    }
-}
-
-#[cfg(windows)]
-impl From<&AlacrittyPty> for ProcessIdGetter {
-    fn from(pty: &AlacrittyPty) -> Self {
-        let child = pty.child_watcher();
-        let handle = child.raw_handle();
-        let fallback_pid = child.pid().unwrap_or_else(|| unsafe {
-            NonZeroU32::new_unchecked(GetProcessId(HANDLE(handle as _)))
-        });
-
-        Self::new(handle as i32, u32::from(fallback_pid))
     }
 }
 
@@ -152,7 +133,6 @@ pub(super) fn apply_config(term: &AlacrittyTermLock, config: &AlacrittyTermConfi
     term.lock().set_options(config.clone());
 }
 
-#[cfg(not(windows))]
 pub(super) fn current_child_signal_mask() -> io::Result<tty::SignalMask> {
     tty::SignalMask::current()
 }
@@ -161,18 +141,14 @@ pub(super) fn pty_options(
     shell: Option<(String, Vec<String>)>,
     working_directory: Option<PathBuf>,
     env: impl IntoIterator<Item = (String, String)>,
-    #[cfg(not(windows))] child_signal_mask: Option<tty::SignalMask>,
-    #[cfg(windows)] escape_args: bool,
+    child_signal_mask: Option<tty::SignalMask>,
 ) -> tty::Options {
     tty::Options {
         shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
         working_directory,
         drain_on_exit: true,
         env: env.into_iter().collect(),
-        #[cfg(not(windows))]
         child_signal_mask,
-        #[cfg(windows)]
-        escape_args,
     }
 }
 

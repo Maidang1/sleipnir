@@ -110,11 +110,7 @@ impl SessionNode {
 
 /// Default session file path, next to `settings.json`.
 pub fn session_path() -> PathBuf {
-    session_path_for(cfg!(windows))
-}
-
-pub fn session_path_for(windows: bool) -> PathBuf {
-    sleipnir_settings::config_dir_for(windows).join("session.json")
+    sleipnir_settings::config_dir().join("session.json")
 }
 
 /// Load a session from disk. Returns `None` if the file is missing, empty,
@@ -344,14 +340,11 @@ mod tests {
 
     #[test]
     fn session_file_sits_beside_settings() {
-        let unix = session_path_for(false);
+        let path = session_path();
         assert!(
-            unix.ends_with(".config/sleipnir/session.json"),
+            path.ends_with(".config/sleipnir/session.json"),
             "{}",
-            unix.display()
+            path.display()
         );
-        let win = session_path_for(true);
-        assert_eq!(win.file_name().and_then(|s| s.to_str()), Some("session.json"));
-        assert_eq!(win.parent(), Some(sleipnir_settings::config_dir_for(true).as_path()));
     }
 }

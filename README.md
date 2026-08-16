@@ -4,7 +4,7 @@
 
 # Sleipnir
 
-**A fast, native terminal emulator for macOS, Windows and Linux — GPU-rendered, tab- and split-aware.**
+**A fast, native terminal emulator for macOS — GPU-rendered, tab- and split-aware.**
 
 Built on [GPUI](https://gpui.rs) (the UI framework behind [Zed](https://github.com/zed-industries/zed))
 with a forked terminal backend.
@@ -17,16 +17,15 @@ with a forked terminal backend.
 
 ## About
 
-Sleipnir is a standalone terminal that renders on the GPU through GPUI, so
-scrolling and redraw stay smooth even under heavy output. It ships with a real PTY
-(ConPTY on Windows, the host PTY on Linux/macOS), IME support, multi-tab and split
-panes, multi-window sessions, adaptive theming that follows the system appearance,
-and a file-manager-friendly clipboard that turns pasted images into quoted paths.
+Sleipnir is a standalone macOS terminal that renders on the GPU through GPUI, so
+scrolling and redraw stay smooth even under heavy output. It ships with a real
+host PTY, IME support, multi-tab and split panes, multi-window sessions,
+adaptive theming that follows the system appearance, and a file-manager-friendly
+clipboard that turns pasted images into quoted paths.
 
-Prebuilt downloads: macOS `.dmg` / `.zip`, a Windows x64 `.zip`
-(`Sleipnir-<ver>-windows-x64.zip`), and a Linux `.deb` / `.tar.gz`
-(`Sleipnir-<ver>-linux-x86_64.tar.gz`). All ship on
-[GitHub Releases](https://github.com/Maidang1/sleipnir/releases).
+Prebuilt downloads are macOS `.dmg` / `.zip` on
+[GitHub Releases](https://github.com/Maidang1/sleipnir/releases). Windows and
+Linux are not supported.
 
 The name comes from Norse myth — Odin's eight-legged steed, the fastest horse in the
 nine worlds. The app icon abstracts that into a minimal horse-head mark over a terminal
@@ -34,33 +33,31 @@ prompt.
 
 ## Features
 
-- **GPU rendering** — smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D on Windows, Vulkan on Linux); ease-in-out cursor blink.
+- **GPU rendering** — smooth scrollback and redraw via GPUI (Metal); ease-in-out cursor blink.
 - **Tabs, splits & panes** — split right/down, jump tabs, move focus, drag tabs to reorder or drop onto the terminal to detach into a new window; pane zoom and unfocused dim.
-- **Multi-window** — `⌘N` / `Ctrl+Shift+N` opens an independent window with its own tabs and shells.
-- **Font zoom** — `⌘+` / `Ctrl++` (and `-` / `0`) resize the grid for the current window (not persisted).
+- **Multi-window** — `⌘N` opens an independent window with its own tabs and shells.
+- **Font zoom** — `⌘+` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
   GitHub Dark/Light, Dracula, One Dark; `auto` follows the system light/dark appearance.
   Extra palettes go in `themes.json` in the config dir (`"theme": "kanagawa"`, see
   `docs/themes.example.json`).
-- **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder / Explorer /
-  Nautilus selections as quoted paths; force text-only paste when you need it.
-- **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R` / `Ctrl+Shift+R`.
+- **Smart paste** — paste an image to get a shell-quoted temp-file path; paste Finder
+  selections as quoted paths; force text-only paste when you need it.
+- **Zed-compatible config** — reuse your `terminal.*` settings; hot-reload with `⌘⇧R`.
 - **vi mode** — keyboard-driven selection and navigation.
 - **Accessibility** — the terminal exposes the visible screen as a read-only accessible value (VoiceOver can read the current output), like Ghostty's read-only AX.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
-- **Command palette** — discover actions with `⌘⇧K` / `Ctrl+Shift+P`; optional key binding overrides in settings.
-- **Find in scrollback** — `⌘F` / `Ctrl+Shift+F` search with match highlights, regex (`.*`) and match-case (`Aa`) toggles; export scrollback to a file via **Shell → Export Scrollback…** (opens in your default editor).
-- **Path links & bell** — ⌘-click / Ctrl-click paths open in the default app; hover shows a URL/path preview tooltip; optional system/visual bell.
+- **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings.
+- **Find in scrollback** — `⌘F` search with match highlights, regex (`.*`) and match-case (`Aa`) toggles; export scrollback to a file via **Shell → Export Scrollback…** (opens in your default editor).
+- **Path links & bell** — ⌘-click paths open in the default app; hover shows a URL/path preview tooltip; optional system/visual bell.
 - **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
 - **Shell collaboration** — OSC 133 prompt jump; new tabs/splits inherit the active pane's working directory; optional notify when a long command finishes
-  while unfocused (macOS notification; Windows logs only; Linux via libnotify).
+  while unfocused (macOS notification).
 - **Quick Terminal / Quick Select** — open a spare window fast; link-oriented mode.
 
 ## Install
 
-### macOS
-
-Latest GitHub Release:
+Sleipnir is **macOS 14+ only**. Latest GitHub Release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | bash
@@ -85,93 +82,31 @@ and, if macOS still blocks it, run:
 xattr -cr /Applications/Sleipnir.app
 ```
 
-### Windows
-
-PowerShell, latest GitHub Release (installs to `%LOCALAPPDATA%\Sleipnir`):
-
-```powershell
-irm https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.ps1 | iex
-```
-
-Or grab `Sleipnir-<ver>-windows-x64.zip` from
-[Releases](https://github.com/Maidang1/sleipnir/releases), unzip, and run
-`sleipnir.exe`. The default shell is the system shell (usually PowerShell).
-Set `terminal.shell` to `wsl.exe` in settings if you want WSL.
-
-Closing the last window exits the process (unlike macOS, where the app can stay
-in the Dock with no windows).
-
-Or build from source (see below).
-
-### Linux (Ubuntu 22.04+ / Debian 12+)
-
-Latest GitHub Release (installs the `.deb` with apt):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install-linux.sh | bash
-```
-
-The script downloads `sleipnir_<ver>_amd64.deb` and runs `sudo apt install`.
-It needs a Vulkan driver (`sudo apt install libvulkan1 mesa-vulkan-drivers`).
-Prefer the portable tarball, or skip launching:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install-linux.sh \
-  | SLEIPNIR_TARBALL=1 PREFIX="$HOME/.local" SLEIPNIR_NO_OPEN=1 bash
-```
-
-Or grab `sleipnir_<ver>_amd64.deb` / `Sleipnir-<ver>-linux-x86_64.tar.gz` from
-[Releases](https://github.com/Maidang1/sleipnir/releases) and install by hand:
-
-```bash
-sudo apt install ./sleipnir_<ver>_amd64.deb
-# or:
-tar -xzf Sleipnir-<ver>-linux-x86_64.tar.gz
-cd Sleipnir-<ver>-linux-x86_64 && ./sleipnir
-```
-
-The `.deb` installs a desktop entry and hicolor icons, so you can launch Sleipnir
-from the app menu. The tarball bundles the binary, a `.desktop` file, and a README.
-Sleipnir prefers Wayland when `WAYLAND_DISPLAY` is set and falls back to X11
-otherwise (set `WAYLAND_DISPLAY=` to force X11).
-
 ## Requirements
 
 To **run** a release build:
 
 - macOS 14.0+ (Sonoma)
-- Windows 10 1809+ (ConPTY) with a Direct3D 11 GPU
-- Linux (Ubuntu 22.04+ / Debian 12+) with a Vulkan driver, X11 or Wayland,
-  and `xdg-open` (from `xdg-utils`) for opening links/paths
 
 To **build** from source, also:
 
 - Rust **1.95.0** (see `rust-toolchain.toml`)
-- macOS: Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
-- Linux (Ubuntu): `pkg-config`, `libfontconfig-dev`, `libfreetype-dev`,
-  `libxkbcommon-dev`, `libwayland-dev`, and `libvulkan1` at runtime
+- Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+
+The crate fails to compile on Windows and Linux.
 
 ## Build & run
 
 ```bash
 cargo run -p sleipnir
-# macOS binary: target/debug/sleipnir
-# Windows binary: target/debug/sleipnir.exe
-# Linux binary:  target/debug/sleipnir
+# binary: target/debug/sleipnir
 ```
 
 ## Config
 
-Zed-compatible `terminal.*` keys plus Sleipnir extensions:
-
-| OS | Settings / session |
-|----|--------------------|
-| macOS | `~/.config/sleipnir/settings.json` and `session.json` |
-| Windows | `%APPDATA%\sleipnir\settings.json` and `session.json` |
-| Linux | `~/.config/sleipnir/settings.json` and `session.json` |
-
-Default font is **Menlo** on macOS, **Cascadia Mono** (then Consolas, Courier New)
-on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linux.
+Zed-compatible `terminal.*` keys plus Sleipnir extensions. Settings live in
+`~/.config/sleipnir/settings.json` and session restore in `session.json`.
+Default font is **Menlo**.
 
 | Key | Meaning |
 |-----|---------|
@@ -179,7 +114,7 @@ on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linu
 | `custom_theme` | Optional hex palette (`background`/`foreground`/`ansi`…) that overrides `theme` |
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
-| `path_links` | Open path-like targets on ⌘-click / Ctrl-click (default `true`) |
+| `path_links` | Open path-like targets on ⌘-click (default `true`) |
 | `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
@@ -193,90 +128,67 @@ on Windows, and **Ubuntu Mono** (then DejaVu Sans Mono, Liberation Mono) on Linu
 | `run_ledger_redact` | Redact command lines at capture (default `true`; heuristic, not a guarantee) |
 | `terminal.inject_osc133` | Inject OSC 133 A/B/C/D into zsh/bash/fish (default `true`; was `false`) |
 
-Open the in-app theme picker with `⌘,` / `Ctrl+,`, or edit the file and reload
-with `⌘⇧R` / `Ctrl+Shift+R` (key binding overrides apply on next launch).
+Open the in-app theme picker with `⌘,`, or edit the file and reload
+with `⌘⇧R` (key binding overrides apply on next launch).
 See [`docs/settings.example.json`](docs/settings.example.json).
 
 ## Paste
 
-| Clipboard | Paste behavior (`⌘V` / `Ctrl+V` / `Ctrl+Shift+V`) |
+| Clipboard | Paste behavior (`⌘V` / `⌃⇧V`) |
 |-----------|----------------|
-| Image (screenshot, etc.) | Write to a temp file; paste a quoted absolute path (POSIX on macOS/Linux, PowerShell on Windows) |
-| Finder / Explorer / Nautilus file paths | Paste space-separated quoted paths |
+| Image (screenshot, etc.) | Write to a temp file; paste a quoted absolute POSIX path |
+| Finder file paths | Paste space-separated quoted paths |
 | Text | Normal paste (bracketed paste when the app enables it) |
 
-Force **text-only** paste (skip image→path conversion) with `⌃⌘V` on macOS or
-`Ctrl+Alt+V` on Windows/Linux.
-
-On Windows and Linux, plain `Ctrl+C` still goes to the PTY (interrupt). Copy is
-`Ctrl+Shift+C`.
+Force **text-only** paste (skip image→path conversion) with `⌃⌘V`.
 
 ## Shortcuts
 
-Windows and Linux follow Windows Terminal / Zed conventions: app chords use
-Ctrl+Shift so `Ctrl+C`, `Ctrl+W`, and `Ctrl+D` stay with the shell.
-
-| Action | macOS | Windows / Linux |
-|--------|-------|---------|
-| Copy | `⌘C` / `⌃⇧C` | `Ctrl+Shift+C` / `Ctrl+Insert` |
-| Paste (image → path) | `⌘V` / `⌃⇧V` | `Ctrl+V` (Windows) / `Ctrl+Shift+V` / `Shift+Insert` |
-| Paste text only | `⌃⌘V` | `Ctrl+Alt+V` |
-| Select all | `⌘A` | `Ctrl+Shift+A` |
-| Clear | `⌘K` | `Ctrl+Shift+L` |
-| New tab / close pane | `⌘T` / `⌘W` | `Ctrl+Shift+T` / `Ctrl+Shift+W` |
-| New window | `⌘N` | `Ctrl+Shift+N` |
-| Jump to tab N | `⌘1`…`⌘9` | `Ctrl+1`…`Ctrl+9` |
-| Split pane right / down | `⌘D` / `⌘⇧D` | `Alt+Shift+D` / `Alt+Shift+-` |
-| Move focus between panes | `⌘⌥←↑↓→` | `Ctrl+Alt+←↑↓→` |
-| Next / previous tab | `⌃Tab` / `⌃⇧Tab` | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| Next / previous tab (alt) | `⌘⇧]` / `⌘⇧[` | (use Ctrl+Tab) |
-| Increase / decrease / reset font | `⌘+` `⌘=` `⌘-` `⌘0` | `Ctrl++` `Ctrl+=` `Ctrl+-` `Ctrl+0` |
-| Toggle pane zoom | `⌘⇧Enter` | `Ctrl+Shift+Enter` |
-| Toggle broadcast | `⌘⇧B` | `Ctrl+Shift+B` |
-| Jump prev / next prompt | `⌘⇧↑` / `⌘⇧↓` | `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
-| Quick Select | `⌘⇧O` | `Ctrl+Shift+O` |
-| Quick Terminal | `⌘⇧N` | `Ctrl+Alt+N` |
-| Settings | `⌘,` | `Ctrl+,` |
-| Reload settings | `⌘⇧R` | `Ctrl+Shift+R` |
-| Cycle theme | `⌘⇧P` | `Ctrl+Shift+Alt+P` |
-| Command palette | `⌘⇧K` | `Ctrl+Shift+P` |
-| Find in scrollback | `⌘F` | `Ctrl+Shift+F` |
-| Next / previous find match | `⌘G` / `⌘⇧G` | `Ctrl+Shift+G` / `Ctrl+Shift+Alt+G` |
-| Find: match case / regex | `⌥⌘C` / `⌥⌘R` | (find-bar buttons) |
-| Check for updates | `⌘⇧U` | `Ctrl+Shift+U` |
-| Scroll page | `⌘↑` / `⌘↓` | `Shift+PageUp` / `Shift+PageDown` |
-| Scroll line | `⇧↑` / `⇧↓` | `Shift+↑` / `Shift+↓` |
-| Line start / end | `⌘←` / `⌘→` | (send to PTY) |
-| Word back / forward | `⌥←` / `⌥→` | `Alt+←` / `Alt+→` |
-| Clear line | `⌘⌫` | (send to PTY) |
-| Delete to end of line | `⌘⌦` | (send to PTY) |
-| Character palette | `⌃⌘Space` | — |
-| Toggle vi mode | `⌃⇧Space` | `Ctrl+Shift+Space` |
-| Quit | `⌘Q` | `Alt+F4` / `Ctrl+Q` (Windows) / `Ctrl+Shift+Q` (Linux) |
+| Action | Shortcut |
+|--------|----------|
+| Copy | `⌘C` / `⌃⇧C` |
+| Paste (image → path) | `⌘V` / `⌃⇧V` |
+| Paste text only | `⌃⌘V` |
+| Select all | `⌘A` |
+| Clear | `⌘K` |
+| New tab / close pane | `⌘T` / `⌘W` |
+| New window | `⌘N` |
+| Jump to tab N | `⌘1`…`⌘9` |
+| Split pane right / down | `⌘D` / `⌘⇧D` |
+| Move focus between panes | `⌘⌥←↑↓→` |
+| Next / previous tab | `⌃Tab` / `⌃⇧Tab` |
+| Next / previous tab (alt) | `⌘⇧]` / `⌘⇧[` |
+| Increase / decrease / reset font | `⌘+` `⌘=` `⌘-` `⌘0` |
+| Toggle pane zoom | `⌘⇧Enter` |
+| Toggle broadcast | `⌘⇧B` |
+| Jump prev / next prompt | `⌘⇧↑` / `⌘⇧↓` |
+| Quick Select | `⌘⇧O` |
+| Quick Terminal | `⌘⇧N` |
+| Settings | `⌘,` |
+| Reload settings | `⌘⇧R` |
+| Cycle theme | `⌘⇧P` |
+| Command palette | `⌘⇧K` |
+| Find in scrollback | `⌘F` |
+| Next / previous find match | `⌘G` / `⌘⇧G` |
+| Find: match case / regex | `⌥⌘C` / `⌥⌘R` |
+| Check for updates | `⌘⇧U` |
+| Scroll page | `⌘↑` / `⌘↓` |
+| Scroll line | `⇧↑` / `⇧↓` |
+| Line start / end | `⌘←` / `⌘→` |
+| Word back / forward | `⌥←` / `⌥→` |
+| Clear line | `⌘⌫` |
+| Delete to end of line | `⌘⌦` |
+| Character palette | `⌃⌘Space` |
+| Toggle vi mode | `⌃⇧Space` |
+| Quit | `⌘Q` |
 
 Scroll shortcuts are ignored on the alternate screen (full-screen TUI apps).
-
-Linux uses the same Ctrl+Shift app chords as Windows (so `Ctrl+C`/`Ctrl+V` stay
-with the shell), with these differences:
-
-| Action | Linux |
-|--------|-------|
-| Copy | `Ctrl+Shift+C` / `Ctrl+Insert` |
-| Paste | `Ctrl+Shift+V` / `Shift+Insert` |
-| Paste text only | `Ctrl+Alt+V` |
-| Quit | `Ctrl+Shift+Q` |
-| Scroll to top / bottom | `Shift+Home` / `Shift+End` |
-| Word back / forward | `Alt+←` / `Alt+→` (also `Alt+B` / `Alt+F`) |
-| Delete word / rest of line | `Alt+Delete` / `Ctrl+Delete` (sent to the PTY as escape sequences) |
 
 ## Auto-update
 
 Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sleipnir/releases).
 
-In-place install is **macOS-only**. On Windows and Linux, Check for Updates still
-queries GitHub, then opens the releases page.
-
-- Open the update dialog via **Sleipnir → Check for Updates…** (`⌘⇧U` / `Ctrl+Shift+U`).
+- Open the update dialog via **Sleipnir → Check for Updates…** (`⌘⇧U`).
   Sleipnir does **not** check for updates automatically on launch.
 - If a newer version is found, choosing **Download & Install** fetches the
   `Sleipnir-<ver>-macos.zip` artifact and verifies it against the published
@@ -287,16 +199,39 @@ queries GitHub, then opens the releases page.
   lives somewhere the app can't write (e.g. a protected `/Applications` install owned by
   another user), it falls back to opening the releases page for a manual install.
 
+## Scope
+
+Sleipnir is built for **people who run coding agents in a terminal**: the human is
+the user, the agent is the workload. That sets the boundaries:
+
+- **No built-in AI.** No model calls, no chat panel, no API-key management. Sleipnir
+  is the terminal your agent runs *in*, not an agent. If you want to talk to an AI
+  inside your terminal, use [Warp](https://warp.dev) or [Wave](https://waveterm.dev).
+  ([ADR-0008](docs/adr/0008-no-builtin-ai.md))
+- **No persisted scrollback.** Session restore brings back tabs, splits and working
+  directories — never terminal output, because output routinely contains tokens and
+  passwords. Use **Shell → Export Scrollback…** when you want to keep a transcript.
+- **No process restore.** Restarting does not resurrect running commands; that is
+  what `tmux` / `zellij` are for, and Sleipnir does not reimplement them.
+- **No plugin system.** Configuration, key bindings, and piping to external commands
+  are the extension points.
+
 ## Status
 
 Shipped through M15 — see [CHANGELOG](CHANGELOG.md). Still open: scrollback
 byte-budget / compression, a fuller VoiceOver tree, and kitty graphics
 (tracked, not implemented: [ADR-0004](docs/adr/0004-kitty-graphics-track-not-implement.md)).
 
+Performance is measured, not asserted: methodology in
+[`scripts/bench/README.md`](scripts/bench/README.md), numbers in
+[`scripts/bench/results.md`](scripts/bench/results.md). Input latency and a
+same-machine comparison against Ghostty / kitty / Alacritty are still open, so treat
+the throughput figures as internal baselines rather than competitive claims.
+
 ## Upstream
 
 The GPUI stack is **not** vendored. Root `Cargo.toml` pins `zed-industries/zed` at a
-fixed `rev` (`gpui`, `gpui_macos`, `gpui_linux`, `gpui_windows`, `collections`, `util`, …). Local forks:
+fixed `rev` (`gpui`, `gpui_macos`, `collections`, `util`, …). Local forks:
 `terminal`, a slim `gpui_platform`, and the Sleipnir app crates. See [`UPSTREAM.md`](UPSTREAM.md)
 to bump the pin.
 
@@ -317,15 +252,10 @@ to bump the pin.
 
 # Create a .dmg (requires signing)
 ./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --dmg
-
-# Linux: build and package as .tar.gz + .deb
-./scripts/make-linux-package.sh
 ```
 
 The macOS bundle uses [`resources/AppIcon.icns`](resources/AppIcon.icns), generated from
-[`resources/appicon.svg`](resources/appicon.svg). The Linux packages embed hicolor icons
-resized from [`resources/appicon_preview.png`](resources/appicon_preview.png) and a
-[`.desktop`](resources/linux/sleipnir.desktop) entry.
+[`resources/appicon.svg`](resources/appicon.svg).
 
 ### Publish to GitHub Releases (via `gh` CLI)
 
@@ -342,9 +272,8 @@ git push origin v0.2.0
 ### CI (GitHub Actions)
 
 Triggered automatically on git tags (`v*`). Also supports manual dispatch.
-The same workflow builds and tests `-p sleipnir` on `windows-latest` (`.zip`) and
-`ubuntu-latest` (`.tar.gz` + `.deb`); the macOS job creates the GitHub Release and
-each job attaches its assets to it.
+The workflow builds and tests on `macos-latest` and publishes the `.dmg`, `.zip`,
+and `.zip.sha256` to the GitHub Release.
 
 ```bash
 gh workflow run build-and-release.yml \

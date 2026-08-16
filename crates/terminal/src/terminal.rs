@@ -17,9 +17,7 @@ pub use shell_semantics::{
     wrap_shell_for_inject, wrap_shell_for_inject_in,
 };
 
-#[cfg(not(windows))]
-use anyhow::Context as _;
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use futures_lite::future::yield_now;
 use log::trace;
 
@@ -46,7 +44,6 @@ use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, Ter
 use urlencoding;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 
-#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
     borrow::Cow,
@@ -72,9 +69,8 @@ use gpui::{
     Point as GpuiPoint, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, px,
 };
 
-#[cfg(not(windows))]
-use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
+    current_child_signal_mask,
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
@@ -1056,8 +1052,6 @@ impl TerminalBuilder {
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
-            #[cfg(windows)]
-            shell_program: None,
             activation_script: Vec::new(),
             template: CopyTemplate {
                 shell: Shell::System,
@@ -1120,7 +1114,6 @@ impl TerminalBuilder {
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
         let no_pty = HeadlessTerminal::is_enabled(cx);
-        #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
         {
@@ -1166,17 +1159,7 @@ impl TerminalBuilder {
             }
 
             let shell_params = match shell.clone() {
-                Shell::System => {
-                    if cfg!(windows) {
-                        Some(ShellParams::new(
-                            util::shell::get_windows_system_shell(),
-                            None,
-                            None,
-                        ))
-                    } else {
-                        None
-                    }
-                }
+                Shell::System => None,
                 Shell::Program(program) => Some(ShellParams::new(program, None, None)),
                 Shell::WithArguments {
                     program,
@@ -1187,21 +1170,7 @@ impl TerminalBuilder {
             let terminal_title_override =
                 shell_params.as_ref().and_then(|e| e.title_override.clone());
 
-            #[cfg(windows)]
-            let shell_program = shell_params.as_ref().map(|params| {
-                use util::ResultExt;
-
-                Self::resolve_path(&params.program)
-                    .log_err()
-                    .unwrap_or(params.program.clone())
-            });
-
-            // Note: when remoting, this shell_kind will scrutinize `ssh` or
-            // `wsl.exe` as a shell and fall back to posix or powershell based on
-            // the compilation target. This is fine right now due to the restricted
-            // way we use the return value, but would become incorrect if we
-            // supported remoting into windows.
-            let shell_kind = shell.shell_kind(cfg!(windows));
+            let shell_kind = shell.shell_kind(false);
 
             let scrolling_history = if task.is_some() {
                 // Tasks like `cargo build --all` may produce a lot of output, ergo allow maximum scrolling.
@@ -1273,10 +1242,7 @@ impl TerminalBuilder {
                     // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
                     // otherwise the terminal would inherit the background executor's signal mask which blocks
                     // some terminal signals
-                    #[cfg(not(windows))]
                     child_signal_mask,
-                    #[cfg(windows)]
-                    shell_kind.tty_escape_args(),
                 );
 
                 //Setup the pty...
@@ -1338,8 +1304,6 @@ impl TerminalBuilder {
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
-                #[cfg(windows)]
-                shell_program,
                 activation_script: activation_script.clone(),
                 template: CopyTemplate {
                     shell,
@@ -1504,24 +1468,6 @@ impl TerminalBuilder {
         });
         self.terminal
     }
-
-    #[cfg(windows)]
-    fn resolve_path(path: &str) -> Result<String> {
-        use windows::Win32::Storage::FileSystem::SearchPathW;
-        use windows::core::HSTRING;
-
-        let path = if path.starts_with(r"\\?\") || !path.contains(&['/', '\\']) {
-            path.to_string()
-        } else {
-            r"\\?\".to_string() + path
-        };
-
-        let required_length = unsafe { SearchPathW(None, &HSTRING::from(&path), None, None, None) };
-        let mut buf = vec![0u16; required_length as usize];
-        let size = unsafe { SearchPathW(None, &HSTRING::from(&path), None, Some(&mut buf), None) };
-
-        Ok(String::from_utf16(&buf[..size as usize])?)
-    }
 }
 
 enum TerminalType {
@@ -1563,8 +1509,6 @@ pub struct Terminal {
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
-    #[cfg(windows)]
-    shell_program: Option<String>,
     template: CopyTemplate,
     activation_script: Vec<String>,
     child_exited: Option<ExitStatus>,
@@ -1664,18 +1608,6 @@ impl Terminal {
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         match event {
             TerminalBackendEvent::Title(title) => {
-                // ignore default shell program title change as windows always sends those events
-                // and it would end up showing the shell executable path in breadcrumbs
-                #[cfg(windows)]
-                if self
-                    .shell_program
-                    .as_ref()
-                    .map(|e| *e == title)
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-
                 self.breadcrumb_text = title;
                 cx.emit(Event::BreadcrumbsChanged);
             }
@@ -1810,11 +1742,6 @@ impl Terminal {
                 if self.vi_mode_enabled {
                     update_vi_cursor_for_scroll(term, *scroll);
                     if let Some(selection_head) = update_selection_to_vi_cursor(term) {
-                        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                        if let Some(selection_text) = selection_text(term) {
-                            cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                        }
-
                         self.selection_head = Some(selection_head);
                         cx.emit(Event::SelectionsChanged)
                     }
@@ -1823,11 +1750,6 @@ impl Terminal {
             InternalEvent::SetSelection(selection) => {
                 trace!("Setting selection: selection={selection:?}");
                 set_term_selection(term, selection.as_ref());
-
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                if let Some(selection_text) = selection_text(term) {
-                    cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                }
 
                 if let Some(selection) = selection {
                     self.selection_head = Some(selection.head);
@@ -1843,11 +1765,6 @@ impl Terminal {
                 );
 
                 if update_term_selection(term, point, side) {
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    if let Some(selection_text) = selection_text(term) {
-                        cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                    }
-
                     self.selection_head = Some(point);
                     cx.emit(Event::SelectionsChanged)
                 }
@@ -3004,13 +2921,6 @@ impl Terminal {
                             .push_back(InternalEvent::SetSelection(Some(selection)));
                     }
                 }
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                MouseButton::Middle => {
-                    if let Some(item) = cx.read_from_primary() {
-                        let text = item.text().unwrap_or_default();
-                        self.paste(&text);
-                    }
-                }
                 _ => {}
             }
         }
@@ -3487,10 +3397,7 @@ fn task_summary(task: &TaskState, exit_status: Option<ExitStatus>) -> (bool, Str
     let (success, task_line) = match exit_status {
         Some(status) => {
             let code = status.code();
-            #[cfg(unix)]
             let signal = status.signal();
-            #[cfg(not(unix))]
-            let signal: Option<i32> = None;
 
             match (code, signal) {
                 (Some(0), _) => (true, task_label("finished successfully")),

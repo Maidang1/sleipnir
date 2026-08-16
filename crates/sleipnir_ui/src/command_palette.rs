@@ -107,151 +107,146 @@ pub struct CommandItem {
     pub keywords: &'static str,
 }
 
-/// Built-in command catalog for this OS.
+/// Built-in command catalog.
 pub fn commands() -> Vec<CommandItem> {
-    commands_for(cfg!(windows))
-}
-
-/// Built-in command catalog. `windows = true` shows Ctrl labels.
-pub fn commands_for(windows: bool) -> Vec<CommandItem> {
-    use crate::keymap::display_shortcut_for;
+    use crate::keymap::display_shortcut;
     vec![
         CommandItem {
             id: CommandId::NewTab,
             title: "New Tab".into(),
-            shortcut: display_shortcut_for("new_tab", windows).into(),
+            shortcut: display_shortcut("new_tab").into(),
             keywords: "tab new open",
         },
         CommandItem {
             id: CommandId::ClosePane,
             title: "Close Pane / Tab".into(),
-            shortcut: display_shortcut_for("close_tab", windows).into(),
+            shortcut: display_shortcut("close_tab").into(),
             keywords: "close pane tab",
         },
         CommandItem {
             id: CommandId::NextTab,
             title: "Next Tab".into(),
-            shortcut: display_shortcut_for("next_tab", windows).into(),
+            shortcut: display_shortcut("next_tab").into(),
             keywords: "tab next",
         },
         CommandItem {
             id: CommandId::PrevTab,
             title: "Previous Tab".into(),
-            shortcut: display_shortcut_for("prev_tab", windows).into(),
+            shortcut: display_shortcut("prev_tab").into(),
             keywords: "tab previous prev",
         },
         CommandItem {
             id: CommandId::SplitRight,
             title: "Split Pane Right".into(),
-            shortcut: display_shortcut_for("split_right", windows).into(),
+            shortcut: display_shortcut("split_right").into(),
             keywords: "split right vertical",
         },
         CommandItem {
             id: CommandId::SplitDown,
             title: "Split Pane Down".into(),
-            shortcut: display_shortcut_for("split_down", windows).into(),
+            shortcut: display_shortcut("split_down").into(),
             keywords: "split down horizontal",
         },
         CommandItem {
             id: CommandId::Find,
             title: "Find in Scrollback".into(),
-            shortcut: display_shortcut_for("find", windows).into(),
+            shortcut: display_shortcut("find").into(),
             keywords: "find search scrollback",
         },
         CommandItem {
             id: CommandId::OpenSettings,
             title: "Open Settings".into(),
-            shortcut: display_shortcut_for("open_settings", windows).into(),
+            shortcut: display_shortcut("open_settings").into(),
             keywords: "settings preferences theme",
         },
         CommandItem {
             id: CommandId::ReloadSettings,
             title: "Reload Settings".into(),
-            shortcut: display_shortcut_for("reload_settings", windows).into(),
+            shortcut: display_shortcut("reload_settings").into(),
             keywords: "reload settings config",
         },
         CommandItem {
             id: CommandId::CycleTheme,
             title: "Cycle Theme".into(),
-            shortcut: display_shortcut_for("cycle_theme", windows).into(),
+            shortcut: display_shortcut("cycle_theme").into(),
             keywords: "theme cycle appearance",
         },
         CommandItem {
             id: CommandId::CheckForUpdates,
             title: "Check for Updates".into(),
-            shortcut: display_shortcut_for("check_for_updates", windows).into(),
+            shortcut: display_shortcut("check_for_updates").into(),
             keywords: "update upgrade release",
         },
         CommandItem {
             id: CommandId::ToggleCommandPalette,
             title: "Toggle Command Palette".into(),
-            shortcut: display_shortcut_for("toggle_command_palette", windows).into(),
+            shortcut: display_shortcut("toggle_command_palette").into(),
             keywords: "command palette actions",
         },
         CommandItem {
             id: CommandId::NewWindow,
             title: "New Window".into(),
-            shortcut: display_shortcut_for("new_window", windows).into(),
+            shortcut: display_shortcut("new_window").into(),
             keywords: "window new open",
         },
         CommandItem {
             id: CommandId::IncreaseFontSize,
             title: "Increase Font Size".into(),
-            shortcut: display_shortcut_for("increase_font_size", windows).into(),
+            shortcut: display_shortcut("increase_font_size").into(),
             keywords: "font zoom larger bigger size",
         },
         CommandItem {
             id: CommandId::DecreaseFontSize,
             title: "Decrease Font Size".into(),
-            shortcut: display_shortcut_for("decrease_font_size", windows).into(),
+            shortcut: display_shortcut("decrease_font_size").into(),
             keywords: "font zoom smaller size",
         },
         CommandItem {
             id: CommandId::ResetFontSize,
             title: "Reset Font Size".into(),
-            shortcut: display_shortcut_for("reset_font_size", windows).into(),
+            shortcut: display_shortcut("reset_font_size").into(),
             keywords: "font zoom reset default size",
         },
         CommandItem {
             id: CommandId::TogglePaneZoom,
             title: "Toggle Pane Zoom".into(),
-            shortcut: display_shortcut_for("toggle_pane_zoom", windows).into(),
+            shortcut: display_shortcut("toggle_pane_zoom").into(),
             keywords: "zoom maximize pane split",
         },
         CommandItem {
             id: CommandId::ToggleBroadcast,
             title: "Toggle Broadcast Input".into(),
-            shortcut: display_shortcut_for("toggle_broadcast", windows).into(),
+            shortcut: display_shortcut("toggle_broadcast").into(),
             keywords: "broadcast all panes input",
         },
         CommandItem {
             id: CommandId::JumpPrevPrompt,
             title: "Jump to Previous Prompt".into(),
-            shortcut: display_shortcut_for("jump_prev_prompt", windows).into(),
+            shortcut: display_shortcut("jump_prev_prompt").into(),
             keywords: "prompt shell osc133 jump previous",
         },
         CommandItem {
             id: CommandId::JumpNextPrompt,
             title: "Jump to Next Prompt".into(),
-            shortcut: display_shortcut_for("jump_next_prompt", windows).into(),
+            shortcut: display_shortcut("jump_next_prompt").into(),
             keywords: "prompt shell osc133 jump next",
         },
         CommandItem {
             id: CommandId::ToggleQuickSelect,
             title: "Toggle Quick Select".into(),
-            shortcut: display_shortcut_for("toggle_quick_select", windows).into(),
+            shortcut: display_shortcut("toggle_quick_select").into(),
             keywords: "quick select labels links",
         },
         CommandItem {
             id: CommandId::OpenQuickTerminal,
             title: "Open Quick Terminal".into(),
-            shortcut: display_shortcut_for("open_quick_terminal", windows).into(),
+            shortcut: display_shortcut("open_quick_terminal").into(),
             keywords: "quick terminal dropdown window",
         },
         CommandItem {
             id: CommandId::ExportScrollback,
             title: "Export Scrollback to File".into(),
-            shortcut: display_shortcut_for("export_scrollback", windows).into(),
+            shortcut: display_shortcut("export_scrollback").into(),
             keywords: "export scrollback save file editor dump",
         },
         CommandItem {
@@ -323,27 +318,8 @@ mod tests {
     }
 
     #[test]
-    fn windows_palette_copy_uses_ctrl() {
-        let items = commands_for(true);
-        let new_tab = items
-            .iter()
-            .find(|i| i.id == CommandId::NewTab)
-            .expect("new tab");
-        assert_eq!(new_tab.shortcut.as_ref(), "Ctrl+Shift+T");
-        let close = items
-            .iter()
-            .find(|i| i.id == CommandId::ClosePane)
-            .expect("close");
-        assert_eq!(close.shortcut.as_ref(), "Ctrl+Shift+W");
-        assert!(
-            items.iter().all(|i| !i.shortcut.to_string().contains('⌘')),
-            "Windows palette must not show ⌘"
-        );
-    }
-
-    #[test]
     fn macos_palette_copy_keeps_cmd() {
-        let items = commands_for(false);
+        let items = commands();
         let new_tab = items
             .iter()
             .find(|i| i.id == CommandId::NewTab)

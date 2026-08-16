@@ -353,13 +353,7 @@ pub fn open_sleipnir_window(cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                // macOS reserves the leading pad for traffic lights; Windows and
-                // Linux have no traffic lights, so the custom chrome starts flush.
-                traffic_light_position: if cfg!(windows) || cfg!(target_os = "linux") {
-                    None
-                } else {
-                    Some(geo.traffic_light_position)
-                },
+                traffic_light_position: Some(geo.traffic_light_position),
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -384,11 +378,7 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                traffic_light_position: if cfg!(windows) {
-                    None
-                } else {
-                    Some(geo.traffic_light_position)
-                },
+                traffic_light_position: Some(geo.traffic_light_position),
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -2066,54 +2056,6 @@ impl AppShell {
                 cx.open_url(updater::RELEASES_PAGE);
             }
         }
-    }
-
-    /// CSD caption buttons for Linux (minimize / zoom / close).
-    fn render_linux_caption_buttons(
-        &self,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id("linux-caption-buttons")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .pr_2()
-            .child(self.caption_button("linux-min", "−", tokens, cx, |_, window, _| {
-                window.minimize_window();
-            }))
-            .child(self.caption_button("linux-zoom", "□", tokens, cx, |_, window, _| {
-                window.zoom_window();
-            }))
-            .child(self.caption_button("linux-close", "×", tokens, cx, |_, window, _| {
-                window.remove_window();
-            }))
-    }
-
-    fn caption_button(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .w(px(36.0))
-            .h(px(28.0))
-            .rounded_md()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(tokens.fg_muted)
-            .text_size(px(14.0))
-            .cursor_pointer()
-            .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
-            .child(label)
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
     }
 
     /// A pill button for the update dialog.
@@ -3854,10 +3796,7 @@ impl Render for AppShell {
             .items_center()
             .flex_1()
             .min_w(geo.trailing_pad)
-            .child(trailing_drag)
-            .when(cfg!(target_os = "linux") && !fullscreen, |el| {
-                el.child(self.render_linux_caption_buttons(&tokens, cx))
-            });
+            .child(trailing_drag);
 
         let tab_scroll = self.render_tab_strip(&tokens, &geo, window, cx);
 

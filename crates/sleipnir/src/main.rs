@@ -1,16 +1,17 @@
 //! Sleipnir — standalone terminal (HIG-aligned window chrome).
 
+#[cfg(not(target_os = "macos"))]
+compile_error!("Sleipnir is macOS-only");
+
 mod app_menus;
 
-use app_menus::{app_menus, Quit};
-#[cfg(target_os = "macos")]
-use app_menus::{Hide, HideOthers, ShowAll};
+use app_menus::{Hide, HideOthers, ShowAll, app_menus, Quit};
 use gpui::{App, KeyBinding};
 use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    BindingContext, BuiltinAction, builtin_bindings, last_window_close_quits, open_sleipnir_window,
+    BindingContext, BuiltinAction, builtin_bindings, open_sleipnir_window,
     ActivateTab, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, Find,
     FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
@@ -28,47 +29,32 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let app = application();
-    // Last-window close does not quit on macOS. Dock / Cmd-Tab reactivation
+    // Last-window close does not quit. Dock / Cmd-Tab reactivation
     // fires `applicationShouldHandleReopen` with no visible windows; without
     // this callback the click is a no-op and the process stays headless.
-    #[cfg(target_os = "macos")]
-    {
-        app.on_reopen(|cx| {
-            if cx.windows().is_empty() {
-                open_sleipnir_window(cx);
-                return;
-            }
-            // All windows may be minimized; AppKit reports no visible windows and
-            // GPUI still holds the handles — bring one back instead of spawning.
-            if let Some(handle) = cx.windows().first().copied() {
-                let _ = handle.update(cx, |_, window, _| window.activate_window());
-            }
-        });
-    }
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            open_sleipnir_window(cx);
+            return;
+        }
+        // All windows may be minimized; AppKit reports no visible windows and
+        // GPUI still holds the handles — bring one back instead of spawning.
+        if let Some(handle) = cx.windows().first().copied() {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+    });
     app.run(|cx: &mut App| {
         AppVersion::init_with(env!("CARGO_PKG_VERSION"), cx);
         sleipnir_settings::init(cx);
 
         // App-menu actions (always available so validation enables the items).
         cx.on_action(|_: &Quit, cx| cx.quit());
-        #[cfg(target_os = "macos")]
-        {
-            cx.on_action(|_: &Hide, cx| cx.hide());
-            cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
-            cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-        }
+        cx.on_action(|_: &Hide, cx| cx.hide());
+        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
         // AppShell's NewWindow handler dies with the last window; keep
         // New Window working while the process is still up.
         cx.on_action(|_: &NewWindow, cx| open_sleipnir_window(cx));
-
-        if last_window_close_quits() {
-            cx.on_window_closed(|cx, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-        }
 
         let mut keys = Vec::new();
         for spec in builtin_bindings() {
@@ -102,15 +88,8 @@ fn key_bindings_for_builtin(spec: &sleipnir_ui::BuiltinBinding) -> Vec<KeyBindin
 fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBinding {
     match action {
         BuiltinAction::Quit => KeyBinding::new(key, Quit, context),
-        #[cfg(target_os = "macos")]
         BuiltinAction::Hide => KeyBinding::new(key, Hide, context),
-        #[cfg(target_os = "macos")]
         BuiltinAction::HideOthers => KeyBinding::new(key, HideOthers, context),
-        #[cfg(not(target_os = "macos"))]
-        BuiltinAction::Hide | BuiltinAction::HideOthers => {
-            // macOS-only actions; non-macOS keymaps never produce them.
-            unreachable!("Hide/HideOthers are macOS-only actions")
-        }
         BuiltinAction::Copy => KeyBinding::new(key, Copy, context),
         BuiltinAction::Paste => KeyBinding::new(key, Paste, context),
         BuiltinAction::PasteText => KeyBinding::new(key, PasteText, context),

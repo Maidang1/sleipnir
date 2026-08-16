@@ -1,8 +1,7 @@
 //! Thin settings for sleipnir.
 //!
 //! JSON keys align with Zed's `terminal` segment where practical.
-//! Path: `config_path()` — `~/.config/sleipnir/settings.json` on macOS/Unix,
-//! `%APPDATA%\sleipnir\settings.json` on Windows (not Zed's config path).
+//! Path: `config_path()` — `~/.config/sleipnir/settings.json`.
 
 mod themes;
 
@@ -216,59 +215,14 @@ pub struct KeyBindingSpec {
     pub context: Option<String>,
 }
 
-/// Default monospace family for this OS.
+/// Default monospace family.
 pub fn default_font_family() -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        // Ubuntu Mono ships with Ubuntu; DejaVu Sans Mono is the universal
-        // fallback (fontconfig), so this always resolves on Ubuntu desktops.
-        "Ubuntu Mono"
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        default_font_family_for(cfg!(windows))
-    }
+    "Menlo"
 }
 
-/// Default monospace family. `windows = true` selects Cascadia Mono.
-pub fn default_font_family_for(windows: bool) -> &'static str {
-    if windows {
-        "Cascadia Mono"
-    } else {
-        "Menlo"
-    }
-}
-
-/// Fallback families for this OS (Linux prefers system monospace).
+/// Fallback families. Menlo is always present on macOS.
 pub fn default_font_fallbacks() -> Option<FontFallbacks> {
-    #[cfg(target_os = "linux")]
-    {
-        Some(FontFallbacks::from_fonts(vec![
-            "DejaVu Sans Mono".into(),
-            "Liberation Mono".into(),
-        ]))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        default_font_fallbacks_for(cfg!(windows))
-    }
-}
-
-/// Fallback families so a missing Cascadia Mono still renders a grid.
-pub fn default_font_fallbacks_for(windows: bool) -> Option<FontFallbacks> {
-    if windows {
-        Some(FontFallbacks::from_fonts(vec![
-            "Consolas".into(),
-            "Courier New".into(),
-        ]))
-    } else {
-        None
-    }
-}
-
-/// Alt-as-meta default. Off on Windows so Alt can reach the menu bar.
-pub fn option_as_meta_default_for(windows: bool) -> bool {
-    !windows
+    None
 }
 
 impl Default for TerminalSettings {
@@ -286,7 +240,7 @@ impl Default for TerminalSettings {
             cursor_shape: CursorShape::Block,
             blinking: TerminalBlink::TerminalControlled,
             alternate_scroll: AlternateScroll::On,
-            option_as_meta: option_as_meta_default_for(cfg!(windows)),
+            option_as_meta: true,
             copy_on_select: false,
             keep_selection_on_copy: true,
             open_links_in_mouse_mode: true,
@@ -577,28 +531,13 @@ where
 
 /// Directory that holds `settings.json` and `session.json`.
 pub fn config_dir() -> PathBuf {
-    config_dir_for(cfg!(windows))
-}
-
-/// Settings/session directory for a given OS family.
-pub fn config_dir_for(windows: bool) -> PathBuf {
-    if windows {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir")
-    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/sleipnir")
 }
 
 pub fn config_path() -> PathBuf {
-    config_path_for(cfg!(windows))
-}
-
-pub fn config_path_for(windows: bool) -> PathBuf {
-    config_dir_for(windows).join("settings.json")
+    config_dir().join("settings.json")
 }
 
 fn load_or_default() -> TerminalSettings {
@@ -764,7 +703,7 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
             font_size: Some(14.0),
             font_family: Some(default_font_family().into()),
             line_height: Some(TerminalLineHeight::Custom(1.3)),
-            option_as_meta: Some(option_as_meta_default_for(cfg!(windows))),
+            option_as_meta: Some(true),
             copy_on_select: Some(false),
             max_scroll_history_lines: Some(10_000),
             scroll_multiplier: Some(3.0),
@@ -1038,49 +977,28 @@ mod tests {
     }
 
     #[test]
-    fn default_font_is_os_specific() {
-        assert_eq!(default_font_family_for(false), "Menlo");
-        assert_eq!(default_font_family_for(true), "Cascadia Mono");
+    fn default_font_is_menlo() {
+        assert_eq!(default_font_family(), "Menlo");
         assert_eq!(
             TerminalSettings::default().font_family.as_deref(),
-            Some(default_font_family())
+            Some("Menlo")
         );
-        let win_fallbacks = default_font_fallbacks_for(true).expect("windows fallbacks");
-        assert!(win_fallbacks.0.iter().any(|f| f == "Consolas"));
-        assert!(win_fallbacks.0.iter().any(|f| f == "Courier New"));
-        assert!(default_font_fallbacks_for(false).is_none());
+        assert!(default_font_fallbacks().is_none());
     }
 
     #[test]
-    fn option_as_meta_defaults_off_on_windows() {
-        assert!(option_as_meta_default_for(false));
-        assert!(!option_as_meta_default_for(true));
-        assert_eq!(
-            TerminalSettings::default().option_as_meta,
-            option_as_meta_default_for(cfg!(windows))
-        );
+    fn option_as_meta_defaults_on() {
+        assert!(TerminalSettings::default().option_as_meta);
     }
 
     #[test]
-    fn config_path_uses_os_config_dir_on_windows() {
-        let unix = config_path_for(false);
+    fn config_path_is_xdg_style() {
+        let path = config_path();
         assert!(
-            unix.ends_with(".config/sleipnir/settings.json"),
-            "unix path was {}",
-            unix.display()
+            path.ends_with(".config/sleipnir/settings.json"),
+            "config path was {}",
+            path.display()
         );
-
-        let win = config_path_for(true);
-        assert_eq!(win.file_name().and_then(|s| s.to_str()), Some("settings.json"));
-        assert_eq!(
-            win.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
-            Some("sleipnir")
-        );
-        let win_dir = config_dir_for(true);
-        assert_eq!(win.parent(), Some(win_dir.as_path()));
-        if let Some(config) = dirs::config_dir() {
-            assert_eq!(win_dir, config.join("sleipnir"));
-        }
     }
 
     #[test]

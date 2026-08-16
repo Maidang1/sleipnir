@@ -34,8 +34,7 @@ should show a tombstone at all.
 ## Decision
 
 Persist a **Run Ledger**: one record per command execution, written as
-`runs.json` next to `session.json` (`~/.config/sleipnir/runs.json` on Unix,
-`%APPDATA%\sleipnir\runs.json` on Windows).
+`runs.json` next to `session.json` (`~/.config/sleipnir/runs.json`).
 
 Each Run stores a **redacted command line** plus non-output metadata (`RunId`,
 `PaneKey`, `LaunchId`, cwd, wall-clock start, duration, exit status, inferred

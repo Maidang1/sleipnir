@@ -10,9 +10,7 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-#[cfg(target_os = "macos")]
 use std::io::Write as _;
-#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -67,32 +65,10 @@ pub fn is_newer(current: &str, latest: &semver::Version) -> bool {
     }
 }
 
-/// Asset filename marker and file extension for the current OS's release
-/// artifact: macOS ships `*-macos.zip`, Windows `*-windows-*.zip`, and Linux
-/// `*-linux-*.tar.gz`. `marker` appears in the name; `extension` is the file
-/// suffix (the SHA-256 sidecar is `<artifact>.sha256`).
+/// Asset filename marker and file extension for the macOS release artifact.
+/// macOS ships `*-macos.zip`; the SHA-256 sidecar is `<artifact>.sha256`.
 pub fn platform_asset_markers() -> (&'static str, &'static str) {
-    #[cfg(target_os = "windows")]
-    {
-        ("-windows-", ".zip")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        ("-macos", ".zip")
-    }
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    {
-        ("-linux-", ".tar.gz")
-    }
-    #[cfg(not(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "freebsd"
-    )))]
-    {
-        ("", "")
-    }
+    ("-macos", ".zip")
 }
 
 /// Select the release artifact and its `.sha256` sidecar for the current OS.
@@ -260,35 +236,25 @@ fn hex_lower(bytes: &[u8]) -> String {
     })
 }
 
-/// Whether this platform can swap the running install in place. Only macOS
-/// ships an updatable `.app` bundle today; Windows and Linux download and
-/// verify the artifact, then fall back to opening the releases page.
+/// Whether this platform can swap the running install in place.
 pub fn in_place_update_supported() -> bool {
-    cfg!(target_os = "macos")
+    true
 }
 
 /// Resolve the `.app` bundle that contains the current executable.
 ///
-/// Returns `None` in development (running the bare `target/debug/sleipnir`)
-/// and on platforms without a macOS-style bundle, which signals callers to
-/// fall back to opening the releases page.
+/// Returns `None` in development (running the bare `target/debug/sleipnir`),
+/// which signals callers to fall back to opening the releases page.
 pub fn current_app_bundle_path() -> Option<PathBuf> {
-    #[cfg(not(target_os = "macos"))]
-    {
+    let exe = std::env::current_exe().ok()?;
+    // .../Sleipnir.app/Contents/MacOS/sleipnir
+    let macos = exe.parent()?; // MacOS
+    let contents = macos.parent()?; // Contents
+    let app = contents.parent()?; // Sleipnir.app
+    if app.extension().and_then(|e| e.to_str()) == Some("app") {
+        Some(app.to_path_buf())
+    } else {
         None
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let exe = std::env::current_exe().ok()?;
-        // .../Sleipnir.app/Contents/MacOS/sleipnir
-        let macos = exe.parent()?; // MacOS
-        let contents = macos.parent()?; // Contents
-        let app = contents.parent()?; // Sleipnir.app
-        if app.extension().and_then(|e| e.to_str()) == Some("app") {
-            Some(app.to_path_buf())
-        } else {
-            None
-        }
     }
 }
 
@@ -296,22 +262,8 @@ pub fn current_app_bundle_path() -> Option<PathBuf> {
 /// process to exit, atomically swaps the `.app`, and relaunches it.
 ///
 /// On failure to install (permissions, etc.) the helper opens the releases page
-/// for a manual install. Windows and Linux have no in-place installer: they
-/// download and verify, then the caller falls back to the releases page.
+/// for a manual install.
 pub fn install_and_relaunch(zip_path: &Path, app_bundle: &Path) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (zip_path, app_bundle);
-        bail!("in-place update is not supported on this platform; open {RELEASES_PAGE}");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        install_and_relaunch_unix(zip_path, app_bundle)
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn install_and_relaunch_unix(zip_path: &Path, app_bundle: &Path) -> Result<()> {
     let stage = zip_path
         .parent()
         .ok_or_else(|| anyhow!("zip has no parent dir"))?
@@ -358,7 +310,6 @@ fn install_and_relaunch_unix(zip_path: &Path, app_bundle: &Path) -> Result<()> {
 }
 
 /// Find the single `.app` bundle directly under `dir`.
-#[cfg(target_os = "macos")]
 fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(dir).context("read extract dir")? {
         let path = entry?.path();
@@ -370,7 +321,6 @@ fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
 }
 
 /// Write a detached shell script that performs the swap-and-relaunch.
-#[cfg(target_os = "macos")]
 fn write_helper_script(
     pid: u32,
     new_app: &Path,
@@ -431,7 +381,6 @@ fi
 }
 
 /// Single-quote a path for safe embedding in a POSIX shell script.
-#[cfg(target_os = "macos")]
 fn shell_quote(path: &Path) -> String {
     let s = path.to_string_lossy();
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -489,23 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn pick_asset_selects_linux_tar_gz() {
-        let release = json!({
-            "assets": [
-                {"name": "Sleipnir-0.2.0-linux-x86_64.tar.gz",
-                 "browser_download_url": "https://x/tgz"},
-                {"name": "Sleipnir-0.2.0-linux-x86_64.tar.gz.sha256",
-                 "browser_download_url": "https://x/sha"},
-                {"name": "Sleipnir-0.2.0-macos.zip",
-                 "browser_download_url": "https://x/zip"}
-            ]
-        });
-        let (artifact, sha) = pick_asset_for(&release, "-linux-", ".tar.gz").unwrap();
-        assert_eq!(artifact, "https://x/tgz");
-        assert_eq!(sha, "https://x/sha");
-    }
-
-    #[test]
     fn pick_asset_errors_without_zip() {
         let release = json!({
             "assets": [
@@ -552,11 +484,10 @@ mod tests {
     }
 
     #[test]
-    fn in_place_update_is_macos_only() {
-        assert_eq!(in_place_update_supported(), cfg!(target_os = "macos"));
+    fn in_place_update_is_supported() {
+        assert!(in_place_update_supported());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn shell_quote_escapes_single_quotes() {
         let q = shell_quote(Path::new("/tmp/it's here/Sleipnir.app"));

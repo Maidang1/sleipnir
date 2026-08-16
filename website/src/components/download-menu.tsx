@@ -17,13 +17,6 @@ function downloadItems(release: LatestRelease | null): MenuItem[] {
   const items: MenuItem[] = []
   if (release?.dmgUrl) items.push({ href: release.dmgUrl, label: 'macOS (.dmg)' })
   if (release?.zipUrl) items.push({ href: release.zipUrl, label: 'macOS (.zip)' })
-  if (release?.windowsZipUrl) {
-    items.push({ href: release.windowsZipUrl, label: 'Windows (.zip)' })
-  }
-  if (release?.linuxDebUrl) items.push({ href: release.linuxDebUrl, label: 'Linux (.deb)' })
-  if (release?.linuxTarUrl) {
-    items.push({ href: release.linuxTarUrl, label: 'Linux (.tar.gz)' })
-  }
   items.push({ href: page, label: 'All releases', muted: true, external: true })
   return items
 }

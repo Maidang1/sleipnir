@@ -84,8 +84,6 @@ pub fn save_runs(
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(windows)]
-    let _ = fs::remove_file(path);
     fs::rename(&tmp, path)?;
     Ok(())
 }

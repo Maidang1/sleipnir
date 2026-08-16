@@ -10,6 +10,7 @@
 ### Breaking Changes
 - `terminal.inject_osc133` now defaults to `true`
 - New `runs.json` file written to config dir by default (`run_ledger: "off"` disables)
+- **macOS only:** Windows and Linux are no longer supported. Prebuilt `.zip` / `.deb` / `.tar.gz` artifacts, `install.ps1`, `install-linux.sh`, `make-linux-package.sh`, and the Windows/Linux CI jobs are gone. The crate fails to compile on those targets.
 
 ## 0.1.11
 
