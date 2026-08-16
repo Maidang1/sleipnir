@@ -68,6 +68,16 @@ show git. Long titles, paths, and branch names truncate with `…`. A
 non-repo pane shows no rail subtitle. Drag-reorder stays inside a group.
 _Avoid_: Project, folder, space.
 
+**Diff inspector**:
+A window-level overlay that renders the active Pane's git work tree as a
+`git diff HEAD` (split or unified, file tree, expandable hidden context after
+a full-file upgrade, word-level intra-line highlights, tree-sitter on a
+small language set, optional minimap). Not a Pane. Not persisted. Open from
+the chrome **Diff** button, the rail `+N −M` counts, `⌥⌘G`, the command
+palette, or View → Diff Inspector. `v` toggles split / unified; `m` toggles
+the minimap. Click `⋯ N hidden lines` to expand a gap.
+_Avoid_: Diff pane, review tab, source control panel.
+
 **Agent identity**:
 A known coding-agent process detected from the Pane's foreground command name.
 Rendered as a letter monogram Sleipnir owns. Distinct from Attention (who vs

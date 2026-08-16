@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Features
+- Diff inspector overlay (`⌥⌘G` / command palette / View → Diff Inspector / chrome **Diff** button / rail `+N −M`): `git diff HEAD` of the focused pane's work tree, split (default) or unified (`v`), file tree, full-file upgrade with expandable `⋯ N hidden lines`, tree-sitter on Rust/Python/JS/JSON, minimap (`m`), word-level intra-line highlights, file/hunk jump (`n` `p` `]` `[`). Not a pane. `send_git_diff` still pastes the raw patch into the PTY
 - Tab placement is Side (default left rail) or Top (horizontal strip). Both group by git workspace (no group header), with agent marks, in-group drag, and New tab. Switch in Settings, View → Toggle Tab Placement, or the command palette
 - Side-rail rows stay two lines: title, then branch + dirty `+N −M`
 - Top-strip chips show only the last two cwd components (`myself/harbor`); no branch or dirty mark

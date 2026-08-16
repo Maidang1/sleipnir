@@ -107,7 +107,7 @@ cargo run -p sleipnir
 | `restore_session` | 启动时恢复标签 / 分屏 / cwd（默认 `true`） |
 | `confirm_close` | `dirty` / `always` / `never`，忙窗格关闭前提示（默认 `dirty`） |
 | `path_links` | ⌘-点击打开路径类目标（默认 `true`） |
-| `key_bindings` | 额外组合键（`{ "key": "cmd-alt-t", "action": "new_tab" }`）。动作：`new_tab`、`close_tab`、`next_tab`、`prev_tab`、`split_right`、`split_down`、`new_window`、`open_settings`、`reload_settings`、`cycle_theme`、`find`、`toggle_command_palette`、`increase_font_size`、`decrease_font_size`、`reset_font_size`、`toggle_pane_zoom`、`toggle_broadcast`、`jump_prev_prompt`、`jump_next_prompt`、`toggle_quick_select`、`open_quick_terminal`、`export_scrollback`、`check_for_updates`、`clear_run_ledger`、`toggle_run_ledger`、`mark_tab_seen`、`toggle_pane_facts`、`send_selection`、`pipe_selection`、`send_git_diff`、`toggle_history_search`、`toggle_tab_placement`。可选 `context`：`AppShell` / `Terminal`。改完要重启才生效。 |
+| `key_bindings` | 额外组合键（`{ "key": "cmd-alt-t", "action": "new_tab" }`）。动作：`new_tab`、`close_tab`、`next_tab`、`prev_tab`、`split_right`、`split_down`、`new_window`、`open_settings`、`reload_settings`、`cycle_theme`、`find`、`toggle_command_palette`、`increase_font_size`、`decrease_font_size`、`reset_font_size`、`toggle_pane_zoom`、`toggle_broadcast`、`jump_prev_prompt`、`jump_next_prompt`、`toggle_quick_select`、`open_quick_terminal`、`export_scrollback`、`check_for_updates`、`clear_run_ledger`、`toggle_run_ledger`、`mark_tab_seen`、`toggle_pane_facts`、`send_selection`、`pipe_selection`、`send_git_diff`、`toggle_diff`、`toggle_history_search`、`toggle_tab_placement`。可选 `context`：`AppShell` / `Terminal`。改完要重启才生效。 |
 | `terminal.font_ligatures` | 打开 OpenType 连字（默认 `false`） |
 | `terminal.copy_on_select` | 鼠标松开即复制（默认 `false`；设置里可切） |
 | `terminal.bell` | `off` / `system` / `visual`（默认 `off`） |

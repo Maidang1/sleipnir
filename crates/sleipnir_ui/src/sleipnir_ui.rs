@@ -6,6 +6,7 @@ mod blink;
 mod chrome;
 mod command_palette;
 mod control_surface;
+mod diff;
 mod keymap;
 mod pane_tree;
 mod run_ledger_global;
@@ -22,7 +23,7 @@ pub use app_shell::{
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown, SplitRight,
     MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleBroadcast,
-    ToggleCommandPalette, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
+    ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
     ToggleQuickSelect, ToggleRunLedger, ToggleTabPlacement,
     UpdateUiState, open_sleipnir_window,
 };
@@ -1541,6 +1542,25 @@ mod tests {
                 "{id} must .occlude() so wheel events do not reach TermElement under the overlay"
             );
         }
+        let diff_src = include_str!("diff/render.rs");
+        let prefix = overlay_builder_prefix(diff_src, "diff-overlay");
+        assert!(
+            prefix.contains(".occlude()"),
+            "diff-overlay must .occlude() so wheel events do not reach TermElement under the overlay"
+        );
+    }
+
+    #[test]
+    fn chrome_exposes_a_diff_button() {
+        let src = include_str!("chrome/tab_sidebar.rs");
+        assert!(
+            src.contains(r#".id("diff-chrome-button")"#),
+            "content title must ship a clickable Diff control"
+        );
+        assert!(
+            src.contains("toggle_diff"),
+            "Diff chrome button must open the inspector"
+        );
     }
 
     /// Empty-region window move lives on `chrome-drag-trailing`. A height-less

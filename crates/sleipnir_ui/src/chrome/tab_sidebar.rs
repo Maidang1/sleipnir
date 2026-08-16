@@ -2,13 +2,13 @@
 
 use gpui::{
     App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use sleipnir_settings::{TabPlacement, TerminalPalette, TerminalSettings};
 
 use crate::app_shell::{AppShell, PaneDrag};
 use crate::chrome::agent;
-use crate::chrome::tab_strip::{render_tab_chip, tab_badge_for, TabChipLayout};
+use crate::chrome::tab_strip::{render_tab_chip, tab_badge_for, tab_git_facts, TabChipLayout};
 use crate::chrome::workspace::{WorkspaceKey, group_tabs};
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 
@@ -134,6 +134,7 @@ impl AppShell {
             .map(|tab| tab.title(cx).to_string())
             .unwrap_or_else(|| "shell".into());
         let label: gpui::SharedString = format!("{workspace} · {title}").into();
+        let palette = TerminalPalette::get_global(cx);
 
         self.attach_empty_drag("content-title", cx)
             .h(geo.content_title_height)
@@ -155,6 +156,59 @@ impl AppShell {
                     .text_ellipsis()
                     .child(label),
             )
+            .child(self.render_diff_chrome_button(tokens, &palette, cx))
+    }
+
+    /// Always-visible chrome control that opens the diff inspector.
+    pub(crate) fn render_diff_chrome_button(
+        &self,
+        tokens: &ChromeTokens,
+        palette: &TerminalPalette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (_, added, deleted) = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab_git_facts(tab, cx))
+            .unwrap_or((None, 0, 0));
+        let open = self.diff_open;
+        div()
+            .id("diff-chrome-button")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_shrink_0()
+            .px_2()
+            .py_0p5()
+            .rounded(px(4.0))
+            .text_xs()
+            .cursor_pointer()
+            .when(open, |el| {
+                el.bg(tokens.accent.opacity(0.2)).text_color(tokens.fg)
+            })
+            .when(!open, |el| {
+                el.text_color(tokens.fg_muted)
+                    .hover(|style| style.bg(tokens.hover).text_color(tokens.fg))
+            })
+            .child(gpui::SharedString::from("Diff"))
+            .when(added > 0, |el| {
+                el.child(
+                    div()
+                        .text_color(palette.ansi[2])
+                        .child(gpui::SharedString::from(format!("+{added}"))),
+                )
+            })
+            .when(deleted > 0, |el| {
+                el.child(
+                    div()
+                        .text_color(palette.ansi[1])
+                        .child(gpui::SharedString::from(format!("−{deleted}"))),
+                )
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_diff(window, cx);
+            }))
     }
 }
 

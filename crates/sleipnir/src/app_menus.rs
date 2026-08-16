@@ -6,7 +6,7 @@
 use gpui::{actions, Menu, MenuItem, SystemMenuType};
 use sleipnir_ui::{
     CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback,
-    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleHistorySearch, TogglePaneFacts,
+    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
     ToggleRunLedger,
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
     JumpPrevPrompt, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab,
@@ -103,6 +103,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Quick Terminal", OpenQuickTerminal),
             MenuItem::separator(),
             MenuItem::action("Pane Facts", TogglePaneFacts),
+            MenuItem::action("Diff Inspector", ToggleDiff),
             MenuItem::separator(),
             MenuItem::action("Toggle Vi Mode", ToggleViMode),
         ]),

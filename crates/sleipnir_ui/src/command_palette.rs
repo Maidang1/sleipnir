@@ -40,6 +40,7 @@ pub enum CommandId {
     SendGitDiff,
     ToggleHistorySearch,
     ToggleTabPlacement,
+    ToggleDiff,
 }
 
 impl CommandId {
@@ -77,6 +78,7 @@ impl CommandId {
             CommandId::SendGitDiff => "send_git_diff",
             CommandId::ToggleHistorySearch => "toggle_history_search",
             CommandId::ToggleTabPlacement => "toggle_tab_placement",
+            CommandId::ToggleDiff => "toggle_diff",
         }
     }
 
@@ -114,6 +116,7 @@ impl CommandId {
             "send_git_diff" => Some(CommandId::SendGitDiff),
             "toggle_history_search" | "history_search" => Some(CommandId::ToggleHistorySearch),
             "toggle_tab_placement" | "tab_placement" => Some(CommandId::ToggleTabPlacement),
+            "toggle_diff" => Some(CommandId::ToggleDiff),
             _ => None,
         }
     }
@@ -313,6 +316,12 @@ pub fn commands() -> Vec<CommandItem> {
             keywords: "git diff send review pane",
         },
         CommandItem {
+            id: CommandId::ToggleDiff,
+            title: "Toggle Diff Inspector".into(),
+            shortcut: display_shortcut("toggle_diff").into(),
+            keywords: "git diff inspector review overlay patch",
+        },
+        CommandItem {
             id: CommandId::ToggleHistorySearch,
             title: "Search Shell History".into(),
             shortcut: "".into(),
@@ -441,6 +450,14 @@ mod tests {
                 .iter()
                 .any(|i| i.id == CommandId::ToggleTabPlacement),
             "Toggle Tab Placement must appear in the palette"
+        );
+        assert_eq!(
+            CommandId::from_str("toggle_diff"),
+            Some(CommandId::ToggleDiff)
+        );
+        assert!(
+            commands().iter().any(|i| i.id == CommandId::ToggleDiff),
+            "Toggle Diff Inspector must appear in the palette"
         );
     }
 }

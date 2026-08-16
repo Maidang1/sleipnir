@@ -60,6 +60,7 @@ pub enum BuiltinAction {
     OpenQuickTerminal,
     ToggleRunLedger,
     ToggleHistorySearch,
+    ToggleDiff,
     IncreaseFontSize,
     DecreaseFontSize,
     ResetFontSize,
@@ -188,6 +189,7 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
         b("cmd-shift-n", BuiltinAction::OpenQuickTerminal, Both),
         b("cmd-shift-l", BuiltinAction::ToggleRunLedger, Both),
         b("cmd-shift-;", BuiltinAction::ToggleHistorySearch, Both),
+        b("cmd-alt-g", BuiltinAction::ToggleDiff, Both),
     ]
 }
 
@@ -234,6 +236,7 @@ pub fn display_shortcut(id: &str) -> &'static str {
         "jump_next_prompt" => "⌘⇧↓",
         "toggle_quick_select" => "⌘⇧O",
         "open_quick_terminal" => "⌘⇧N",
+        "toggle_diff" => "⌥⌘G",
         "secondary_click" => "⌘",
         _ => "",
     }
@@ -254,6 +257,7 @@ mod tests {
         assert!(keys.iter().any(|k| k == "cmd-c"));
         assert!(keys.iter().any(|k| k == "cmd-w"));
         assert!(keys.iter().any(|k| k == "cmd-d"));
+        assert!(keys.iter().any(|k| k == "cmd-alt-g"));
         assert!(!keys.iter().any(|k| k == "ctrl-v"));
     }
 

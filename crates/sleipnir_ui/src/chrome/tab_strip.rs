@@ -188,11 +188,14 @@ pub(crate) fn render_tab_chip(
         )
         .when(show_subtitle, |el| {
             el.child(render_git_subtitle(
+                ix,
+                tab_id,
                 branch,
                 added,
                 deleted,
                 tokens,
                 palette,
+                cx,
             ))
         });
 
@@ -267,7 +270,7 @@ pub(crate) fn render_tab_chip(
     .into_any_element()
 }
 
-fn tab_git_facts(tab: &Tab, cx: &App) -> (Option<String>, u32, u32) {
+pub(crate) fn tab_git_facts(tab: &Tab, cx: &App) -> (Option<String>, u32, u32) {
     match tab.workspace_cwd(cx) {
         Some(cwd) => cached_git_snapshot(&cwd)
             .map(|snap| (Some(snap.branch), snap.added, snap.deleted))
@@ -277,13 +280,18 @@ fn tab_git_facts(tab: &Tab, cx: &App) -> (Option<String>, u32, u32) {
 }
 
 fn render_git_subtitle(
+    ix: usize,
+    tab_id: u64,
     branch: Option<String>,
     added: u32,
     deleted: u32,
     tokens: &ChromeTokens,
     palette: &TerminalPalette,
+    cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
+    let dirty = added > 0 || deleted > 0;
     div()
+        .id(("tab-git", tab_id))
         .w_full()
         .min_w_0()
         .flex()
@@ -292,6 +300,20 @@ fn render_git_subtitle(
         .gap_1()
         .text_xs()
         .text_color(tokens.fg_muted)
+        .when(dirty, |el| {
+            el.cursor_pointer()
+                .hover(|style| style.text_color(tokens.fg))
+                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    let _ = event;
+                    cx.stop_propagation();
+                    this.activate(ix, window, cx);
+                    if !this.diff_open {
+                        this.toggle_diff(window, cx);
+                    } else {
+                        this.refresh_diff(true, window, cx);
+                    }
+                }))
+        })
         .when(branch.is_some(), |el| {
             el.child(
                 div()

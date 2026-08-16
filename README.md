@@ -50,6 +50,7 @@ prompt.
 - **Accessibility** — the terminal exposes the visible screen as a read-only accessible value (VoiceOver can read the current output), like Ghostty's read-only AX.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
 - **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings. `keybinding_preset: tmux` adds `ctrl-b` tab/pane chords. **Pane Facts** (View menu) shows the focused pane's directory, process tree, and listen ports.
+- **Diff inspector** — chrome **Diff** button, rail `+N −M`, or `⌥⌘G`. Split (default) or unified (`v`) `git diff HEAD` of the focused pane's work tree, file tree, expandable hidden context, tree-sitter (Rust/Python/JS/JSON), minimap (`m`), word-level intra-line. Not a pane. `n`/`p` jump hunks, `]`/`[` jump files. **Shell → Send Git Diff to Pane** still pastes the raw patch.
 - **Run Ledger** — `⌘⇧L` overlay of redacted command runs; click a row to jump to that pane and its OSC 133 Anchor. Persisted to `runs.json` by default (`run_ledger`: `off` / `memory` / `persist`). Pane gutter triangles mark command start/end (hidden on the alternate screen). After restore, a chrome tombstone banner names the last prior-launch command (not scrollback; dismisses on type; `show_tombstone: false` hides it).
 - **Control surface** — off by default. Set `control_surface: true` or `SLEIPNIR_CONTROL=1` to bind `~/.config/sleipnir/control.sock`; `sleipnir-ctl ls|capture|send|wait` drives live panes ([ADR-0011](docs/adr/0011-control-surface.md)).
 - **Find in scrollback** — `⌘F` search with match highlights, regex (`.*`) and match-case (`Aa`) toggles; export scrollback to a file via **Shell → Export Scrollback…** (opens in your default editor).
@@ -120,7 +121,7 @@ Default font is **Menlo**.
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
 | `path_links` | Open path-like targets on ⌘-click (default `true`) |
-| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`, `mark_tab_seen`, `toggle_pane_facts`, `send_selection`, `pipe_selection`, `send_git_diff`, `toggle_history_search`, `toggle_tab_placement`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
+| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`, `mark_tab_seen`, `toggle_pane_facts`, `send_selection`, `pipe_selection`, `send_git_diff`, `toggle_diff`, `toggle_history_search`, `toggle_tab_placement`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
 | `terminal.bell` | `off` / `system` / `visual` (default `off`) |
@@ -182,6 +183,7 @@ Force **text-only** paste (skip image→path conversion) with `⌃⌘V`.
 | Cycle theme | `⌘⇧P` |
 | Command palette | `⌘⇧K` |
 | Run Ledger | `⌘⇧L` |
+| Diff inspector | `⌥⌘G` (`v` split/unified, `m` minimap) |
 | Search shell history | `⌘⇧;` |
 | Find in scrollback | `⌘F` |
 | Next / previous find match | `⌘G` / `⌘⇧G` |

@@ -17,7 +17,7 @@ use sleipnir_ui::{
     IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
     SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
-    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleHistorySearch, TogglePaneFacts,
+    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
     ToggleRunLedger, ToggleTabPlacement,
 };
 use terminal::{
@@ -140,6 +140,7 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::OpenQuickTerminal => KeyBinding::new(key, OpenQuickTerminal, context),
         BuiltinAction::ToggleRunLedger => KeyBinding::new(key, ToggleRunLedger, context),
         BuiltinAction::ToggleHistorySearch => KeyBinding::new(key, ToggleHistorySearch, context),
+        BuiltinAction::ToggleDiff => KeyBinding::new(key, ToggleDiff, context),
         BuiltinAction::IncreaseFontSize => KeyBinding::new(key, IncreaseFontSize, context),
         BuiltinAction::DecreaseFontSize => KeyBinding::new(key, DecreaseFontSize, context),
         BuiltinAction::ResetFontSize => KeyBinding::new(key, ResetFontSize, context),
@@ -241,6 +242,7 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "toggle_tab_placement" | "tab_placement" => {
                 KeyBinding::new(&spec.key, ToggleTabPlacement, Some(ctx))
             }
+            "toggle_diff" => KeyBinding::new(&spec.key, ToggleDiff, Some(ctx)),
             _ => continue,
         };
         out.push(kb);

@@ -10,6 +10,8 @@ members = [
     "crates/release_channel",
     "crates/updater",
     "crates/run_ledger",
+    "crates/diff_core",
+    "crates/syntax",
     "crates/sleipnir_ctl",
     # macOS entry; gpui / gpui_macos come from Zed via git.
     "crates/gpui_platform",
@@ -46,6 +48,8 @@ task_types = { path = "crates/task_types" }
 release_channel = { path = "crates/release_channel" }
 updater = { path = "crates/updater" }
 run_ledger = { path = "crates/run_ledger" }
+diff_core = { path = "crates/diff_core" }
+syntax = { path = "crates/syntax" }
 sleipnir_ctl = { path = "crates/sleipnir_ctl" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false, features = ["font-kit"] }
 
@@ -55,6 +59,7 @@ gpui_platform = { path = "crates/gpui_platform", default-features = false, featu
 # Fork of zed-industries/alacritty @ 4c129667 + OSC 133/9/777 (ADR-0005).
 alacritty_terminal = { git = "https://github.com/Maidang1/alacritty", rev = "561594caa275f00914a039356816fe70467a2d44" }
 anyhow = "1.0.86"
+imara-diff = "0.1"
 async-channel = "2.5.0"
 dirs = "6.0"
 env_logger = "0.11"

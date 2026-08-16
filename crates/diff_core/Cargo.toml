@@ -1,0 +1,19 @@
+[package]
+name = "diff_core"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/diff_core.rs"
+doctest = false
+
+[dependencies]
+imara-diff.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

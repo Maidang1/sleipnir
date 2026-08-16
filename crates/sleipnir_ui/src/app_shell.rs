@@ -118,6 +118,8 @@ actions!(
         ToggleHistorySearch,
         /// Switch tab chrome between the side rail and the top strip.
         ToggleTabPlacement,
+        /// Toggle the git diff inspector overlay.
+        ToggleDiff,
     ]
 );
 
@@ -357,7 +359,7 @@ pub struct AppShell {
     /// Match case (⌥⌘C). Off = case-insensitive; on = case-sensitive.
     find_match_case: bool,
     /// Window-scoped font size override (M12 zoom); not written to settings.
-    font_size_override: Option<Pixels>,
+    pub(crate) font_size_override: Option<Pixels>,
     /// Close-confirm dialog pending (M12).
     close_confirm: Option<CloseConfirmState>,
     /// Tab ids currently flashing for visual bell (M12).
@@ -375,6 +377,10 @@ pub struct AppShell {
     history_open: bool,
     history_query: String,
     history_selected: usize,
+    /// Git diff inspector (ADR-0012). Not a Pane.
+    pub(crate) diff_open: bool,
+    pub(crate) diff_view: Option<crate::diff::DiffView>,
+    diff_gen: u64,
     /// Debounced session save task.
     _session_save_task: Option<Task<()>>,
     /// Keep the app-quit subscription alive for the window lifetime.
@@ -499,6 +505,9 @@ impl AppShell {
             history_open: false,
             history_query: String::new(),
             history_selected: 0,
+            diff_open: false,
+            diff_view: None,
+            diff_gen: 0,
             facts: None,
             facts_at: None,
             _session_save_task: None,
@@ -1752,6 +1761,271 @@ impl AppShell {
         self.send_git_diff_to_pty(cx);
     }
 
+    fn on_toggle_diff(&mut self, _: &ToggleDiff, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_diff(window, cx);
+    }
+
+    pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.diff_open {
+            self.close_diff(window, cx);
+            return;
+        }
+        self.diff_open = true;
+        self.refresh_diff(false, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.diff_open {
+            return;
+        }
+        self.diff_open = false;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn refresh_diff(&mut self, force: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self
+            .active_working_directory(cx)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+        let root = crate::chrome::workspace::git_root(&cwd).unwrap_or_else(|| cwd.clone());
+        if !force {
+            if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_ref() {
+                if session.still_fresh(&root) {
+                    self.diff_open = true;
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        let mode = match &self.diff_view {
+            Some(crate::diff::DiffView::Ready(session)) => session.mode,
+            _ => crate::diff::ViewMode::default(),
+        };
+        let minimap_visible = match &self.diff_view {
+            Some(crate::diff::DiffView::Ready(session)) => session.minimap_visible,
+            _ => true,
+        };
+        self.diff_gen = self.diff_gen.wrapping_add(1);
+        let generation = self.diff_gen;
+        let title = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
+        self.diff_view = Some(crate::diff::DiffView::Loading {
+            title,
+            generation,
+        });
+        self.diff_open = true;
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move { crate::diff::fetch_worktree_diff(&cwd) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.diff_gen != generation {
+                    return;
+                }
+                this.diff_view = Some(match outcome {
+                    crate::diff::FetchOutcome::Ready(ready) => {
+                        let root = ready.root.clone();
+                        let jobs: Vec<crate::diff::upgrade::UpgradeJob> = ready
+                            .parsed
+                            .files
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, f)| {
+                                f.status != diff_core::FileStatus::Binary && !f.hunks.is_empty()
+                            })
+                            .map(|(ix, f)| crate::diff::upgrade::UpgradeJob {
+                                file_ix: ix,
+                                old_path: f.old_path.clone(),
+                                new_path: f.new_path.clone(),
+                                status: f.status,
+                            })
+                            .collect();
+                        let mut session = crate::diff::DiffSession::from_ready(ready, mode);
+                        session.minimap_visible = minimap_visible;
+                        if !jobs.is_empty() {
+                            this.spawn_diff_upgrade(generation, root, jobs, cx);
+                        }
+                        crate::diff::DiffView::Ready(session)
+                    }
+                    crate::diff::FetchOutcome::Clean { title } => crate::diff::DiffView::Message {
+                        title,
+                        body: "Working tree clean".into(),
+                    },
+                    crate::diff::FetchOutcome::Failed { title, message } => {
+                        crate::diff::DiffView::Message {
+                            title,
+                            body: message,
+                        }
+                    }
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn spawn_diff_upgrade(
+        &mut self,
+        generation: u64,
+        root: std::path::PathBuf,
+        jobs: Vec<crate::diff::upgrade::UpgradeJob>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let files = cx
+                .background_spawn(async move { crate::diff::upgrade::run_upgrade(&root, jobs) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.diff_gen != generation {
+                    return;
+                }
+                if let Some(crate::diff::DiffView::Ready(session)) = this.diff_view.as_mut() {
+                    session.apply_upgrades(files);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn expand_diff_gap(
+        &mut self,
+        file_ix: usize,
+        gap_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() else {
+            return;
+        };
+        let Some((gap_row, inserted)) = session.expand_gap(file_ix, gap_ix) else {
+            return;
+        };
+        if session.cursor > gap_row {
+            session.cursor += inserted;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_diff_minimap(&mut self, cx: &mut Context<Self>) {
+        if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+            session.minimap_visible = !session.minimap_visible;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_diff_mode(&mut self, cx: &mut Context<Self>) {
+        if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+            let next = session.mode.toggle();
+            session.set_mode(next);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn jump_diff_file(&mut self, row: usize, cx: &mut Context<Self>) {
+        if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+            session.jump_to_row(row);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn send_open_diff_to_pty(&mut self, cx: &mut Context<Self>) {
+        let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_ref() else {
+            self.send_git_diff_to_pty(cx);
+            return;
+        };
+        let Some(payload) = crate::chrome::send_context::git_diff_payload(&session.patch) else {
+            return;
+        };
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        view.update(cx, |v, cx| v.input_bytes(payload.into_bytes(), cx));
+        cx.notify();
+    }
+
+    fn handle_diff_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.diff_open {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.close_diff(window, cx);
+                true
+            }
+            "n" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.hunk_rows.clone();
+                    session.jump_next(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "p" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.hunk_rows.clone();
+                    session.jump_prev(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "]" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.file_rows.clone();
+                    session.jump_next(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "[" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    let targets = session.file_rows.clone();
+                    session.jump_prev(&targets);
+                }
+                cx.notify();
+                true
+            }
+            "v" => {
+                self.toggle_diff_mode(cx);
+                true
+            }
+            "m" => {
+                self.toggle_diff_minimap(cx);
+                true
+            }
+            "r" => {
+                self.refresh_diff(true, window, cx);
+                true
+            }
+            "home" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    session.jump_home();
+                }
+                cx.notify();
+                true
+            }
+            "end" => {
+                if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_mut() {
+                    session.jump_end();
+                }
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn on_toggle_history_search(
         &mut self,
         _: &ToggleHistorySearch,
@@ -2167,6 +2441,7 @@ impl AppShell {
             }
             CommandId::TogglePaneFacts => self.toggle_pane_facts(cx),
             CommandId::ToggleTabPlacement => self.toggle_tab_placement(cx),
+            CommandId::ToggleDiff => self.toggle_diff(window, cx),
         }
     }
 
@@ -4710,6 +4985,16 @@ impl Render for AppShell {
                     }
                     return;
                 }
+                if this.diff_open {
+                    if this.handle_diff_key(event, window, cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if !event.keystroke.modifiers.platform {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
                 if this.rename_key_down(event, window, cx) {
                     cx.stop_propagation();
                 }
@@ -4760,6 +5045,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_send_selection))
             .on_action(cx.listener(Self::on_pipe_selection))
             .on_action(cx.listener(Self::on_send_git_diff))
+            .on_action(cx.listener(Self::on_toggle_diff))
             .on_action(cx.listener(Self::on_toggle_history_search))
             .on_action(cx.listener(Self::on_toggle_tab_placement))
             .when(!side, |el| {
@@ -4783,6 +5069,12 @@ impl Render for AppShell {
                     .bg(tokens.content_bg)
                     .child(leading_drag)
                     .child(tab_scroll)
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px_2()
+                            .child(self.render_diff_chrome_button(&tokens, &palette, cx)),
+                    )
                     .child(trailing_drag);
                 el.child(chrome_band)
                     .when(self.find_open, |el| {
@@ -4885,6 +5177,9 @@ impl Render for AppShell {
             })
             .when(self.history_open, |el| {
                 el.child(self.render_history_search(&tokens, cx))
+            })
+            .when(self.diff_open, |el| {
+                el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
             })
             .when_some(self.active_tombstone(cx), |el, stone| {
                 el.child(self.render_tombstone(&tokens, stone))
