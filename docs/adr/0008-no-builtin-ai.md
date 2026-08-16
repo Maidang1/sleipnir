@@ -54,5 +54,5 @@ Stated for users, in these words:
   against taste. A request that needs a model call in our process is closed by
   this ADR; a request that needs better structured output is in scope.
 - The complementary boundary — how much of the terminal an *external* agent may
-  drive — is deliberately deferred, and stays forbidden by default until the
-  control-surface ADR exists.
+  drive — is [ADR-0011](0011-control-surface.md): a local control surface that
+  stays **default off**.

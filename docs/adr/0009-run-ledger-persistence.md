@@ -93,8 +93,9 @@ escape hatch.
 - Attention (unseen finished Runs) and Anchors (scrollback positions) are
   process-lifetime only. They are not fields in `runs.json`. Loaded history is
   marked seen; in-flight Runs become Abandoned.
-- P0 writes `runs.json` and shows tab badges. The chrome tombstone banner and
-  the Ledger panel that *read* the file across a restart are P1; that gap is
-  deliberate so the persistence and privacy decision can be reviewed before the
-  consumption UI lands.
+- P0 writes `runs.json` and the first-write notice / one-click off / one-click
+  clear. P1 consumption UI has since shipped: chrome tombstone banner (not a
+  grid line), Ledger overlay (`⌘⇧L`, jump to pane + Anchor), and pane gutter
+  triangles. Tab chrome no longer draws run glyphs; failed Attention is a wash
+  (see [ADR-0010](0010-side-tab-rail.md)).
 - ADR-0006 is **superseded, not accepted.** Do not promote it.

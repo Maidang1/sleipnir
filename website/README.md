@@ -2,7 +2,7 @@
 
 Product landing page for [Sleipnir](https://github.com/Maidang1/sleipnir), designed in the spirit of [waku.sh](https://waku.sh/) (centered column, monochrome tokens, feature grid, FAQ).
 
-Copy tracks the shipped product surface in the monorepo README (M0–M15): GPU terminal (Metal on macOS), tabs/splits/pane zoom, multi-window, themes, smart paste, session restore, path links, shell prompt jump, and optional Quick Terminal / opacity. Prebuilt downloads are macOS .dmg/.zip from GitHub Releases. Windows and Linux are not supported.
+Copy tracks the shipped product surface in the monorepo README: GPU terminal (Metal on macOS), side tab rail or top strip grouped by git workspace, splits/pane zoom, multi-window, themes, smart paste, session restore, Run Ledger, path links, shell prompt jump, and optional Quick Terminal / opacity. Prebuilt downloads are macOS .dmg/.zip from GitHub Releases. Windows and Linux are not supported.
 
 ## Develop
 
@@ -32,4 +32,4 @@ Latest release download links are resolved client-side from the GitHub Releases 
 | One-line install (macOS `curl \| bash`) | `src/components/install-command.tsx` + `INSTALL_COMMAND` in `src/lib/release.ts` |
 | Download menu | `src/components/download-menu.tsx` + `src/lib/release.ts` |
 | Meta / OG | `index.html` |
-| Product docs (canonical detail) | repo root `README.md`, `docs/settings.example.json` |
+| Product docs (canonical detail) | repo root `README.md`, `README.zh.md`, `docs/settings.example.json` |

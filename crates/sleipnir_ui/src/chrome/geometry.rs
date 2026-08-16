@@ -31,6 +31,8 @@ pub struct ChromeGeometry {
     pub sidebar_header: Pixels,
     /// Thin content-column title / drag bar (side placement).
     pub content_title_height: Pixels,
+    /// Top-strip band height (two-line chips + padding).
+    pub top_strip_height: Pixels,
 }
 
 impl ChromeGeometry {
@@ -54,6 +56,7 @@ impl ChromeGeometry {
             sidebar_width: px(200.0),
             sidebar_header: px(40.0),
             content_title_height: px(28.0),
+            top_strip_height: px(56.0),
         }
     }
 
@@ -98,6 +101,8 @@ mod tests {
         assert_eq!(g.sidebar_header, px(40.0));
         assert_eq!(g.content_title_height, px(28.0));
         assert_eq!(g.rail_row_height, px(48.0));
+        assert_eq!(g.top_strip_height, px(56.0));
         assert!(g.rail_row_height > g.tab_height);
+        assert!(g.top_strip_height > g.rail_row_height);
     }
 }

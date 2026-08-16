@@ -1,4 +1,5 @@
-//! Tab / pane Run badges: color and label. Running tabs show ●, not a timer.
+//! Run-badge glyph helpers. Tab chips no longer draw these (failed is a wash).
+#![allow(dead_code)]
 
 use gpui::Hsla;
 use run_ledger::BadgeKind;

@@ -39,7 +39,7 @@ const FEATURES = [
   {
     icon: Columns2,
     title: 'Tabs, splits & pane zoom',
-    body: 'Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. Zoom a pane with ⌘⇧Enter; inactive splits dim so focus stays clear.',
+    body: 'Default chrome is a left tab rail with title, branch, and dirty +N −M. The top strip shows only the last two folders of the cwd. Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. Zoom a pane with ⌘⇧Enter; inactive splits dim so focus stays clear.',
   },
   {
     icon: AppWindow,
@@ -69,7 +69,7 @@ const FEATURES = [
   {
     icon: Maximize2,
     title: 'Daily extras without bloat',
-    body: 'Quick Terminal, Quick Select mode, optional content opacity, and a macOS notification when a long command finishes while you are in another app.',
+    body: 'Run Ledger (⌘⇧L) remembers redacted command runs. Quick Terminal, Quick Select, optional content opacity, and a macOS notification when a long command finishes while you are in another app.',
   },
   {
     icon: RefreshCw,
@@ -119,7 +119,7 @@ const FAQ = [
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',
-    a: 'GPU-first rendering via GPUI, Zed-shaped settings, file-manager paste, multi-window, pane zoom, path links, and light shell integration, without an account, cloud features, or a shell-suite installer.',
+    a: 'GPU-first rendering via GPUI, a side tab rail grouped by git workspace, Run Ledger for command history, Zed-shaped settings, file-manager paste, and light shell integration. No account, no cloud, no built-in AI.',
   },
   {
     q: 'Is there AI built in?',
@@ -193,8 +193,8 @@ export default function App() {
               A fast native terminal for macOS.
             </h1>
             <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-              GPU-rendered through GPUI. Tabs, splits, multi-window, adaptive themes,
-              and session restore.
+              GPU-rendered through GPUI. Side tab rail, splits, multi-window,
+              adaptive themes, Run Ledger, and session restore.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
               <DownloadMenu

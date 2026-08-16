@@ -18,7 +18,7 @@ use sleipnir_ui::{
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
     SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
     MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleHistorySearch, TogglePaneFacts,
-    ToggleRunLedger,
+    ToggleRunLedger, ToggleTabPlacement,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -237,6 +237,9 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "send_git_diff" => KeyBinding::new(&spec.key, SendGitDiff, Some(ctx)),
             "toggle_history_search" | "history_search" => {
                 KeyBinding::new(&spec.key, ToggleHistorySearch, Some(ctx))
+            }
+            "toggle_tab_placement" | "tab_placement" => {
+                KeyBinding::new(&spec.key, ToggleTabPlacement, Some(ctx))
             }
             _ => continue,
         };

@@ -23,7 +23,7 @@ pub use app_shell::{
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown, SplitRight,
     MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleBroadcast,
     ToggleCommandPalette, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    ToggleQuickSelect, ToggleRunLedger,
+    ToggleQuickSelect, ToggleRunLedger, ToggleTabPlacement,
     UpdateUiState, open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};

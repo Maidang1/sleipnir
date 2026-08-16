@@ -11,6 +11,8 @@ with a forked terminal backend.
 
 [Features](#features) · [Install](#install) · [Config](#config) · [Shortcuts](#shortcuts)
 
+[English](README.md) · [中文](README.zh.md)
+
 </div>
 
 ---
@@ -34,7 +36,7 @@ prompt.
 ## Features
 
 - **GPU rendering** — smooth scrollback and redraw via GPUI (Metal); ease-in-out cursor blink.
-- **Tabs, splits & panes** — side tab rail grouped by git workspace (or `tab_placement: top` for the historical strip); each row shows the title plus a branch subtitle and a dirty `+N −M` mark; split right/down, jump tabs, move focus, drag tabs to reorder or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark on the tab. Mark Tab as Seen clears Attention without deleting Run records.
+- **Tabs, splits & panes** — side tab rail (default) or top strip (`tab_placement: top`, Settings → Tab placement, View → Toggle Tab Placement, or the command palette). Both group by git workspace with no group header. The rail is two lines (title, then branch + dirty `+N −M`). The top strip shows only the last two cwd components (`myself/harbor`), no branch or dirty mark. Right-click rename still overrides. Split right/down, jump tabs, move focus, drag tabs to reorder inside a group or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark (`claude` → `C`, `codex` → `X`, …); a plain shell has no placeholder. A tab with failed Attention washes faint red (no running/success dots). Mark Tab as Seen clears Attention without deleting Run records.
 - **Multi-window** — `⌘N` opens an independent window with its own tabs and shells.
 - **Font zoom** — `⌘+` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
@@ -47,13 +49,16 @@ prompt.
 - **vi mode** — keyboard-driven selection and navigation.
 - **Accessibility** — the terminal exposes the visible screen as a read-only accessible value (VoiceOver can read the current output), like Ghostty's read-only AX.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
-- **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings. `keybinding_preset: tmux` adds `ctrl-b` tab/pane chords. **Pane Facts** shows the focused pane's directory, process tree, and listen ports.
+- **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings. `keybinding_preset: tmux` adds `ctrl-b` tab/pane chords. **Pane Facts** (View menu) shows the focused pane's directory, process tree, and listen ports.
+- **Run Ledger** — `⌘⇧L` overlay of redacted command runs; click a row to jump to that pane and its OSC 133 Anchor. Persisted to `runs.json` by default (`run_ledger`: `off` / `memory` / `persist`). Pane gutter triangles mark command start/end (hidden on the alternate screen). After restore, a chrome tombstone banner names the last prior-launch command (not scrollback; dismisses on type; `show_tombstone: false` hides it).
+- **Control surface** — off by default. Set `control_surface: true` or `SLEIPNIR_CONTROL=1` to bind `~/.config/sleipnir/control.sock`; `sleipnir-ctl ls|capture|send|wait` drives live panes ([ADR-0011](docs/adr/0011-control-surface.md)).
 - **Find in scrollback** — `⌘F` search with match highlights, regex (`.*`) and match-case (`Aa`) toggles; export scrollback to a file via **Shell → Export Scrollback…** (opens in your default editor).
 - **Path links & bell** — ⌘-click paths open in the default app; hover shows a URL/path preview tooltip; optional system/visual bell.
 - **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
-- **Shell collaboration** — OSC 133 prompt jump; new tabs/splits inherit the active pane's working directory; optional notify when a long command finishes
-  while unfocused (macOS notification).
+- **Shell collaboration** — OSC 133 prompt jump; new tabs inherit the workspace git root (splits inherit the active pane cwd); optional notify when a long command finishes
+  while unfocused (macOS notification). **Shell → Search Shell History** (`⌘⇧;`) fuzzy-searches `HISTFILE` / `~/.zsh_history`. Send Selection / Send Git Diff paste into the focused pane; `pipe_selection_command` runs the selection through an external command.
 - **Quick Terminal / Quick Select** — open a spare window fast; link-oriented mode.
+- **Attention** — menu-bar item (`show_tray_icon`, default on) and Dock badge of failed Attention count. Independent of the tab wash.
 
 ## Install
 
@@ -115,7 +120,7 @@ Default font is **Menlo**.
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
 | `path_links` | Open path-like targets on ⌘-click (default `true`) |
-| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
+| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`, `mark_tab_seen`, `toggle_pane_facts`, `send_selection`, `pipe_selection`, `send_git_diff`, `toggle_history_search`, `toggle_tab_placement`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
 | `terminal.bell` | `off` / `system` / `visual` (default `off`) |
@@ -126,11 +131,14 @@ Default font is **Menlo**.
 | `run_ledger_retention_days` | How long to keep persisted runs (default `7`) |
 | `run_ledger_max_runs` | Cap on persisted runs; oldest dropped first (default `500`) |
 | `run_ledger_redact` | Redact command lines at capture (default `true`; heuristic, not a guarantee) |
-| `tab_placement` | `side` (default) left rail grouped by git workspace / `top` historical strip |
-| `sidebar_width` | Left rail width in px, 160–320 (default `200`) |
+| `tab_placement` | `side` (default) left rail with title + branch/`+N −M` / `top` strip with cwd path only. Same silent grouping and in-group drag |
+| `sidebar_width` | Left rail width in px, 160–320 (default `200`). Not a live-drag divider |
 | `agent_icons` | Letter monograms for known coding-agent processes (default `true`) |
 | `control_surface` | Bind the local control socket (default `false`). Also on with `SLEIPNIR_CONTROL=1` |
 | `show_tray_icon` | Menu-bar Attention item (default `true`). Dock badge is independent |
+| `pipe_selection_command` | External command that receives the current selection; empty disables |
+| `keybinding_preset` | `default` / `tmux` (`ctrl-b` then `c` / `%` / `"` / arrows / `z`) |
+| `show_tombstone` | Chrome restore banner from prior-launch Run metadata (default `true`) |
 | `terminal.inject_osc133` | Inject OSC 133 A/B/C/D into zsh/bash/fish (default `true`; was `false`) |
 
 Open the in-app theme picker with `⌘,`, or edit the file and reload
@@ -173,6 +181,8 @@ Force **text-only** paste (skip image→path conversion) with `⌃⌘V`.
 | Reload settings | `⌘⇧R` |
 | Cycle theme | `⌘⇧P` |
 | Command palette | `⌘⇧K` |
+| Run Ledger | `⌘⇧L` |
+| Search shell history | `⌘⇧;` |
 | Find in scrollback | `⌘F` |
 | Next / previous find match | `⌘G` / `⌘⇧G` |
 | Find: match case / regex | `⌥⌘C` / `⌥⌘R` |
@@ -223,9 +233,10 @@ the user, the agent is the workload. That sets the boundaries:
 
 ## Status
 
-Shipped through M15 — see [CHANGELOG](CHANGELOG.md). Still open: scrollback
-byte-budget / compression, a fuller VoiceOver tree, and kitty graphics
-(tracked, not implemented: [ADR-0004](docs/adr/0004-kitty-graphics-track-not-implement.md)).
+Shipped through M15 plus the Unreleased chrome, Run Ledger, and control-surface
+work — see [CHANGELOG](CHANGELOG.md). Still open: scrollback byte-budget /
+compression, a fuller VoiceOver tree, and kitty graphics (tracked, not
+implemented: [ADR-0004](docs/adr/0004-kitty-graphics-track-not-implement.md)).
 
 Performance is measured, not asserted: methodology in
 [`scripts/bench/README.md`](scripts/bench/README.md), numbers in

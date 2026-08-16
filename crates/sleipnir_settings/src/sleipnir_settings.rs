@@ -116,8 +116,24 @@ pub enum TabPlacement {
     /// Vertical rail on the left, grouped by workspace. Default.
     #[default]
     Side,
-    /// Historical unified title-tab band across the top.
+    /// Horizontal strip across the top. Same tab features as [`Self::Side`].
     Top,
+}
+
+impl TabPlacement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Side => "side",
+            Self::Top => "top",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Side => Self::Top,
+            Self::Top => Self::Side,
+        }
+    }
 }
 
 /// Optional keymap overlay. Extra `key_bindings` still win.
@@ -233,7 +249,7 @@ pub struct TerminalSettings {
     pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
     pub run_ledger_redact: bool,
-    /// Side rail (default) or the historical top tab strip.
+    /// Side rail (default) or the top tab strip. Same tab features either way.
     pub tab_placement: TabPlacement,
     /// Left rail width in logical pixels (clamped 160–320).
     pub sidebar_width: f32,
@@ -425,6 +441,21 @@ impl TerminalSettings {
             log::warn!("failed to persist copy_on_select={enabled}: {err}");
         } else {
             log::info!("copy_on_select -> {enabled} (persisted)");
+        }
+    }
+
+    /// Switch tab chrome between the side rail and the top strip.
+    pub fn set_tab_placement(placement: TabPlacement, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.tab_placement = placement;
+        apply_loaded(settings, cx);
+        if let Err(err) = persist_string_key("tab_placement", placement.as_str()) {
+            log::warn!(
+                "failed to persist tab_placement={}: {err}",
+                placement.as_str()
+            );
+        } else {
+            log::info!("tab_placement -> {} (persisted)", placement.as_str());
         }
     }
 
@@ -900,6 +931,14 @@ fn persist_bool_key(key: &str, value: bool) -> anyhow::Result<()> {
     write_settings_json(&json)
 }
 
+fn persist_string_key(key: &str, value: &str) -> anyhow::Result<()> {
+    let raw = read_settings_raw()?;
+    let json = merge_settings_json(raw.as_deref(), |doc| {
+        doc[key] = serde_json::Value::String(value.to_string());
+    });
+    write_settings_json(&json)
+}
+
 fn persist_terminal_bool(key: &str, value: bool) -> anyhow::Result<()> {
     let raw = read_settings_raw()?;
     let json = merge_settings_json(raw.as_deref(), |doc| {
@@ -1179,6 +1218,20 @@ mod tests {
         let mut settings = TerminalSettings::default();
         merge_file(&mut settings, file);
         assert_eq!(settings.tab_placement, TabPlacement::Top);
+    }
+
+    #[test]
+    fn tab_placement_toggle_and_merge() {
+        assert_eq!(TabPlacement::Side.toggle(), TabPlacement::Top);
+        assert_eq!(TabPlacement::Top.toggle(), TabPlacement::Side);
+        assert_eq!(TabPlacement::Side.as_str(), "side");
+        assert_eq!(TabPlacement::Top.as_str(), "top");
+        let out = merge_settings_json(Some(r#"{ "theme": "mocha" }"#), |v| {
+            v["tab_placement"] = serde_json::Value::String(TabPlacement::Top.as_str().into());
+        });
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], "mocha");
+        assert_eq!(v["tab_placement"], "top");
     }
 
     #[test]

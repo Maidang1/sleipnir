@@ -3,27 +3,24 @@
 ## Unreleased
 
 ### Features
-- Side tab rail (default): tabs list on the left, grouped by git workspace; `tab_placement: top` restores the historical strip
-- Side-rail rows are two lines: title on top (ellipsis), branch + dirty `+N −M` on the second line (tracked files only)
-- Agent monograms on tabs for known coding-agent processes (`claude`, `codex`, …); `agent_icons: false` hides them
+- Tab placement is Side (default left rail) or Top (horizontal strip). Both group by git workspace (no group header), with agent marks, in-group drag, and New tab. Switch in Settings, View → Toggle Tab Placement, or the command palette
+- Side-rail rows stay two lines: title, then branch + dirty `+N −M`
+- Top-strip chips show only the last two cwd components (`myself/harbor`); no branch or dirty mark
+- Tab chrome no longer draws run dots (running ● / succeeded ✓). A tab with failed Attention washes the whole chip a faint red
+- Agent monograms on tabs for known coding-agent processes (`claude`, `codex`, …); no house placeholder when the tab is just a shell; `agent_icons: false` hides them
 - New tabs inherit the workspace git root so they stay in the same group
-- Run Ledger: tab badges show only failed runs (not running / succeeded)
-- `clear_run_ledger` action in command palette and menus
-- `toggle_run_ledger` action registered for P1 panel
-- `mark_tab_seen` clears Attention on the active tab without deleting Run records
+- `clear_run_ledger` / `toggle_run_ledger` / `mark_tab_seen` in command palette and menus. Mark Tab as Seen clears Attention without deleting Run records
 - Close-confirm names the busy foreground process when one is known
 - Drag a tab onto another tab's panes to merge it as a split (same sessions); drag a pane grip onto the tab list to extract it as its own tab. Dropping the visible tab on the pane area still detaches it to a new window
 - Pane Facts overlay (View / command palette): cwd, foreground process, descendant process tree, and listening ports for the focused pane
 - Run Ledger overlay (`⌘⇧L`): grouped runs, jump to the pane and scroll to the OSC 133 Anchor
 - Pane gutter triangles on command start/end lines (overlay; hidden on alt screen)
 - Menu-bar Attention item (`show_tray_icon`) and Dock badge of failed Attention count
-- Control surface listens when `control_surface: true` or `SLEIPNIR_CONTROL=1`; `sleipnir-ctl ls/send/wait/capture` drive live panes
-- Restore tombstone banner from prior-launch Run metadata (no scrollback); dismisses on type; skips in-flight / unrecognized last commands
+- Default-off control surface (ADR-0011): listens when `control_surface: true` or `SLEIPNIR_CONTROL=1`; `sleipnir-ctl ls/send/wait/capture` drive live panes
+- Restore tombstone banner from prior-launch Run metadata (no scrollback); dismisses on type; skips in-flight / unrecognized last commands; `show_tombstone: false` hides it
 - Send Selection / Send Git Diff to the focused pane; optional `pipe_selection_command`
 - Shell history search overlay (`⌘⇧;`) over `HISTFILE` / `~/.zsh_history`
 - `keybinding_preset: tmux` adds `ctrl-b` pane/tab chords
-- Default-off control surface (ADR-0011) + `sleipnir-ctl` client
-- Tab chrome badges show Attention ∪ Running again (failed / running / succeeded)
 
 ### Fixes
 - Side-rail git dirty mark no longer walks the work tree on the UI thread (tab switches stalled for ~1s+ in repos with `target/` / `node_modules/`)

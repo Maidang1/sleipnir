@@ -11,7 +11,7 @@ use sleipnir_ui::{
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
     JumpPrevPrompt, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab,
     ReloadSettings, ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, TogglePaneZoom,
-    ToggleQuickSelect,
+    ToggleQuickSelect, ToggleTabPlacement,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -94,6 +94,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Toggle Pane Zoom", TogglePaneZoom),
             MenuItem::action("Toggle Broadcast Input", ToggleBroadcast),
+            MenuItem::action("Toggle Tab Placement", ToggleTabPlacement),
             MenuItem::separator(),
             MenuItem::action("Previous Prompt", JumpPrevPrompt),
             MenuItem::action("Next Prompt", JumpNextPrompt),

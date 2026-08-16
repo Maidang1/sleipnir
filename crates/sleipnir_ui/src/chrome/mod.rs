@@ -10,6 +10,7 @@ pub(crate) mod history_search;
 pub(crate) mod pane_facts;
 pub(crate) mod send_context;
 pub(crate) mod tombstone;
+#[allow(dead_code)]
 mod tab_badge;
 pub(crate) mod tab_sidebar;
 mod tab_strip;
