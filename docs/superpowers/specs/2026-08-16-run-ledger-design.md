@@ -70,7 +70,10 @@ Sleipnir 是**你可以离开的终端**。人跑 coding agent 和长任务，Sl
 
 **Run（运行）**：一次命令执行，从 OSC 133 `C`（开始执行）到 `D`（结束，带退出码）。恰好属于
 一个 Pane。字段：`RunId`、命令行文本（脱敏后）、cwd、开始时间（wall clock）、耗时（单调时钟）、
-退出码、状态、`LaunchId`、`PaneKey`、Anchor、是否推断、是否已看过（仅进程内有效，见 §3.1）。
+退出码、状态、`LaunchId`、`PaneKey`、Anchor、是否推断、是否已看过。
+
+其中 **Anchor 与「是否已看过」是内存字段，不进 `runs.json` schema**（Anchor 跨重启必然失效；Attention
+不跨重启，见 §3.1）。
 _避免_：Task（本仓库已用于 Zed 派生的 `SpawnInTerminal` / `TaskState`）、Command（命令是文本，
 Run 是一次执行）、Block、Job。
 
@@ -267,19 +270,18 @@ ADR-0006 是 proposed，且其两条决策与本设计**直接冲突**，必须�
 | 键 | 取值 | 默认 |
 |---|---|---|
 | `run_ledger` | `off` / `memory` / `persist` | `persist` |
+| `run_ledger_retention_days` | 整数 | `7` |
+| `run_ledger_max_runs` | 整数 | `500` |
+| `run_ledger_redact` | bool | `true` |
+| `terminal.inject_osc133` | bool | `true`（**变更**） |
 
-三态语义（必须逐条实现，不留推断空间）：
+`run_ledger` 三态语义（必须逐条实现，不留推断空间）：
 
 | 值 | 采集 RunEvent | 徽标 / gutter / 面板 | 读写 `runs.json` | tombstone |
 |---|---|---|---|---|
 | `persist` | 是 | 有 | 读 + 写 | 可用 |
 | `memory` | 是 | 有 | **既不读也不写；磁盘上已有的 `runs.json` 原样保留不动**（切回 `persist` 时还在） | **不可用**（无跨重启数据） |
 | `off` | 否 | 无 | 既不读也不写，文件保留 | 不可用 |
-
-| `run_ledger_retention_days` | 整数 | `7` |
-| `run_ledger_max_runs` | 整数 | `500` |
-| `run_ledger_redact` | bool | `true` |
-| `terminal.inject_osc133` | bool | `true`（**变更**） |
 
 ## 5. 降级与错误处理
 
@@ -314,14 +316,17 @@ ADR-0006 是 proposed，且其两条决策与本设计**直接冲突**，必须�
 | `crates/sleipnir_settings` | 上表设置键；`inject_osc133` 默认值改 `true`，同步改现有单测 `inject_osc133_defaults_off`（`sleipnir_settings.rs:288/685`） |
 | `docs/settings.example.json:43` | `"inject_osc133": false` → `true` |
 | `docs/adr/0009-run-ledger-persistence.md`（新） | 持久化 + 脱敏 + 默认值决策 |
-| `docs/adr/0006-*` | 状态 proposed → accepted |
+| `docs/adr/0006-*` | 状态 proposed → **superseded by 0009**（见 §3.4；**不是** accepted） |
 | `docs/glossary.md` | 新增 Run / Ledger / Anchor / Attention |
 | `README.md` / `website/` | 叙事改写（性能降级为底线要求） |
 
 ## 8. 分期
 
-- **P0**：`run_ledger` crate（状态机 + 脱敏 + 存储）、`RunEvent` 打通、Tab/Pane 徽标、
-  `inject_osc133` 默认开、设置键、ADR-0009。
+- **P0**：`run_ledger` crate（状态机 + 脱敏 + 存储）、`RunEvent` 打通、`PaneKey` 写入 session、
+  Tab/Pane 徽标、`inject_osc133` 默认开、设置键、**首次写盘的一次性告知**（默认持久化的硬条件
+  之一，不得延后）、`clear_run_ledger` action、ADR-0009。
+  注：P0 会写 `runs.json` 但应用内还没有读者（面板与 tombstone 均在 P1）—— 这是有意的：先把
+  数据与隐私决策落定并接受评审，再建消费面。
 - **P1**：Ledger 面板（浮层）+ 跳转、gutter 标记、tombstone 横幅、通知重构、叙事改写。
 - **P2**：面板可钉住为常驻侧栏、Dock / 任务栏 badge。
 
