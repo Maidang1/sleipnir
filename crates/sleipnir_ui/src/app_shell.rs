@@ -1,9 +1,9 @@
 //! Single-window multi-tab shell for sleipnir (HIG-aligned chrome).
 
 use gpui::{
-    App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
-    ParentElement as _, Pixels, Render, ScrollHandle, SharedString, size,
+    App, AppContext as _, BorrowAppContext, Bounds, ClickEvent, Context, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollHandle, SharedString, size,
     StatefulInteractiveElement as _, Styled as _, Task, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas, deferred, div, point,
     prelude::FluentBuilder as _, px, relative,
@@ -12,9 +12,11 @@ use sleipnir_settings::{
     Appearance, ConfirmClose, TerminalPalette, TerminalSettings, ThemeName, ThemeSetting,
     palette_for_theme,
 };
+use run_ledger::{PaneKey, RunEvent};
 
 use crate::TermView;
 use crate::chrome::{ChromeGeometry, ChromeTokens, active_after_close};
+use crate::run_ledger_global::RunLedgerGlobal;
 use crate::command_palette::{CommandId, CommandItem, commands as palette_commands, filter_commands};
 use crate::pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
@@ -442,9 +444,13 @@ impl AppShell {
             })
             .detach();
 
-        // Persist session on quit (M8).
+        RunLedgerGlobal::init(cx);
+
+        // Persist session on quit (M8) and flush the Run Ledger.
         shell._quit_subscription = Some(cx.on_app_quit(|this, cx| {
+            this.emit_all_panes_closed(cx);
             this.persist_session_now(cx);
+            RunLedgerGlobal::flush_now_in(cx);
             async {}
         }));
 
@@ -456,6 +462,8 @@ impl AppShell {
         };
         if !restored {
             shell.add_tab(window, cx);
+        } else {
+            shell.sync_ledger_focus(window, cx);
         }
         shell
     }
@@ -531,6 +539,7 @@ impl AppShell {
                         this.font_size_override = None;
                         this.apply_font_override_to_all_panes(cx);
                         TerminalSettings::reload(cx);
+                        RunLedgerGlobal::reload_settings_in(cx);
                         cx.notify();
                     }
                     crate::TermViewEvent::RequestCycleTheme => {
@@ -543,6 +552,31 @@ impl AppShell {
                     }
                     crate::TermViewEvent::Bell => {
                         this.on_term_bell(view, cx);
+                    }
+                    crate::TermViewEvent::RunStarted {
+                        command,
+                        cwd,
+                        inferred,
+                    } => {
+                        if let Some(pane) = this.pane_key_for_view(view) {
+                            this.apply_run_event(
+                                RunEvent::Started {
+                                    pane,
+                                    command: command.clone(),
+                                    cwd: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                                    at_ms: 0,
+                                    inferred: *inferred,
+                                },
+                                cx,
+                            );
+                        }
+                        cx.notify();
+                    }
+                    crate::TermViewEvent::RunFinished { exit_code } => {
+                        if let Some(pane) = this.pane_key_for_view(view) {
+                            this.apply_run_event(RunEvent::finished(pane, *exit_code, 0), cx);
+                        }
+                        cx.notify();
                     }
                 }
             },
@@ -588,6 +622,65 @@ impl AppShell {
             }
         }
         None
+    }
+
+    fn pane_key_for_view(&self, view: &Entity<TermView>) -> Option<PaneKey> {
+        self.tabs
+            .iter()
+            .find_map(|tab| tab.tree.pane_key_for_view(view))
+    }
+
+    fn active_pane_key(&self) -> Option<PaneKey> {
+        let tab = self.tabs.get(self.active)?;
+        tab.tree.pane_key_for_id(tab.active_pane)
+    }
+
+    fn apply_run_event(&self, mut event: RunEvent, cx: &mut App) {
+        if !cx.has_global::<RunLedgerGlobal>() {
+            return;
+        }
+        cx.update_global(|g: &mut RunLedgerGlobal, cx| {
+            let at_ms = g.now_ms();
+            match &mut event {
+                RunEvent::Started { at_ms: slot, .. }
+                | RunEvent::Finished { at_ms: slot, .. }
+                | RunEvent::PaneClosed { at_ms: slot, .. } => {
+                    *slot = at_ms;
+                }
+            }
+            g.apply(event, cx);
+        });
+    }
+
+    fn apply_pane_closed(&self, pane: PaneKey, cx: &mut App) {
+        self.apply_run_event(RunEvent::PaneClosed { pane, at_ms: 0 }, cx);
+    }
+
+    fn emit_all_panes_closed(&self, cx: &mut App) {
+        let keys: Vec<PaneKey> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.tree.all_pane_keys())
+            .collect();
+        for pane in keys {
+            self.apply_pane_closed(pane, cx);
+        }
+    }
+
+    fn sync_ledger_focus(&self, window: &Window, cx: &mut App) {
+        if !cx.has_global::<RunLedgerGlobal>() {
+            return;
+        }
+        let pane = self.active_pane_key();
+        let active = window.is_window_active();
+        cx.update_global(|g: &mut RunLedgerGlobal, _cx| {
+            g.set_focus(pane, active);
+            if active {
+                if let Some(pane) = pane {
+                    g.mark_pane_seen(pane);
+                }
+            }
+        });
     }
 
     fn apply_font_override_to_all_panes(&self, cx: &mut Context<Self>) {
@@ -938,6 +1031,7 @@ impl AppShell {
         });
         self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
+        self.sync_ledger_focus(window, cx);
         self.sync_window_title(window, cx);
         self.tab_scroll_handle.scroll_to_item(self.active);
         self.schedule_session_save(cx);
@@ -1036,6 +1130,10 @@ impl AppShell {
                 self.rename = None;
             }
         }
+        let closed_keys = self.tabs[index].tree.all_pane_keys();
+        for pane in closed_keys {
+            self.apply_pane_closed(pane, cx);
+        }
         match active_after_close(self.active, index, self.tabs.len()) {
             None => {
                 self.tabs.remove(index);
@@ -1046,6 +1144,7 @@ impl AppShell {
                 self.tabs.remove(index);
                 self.active = new_active;
                 self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
                 self.sync_window_title(window, cx);
                 self.tab_scroll_handle.scroll_to_item(self.active);
                 self.schedule_session_save(cx);
@@ -1066,6 +1165,7 @@ impl AppShell {
         if index < self.tabs.len() {
             self.active = index;
             self.focus_active(window, cx);
+            self.sync_ledger_focus(window, cx);
             self.sync_window_title(window, cx);
             self.tab_scroll_handle.scroll_to_item(self.active);
             self.schedule_session_save(cx);
@@ -1211,6 +1311,7 @@ impl AppShell {
             }
         }
         self.focus_active(window, cx);
+        self.sync_ledger_focus(window, cx);
         self.schedule_session_save(cx);
         cx.notify();
     }
@@ -1230,6 +1331,7 @@ impl AppShell {
                 tab.active_pane = next;
             }
             self.focus_active(window, cx);
+            self.sync_ledger_focus(window, cx);
             self.schedule_session_save(cx);
             cx.notify();
         }
@@ -1246,22 +1348,33 @@ impl AppShell {
             return;
         };
         let target = tab.active_pane;
-        match tab.tree.close(target) {
+        let closed_key = tab.tree.pane_key_for_id(target);
+        let outcome = tab.tree.close(target);
+        match outcome {
             CloseOutcome::TreeEmpty => {
                 self.close_active_tab(window, cx);
             }
             CloseOutcome::NotFound => {
                 // Stale active_pane id: recover focus instead of nuking the tab.
-                tab.active_pane = tab.tree.first_leaf_id();
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = tab.tree.first_leaf_id();
+                }
                 self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
                 cx.notify();
             }
             CloseOutcome::Closed => {
+                if let Some(pane) = closed_key {
+                    self.apply_pane_closed(pane, cx);
+                }
                 // Surviving subtree: focus its first leaf (the collapsed sibling
                 // when the closed pane was a direct child of a split).
-                tab.active_pane = tab.tree.first_leaf_id();
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = tab.tree.first_leaf_id();
+                }
                 self.sync_window_title(window, cx);
                 self.focus_active(window, cx);
+                self.sync_ledger_focus(window, cx);
                 self.schedule_session_save(cx);
                 cx.notify();
             }
@@ -1391,6 +1504,7 @@ impl AppShell {
         self.font_size_override = None;
         self.apply_font_override_to_all_panes(cx);
         TerminalSettings::reload(cx);
+        RunLedgerGlobal::reload_settings_in(cx);
         cx.notify();
     }
 
@@ -1456,6 +1570,7 @@ impl AppShell {
                 self.font_size_override = None;
                 self.apply_font_override_to_all_panes(cx);
                 TerminalSettings::reload(cx);
+                RunLedgerGlobal::reload_settings_in(cx);
                 cx.notify();
             }
             CommandId::CycleTheme => {
@@ -3604,6 +3719,7 @@ fn snapshot_tree(node: &PaneNode, cx: &App) -> SessionNode {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_ledger_focus(window, cx);
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);

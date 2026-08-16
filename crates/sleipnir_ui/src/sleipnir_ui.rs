@@ -6,6 +6,7 @@ mod chrome;
 mod command_palette;
 mod keymap;
 mod pane_tree;
+mod run_ledger_global;
 mod session;
 mod term_element;
 
@@ -29,6 +30,7 @@ pub use pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
     neighbor,
 };
+pub use run_ledger_global::RunLedgerGlobal;
 pub use session::{SessionFile, SessionNode, SessionTab, load_session, save_session, session_path};
 pub use term_element::TermElement;
 
@@ -72,6 +74,14 @@ pub enum TermViewEvent {
     RequestOpenSettings,
     /// Terminal BEL — shell may flash tab chrome (visual bell).
     Bell,
+    /// A command started in this pane (Run Ledger).
+    RunStarted {
+        command: String,
+        cwd: Option<PathBuf>,
+        inferred: bool,
+    },
+    /// The current command in this pane finished.
+    RunFinished { exit_code: Option<i32> },
 }
 
 impl EventEmitter<TermViewEvent> for TermView {}
@@ -277,7 +287,22 @@ impl TermView {
                 Event::Notify(message) => {
                     notify_message("Sleipnir", message);
                 }
-                Event::RunStarted { .. } | Event::RunFinished { .. } => {}
+                Event::RunStarted {
+                    command,
+                    cwd,
+                    inferred,
+                } => {
+                    cx.emit(TermViewEvent::RunStarted {
+                        command: command.clone(),
+                        cwd: cwd.clone(),
+                        inferred: *inferred,
+                    });
+                }
+                Event::RunFinished { exit_code } => {
+                    cx.emit(TermViewEvent::RunFinished {
+                        exit_code: *exit_code,
+                    });
+                }
             },
         )
         .detach();

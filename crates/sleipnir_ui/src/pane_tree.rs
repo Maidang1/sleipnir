@@ -81,6 +81,37 @@ impl PaneNode {
         }
     }
 
+    pub fn pane_key_for_view(&self, view: &Entity<TermView>) -> Option<PaneKey> {
+        match self {
+            PaneNode::Leaf { pane_key, view: leaf, .. } if leaf == view => Some(*pane_key),
+            PaneNode::Split { first, second, .. } => first
+                .pane_key_for_view(view)
+                .or_else(|| second.pane_key_for_view(view)),
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
+    pub fn pane_key_for_id(&self, id: PaneId) -> Option<PaneKey> {
+        match self {
+            PaneNode::Leaf { id: leaf, pane_key, .. } if *leaf == id => Some(*pane_key),
+            PaneNode::Split { first, second, .. } => first
+                .pane_key_for_id(id)
+                .or_else(|| second.pane_key_for_id(id)),
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
+    pub fn all_pane_keys(&self) -> Vec<PaneKey> {
+        match self {
+            PaneNode::Leaf { pane_key, .. } => vec![*pane_key],
+            PaneNode::Split { first, second, .. } => {
+                let mut keys = first.all_pane_keys();
+                keys.extend(second.all_pane_keys());
+                keys
+            }
+        }
+    }
+
     /// The first leaf's id (used to pick a fallback active pane).
     pub fn first_leaf_id(&self) -> PaneId {
         match self {

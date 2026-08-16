@@ -5642,6 +5642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sleipnir_settings",
+ "tempfile",
  "terminal",
  "updater",
  "util",
