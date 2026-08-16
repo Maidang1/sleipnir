@@ -5,11 +5,14 @@
 //! a single `Leaf`, so the no-split case is the degenerate tree.
 
 use gpui::{Bounds, Entity, Pixels};
+use uuid::Uuid;
 
 use crate::TermView;
 
 /// Stable identity for a leaf pane within a tab.
 pub type PaneId = u64;
+/// Stable identity for a Pane across restarts; persisted in `session.json`.
+pub type PaneKey = Uuid;
 
 /// Split orientation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +37,7 @@ pub enum Direction {
 pub enum PaneNode {
     Leaf {
         id: PaneId,
+        pane_key: PaneKey,
         view: Entity<TermView>,
     },
     Split {
@@ -51,7 +55,11 @@ pub const MIN_RATIO: f32 = 0.1;
 
 impl PaneNode {
     pub fn leaf(id: PaneId, view: Entity<TermView>) -> Self {
-        PaneNode::Leaf { id, view }
+        Self::leaf_with_key(id, Uuid::new_v4(), view)
+    }
+
+    pub fn leaf_with_key(id: PaneId, pane_key: PaneKey, view: Entity<TermView>) -> Self {
+        PaneNode::Leaf { id, pane_key, view }
     }
 
     /// Number of leaf panes in this subtree.
@@ -65,7 +73,7 @@ impl PaneNode {
     /// Collect `(PaneId, &Entity<TermView>)` for every leaf, in tree order.
     pub fn leaves<'a>(&'a self, out: &mut Vec<(PaneId, &'a Entity<TermView>)>) {
         match self {
-            PaneNode::Leaf { id, view } => out.push((*id, view)),
+            PaneNode::Leaf { id, view, .. } => out.push((*id, view)),
             PaneNode::Split { first, second, .. } => {
                 first.leaves(out);
                 second.leaves(out);
@@ -100,9 +108,10 @@ impl PaneNode {
         new_view: Entity<TermView>,
     ) -> bool {
         match self {
-            PaneNode::Leaf { id, view } if *id == target => {
+            PaneNode::Leaf { id, pane_key, view } if *id == target => {
                 // Rebuild this leaf as a split: first = old leaf, second = new.
-                let old = PaneNode::leaf(*id, view.clone());
+                // Keep the original pane_key so Run Ledger ownership stays put.
+                let old = PaneNode::leaf_with_key(*id, *pane_key, view.clone());
                 *self = PaneNode::Split {
                     axis,
                     ratio: 0.5,

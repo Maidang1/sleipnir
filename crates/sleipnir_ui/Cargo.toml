@@ -24,6 +24,8 @@ log.workspace = true
 util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+run_ledger.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify-rust = "4"

@@ -5638,12 +5638,14 @@ dependencies = [
  "log",
  "notify-rust",
  "release_channel",
+ "run_ledger",
  "serde",
  "serde_json",
  "sleipnir_settings",
  "terminal",
  "updater",
  "util",
+ "uuid",
 ]
 
 [[package]]

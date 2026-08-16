@@ -21,8 +21,8 @@ use crate::pane_tree::{
     neighbor,
 };
 use crate::session::{
-    SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, sanitize_session,
-    save_session, session_path,
+    SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, restore_pane_key,
+    sanitize_session, save_session, session_path,
 };
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
@@ -823,9 +823,9 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> PaneNode {
         match node {
-            SessionNode::Leaf { id, cwd } => {
+            SessionNode::Leaf { id, cwd, pane_key } => {
                 let view = self.spawn_term_view_with_cwd(resolve_cwd(cwd.as_deref()), window, cx);
-                PaneNode::leaf(*id, view)
+                PaneNode::leaf_with_key(*id, restore_pane_key(*pane_key), view)
             }
             SessionNode::Split {
                 axis,
@@ -3577,12 +3577,13 @@ mod tests {
 
 fn snapshot_tree(node: &PaneNode, cx: &App) -> SessionNode {
     match node {
-        PaneNode::Leaf { id, view } => SessionNode::Leaf {
+        PaneNode::Leaf { id, pane_key, view } => SessionNode::Leaf {
             id: *id,
             cwd: view
                 .read(cx)
                 .working_directory(cx)
                 .map(|p| p.to_string_lossy().into_owned()),
+            pane_key: Some(*pane_key),
         },
         PaneNode::Split {
             axis,
