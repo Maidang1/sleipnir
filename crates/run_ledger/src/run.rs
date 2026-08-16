@@ -131,4 +131,13 @@ impl Run {
         self.duration = Duration::from_millis(mono_ms.saturating_sub(self.started_at_mono_ms));
         self.state = RunState::Abandoned;
     }
+
+    pub(crate) fn started_at_mono_ms(&self) -> u64 {
+        self.started_at_mono_ms
+    }
+
+    /// Elapsed millis for a still-running Run, using the caller's monotonic clock.
+    pub fn elapsed_ms(&self, now_mono_ms: u64) -> u64 {
+        now_mono_ms.saturating_sub(self.started_at_mono_ms)
+    }
 }

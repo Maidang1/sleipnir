@@ -7,6 +7,6 @@ pub mod redact;
 pub mod run;
 pub mod store;
 
-pub use ledger::{Badge, BadgeKind, Ledger};
+pub use ledger::{Badge, BadgeKind, Ledger, Retention};
 pub use redact::redact_command;
 pub use run::{LaunchId, PaneKey, Run, RunEvent, RunId, RunState};
