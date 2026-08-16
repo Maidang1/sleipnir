@@ -6,6 +6,8 @@
 use gpui::{actions, Menu, MenuItem, SystemMenuType};
 use sleipnir_ui::{
     CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback,
+    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleHistorySearch, TogglePaneFacts,
+    ToggleRunLedger,
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
     JumpPrevPrompt, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PrevTab,
     ReloadSettings, ResetFontSize, SplitDown, SplitRight, ToggleBroadcast, TogglePaneZoom,
@@ -67,6 +69,12 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Export Scrollback…", ExportScrollback),
             MenuItem::action("Clear Run Ledger", ClearRunLedger),
+            MenuItem::action("Mark Tab as Seen", MarkTabSeen),
+            MenuItem::action("Run Ledger", ToggleRunLedger),
+            MenuItem::action("Send Selection to Pane", SendSelection),
+            MenuItem::action("Pipe Selection to Command", PipeSelection),
+            MenuItem::action("Send Git Diff to Pane", SendGitDiff),
+            MenuItem::action("Search Shell History", ToggleHistorySearch),
         ]),
         Menu::new("Edit").items([
             MenuItem::action("Copy", Copy),
@@ -92,6 +100,8 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Quick Select", ToggleQuickSelect),
             MenuItem::action("Quick Terminal", OpenQuickTerminal),
+            MenuItem::separator(),
+            MenuItem::action("Pane Facts", TogglePaneFacts),
             MenuItem::separator(),
             MenuItem::action("Toggle Vi Mode", ToggleViMode),
         ]),

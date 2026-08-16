@@ -42,9 +42,31 @@ _Avoid_: Focused terminal, current pane.
 ## Chrome & appearance
 
 **Chrome**:
-The custom title region at the top of a Window: traffic-light clearance, the tab
+The custom chrome of a Window: traffic-light clearance, the Tab rail or top tab
 strip, and any window controls. It is deferential to terminal content per HIG.
 _Avoid_: Titlebar, header, toolbar.
+
+**Tab rail**:
+The left-side list of Tabs, clustered under Workspace headers. Default chrome
+(`tab_placement: side`). The historical top strip remains as `tab_placement: top`.
+_Avoid_: Sidebar (the rail is the tab list, not a second panel), activity bar.
+
+**Workspace**:
+A grouping key for Tabs, derived from the git work tree of the Tab's active Pane
+cwd (or the cwd itself if there is no `.git`, or `~` if cwd is unknown). Not a
+stored object; `cd` into another repo moves the Tab. Not an OS Window. A rail
+row is two lines: the tab title (ellipsis) and, in a work tree, a branch
+subtitle with a `+N` / `−M` count of lines inserted / deleted vs `HEAD`
+(`git diff --numstat`). Long titles and branch names truncate with `…`.
+Untracked files are omitted. A non-repo pane shows no subtitle. The
+workspace header includes the tab count.
+_Avoid_: Project, folder, space.
+
+**Agent identity**:
+A known coding-agent process detected from the Pane's foreground command name.
+Rendered as a letter monogram Sleipnir owns. Distinct from a Run badge (who vs
+what happened).
+_Avoid_: Agent (the process is workload; the user is the person), logo.
 
 **Theme**:
 A named color palette applied to terminal content (e.g. the Catppuccin flavors
@@ -92,6 +114,7 @@ _Avoid_: Mark (a Mark is a raw OSC 133 marker), Bookmark.
 **Attention**:
 The set of finished Runs the user has not yet seen. "Seen" means the Pane was
 focused, or the Run was clicked in the Ledger panel. Attention drives badges
-and notifications. It does not survive a restart (loaded history is marked
-seen).
+and notifications. Tab chrome only renders a Failed badge; Running and
+Succeeded stay in the Ledger. It does not survive a restart (loaded history
+is marked seen).
 _Avoid_: Unread, Badge (a badge is one rendering of Attention), Alert.

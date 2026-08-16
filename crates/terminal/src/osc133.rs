@@ -45,6 +45,67 @@ pub struct Osc133Marker {
     pub column: Option<usize>,
 }
 
+/// Overlay triangle on a command start or end line (does not occupy a grid cell).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GutterKind {
+    Start,
+    End,
+}
+
+/// One pane-gutter mark derived from OSC 133 C/D pairs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GutterMark {
+    pub line: i32,
+    pub kind: GutterKind,
+    /// `None` while the command is still running or the finish had no status.
+    pub status: Option<i32>,
+}
+
+/// Convert an absolute marker line into a viewport display line.
+pub fn absolute_to_display_line(absolute: i32, history_size: i32, display_offset: usize) -> i32 {
+    absolute - history_size + display_offset as i32
+}
+
+/// Pair each OSC 133 C with the following D. An unmatched C is a running start mark.
+pub fn gutter_marks_from_markers(markers: &[Osc133Marker]) -> Vec<GutterMark> {
+    let mut out = Vec::new();
+    let mut open: Option<i32> = None;
+    for marker in markers {
+        match marker.kind {
+            Osc133Kind::CommandExecuted => {
+                if let Some(line) = marker.line {
+                    open = Some(line);
+                }
+            }
+            Osc133Kind::CommandFinished { status } => {
+                if let Some(start) = open.take() {
+                    out.push(GutterMark {
+                        line: start,
+                        kind: GutterKind::Start,
+                        status,
+                    });
+                    if let Some(end) = marker.line {
+                        out.push(GutterMark {
+                            line: end,
+                            kind: GutterKind::End,
+                            status,
+                        });
+                    }
+                }
+            }
+            Osc133Kind::PromptStart | Osc133Kind::CommandStart => {}
+        }
+    }
+    if let Some(start) = open {
+        out.push(GutterMark {
+            line: start,
+            kind: GutterKind::Start,
+            status: None,
+        });
+    }
+    out
+}
+
 /// Incremental scanner for OSC 133 sequences in a byte stream.
 #[derive(Debug, Default)]
 pub struct Osc133Scanner {
@@ -198,5 +259,59 @@ mod tests {
         );
         assert_eq!(Osc133Kind::from_payload("Z"), None);
         assert_eq!(Osc133Kind::from_payload(""), None);
+    }
+
+    #[test]
+    fn gutter_pairs_c_with_following_d() {
+        let markers = [
+            Osc133Marker {
+                kind: Osc133Kind::CommandExecuted,
+                line: Some(10),
+                column: Some(0),
+            },
+            Osc133Marker {
+                kind: Osc133Kind::CommandFinished { status: Some(1) },
+                line: Some(18),
+                column: Some(0),
+            },
+        ];
+        assert_eq!(
+            gutter_marks_from_markers(&markers),
+            vec![
+                GutterMark {
+                    line: 10,
+                    kind: GutterKind::Start,
+                    status: Some(1),
+                },
+                GutterMark {
+                    line: 18,
+                    kind: GutterKind::End,
+                    status: Some(1),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unmatched_c_is_a_running_start_mark() {
+        let markers = [Osc133Marker {
+            kind: Osc133Kind::CommandExecuted,
+            line: Some(4),
+            column: Some(2),
+        }];
+        assert_eq!(
+            gutter_marks_from_markers(&markers),
+            vec![GutterMark {
+                line: 4,
+                kind: GutterKind::Start,
+                status: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn absolute_display_line_uses_viewport_top() {
+        assert_eq!(absolute_to_display_line(100, 80, 10), 30);
+        assert_eq!(absolute_to_display_line(70, 80, 0), -10);
     }
 }

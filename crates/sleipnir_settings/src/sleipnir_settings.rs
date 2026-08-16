@@ -81,7 +81,9 @@ pub enum WorkingDirectory {
     CurrentProjectDirectory,
     FirstProjectDirectory,
     AlwaysHome,
-    Always { directory: String },
+    Always {
+        directory: String,
+    },
 }
 
 /// Line height: bare number (Zed also accepts objects; we accept `f32` or `{"custom": n}`).
@@ -105,6 +107,36 @@ impl TerminalLineHeight {
             Self::Named { custom } => *custom,
         }
     }
+}
+
+/// Where tab chips live in the window chrome.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabPlacement {
+    /// Vertical rail on the left, grouped by workspace. Default.
+    #[default]
+    Side,
+    /// Historical unified title-tab band across the top.
+    Top,
+}
+
+/// Optional keymap overlay. Extra `key_bindings` still win.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeybindingPreset {
+    #[default]
+    Default,
+    /// Prefix-style pane/tab chords: `ctrl-b` then `c` / `%` / `"` / arrows.
+    Tmux,
+}
+
+pub const SIDEBAR_WIDTH_MIN: f32 = 160.0;
+pub const SIDEBAR_WIDTH_MAX: f32 = 320.0;
+pub const SIDEBAR_WIDTH_DEFAULT: f32 = 200.0;
+
+/// Clamp a user `sidebar_width` to the supported range.
+pub fn clamp_sidebar_width(width: f32) -> f32 {
+    width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
 }
 
 /// Where the Run Ledger keeps its data.
@@ -201,6 +233,22 @@ pub struct TerminalSettings {
     pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
     pub run_ledger_redact: bool,
+    /// Side rail (default) or the historical top tab strip.
+    pub tab_placement: TabPlacement,
+    /// Left rail width in logical pixels (clamped 160–320).
+    pub sidebar_width: f32,
+    /// Draw agent monograms on tab chips.
+    pub agent_icons: bool,
+    /// Default-off external control surface (ADR-0011).
+    pub control_surface: bool,
+    /// Menu-bar attention item. Default true.
+    pub show_tray_icon: bool,
+    /// User command to receive the current selection. Empty = disabled.
+    pub pipe_selection_command: Option<String>,
+    /// Built-in keymap overlay.
+    pub keybinding_preset: KeybindingPreset,
+    /// Chrome banner after session restore when a pane has Run history.
+    pub show_tombstone: bool,
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -266,6 +314,14 @@ impl Default for TerminalSettings {
             run_ledger_retention_days: 7,
             run_ledger_max_runs: 500,
             run_ledger_redact: true,
+            tab_placement: TabPlacement::Side,
+            sidebar_width: SIDEBAR_WIDTH_DEFAULT,
+            agent_icons: true,
+            control_surface: false,
+            show_tray_icon: true,
+            pipe_selection_command: None,
+            keybinding_preset: KeybindingPreset::Default,
+            show_tombstone: true,
         }
     }
 }
@@ -403,7 +459,11 @@ fn apply_loaded(settings: TerminalSettings, cx: &mut App) {
 /// Resolve the effective palette: a user `custom_theme` wins, else the built-in
 /// theme name (resolving `Auto` against the system appearance), else a theme
 /// from the user catalog by name.
-fn resolve_palette(settings: &TerminalSettings, appearance: Appearance, cx: &App) -> TerminalPalette {
+fn resolve_palette(
+    settings: &TerminalSettings,
+    appearance: Appearance,
+    cx: &App,
+) -> TerminalPalette {
     if let Some(custom) = &settings.custom_theme {
         return custom.to_palette();
     }
@@ -482,6 +542,25 @@ struct SettingsFile {
     run_ledger_max_runs: Option<usize>,
     #[serde(default)]
     run_ledger_redact: Option<bool>,
+    /// side | top. Default side.
+    #[serde(default)]
+    tab_placement: Option<TabPlacement>,
+    /// Left rail width. Clamped to 160–320.
+    #[serde(default)]
+    sidebar_width: Option<f32>,
+    /// Draw agent monograms on tabs. Default true.
+    #[serde(default)]
+    agent_icons: Option<bool>,
+    #[serde(default)]
+    control_surface: Option<bool>,
+    #[serde(default)]
+    show_tray_icon: Option<bool>,
+    #[serde(default)]
+    pipe_selection_command: Option<String>,
+    #[serde(default)]
+    keybinding_preset: Option<KeybindingPreset>,
+    #[serde(default)]
+    show_tombstone: Option<bool>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
@@ -601,6 +680,30 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.run_ledger_redact {
         settings.run_ledger_redact = v;
     }
+    if let Some(v) = file.tab_placement {
+        settings.tab_placement = v;
+    }
+    if let Some(v) = file.sidebar_width {
+        settings.sidebar_width = clamp_sidebar_width(v);
+    }
+    if let Some(v) = file.agent_icons {
+        settings.agent_icons = v;
+    }
+    if let Some(v) = file.control_surface {
+        settings.control_surface = v;
+    }
+    if let Some(v) = file.show_tray_icon {
+        settings.show_tray_icon = v;
+    }
+    if file.pipe_selection_command.is_some() {
+        settings.pipe_selection_command = file.pipe_selection_command.filter(|s| !s.trim().is_empty());
+    }
+    if let Some(v) = file.keybinding_preset {
+        settings.keybinding_preset = v;
+    }
+    if let Some(v) = file.show_tombstone {
+        settings.show_tombstone = v;
+    }
     let t = file.terminal;
     if let Some(size) = t.font_size {
         settings.font_size = Some(px(size));
@@ -699,6 +802,14 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         run_ledger_retention_days: Some(7),
         run_ledger_max_runs: Some(500),
         run_ledger_redact: Some(true),
+        tab_placement: Some(TabPlacement::Side),
+        sidebar_width: Some(SIDEBAR_WIDTH_DEFAULT),
+        agent_icons: Some(true),
+        control_surface: Some(false),
+        show_tray_icon: Some(true),
+        pipe_selection_command: None,
+        keybinding_preset: Some(KeybindingPreset::Default),
+        show_tombstone: Some(true),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some(default_font_family().into()),
@@ -1046,5 +1157,48 @@ mod tests {
             serde_json::to_string(&TerminalBell::Visual).unwrap(),
             "\"visual\""
         );
+    }
+
+    #[test]
+    fn tab_rail_keys_default_when_absent() {
+        let s = TerminalSettings::default();
+        assert_eq!(s.tab_placement, TabPlacement::Side);
+        assert_eq!(s.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
+        assert!(s.agent_icons);
+        let file: SettingsFile = serde_json::from_str("{}").unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.tab_placement, TabPlacement::Side);
+        assert_eq!(settings.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
+        assert!(settings.agent_icons);
+    }
+
+    #[test]
+    fn tab_placement_parses_top() {
+        let file: SettingsFile = serde_json::from_str(r#"{"tab_placement":"top"}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.tab_placement, TabPlacement::Top);
+    }
+
+    #[test]
+    fn sidebar_width_is_clamped() {
+        let file: SettingsFile = serde_json::from_str(r#"{"sidebar_width":80}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.sidebar_width, SIDEBAR_WIDTH_MIN);
+
+        let file: SettingsFile = serde_json::from_str(r#"{"sidebar_width":900}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.sidebar_width, SIDEBAR_WIDTH_MAX);
+    }
+
+    #[test]
+    fn agent_icons_can_be_disabled() {
+        let file: SettingsFile = serde_json::from_str(r#"{"agent_icons":false}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert!(!settings.agent_icons);
     }
 }

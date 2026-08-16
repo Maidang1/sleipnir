@@ -26,6 +26,10 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 run_ledger.workspace = true
+sleipnir_ctl.workspace = true
+sysinfo.workspace = true
+async-channel.workspace = true
+objc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

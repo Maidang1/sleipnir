@@ -11,12 +11,13 @@ use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    BindingContext, BuiltinAction, builtin_bindings, open_sleipnir_window,
+    BindingContext, BuiltinAction, builtin_bindings, open_sleipnir_window, tmux_preset_bindings,
     ActivateTab, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, Find,
     FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
     SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
+    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleHistorySearch, TogglePaneFacts,
     ToggleRunLedger,
 };
 use terminal::{
@@ -59,6 +60,13 @@ fn main() {
         let mut keys = Vec::new();
         for spec in builtin_bindings() {
             keys.extend(key_bindings_for_builtin(&spec));
+        }
+        if sleipnir_settings::TerminalSettings::get_global(cx).keybinding_preset
+            == sleipnir_settings::KeybindingPreset::Tmux
+        {
+            for spec in tmux_preset_bindings() {
+                keys.extend(key_bindings_for_builtin(&spec));
+            }
         }
         cx.bind_keys(keys);
 
@@ -130,6 +138,8 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::JumpNextPrompt => KeyBinding::new(key, JumpNextPrompt, context),
         BuiltinAction::ToggleQuickSelect => KeyBinding::new(key, ToggleQuickSelect, context),
         BuiltinAction::OpenQuickTerminal => KeyBinding::new(key, OpenQuickTerminal, context),
+        BuiltinAction::ToggleRunLedger => KeyBinding::new(key, ToggleRunLedger, context),
+        BuiltinAction::ToggleHistorySearch => KeyBinding::new(key, ToggleHistorySearch, context),
         BuiltinAction::IncreaseFontSize => KeyBinding::new(key, IncreaseFontSize, context),
         BuiltinAction::DecreaseFontSize => KeyBinding::new(key, DecreaseFontSize, context),
         BuiltinAction::ResetFontSize => KeyBinding::new(key, ResetFontSize, context),
@@ -216,6 +226,18 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "show_character_palette" => KeyBinding::new(&spec.key, ShowCharacterPalette, Some(ctx)),
             "clear_run_ledger" => KeyBinding::new(&spec.key, ClearRunLedger, Some(ctx)),
             "toggle_run_ledger" => KeyBinding::new(&spec.key, ToggleRunLedger, Some(ctx)),
+            "mark_tab_seen" | "mark_as_seen" => {
+                KeyBinding::new(&spec.key, MarkTabSeen, Some(ctx))
+            }
+            "toggle_pane_facts" | "pane_facts" => {
+                KeyBinding::new(&spec.key, TogglePaneFacts, Some(ctx))
+            }
+            "send_selection" => KeyBinding::new(&spec.key, SendSelection, Some(ctx)),
+            "pipe_selection" => KeyBinding::new(&spec.key, PipeSelection, Some(ctx)),
+            "send_git_diff" => KeyBinding::new(&spec.key, SendGitDiff, Some(ctx)),
+            "toggle_history_search" | "history_search" => {
+                KeyBinding::new(&spec.key, ToggleHistorySearch, Some(ctx))
+            }
             _ => continue,
         };
         out.push(kb);

@@ -9,7 +9,10 @@ mod shell_semantics;
 pub mod terminal_settings;
 
 pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
-pub use osc133::{Osc133Kind, Osc133Marker, Osc133Scanner, scan_osc133};
+pub use osc133::{
+    GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
+    gutter_marks_from_markers, scan_osc133,
+};
 pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
 pub use shell_semantics::{
     ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
@@ -717,9 +720,13 @@ pub enum Event {
         command: String,
         cwd: Option<PathBuf>,
         inferred: bool,
+        line: Option<i32>,
+        column: Option<usize>,
     },
     /// The current command finished. `exit_code` is `None` when unknown.
     RunFinished { exit_code: Option<i32> },
+    /// Overlay triangle on a command start/end line was clicked.
+    GutterClicked { line: i32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2003,16 +2010,56 @@ impl Terminal {
             TrackerOut::Started {
                 command, inferred, ..
             } => {
+                let (line, column) = if inferred {
+                    (None, None)
+                } else {
+                    self.prompt_markers
+                        .iter()
+                        .rev()
+                        .find(|m| matches!(m.kind, Osc133Kind::CommandExecuted))
+                        .map(|m| (m.line, m.column))
+                        .unwrap_or((None, None))
+                };
                 cx.emit(Event::RunStarted {
                     command,
                     cwd: self.working_directory(),
                     inferred,
+                    line,
+                    column,
                 });
             }
             TrackerOut::Finished { exit_code, .. } => {
                 cx.emit(Event::RunFinished { exit_code });
             }
         }
+    }
+
+    /// Scroll so `absolute` line (OSC 133 marker coords) is near the top.
+    pub fn scroll_to_absolute(&mut self, absolute: i32, column: usize) {
+        let history = self.term.lock_unfair().history_size() as i32;
+        let grid_line = absolute_to_grid_line(absolute, history);
+        self.events
+            .push_back(InternalEvent::ScrollToPoint(Point::new(grid_line, column)));
+    }
+
+    pub fn history_size(&self) -> usize {
+        self.term.lock_unfair().history_size()
+    }
+
+    pub fn is_alt_screen(&self) -> bool {
+        self.last_content.mode.contains(Modes::ALT_SCREEN)
+    }
+
+    /// Overlay triangles for command start/end. Empty on the alt screen.
+    pub fn gutter_overlay(&self) -> Vec<GutterMark> {
+        if self.is_alt_screen() {
+            return Vec::new();
+        }
+        gutter_marks_from_markers(&self.prompt_markers)
+    }
+
+    pub fn emit_gutter_click(&mut self, line: i32, cx: &mut Context<Self>) {
+        cx.emit(Event::GutterClicked { line });
     }
 
     /// Grid text from the most recent OSC 133 B (command start) to the cursor.
@@ -3244,6 +3291,17 @@ impl Terminal {
     pub fn pid(&self) -> Option<sysinfo::Pid> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info.pid(),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
+    /// The spawned shell child (tree root), not the foreground job group.
+    pub fn shell_pid(&self) -> Option<u32> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => {
+                let pid = info.pid_getter().fallback_pid().as_u32();
+                (pid > 0).then_some(pid)
+            }
             TerminalType::DisplayOnly => None,
         }
     }

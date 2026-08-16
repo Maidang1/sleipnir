@@ -4441,6 +4441,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sleipnir_ctl"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "sleipnir_settings"
 version = "0.1.1"
 dependencies = [
@@ -4459,16 +4469,20 @@ dependencies = [
 name = "sleipnir_ui"
 version = "0.1.1"
 dependencies = [
+ "async-channel",
  "collections",
  "dirs",
  "gpui",
  "itertools 0.14.0",
  "log",
+ "objc",
  "release_channel",
  "run_ledger",
  "serde",
  "serde_json",
+ "sleipnir_ctl",
  "sleipnir_settings",
+ "sysinfo 0.37.2",
  "tempfile",
  "terminal",
  "updater",

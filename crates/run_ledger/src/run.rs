@@ -10,6 +10,14 @@ pub type PaneKey = Uuid;
 /// Identifies one process launch; jumping is only valid within the current one.
 pub type LaunchId = Uuid;
 
+/// Scrollback position of a Run. Process-local — never written to `runs.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Anchor {
+    /// Absolute line (`cursor.line + history_size` when the OSC 133 C fired).
+    pub line: i32,
+    pub column: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
@@ -54,6 +62,9 @@ pub struct Run {
     /// In-memory only (spec §2): Attention never crosses a restart.
     #[serde(skip)]
     pub seen: bool,
+    /// In-memory only (spec §2): scrollback is gone after a restart.
+    #[serde(skip)]
+    pub anchor: Option<Anchor>,
 }
 
 /// What the terminal reports. Times are monotonic millis since process start.
@@ -65,6 +76,7 @@ pub enum RunEvent {
         cwd: Option<String>,
         at_ms: u64,
         inferred: bool,
+        anchor: Option<Anchor>,
     },
     Finished {
         pane: PaneKey,
@@ -79,11 +91,43 @@ pub enum RunEvent {
 
 impl RunEvent {
     pub fn started(pane: PaneKey, command: &str, cwd: Option<String>, at_ms: u64) -> Self {
-        Self::Started { pane, command: command.into(), cwd, at_ms, inferred: false }
+        Self::Started {
+            pane,
+            command: command.into(),
+            cwd,
+            at_ms,
+            inferred: false,
+            anchor: None,
+        }
     }
 
     pub fn started_inferred(pane: PaneKey, command: &str, cwd: Option<String>, at_ms: u64) -> Self {
-        Self::Started { pane, command: command.into(), cwd, at_ms, inferred: true }
+        Self::Started {
+            pane,
+            command: command.into(),
+            cwd,
+            at_ms,
+            inferred: true,
+            anchor: None,
+        }
+    }
+
+    pub fn started_at(
+        pane: PaneKey,
+        command: &str,
+        cwd: Option<String>,
+        at_ms: u64,
+        inferred: bool,
+        anchor: Option<Anchor>,
+    ) -> Self {
+        Self::Started {
+            pane,
+            command: command.into(),
+            cwd,
+            at_ms,
+            inferred,
+            anchor,
+        }
     }
 
     pub fn finished(pane: PaneKey, exit_code: Option<i32>, at_ms: u64) -> Self {
@@ -114,6 +158,7 @@ impl Run {
             state: RunState::Running,
             inferred,
             seen: false,
+            anchor: None,
         }
     }
 
@@ -134,6 +179,33 @@ impl Run {
 
     pub(crate) fn started_at_mono_ms(&self) -> u64 {
         self.started_at_mono_ms
+    }
+
+    /// Build a Run for chrome helpers and tests. Not a live capture path.
+    pub fn for_display(
+        launch_id: LaunchId,
+        pane: PaneKey,
+        command: &str,
+        state: RunState,
+        exit_code: Option<i32>,
+        started_at_unix_ms: u64,
+        seen: bool,
+    ) -> Self {
+        Self {
+            id: RunId::new_v4(),
+            launch_id,
+            pane,
+            command: command.into(),
+            cwd: None,
+            started_at_unix_ms,
+            started_at_mono_ms: 0,
+            duration: Duration::from_millis(1200),
+            exit_code,
+            state,
+            inferred: false,
+            seen,
+            anchor: None,
+        }
     }
 
     /// Elapsed millis for a still-running Run, using the caller's monotonic clock.

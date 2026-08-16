@@ -118,6 +118,18 @@ impl Ledger {
         self.runs.iter()
     }
 
+    pub fn launch_id(&self) -> LaunchId {
+        self.launch_id
+    }
+
+    pub fn snapshot(&self) -> Vec<Run> {
+        self.runs.clone()
+    }
+
+    pub fn failed_attention_count(&self) -> usize {
+        self.attention().filter(|r| r.state == RunState::Failed).count()
+    }
+
     /// 已结束且未看过（Failed 无阈值；Succeeded 需 ≥ 阈值；Unknown 同 Succeeded；
     /// Abandoned 不进 Attention —— 它是进程没了，不是「跑完了等你看」）。
     pub fn attention(&self) -> impl Iterator<Item = &Run> {
@@ -201,7 +213,14 @@ impl Ledger {
 
     pub fn apply(&mut self, event: RunEvent) {
         match event {
-            RunEvent::Started { pane, command, cwd, at_ms, inferred } => {
+            RunEvent::Started {
+                pane,
+                command,
+                cwd,
+                at_ms,
+                inferred,
+                anchor,
+            } => {
                 // One Run per Pane at a time: an unfinished predecessor is Abandoned.
                 self.abandon_running_in(pane, at_ms);
                 let unix_ms = (self.now_unix_ms)();
@@ -210,9 +229,11 @@ impl Ledger {
                 } else {
                     command
                 };
-                self.runs.push(Run::start(
+                let mut run = Run::start(
                     self.launch_id, pane, command, cwd, at_ms, unix_ms, inferred,
-                ));
+                );
+                run.anchor = anchor;
+                self.runs.push(run);
             }
             RunEvent::Finished { pane, exit_code, at_ms } => {
                 // An orphan Finished (no Started) is dropped: never invent half a Run.
@@ -264,7 +285,7 @@ fn default_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{LaunchId, PaneKey, RunEvent, RunState};
+    use crate::run::{Anchor, LaunchId, PaneKey, RunEvent, RunState};
 
     fn pane() -> PaneKey {
         PaneKey::new_v4()
@@ -460,6 +481,11 @@ mod tests {
         assert_eq!(ledger.attention().count(), 2);
         ledger.mark_pane_seen(p);
         assert_eq!(ledger.attention().count(), 0);
+        assert_eq!(
+            ledger.runs().count(),
+            2,
+            "mark_pane_seen must clear Attention without deleting Runs"
+        );
     }
 
     #[test]
@@ -521,6 +547,22 @@ mod tests {
         ledger.load_history(vec![run]);
         assert_eq!(ledger.attention().count(), 0);
         assert!(ledger.badge_for(&[p], 0).is_none());
+    }
+
+    #[test]
+    fn started_run_keeps_in_memory_anchor() {
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        let p = pane();
+        ledger.apply(RunEvent::started_at(
+            p,
+            "cargo test",
+            None,
+            0,
+            false,
+            Some(Anchor { line: 42, column: 3 }),
+        ));
+        let run = ledger.runs().next().unwrap();
+        assert_eq!(run.anchor, Some(Anchor { line: 42, column: 3 }));
     }
 
     #[test]

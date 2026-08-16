@@ -1,0 +1,30 @@
+# Side tab rail, derived workspaces, owned agent marks
+
+**Status:** accepted
+
+## Context
+
+The primary user runs coding agents in many tabs across a few git checkouts.
+A horizontal tab strip hides status and does not show which repo a tab belongs
+to. Run Ledger badges already say *what happened*; they do not say *who* is in
+the foreground.
+
+## Decision
+
+1. **Default chrome is a left tab rail** (`tab_placement: side`). The historical
+   top strip stays as `top`. Width is `sidebar_width` (160–320, default 200).
+   Not a live-drag divider — that would reflow the PTY on every mouse move.
+2. **Workspace is derived**, not stored. Group by the git work tree of the
+   active pane cwd (walk up for `.git`, file or directory). No `session.json`
+   change. `cd` to another repo moves the tab. Drag-reorder only inside a group.
+3. **Agent marks are ours.** Match `foreground_process_command_name()` against a
+   built-in catalog and draw a letter + fixed color. No vendor logos, no model
+   calls ([ADR-0008](0008-no-builtin-ai.md)). `agent_icons: false` hides them.
+
+## Consequences
+
+- New tabs inherit the workspace root (git root or current cwd), not a nested
+  subdirectory, so they stay in the same group.
+- A missing `tab_placement` key means side. `"tab_placement": "top"` is the
+  rollback.
+- Chrome grows a column; the VT grid is unchanged.

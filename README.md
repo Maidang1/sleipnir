@@ -34,7 +34,7 @@ prompt.
 ## Features
 
 - **GPU rendering** — smooth scrollback and redraw via GPUI (Metal); ease-in-out cursor blink.
-- **Tabs, splits & panes** — split right/down, jump tabs, move focus, drag tabs to reorder or drop onto the terminal to detach into a new window; pane zoom and unfocused dim.
+- **Tabs, splits & panes** — side tab rail grouped by git workspace (or `tab_placement: top` for the historical strip); each row shows the title plus a branch subtitle and a dirty `+N −M` mark; split right/down, jump tabs, move focus, drag tabs to reorder or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark on the tab. Mark Tab as Seen clears Attention without deleting Run records.
 - **Multi-window** — `⌘N` opens an independent window with its own tabs and shells.
 - **Font zoom** — `⌘+` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
@@ -47,7 +47,7 @@ prompt.
 - **vi mode** — keyboard-driven selection and navigation.
 - **Accessibility** — the terminal exposes the visible screen as a read-only accessible value (VoiceOver can read the current output), like Ghostty's read-only AX.
 - **Session restore** — tabs, splits, and working directories survive relaunch.
-- **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings.
+- **Command palette** — discover actions with `⌘⇧K`; optional key binding overrides in settings. `keybinding_preset: tmux` adds `ctrl-b` tab/pane chords. **Pane Facts** shows the focused pane's directory, process tree, and listen ports.
 - **Find in scrollback** — `⌘F` search with match highlights, regex (`.*`) and match-case (`Aa`) toggles; export scrollback to a file via **Shell → Export Scrollback…** (opens in your default editor).
 - **Path links & bell** — ⌘-click paths open in the default app; hover shows a URL/path preview tooltip; optional system/visual bell.
 - **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
@@ -126,6 +126,11 @@ Default font is **Menlo**.
 | `run_ledger_retention_days` | How long to keep persisted runs (default `7`) |
 | `run_ledger_max_runs` | Cap on persisted runs; oldest dropped first (default `500`) |
 | `run_ledger_redact` | Redact command lines at capture (default `true`; heuristic, not a guarantee) |
+| `tab_placement` | `side` (default) left rail grouped by git workspace / `top` historical strip |
+| `sidebar_width` | Left rail width in px, 160–320 (default `200`) |
+| `agent_icons` | Letter monograms for known coding-agent processes (default `true`) |
+| `control_surface` | Bind the local control socket (default `false`). Also on with `SLEIPNIR_CONTROL=1` |
+| `show_tray_icon` | Menu-bar Attention item (default `true`). Dock badge is independent |
 | `terminal.inject_osc133` | Inject OSC 133 A/B/C/D into zsh/bash/fish (default `true`; was `false`) |
 
 Open the in-app theme picker with `⌘,`, or edit the file and reload

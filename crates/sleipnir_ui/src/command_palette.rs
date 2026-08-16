@@ -33,6 +33,12 @@ pub enum CommandId {
     ExportScrollback,
     ClearRunLedger,
     ToggleRunLedger,
+    MarkTabSeen,
+    TogglePaneFacts,
+    SendSelection,
+    PipeSelection,
+    SendGitDiff,
+    ToggleHistorySearch,
 }
 
 impl CommandId {
@@ -63,6 +69,12 @@ impl CommandId {
             CommandId::ExportScrollback => "export_scrollback",
             CommandId::ClearRunLedger => "clear_run_ledger",
             CommandId::ToggleRunLedger => "toggle_run_ledger",
+            CommandId::MarkTabSeen => "mark_tab_seen",
+            CommandId::TogglePaneFacts => "toggle_pane_facts",
+            CommandId::SendSelection => "send_selection",
+            CommandId::PipeSelection => "pipe_selection",
+            CommandId::SendGitDiff => "send_git_diff",
+            CommandId::ToggleHistorySearch => "toggle_history_search",
         }
     }
 
@@ -93,6 +105,12 @@ impl CommandId {
             "export_scrollback" | "export_scrollback_to_file" => Some(CommandId::ExportScrollback),
             "clear_run_ledger" => Some(CommandId::ClearRunLedger),
             "toggle_run_ledger" => Some(CommandId::ToggleRunLedger),
+            "mark_tab_seen" | "mark_as_seen" => Some(CommandId::MarkTabSeen),
+            "toggle_pane_facts" | "pane_facts" => Some(CommandId::TogglePaneFacts),
+            "send_selection" => Some(CommandId::SendSelection),
+            "pipe_selection" => Some(CommandId::PipeSelection),
+            "send_git_diff" => Some(CommandId::SendGitDiff),
+            "toggle_history_search" | "history_search" => Some(CommandId::ToggleHistorySearch),
             _ => None,
         }
     }
@@ -255,6 +273,48 @@ pub fn commands() -> Vec<CommandItem> {
             shortcut: "".into(),
             keywords: "clear run ledger history runs delete",
         },
+        CommandItem {
+            id: CommandId::MarkTabSeen,
+            title: "Mark Tab as Seen".into(),
+            shortcut: "".into(),
+            keywords: "mark seen attention unread tab badge",
+        },
+        CommandItem {
+            id: CommandId::TogglePaneFacts,
+            title: "Toggle Pane Facts".into(),
+            shortcut: "".into(),
+            keywords: "pane facts cwd process tree ports info",
+        },
+        CommandItem {
+            id: CommandId::ToggleRunLedger,
+            title: "Toggle Run Ledger".into(),
+            shortcut: "⌘⇧L".into(),
+            keywords: "run ledger panel history attention",
+        },
+        CommandItem {
+            id: CommandId::SendSelection,
+            title: "Send Selection to Pane".into(),
+            shortcut: "".into(),
+            keywords: "send selection paste pty agent",
+        },
+        CommandItem {
+            id: CommandId::PipeSelection,
+            title: "Pipe Selection to Command".into(),
+            shortcut: "".into(),
+            keywords: "pipe selection command external",
+        },
+        CommandItem {
+            id: CommandId::SendGitDiff,
+            title: "Send Git Diff to Pane".into(),
+            shortcut: "".into(),
+            keywords: "git diff send review pane",
+        },
+        CommandItem {
+            id: CommandId::ToggleHistorySearch,
+            title: "Search Shell History".into(),
+            shortcut: "".into(),
+            keywords: "history fuzzy search histfile",
+        },
     ]
 }
 
@@ -342,6 +402,26 @@ mod tests {
                 .iter()
                 .any(|i| i.id == CommandId::ClearRunLedger),
             "Clear Run Ledger must appear in the palette"
+        );
+        assert_eq!(
+            CommandId::from_str("mark_tab_seen"),
+            Some(CommandId::MarkTabSeen)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::MarkTabSeen),
+            "Mark Tab as Seen must appear in the palette"
+        );
+        assert_eq!(
+            CommandId::from_str("toggle_pane_facts"),
+            Some(CommandId::TogglePaneFacts)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::TogglePaneFacts),
+            "Toggle Pane Facts must appear in the palette"
         );
     }
 }

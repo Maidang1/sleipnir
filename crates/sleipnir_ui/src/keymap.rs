@@ -58,6 +58,8 @@ pub enum BuiltinAction {
     JumpNextPrompt,
     ToggleQuickSelect,
     OpenQuickTerminal,
+    ToggleRunLedger,
+    ToggleHistorySearch,
     IncreaseFontSize,
     DecreaseFontSize,
     ResetFontSize,
@@ -72,6 +74,24 @@ pub struct BuiltinBinding {
     pub key: String,
     pub action: BuiltinAction,
     pub context: BindingContext,
+}
+
+/// Extra chords for `keybinding_preset: tmux`. Unbound prefix keys are not
+/// consumed here — the prefix itself is `ctrl-b` chords listed below.
+pub fn tmux_preset_bindings() -> Vec<BuiltinBinding> {
+    use BindingContext::Both;
+    vec![
+        b("ctrl-b c", BuiltinAction::NewTab, Both),
+        b("ctrl-b n", BuiltinAction::NextTab, Both),
+        b("ctrl-b p", BuiltinAction::PrevTab, Both),
+        b("ctrl-b %", BuiltinAction::SplitRight, Both),
+        b("ctrl-b shift-'", BuiltinAction::SplitDown, Both),
+        b("ctrl-b left", BuiltinAction::FocusPaneLeft, Both),
+        b("ctrl-b right", BuiltinAction::FocusPaneRight, Both),
+        b("ctrl-b up", BuiltinAction::FocusPaneUp, Both),
+        b("ctrl-b down", BuiltinAction::FocusPaneDown, Both),
+        b("ctrl-b z", BuiltinAction::TogglePaneZoom, Both),
+    ]
 }
 
 /// Bindings for macOS.
@@ -166,6 +186,8 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
         b("cmd-shift-down", BuiltinAction::JumpNextPrompt, Both),
         b("cmd-shift-o", BuiltinAction::ToggleQuickSelect, Both),
         b("cmd-shift-n", BuiltinAction::OpenQuickTerminal, Both),
+        b("cmd-shift-l", BuiltinAction::ToggleRunLedger, Both),
+        b("cmd-shift-;", BuiltinAction::ToggleHistorySearch, Both),
     ]
 }
 

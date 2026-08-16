@@ -8,10 +8,12 @@ use gpui::{
 use run_ledger::Badge;
 use sleipnir_settings::TerminalPalette;
 
-use crate::app_shell::{AppShell, TabDragPreview};
-use crate::chrome::{ChromeGeometry, ChromeTokens};
+use crate::app_shell::{AppShell, PaneDrag, TabDragPreview};
+use crate::chrome::agent;
 use crate::chrome::tab_badge::{badge_color, badge_label};
+use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::run_ledger_global::RunLedgerGlobal;
+use sleipnir_settings::TerminalSettings;
 
 impl AppShell {
     pub(crate) fn render_tab_strip(
@@ -24,110 +26,136 @@ impl AppShell {
         let palette = TerminalPalette::get_global(cx);
         let active = self.active;
         let hovered = self.hovered_tab;
-        let badges: Vec<Option<Badge>> = self.tabs.iter().map(|tab| tab_badge_for(tab, cx)).collect();
+        let badges: Vec<Option<Badge>> =
+            self.tabs.iter().map(|tab| tab_badge_for(tab, cx)).collect();
+        let show_icons = TerminalSettings::get_global(cx).agent_icons;
 
-        let tabs = self.tabs.iter().zip(badges).enumerate().map(|(ix, (tab, badge))| {
-            let title: gpui::SharedString = tab.title(cx);
-            let is_active = ix == active;
-            let is_hovered = hovered == Some(tab.id);
-            let tab_id = tab.id;
-            let rename_buffer = self
-                .rename
-                .as_ref()
-                .filter(|s| s.tab_id == tab_id)
-                .map(|s| s.buffer.clone());
-            let is_renaming = rename_buffer.is_some();
-
-            let is_bell = self.bell_flash_tabs.contains(&tab_id);
-            let bg = if is_bell {
-                tokens.accent.opacity(0.35)
-            } else if is_active {
-                tokens.active_tab_bg()
-            } else if is_hovered {
-                tokens.hover
-            } else {
-                // Transparent over the chrome band
-                gpui::hsla(0.0, 0.0, 0.0, 0.0)
-            };
-            let fg = if is_active || is_bell || is_hovered {
-                tokens.fg
-            } else {
-                tokens.fg_muted
-            };
-
-            div()
-                .id(("tab", tab_id))
-                .h(geo.tab_height)
-                .min_w(geo.tab_min_width)
-                .max_w(geo.tab_max_width)
-                .px(geo.tab_px)
-                .rounded(geo.tab_radius)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .bg(bg)
-                .text_color(fg)
-                .text_sm()
-                .cursor_pointer()
-                .overflow_hidden()
-                .when(is_renaming, |el| {
-                    el.border_1().border_color(tokens.accent)
-                })
-                .when(is_bell, |el| el.border_1().border_color(tokens.accent))
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered {
-                        this.hovered_tab = Some(tab_id);
-                    } else if this.hovered_tab == Some(tab_id) {
-                        this.hovered_tab = None;
-                    }
-                    cx.notify();
-                }))
-                // Right-click a tab to rename it inline.
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, _, _, cx| {
-                        this.begin_rename(tab_id, cx);
-                    }),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    // While renaming, a click shouldn't switch tabs.
-                    if this.rename.as_ref().is_some_and(|s| s.tab_id == tab_id) {
-                        return;
-                    }
-                    this.activate(ix, window, cx);
-                }))
-                // Drag a tab to reorder it (drop before another tab).
-                .on_drag(tab_id, {
-                    let title = title.clone();
-                    move |_dragged: &u64, _offset, _window, cx| {
-                        let value = title.clone();
-                        cx.new(move |_| TabDragPreview { title: value })
-                    }
-                })
-                .on_drop::<u64>(cx.listener(move |this, dragged: &u64, window, cx| {
-                    this.reorder_tab(*dragged, tab_id, window, cx);
-                }))
-                .when_some(badge, |el, badge| el.child(render_tab_badge(badge, &palette)))
-                .child(if let Some(buffer) = rename_buffer {
-                    let text: gpui::SharedString = format!("{buffer}|").into();
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_color(tokens.fg)
-                        .child(text)
+        let tabs = self
+            .tabs
+            .iter()
+            .zip(badges)
+            .enumerate()
+            .map(|(ix, (tab, badge))| {
+                let title: gpui::SharedString = tab.title(cx);
+                let agent = if show_icons {
+                    agent::identify_tab(tab, cx)
                 } else {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(title)
-                })
-        });
+                    None
+                };
+                let is_active = ix == active;
+                let is_hovered = hovered == Some(tab.id);
+                let tab_id = tab.id;
+                let rename_buffer = self
+                    .rename
+                    .as_ref()
+                    .filter(|s| s.tab_id == tab_id)
+                    .map(|s| s.buffer.clone());
+                let is_renaming = rename_buffer.is_some();
+
+                let is_bell = self.bell_flash_tabs.contains(&tab_id);
+                let bg = if is_bell {
+                    tokens.accent.opacity(0.35)
+                } else if is_active {
+                    tokens.active_tab_bg()
+                } else if is_hovered {
+                    tokens.hover
+                } else {
+                    // Transparent over the chrome band
+                    gpui::hsla(0.0, 0.0, 0.0, 0.0)
+                };
+                let fg = if is_active || is_bell || is_hovered {
+                    tokens.fg
+                } else {
+                    tokens.fg_muted
+                };
+
+                div()
+                    .id(("tab", tab_id))
+                    .h(geo.tab_height)
+                    .min_w(geo.tab_min_width)
+                    .max_w(geo.tab_max_width)
+                    .px(geo.tab_px)
+                    .rounded(geo.tab_radius)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .bg(bg)
+                    .text_color(fg)
+                    .text_sm()
+                    .cursor_pointer()
+                    .overflow_hidden()
+                    .when(is_renaming, |el| el.border_1().border_color(tokens.accent))
+                    .when(is_bell, |el| el.border_1().border_color(tokens.accent))
+                    .on_hover(cx.listener(move |this, hovered, _, cx| {
+                        if *hovered {
+                            this.hovered_tab = Some(tab_id);
+                        } else if this.hovered_tab == Some(tab_id) {
+                            this.hovered_tab = None;
+                        }
+                        cx.notify();
+                    }))
+                    // Right-click a tab to rename it inline.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, _, cx| {
+                            this.begin_rename(tab_id, cx);
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // While renaming, a click shouldn't switch tabs.
+                        if this.rename.as_ref().is_some_and(|s| s.tab_id == tab_id) {
+                            return;
+                        }
+                        this.activate(ix, window, cx);
+                    }))
+                    // Drag a tab to reorder it (drop before another tab).
+                    .on_drag(tab_id, {
+                        let title = title.clone();
+                        move |_dragged: &u64, _offset, _window, cx| {
+                            let value = title.clone();
+                            cx.new(move |_| TabDragPreview { title: value })
+                        }
+                    })
+                    .on_drop::<u64>(cx.listener(move |this, dragged: &u64, window, cx| {
+                        this.reorder_tab(*dragged, tab_id, window, cx);
+                    }))
+                    .on_drop::<PaneDrag>(cx.listener(move |this, dragged: &PaneDrag, window, cx| {
+                        let insert_at = this.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0);
+                        this.extract_pane_to_tab(dragged.pane_id, insert_at, window, cx);
+                    }))
+                    .when_some(agent, |el, kind| {
+                        el.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(kind.color)
+                                .child(kind.mark),
+                        )
+                    })
+                    .when_some(badge, |el, badge| {
+                        el.child(render_tab_badge(badge, &palette))
+                    })
+                    .child(if let Some(buffer) = rename_buffer {
+                        let text: gpui::SharedString = format!("{buffer}|").into();
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_color(tokens.fg)
+                            .child(text)
+                    } else {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(title)
+                    })
+            });
 
         div()
             .id("tab-scroller")
@@ -144,16 +172,21 @@ impl AppShell {
     }
 }
 
-fn tab_badge_for(tab: &crate::app_shell::Tab, cx: &App) -> Option<Badge> {
+pub(crate) fn tab_badge_for(tab: &crate::app_shell::Tab, cx: &App) -> Option<Badge> {
     let ledger = cx.try_global::<RunLedgerGlobal>()?;
     let keys = tab.tree.all_pane_keys();
-    ledger.badge_for(&keys, ledger.now_ms())
+    tab_chrome_badge(ledger.badge_for(&keys, ledger.now_ms()))
 }
 
-fn render_tab_badge(badge: Badge, palette: &TerminalPalette) -> impl IntoElement {
+/// Tab chrome shows Attention ∪ Running (Failed > Running > Succeeded).
+pub(crate) fn tab_chrome_badge(badge: Option<Badge>) -> Option<Badge> {
+    badge
+}
+
+pub(crate) fn render_tab_badge(badge: Badge, palette: &TerminalPalette) -> impl IntoElement {
     let color = badge_color(badge.kind, palette);
     let label = badge_label(badge.kind, badge.count);
-    // Fixed slot so a count change (● → ●2) does not shove the title.
+    // Fixed slot so a count change (✗ → ✗2) does not shove the title.
     div()
         .flex()
         .flex_row()
@@ -163,4 +196,35 @@ fn render_tab_badge(badge: Badge, palette: &TerminalPalette) -> impl IntoElement
         .text_color(color)
         .text_xs()
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use run_ledger::BadgeKind;
+
+    fn badge(kind: BadgeKind) -> Badge {
+        Badge {
+            kind,
+            count: 1,
+            elapsed_ms: 0,
+        }
+    }
+
+    #[test]
+    fn tab_chrome_shows_attention_union_running() {
+        assert_eq!(
+            tab_chrome_badge(Some(badge(BadgeKind::Failed))).map(|b| b.kind),
+            Some(BadgeKind::Failed)
+        );
+        assert_eq!(
+            tab_chrome_badge(Some(badge(BadgeKind::Running))).map(|b| b.kind),
+            Some(BadgeKind::Running)
+        );
+        assert_eq!(
+            tab_chrome_badge(Some(badge(BadgeKind::Succeeded))).map(|b| b.kind),
+            Some(BadgeKind::Succeeded)
+        );
+        assert!(tab_chrome_badge(None).is_none());
+    }
 }

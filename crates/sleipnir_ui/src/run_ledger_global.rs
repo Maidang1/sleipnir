@@ -241,6 +241,56 @@ impl RunLedgerGlobal {
         self.core.ledger.badge_for(panes, now_ms)
     }
 
+    pub fn mode(&self) -> RunLedgerMode {
+        self.core.mode
+    }
+
+    pub fn launch_id(&self) -> LaunchId {
+        self.core.ledger.launch_id()
+    }
+
+    pub fn snapshot(&self) -> Vec<Run> {
+        if self.core.mode == RunLedgerMode::Off {
+            return Vec::new();
+        }
+        self.core.ledger.snapshot()
+    }
+
+    pub fn failed_attention_count(&self) -> usize {
+        if self.core.mode == RunLedgerMode::Off {
+            return 0;
+        }
+        self.core.ledger.failed_attention_count()
+    }
+
+    pub fn attention_count(&self) -> usize {
+        if self.core.mode == RunLedgerMode::Off {
+            return 0;
+        }
+        self.core.ledger.attention().count()
+    }
+
+    pub fn pane_has_attention(&self, pane: PaneKey) -> bool {
+        if self.core.mode == RunLedgerMode::Off {
+            return false;
+        }
+        self.core.ledger.attention().any(|run| run.pane == pane)
+    }
+
+    pub fn pane_has_failed_attention(&self, pane: PaneKey) -> bool {
+        if self.core.mode == RunLedgerMode::Off {
+            return false;
+        }
+        self.core
+            .ledger
+            .attention()
+            .any(|run| run.pane == pane && run.state == run_ledger::RunState::Failed)
+    }
+
+    pub fn mark_run_seen(&mut self, id: run_ledger::RunId) {
+        self.core.ledger.mark_run_seen(id);
+    }
+
     pub fn set_focus(&mut self, pane: Option<PaneKey>, window_active: bool) {
         self.core.ledger.set_focus(pane, window_active);
     }

@@ -10,6 +10,7 @@ members = [
     "crates/release_channel",
     "crates/updater",
     "crates/run_ledger",
+    "crates/sleipnir_ctl",
     # macOS entry; gpui / gpui_macos come from Zed via git.
     "crates/gpui_platform",
 ]
@@ -45,6 +46,7 @@ task_types = { path = "crates/task_types" }
 release_channel = { path = "crates/release_channel" }
 updater = { path = "crates/updater" }
 run_ledger = { path = "crates/run_ledger" }
+sleipnir_ctl = { path = "crates/sleipnir_ctl" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false, features = ["font-kit"] }
 
 # ---------------------------------------------------------------------------

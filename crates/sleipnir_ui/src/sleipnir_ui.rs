@@ -1,12 +1,16 @@
 //! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
 mod app_shell;
+mod attention_chrome;
 mod blink;
 mod chrome;
 mod command_palette;
+mod control_surface;
 mod keymap;
 mod pane_tree;
 mod run_ledger_global;
+mod run_ledger_panel;
+mod tab_convert;
 mod session;
 mod term_element;
 
@@ -16,15 +20,17 @@ pub use app_shell::{
     ActivateTab, AppShell, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize,
     ExportScrollback, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
-    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
-    SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
-    ToggleRunLedger, UpdateUiState, open_sleipnir_window,
+    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown, SplitRight,
+    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleBroadcast,
+    ToggleCommandPalette, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
+    ToggleQuickSelect, ToggleRunLedger,
+    UpdateUiState, open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
 pub use keymap::{
     BindingContext, BuiltinAction, BuiltinBinding, builtin_bindings, display_shortcut,
-    font_zoom_key_bindings,
+    font_zoom_key_bindings, tmux_preset_bindings,
 };
 pub use pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
@@ -35,13 +41,13 @@ pub use session::{SessionFile, SessionNode, SessionTab, load_session, save_sessi
 pub use term_element::TermElement;
 
 use collections::HashMap;
+use gpui::Pixels;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, rgb,
 };
-use gpui::Pixels;
-use gpui::prelude::FluentBuilder as _;
 use sleipnir_settings::{
     AlternateScroll, NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette,
     TerminalSettings,
@@ -79,9 +85,19 @@ pub enum TermViewEvent {
         command: String,
         cwd: Option<PathBuf>,
         inferred: bool,
+        line: Option<i32>,
+        column: Option<usize>,
     },
     /// The current command in this pane finished.
-    RunFinished { exit_code: Option<i32> },
+    RunFinished {
+        exit_code: Option<i32>,
+    },
+    /// Overlay triangle on a command start/end line was clicked.
+    GutterClicked {
+        line: i32,
+    },
+    /// The user sent input to this pane (keystroke, paste, IME).
+    UserTyped,
 }
 
 impl EventEmitter<TermViewEvent> for TermView {}
@@ -245,6 +261,56 @@ impl TermView {
             .and_then(|t| t.read(cx).working_directory())
     }
 
+    /// Normalized foreground process / script name, if the PTY has one.
+    pub fn foreground_process_command_name(&self, cx: &App) -> Option<String> {
+        self.terminal_entity()
+            .and_then(|t| t.read(cx).foreground_process_command_name())
+    }
+
+    /// Spawned shell pid for this pane, when the PTY is local.
+    pub fn shell_pid(&self, cx: &App) -> Option<u32> {
+        self.terminal_entity()
+            .and_then(|t| t.read(cx).shell_pid())
+    }
+
+    /// Current grid selection, if any.
+    pub fn selection_text(&self, cx: &App) -> Option<String> {
+        self.terminal_entity()
+            .and_then(|t| t.read(cx).last_content().selection_text.clone())
+    }
+
+    /// Type into this pane's PTY.
+    pub fn input_bytes(&self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        let typed = !bytes.is_empty();
+        if let Some(term) = self.terminal_entity().cloned() {
+            term.update(cx, |term, _| term.input(bytes));
+        }
+        if typed {
+            self.note_user_typed(cx);
+        }
+    }
+
+    fn note_user_typed(&self, cx: &mut Context<Self>) {
+        cx.emit(TermViewEvent::UserTyped);
+    }
+
+    /// Visible screen (no scrollback), for the control surface `capture` verb.
+    pub fn visible_screen_text(&self, cx: &App) -> String {
+        self.terminal_entity()
+            .map(|t| t.read(cx).visible_screen_text())
+            .unwrap_or_default()
+    }
+
+    /// Scroll this pane to an OSC 133 absolute line (Run Ledger Anchor).
+    pub fn scroll_to_anchor(&self, line: i32, column: usize, cx: &mut App) {
+        if let Some(term) = self.terminal_entity().cloned() {
+            term.update(cx, |term, cx| {
+                term.scroll_to_absolute(line, column);
+                cx.notify();
+            });
+        }
+    }
+
     /// Keep display-only path for tests/demos.
     pub fn new_display_only(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = TerminalSettings::get_global(cx);
@@ -350,17 +416,24 @@ impl TermView {
                     command,
                     cwd,
                     inferred,
+                    line,
+                    column,
                 } => {
                     cx.emit(TermViewEvent::RunStarted {
                         command: command.clone(),
                         cwd: cwd.clone(),
                         inferred: *inferred,
+                        line: *line,
+                        column: *column,
                     });
                 }
                 Event::RunFinished { exit_code } => {
                     cx.emit(TermViewEvent::RunFinished {
                         exit_code: *exit_code,
                     });
+                }
+                Event::GutterClicked { line } => {
+                    cx.emit(TermViewEvent::GutterClicked { line: *line });
                 }
             },
         )
@@ -432,6 +505,7 @@ impl TermView {
             term.try_keystroke(&event.keystroke, option_as_meta)
         });
         if handled {
+            self.note_user_typed(cx);
             cx.notify();
         }
     }
@@ -501,6 +575,7 @@ impl TermView {
                     Ok(path) => {
                         let text = format!("{} ", shell_quote_path(&path));
                         terminal.update(cx, |term, _| term.paste(&text));
+                        self.note_user_typed(cx);
                         cx.notify();
                     }
                     Err(err) => {
@@ -512,12 +587,14 @@ impl TermView {
                 let text = format_external_paths(paths.paths());
                 if !text.trim().is_empty() {
                     terminal.update(cx, |term, _| term.paste(&text));
+                    self.note_user_typed(cx);
                     cx.notify();
                 }
             }
             _ => {
                 if let Some(text) = clipboard.text() {
                     terminal.update(cx, |term, _| term.paste(&text));
+                    self.note_user_typed(cx);
                     cx.notify();
                 }
             }
@@ -531,6 +608,7 @@ impl TermView {
         };
         if let Some(terminal) = self.terminal_entity().cloned() {
             terminal.update(cx, |term, _| term.paste(&text));
+            self.note_user_typed(cx);
             cx.notify();
         }
     }
@@ -643,6 +721,7 @@ impl TermView {
     fn send_text(&mut self, text: &SendText, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(terminal) = self.terminal_entity().cloned() {
             terminal.update(cx, |term, _| term.input(text.0.as_bytes().to_vec()));
+            self.note_user_typed(cx);
             cx.notify();
         }
     }
@@ -662,6 +741,7 @@ impl TermView {
             let handled =
                 terminal.update(cx, |term, _| term.try_keystroke(&keystroke, option_as_meta));
             if handled {
+                self.note_user_typed(cx);
                 cx.notify();
             }
         }
@@ -736,10 +816,16 @@ impl Render for TermView {
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
         // Toast chrome: dark surface, lime border/dot (matches common terminal UX).
-        let toast_bg = palette.background.blend(gpui::Hsla::black().opacity(0.35)).alpha(1.0);
+        let toast_bg = palette
+            .background
+            .blend(gpui::Hsla::black().opacity(0.35))
+            .alpha(1.0);
         let toast_border = palette.ansi[2].opacity(0.9);
         let toast_dot = palette.ansi[2];
-        let toast_fg = palette.foreground.blend(palette.ansi[3].opacity(0.15)).alpha(1.0);
+        let toast_fg = palette
+            .foreground
+            .blend(palette.ansi[3].opacity(0.15))
+            .alpha(1.0);
 
         div()
             .size_full()
@@ -802,8 +888,7 @@ impl Render for TermView {
                         .as_ref()
                         .map(|w| w.word.clone());
 
-                    let a11y_text: SharedString =
-                        terminal.read(cx).visible_screen_text().into();
+                    let a11y_text: SharedString = terminal.read(cx).visible_screen_text().into();
                     let body = div()
                         .id("term-view-body")
                         .size_full()
@@ -825,6 +910,7 @@ impl Render for TermView {
 
                     body.child(TermElement::new(
                         terminal.clone(),
+                        cx.entity(),
                         self.focus_handle.clone(),
                         focused,
                         self.font_size_override,
@@ -859,12 +945,7 @@ impl Render for TermView {
                                 .border_1()
                                 .border_color(toast_border)
                                 .shadow_md()
-                                .child(
-                                    div()
-                                        .size(gpui::px(7.0))
-                                        .rounded_full()
-                                        .bg(toast_dot),
-                                )
+                                .child(div().size(gpui::px(7.0)).rounded_full().bg(toast_dot))
                                 .child(
                                     div()
                                         .text_size(gpui::px(12.0))
@@ -897,8 +978,6 @@ fn notify_message(title: &str, message: &str) {
 pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 72.0;
 pub const FONT_SIZE_STEP: f32 = 1.0;
-
-
 
 /// Effective font size from optional override + settings.
 pub fn effective_font_size(override_size: Option<Pixels>, cx: &App) -> Pixels {
@@ -975,11 +1054,7 @@ pub fn parse_path_line_col(input: &str) -> ParsedPathTarget {
     }
     // Strip a single leading slash after host-less file: (//path → /path already)
     let (path, line, column) = split_path_line_col(s);
-    ParsedPathTarget {
-        path,
-        line,
-        column,
-    }
+    ParsedPathTarget { path, line, column }
 }
 
 fn split_path_line_col(s: &str) -> (String, Option<u32>, Option<u32>) {
@@ -1331,10 +1406,7 @@ mod tests {
             resolve_path("src/main.rs", Some(cwd)),
             PathBuf::from("/project/src/main.rs")
         );
-        assert_eq!(
-            resolve_path("/abs/x", Some(cwd)),
-            PathBuf::from("/abs/x")
-        );
+        assert_eq!(resolve_path("/abs/x", Some(cwd)), PathBuf::from("/abs/x"));
     }
 
     #[test]
@@ -1364,7 +1436,9 @@ mod tests {
             "shipped table must include {want_minus} for decrease"
         );
         assert!(
-            !bindings.iter().any(|(k, _)| k.ends_with("-plus") || k.ends_with("-minus")),
+            !bindings
+                .iter()
+                .any(|(k, _)| k.ends_with("-plus") || k.ends_with("-minus")),
             "must not use plus/minus key names (never-emitted)"
         );
 
@@ -1479,9 +1553,7 @@ mod tests {
             !src.contains(r#".id("chrome-trailing")"#),
             "do not wrap chrome-drag-trailing in a height-less row"
         );
-        let band = src
-            .find(r#".id("chrome-band")"#)
-            .expect("chrome-band");
+        let band = src.find(r#".id("chrome-band")"#).expect("chrome-band");
         assert!(
             src[band..].contains(".child(trailing_drag)"),
             "chrome-band must parent trailing_drag directly so h_full() resolves against the band height"
