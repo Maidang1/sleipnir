@@ -29,10 +29,11 @@
 | `crates/sleipnir_settings/src/sleipnir_settings.rs` | 4 个新设置键；`inject_osc133` 默认 `true` | 修改 |
 | `docs/settings.example.json` | 同步示例 | 修改 |
 | `crates/sleipnir_ui/src/session.rs` | `SessionNode::Leaf.pane_key` | 修改 |
+| `crates/sleipnir_ui/src/pane_tree.rs` | `PaneNode::Leaf` 增加 `pane_key: PaneKey` 字段 | 修改 |
 | `crates/terminal/src/run_tracker.rs` | 纯状态跟踪：marker/busy → `RunEvent`，**不碰 gpui** | 创建 |
 | `crates/terminal/src/terminal.rs` | 接线 `run_tracker`，emit `Event::RunStarted/RunFinished` | 修改 |
 | `crates/sleipnir_ui/src/run_ledger_global.rs` | GPUI 全局：持有 `Ledger` + 去抖落盘 + 首次写盘告知 | 创建 |
-| `crates/sleipnir_ui/src/chrome/tab_badge.rs` | 徽标渲染（纯渲染，聚合逻辑在 run_ledger） | 创建 |
+| `crates/sleipnir_ui/src/chrome/tab_badge.rs` | 徽标渲染 + `format_elapsed` / `badge_label`（纯渲染，聚合逻辑在 run_ledger） | 创建 |
 | `crates/sleipnir_ui/src/sleipnir_ui.rs` | `TermViewEvent::Run*` 转发 | 修改 |
 | `crates/sleipnir_ui/src/app_shell.rs` | 订阅 → 全局 Ledger；tab chip 渲染徽标；`clear_run_ledger` | 修改 |
 | `docs/adr/0009-run-ledger-persistence.md` | 新 ADR | 创建 |
@@ -40,6 +41,16 @@
 | `docs/glossary.md` / `CHANGELOG.md` / `README.md` | 术语、破坏性默认值变更、配置表 | 修改 |
 
 **为什么聚合逻辑放 `run_ledger` 而不是 UI**：徽标优先级（失败 > 在跑 > 成功）、计数、阈值、focus 清空 —— 这些是本设计最容易写错的规则，放在纯 crate 里可以用 `cargo test -p run_ledger` 秒级覆盖，不需要起窗口。
+
+**重要实现说明（来自评审）**：
+
+1. **Tab strip 渲染不是独立函数**：`app_shell.rs` 里的 tab strip 渲染是内联在 `impl Render for AppShell` 中（约 3659–4035 行），依赖私有字段（`hovered_tab`、`rename`、`tab_scroll_handle` 等）。拆分时需要在 `chrome/tab_strip.rs` 中写 `impl AppShell` 方法，并把相关字段改为 `pub(crate)`。
+2. **运行时 Pane 不是独立结构体**：`PaneNode::Leaf { id, view }` 在 `pane_tree.rs:34-46`，需要增加 `pane_key: PaneKey` 字段（13 处构造 / match 站点）。
+3. **`RunsFile` 需包含 `announced: bool`**：Task 4 的 `RunsFile` 结构体和 API 必须从一开始就包含这个字段，否则 Task 8 无法实现首次写盘告知。
+4. **`record_osc133_marker` 没有 `cx` 参数**：解决方案是在 `RunTracker` 内部产出 `TrackerOut`，在有 `cx` 的调用点（`terminal.rs:1726` 的 `TerminalBackendEvent` match）统一 drain 并 emit。display-only 路径只 feed tracker 不 emit。
+5. **加载历史时 `Running` 状态的 Run 必须转为 `Abandoned`**：否则 `started_at_mono_ms`（`#[serde(skip)]`）为 0，计时异常并触发虚假的 ● 徽标。
+6. **Action 注册在 `command_palette.rs` 的 `CommandId`**：不是 `keymap.rs`。
+7. **Settings → Ledger 接线**：`RunLedgerGlobal::init` 必须读 `TerminalSettings::get_global` 并调用 `set_retention` / `set_redact` / `set_success_threshold_secs`；⌘⇧R reload 时也要同步。
 
 ---
 
@@ -592,6 +603,14 @@ git commit -m "feat(run_ledger): redact command lines at capture time"
     fn loaded_history_is_seen_so_badges_never_resurrect_after_restart() {
         // Ledger::load_history(vec![failed_run]) → Attention 为空
     }
+
+    #[test]
+    fn loaded_running_becomes_abandoned() {
+        // 磁盘上有一条 state=Running 的 Run（崩溃 / kill -9 造成）
+        // load_history 后它变成 Abandoned，不会触发 ● 徽标
+        // （原因：started_at_mono_ms 是 #[serde(skip)]，加载后为 0，
+        //  若不转 Abandoned 则计时异常）
+    }
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -649,7 +668,8 @@ impl Ledger {
     /// 时间窗 + 条数双约束，先到先裁。
     pub fn prune(&mut self);
 
-    /// 启动时载入历史：全部标记 `seen = true`（Attention 不跨重启）。
+    /// 启动时载入历史：全部标记 `seen = true`（Attention 不跨重启）；
+    /// 状态为 `Running` 的 Run 强制转为 `Abandoned`（spec §3.1：徽标不会在启动时凭历史数据出现）。
     pub fn load_history(&mut self, runs: Vec<Run>);
 }
 ```
@@ -707,16 +727,21 @@ pub const RUNS_VERSION: u32 = 1;
 #[derive(Serialize, Deserialize)]
 pub struct RunsFile {
     pub version: u32,
+    /// First-persist notice has been shown (Task 8 reads this).
+    #[serde(default)]
+    pub announced: bool,
     pub runs: Vec<Run>,
 }
 
-/// 读入；文件缺失 → 空；损坏或版本不认 → 重命名为 `<path>.bak` 后返回空。
+/// 读入；文件缺失 → (empty, announced=false)；损坏或版本不认 → 重命名为 `.bak` 后返回空。
 /// **绝不返回 Err**：启动路径不允许被台账阻塞（spec §5）。
-pub fn load_runs(path: &Path) -> Vec<Run>;
+/// 返回 `(runs, announced)`。
+pub fn load_runs(path: &Path) -> (Vec<Run>, bool);
 
 /// 写盘：先重读磁盘按 `RunId` 求并集（多实例并发，spec §4）→ 按 `started_at_unix_ms`
 /// 排序 → 应用 `Retention` → 写临时文件 → `set_permissions(0o600)`（unix）→ `rename`。
-pub fn save_runs(path: &Path, runs: &[Run], retention: Retention) -> std::io::Result<()>;
+/// `announced` 字段会被保留到磁盘。
+pub fn save_runs(path: &Path, runs: &[Run], retention: Retention, announced: bool) -> std::io::Result<()>;
 
 /// 与 `session.json` 同目录。
 pub fn default_runs_path(config_dir: &Path) -> PathBuf { config_dir.join("runs.json") }
@@ -817,7 +842,8 @@ real command boundaries. Set it to false to restore detect-only behavior."
 
 **Files:**
 - Modify: `crates/sleipnir_ui/src/session.rs`
-- Modify: `crates/sleipnir_ui/src/app_shell.rs`（构造 / restore pane 的位置）
+- Modify: `crates/sleipnir_ui/src/pane_tree.rs`（`PaneNode::Leaf` 增加 `pane_key: PaneKey`，影响 13 处构造/match）
+- Modify: `crates/sleipnir_ui/src/app_shell.rs`（`materialize_tree` ~line 852、`snapshot_tree` ~line 3635）
 - Modify: `crates/sleipnir_ui/Cargo.toml`（`uuid.workspace = true`）
 
 - [ ] **Step 1: 写失败的测试**（`session.rs` 的 `mod tests`）
@@ -986,10 +1012,16 @@ Expected: PASS。
 ```
 
 2. `Terminal` 加字段 `run_tracker: RunTracker` 与 `started_at: Instant`（单调时钟基准）。
-3. `record_osc133_marker`：在现有逻辑之后，遇 `CommandExecuted` 时用
-   `prompt_markers` 里最近的 `CommandStart`（line/column）到当前光标位置从网格读出命令行文本，
-   交给 `on_marker_with_command`；遇 `CommandFinished` 交给 `on_marker`。产出 `TrackerOut` 时
-   `cx.emit(...)`。
+3. **`record_osc133_marker` 本身没有 `cx` 参数**（display-only 路径 `ingest_osc133` 也没有）。
+   解决方案：`RunTracker` 产出 `Option<TrackerOut>` 不 emit；**统一在有 `cx` 的调用点 drain 并 emit**：
+   - 真 PTY 路径：`terminal.rs:1726`（`TerminalBackendEvent` match 内，已有 `cx`）—— 在
+     `osc_custom` 分支处理完 marker 后，检查 `tracker.take_output()` 并 `cx.emit(...)`。
+   - Display-only 路径：只 feed tracker、不 emit（这条路径本来就是备用，不应产生 Run）。
+   - `poll_command_finish`：它被从 `sleipnir_ui.rs:289` 用 `terminal.update(cx, |t, _| ...)` 调用，
+     里面的 `_` 实际上是一个丢弃的 `&mut Context<Terminal>`。改为不丢弃它，
+     调用 `on_busy_change` 后若返回 `Some(TrackerOut)` 则 `cx.emit(...)`。
+   - 遇 `CommandExecuted` 时用 `prompt_markers` 里最近的 `CommandStart`（line/column）
+     到当前光标位置从网格读出命令行文本，交给 `on_marker_with_command`。
    - 网格读取用 `Term` 已有的行遍历（参考 `terminal.rs` 里导出 scrollback 的实现）。
    - 读失败/为空 → `UNRECOGNIZED_COMMAND`（Task 7 Step 1 已有测试）。
 4. `poll_command_finish` 内的 busy 迁移处**追加**调用 `on_busy_change`（保留原返回值语义，
@@ -1063,10 +1095,13 @@ pub struct RunLedgerGlobal {
 impl Global for RunLedgerGlobal {}
 
 impl RunLedgerGlobal {
-    /// 启动时：Persist 读盘并 `load_history`；Memory/Off 不读。
+    /// 启动时：读 `TerminalSettings::get_global` 并调用 `set_retention` / `set_redact` /
+    /// `set_success_threshold_secs`；Persist 读盘并 `load_history`；Memory/Off 不读。
     pub fn init(cx: &mut App);
     pub fn apply(&mut self, event: RunEvent, cx: &mut App);
     pub fn set_mode(&mut self, mode: RunLedgerMode, cx: &mut App);
+    /// ⌘⇧R 设置重载时调用：重新读 settings 并同步 retention/redact/threshold/mode。
+    pub fn reload_settings(&mut self, cx: &mut App);
     /// 去抖 2s（`cx.background_executor().timer`）；写失败 → 降级为 Memory + 记一条日志。
     fn schedule_flush(&mut self, cx: &mut App);
     pub fn flush_now(&mut self);
@@ -1158,8 +1193,13 @@ Expected: PASS。
 
 - [ ] **Step 5: 把 tab strip 渲染迁到 `chrome/tab_strip.rs`**
 
-**纯搬迁 + 最小改动**：把 `render_tab_strip`（含 tab chip 渲染、拖拽、rename）整段移入新模块，
-`app_shell.rs` 只留调用。移动前后 `cargo build` 必须都通过，且**不改行为**。
+**不是「纯搬迁」而是「内部提取」**：tab strip 渲染是 `impl Render for AppShell` 里的内联代码
+（约 3659–4035 行），依赖私有字段 `hovered_tab` / `rename` / `tab_scroll_handle` /
+`drag` / `bell_flash_tabs` 等。做法：
+- 在 `chrome/tab_strip.rs` 里写 `impl AppShell { pub(crate) fn render_tab_strip(...) }`。
+- 把上述字段从 `pub(super)` / private 改为 `pub(crate)`（先列清单，逐个改）。
+- `render()` 里原地替换为 `self.render_tab_strip(window, cx, ...)`。
+- 移动前后 `cargo build` 必须都通过，且**不改行为**。
 不要顺手重构其它部分（spec §2 架构决策 2：范围只限本次要碰的）。
 
 - [ ] **Step 6: 在 tab chip 里渲染徽标**
@@ -1199,13 +1239,14 @@ git commit -m "feat(chrome): show Run badges on tabs and split the tab strip out
 ```rust
     #[test]
     fn clear_run_ledger_is_a_known_action_name() {
-        // keymap 的 action 名解析表里包含 "clear_run_ledger"
+        // command_palette.rs 的 CommandId::from_str 返回 Some
+        assert!(CommandId::from_str("clear_run_ledger").is_some());
     }
 ```
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `cargo test -p sleipnir_ui keymap`
+Run: `cargo test -p sleipnir_ui command_palette`
 Expected: FAIL。
 
 - [ ] **Step 3: 实现**
