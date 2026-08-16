@@ -3915,17 +3915,15 @@ impl Render for AppShell {
             .attach_empty_drag("chrome-drag-leading", cx)
             .w(leading);
 
+        // Direct chrome-band child. A height-less wrapper (the old
+        // chrome-trailing row, left over after Linux caption buttons
+        // were removed) collapses `h_full()` to 0px and drops the
+        // window-move hitbox. `app_owns_titlebar_drag` then leaves
+        // nothing that can drag the window.
         let trailing_drag = self
             .attach_empty_drag("chrome-drag-trailing", cx)
-            .flex_1();
-        let trailing = div()
-            .id("chrome-trailing")
-            .flex()
-            .flex_row()
-            .items_center()
             .flex_1()
-            .min_w(geo.trailing_pad)
-            .child(trailing_drag);
+            .min_w(geo.trailing_pad);
 
         let tab_scroll = self.render_tab_strip(&tokens, &geo, window, cx);
 
@@ -3939,7 +3937,7 @@ impl Render for AppShell {
             .bg(tokens.content_bg)
             .child(leading_drag)
             .child(tab_scroll)
-            .child(trailing);
+            .child(trailing_drag);
 
         div()
             .size_full()

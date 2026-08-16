@@ -1468,4 +1468,23 @@ mod tests {
             );
         }
     }
+
+    /// Empty-region window move lives on `chrome-drag-trailing`. A height-less
+    /// wrapper (the old `chrome-trailing` row) collapses `h_full()` to 0px,
+    /// and `app_owns_titlebar_drag` then leaves no native fallback.
+    #[test]
+    fn chrome_trailing_drag_is_a_direct_band_child() {
+        let src = include_str!("app_shell.rs");
+        assert!(
+            !src.contains(r#".id("chrome-trailing")"#),
+            "do not wrap chrome-drag-trailing in a height-less row"
+        );
+        let band = src
+            .find(r#".id("chrome-band")"#)
+            .expect("chrome-band");
+        assert!(
+            src[band..].contains(".child(trailing_drag)"),
+            "chrome-band must parent trailing_drag directly so h_full() resolves against the band height"
+        );
+    }
 }
