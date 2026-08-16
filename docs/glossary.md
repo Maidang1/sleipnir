@@ -63,3 +63,35 @@ A user-selectable theme choice that binds a dark Theme and a light Theme as a
 pair and follows the system Appearance, swapping between the two automatically.
 Distinct from selecting a single fixed Theme.
 _Avoid_: System theme, adaptive theme.
+
+## Run Ledger
+
+**Run**:
+One command execution, from OSC 133 `C` (start) to `D` (end, with an exit
+code), belonging to exactly one Pane. A Run carries a redacted command line,
+cwd, wall-clock start, monotonic duration, exit status, `RunId`, `PaneKey`,
+`LaunchId`, an Anchor, and whether it was inferred. The command line is
+redacted at capture, so memory and disk hold the same text.
+_Avoid_: Task (already taken in this repo by the Zed-derived `SpawnInTerminal`
+/ `TaskState`), Command (a command is the text; a Run is one execution),
+Block, Job.
+
+**Ledger**:
+The ordered collection of every Run across Window / Tab / Pane. There is one
+in-process Ledger, persisted to `runs.json`. It is the only source of truth;
+UI reads snapshots of it.
+_Avoid_: History (shell history is a text history of commands), Log, Timeline.
+
+**Anchor**:
+The Run's position in its Pane's scrollback, reused from `Osc133Marker`
+line/column and `command_output_range()`, used to jump back to that output.
+Valid only for the process lifetime — after a restart the scrollback is gone
+and the Anchor is gone with it. Anchors are not written to `runs.json`.
+_Avoid_: Mark (a Mark is a raw OSC 133 marker), Bookmark.
+
+**Attention**:
+The set of finished Runs the user has not yet seen. "Seen" means the Pane was
+focused, or the Run was clicked in the Ledger panel. Attention drives badges
+and notifications. It does not survive a restart (loaded history is marked
+seen).
+_Avoid_: Unread, Badge (a badge is one rendering of Attention), Alert.

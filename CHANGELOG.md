@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- Run Ledger: tab badges show running/succeeded/failed state
+- `clear_run_ledger` action in command palette and menus
+- `toggle_run_ledger` action registered for P1 panel
+
+### Breaking Changes
+- `terminal.inject_osc133` now defaults to `true`
+- New `runs.json` file written to config dir by default (`run_ledger: "off"` disables)
+
 ## 0.1.11
 
 ### Features
