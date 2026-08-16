@@ -104,10 +104,10 @@ actions!(
 #[action(namespace = sleipnir, no_json)]
 pub struct ActivateTab(pub usize);
 
-struct Tab {
-    id: u64,
+pub(crate) struct Tab {
+    pub(crate) id: u64,
     /// Recursive pane layout; a fresh tab is a single leaf.
-    tree: PaneNode,
+    pub(crate) tree: PaneNode,
     /// The pane that currently holds focus within this tab.
     active_pane: PaneId,
     /// User-assigned title (via right-click rename). When set, it overrides the
@@ -118,8 +118,8 @@ struct Tab {
 }
 
 /// Ghost chip rendered under the pointer while dragging a tab to reorder it.
-struct TabDragPreview {
-    title: SharedString,
+pub(crate) struct TabDragPreview {
+    pub(crate) title: SharedString,
 }
 
 impl Render for TabDragPreview {
@@ -143,7 +143,7 @@ impl Render for TabDragPreview {
 impl Tab {
     /// Title shown on the tab chip: the user-assigned title if set, otherwise
     /// the active pane's title.
-    fn title(&self, cx: &App) -> SharedString {
+    pub(crate) fn title(&self, cx: &App) -> SharedString {
         if let Some(custom) = self.custom_title.as_ref() {
             if !custom.is_empty() {
                 return custom.clone();
@@ -169,9 +169,9 @@ impl Tab {
 
 /// In-progress inline tab rename triggered by a right-click on a tab.
 #[derive(Clone)]
-struct RenameState {
-    tab_id: u64,
-    buffer: String,
+pub(crate) struct RenameState {
+    pub(crate) tab_id: u64,
+    pub(crate) buffer: String,
 }
 
 /// Top-level section inside the settings panel (WezTerm-style tabs).
@@ -255,17 +255,17 @@ pub enum UpdateUiState {
 
 /// Window root: unified chrome band + active terminal.
 pub struct AppShell {
-    tabs: Vec<Tab>,
-    active: usize,
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active: usize,
     next_id: u64,
     /// Monotonic id source for panes across all tabs.
     next_pane_id: PaneId,
     focus_handle: FocusHandle,
     /// Empty-region drag: true after mouse-down on a drag strip until move/up.
     should_move: bool,
-    tab_scroll_handle: ScrollHandle,
+    pub(crate) tab_scroll_handle: ScrollHandle,
     /// Tab id currently under the pointer (for hover close / hover fill).
-    hovered_tab: Option<u64>,
+    pub(crate) hovered_tab: Option<u64>,
     /// Pane rects from the last render, for keyboard neighbor navigation.
     pane_rects: Vec<PaneRect>,
     /// Content area bounds captured last frame (origin + size), for analytic
@@ -274,7 +274,7 @@ pub struct AppShell {
     /// Active divider drag, if any.
     drag: Option<DragState>,
     /// In-progress inline tab rename, if any.
-    rename: Option<RenameState>,
+    pub(crate) rename: Option<RenameState>,
     /// Whether the settings overlay is visible.
     settings_open: bool,
     /// Active section tab inside the settings panel.
@@ -306,7 +306,7 @@ pub struct AppShell {
     /// Close-confirm dialog pending (M12).
     close_confirm: Option<CloseConfirmState>,
     /// Tab ids currently flashing for visual bell (M12).
-    bell_flash_tabs: std::collections::HashSet<u64>,
+    pub(crate) bell_flash_tabs: std::collections::HashSet<u64>,
     /// Fan-out keystrokes to all panes in the active tab (M13).
     broadcast: bool,
     /// Quick Select overlay active (M15).
@@ -507,7 +507,14 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         cx.observe(view, |this, view, cx| {
-            if this.tab_id_for_view(&view, cx).is_some() {
+            // Only *visible* panes may drive a window repaint. A pane in a
+            // background tab (or hidden behind pane zoom) is not part of the
+            // element tree at all, so notifying for it repaints the whole
+            // window for content nobody can see. That matters a lot when a
+            // long-running agent streams output in a background tab: without
+            // this guard it steals ~250 repaints/second (the PTY event loop
+            // coalesces into 4 ms batches) from the pane the user is typing in.
+            if this.is_pane_visible(&view) {
                 cx.notify();
             }
         })
@@ -559,12 +566,13 @@ impl AppShell {
                         inferred,
                     } => {
                         if let Some(pane) = this.pane_key_for_view(view) {
+                            let cwd = cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
                             this.apply_run_event(
                                 RunEvent::Started {
                                     pane,
                                     command: command.clone(),
-                                    cwd: cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
-                                    at_ms: 0,
+                                    cwd,
+                                    at_ms: 0, // stamped in apply_run_event
                                     inferred: *inferred,
                                 },
                                 cx,
@@ -609,6 +617,25 @@ impl AppShell {
             .ok();
         })
         .detach();
+    }
+
+    /// Whether this pane is currently on screen: it must live in the active
+    /// tab, and — if that tab has a zoomed pane — be the zoomed one. Mirrors
+    /// exactly what [`Self::render_content`] puts into the element tree.
+    ///
+    /// Used to suppress repaints driven by off-screen panes. Anything the
+    /// chrome shows *about* a background pane (tab title, visual bell) arrives
+    /// through low-frequency `TermViewEvent`s instead, not through this path.
+    fn is_pane_visible(&self, view: &Entity<TermView>) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let mut leaves = Vec::new();
+        tab.tree.leaves(&mut leaves);
+        leaves
+            .iter()
+            .find(|(_, leaf)| *leaf == view)
+            .is_some_and(|(id, _)| pane_is_on_screen(tab.zoomed_pane, *id))
     }
 
     fn tab_id_for_view(&self, view: &Entity<TermView>, _cx: &App) -> Option<u64> {
@@ -1041,7 +1068,7 @@ impl AppShell {
 
     /// Begin an inline rename for the given tab, seeding the editable buffer
     /// with its current title.
-    fn begin_rename(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn begin_rename(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
@@ -1161,7 +1188,7 @@ impl AppShell {
         self.close_tab_at(idx, window, cx);
     }
 
-    fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active = index;
             self.focus_active(window, cx);
@@ -1175,7 +1202,7 @@ impl AppShell {
 
     /// Move the dragged tab so it sits immediately before `target_id` (tab drag
     /// reorder). `active` follows the previously-active tab to its new index.
-    fn reorder_tab(
+    pub(crate) fn reorder_tab(
         &mut self,
         dragged_id: u64,
         target_id: u64,
@@ -3624,6 +3651,20 @@ fn tree_contains(tree: &PaneNode, id: PaneId) -> bool {
     leaves.iter().any(|(leaf, _)| *leaf == id)
 }
 
+/// Whether a pane of the *active* tab is actually painted, given the tab's
+/// zoom state. Pane zoom shows exactly one leaf, so every other leaf is
+/// off-screen even though it is still in the tree and still draining its PTY.
+///
+/// This is the render contract [`AppShell::render_content`] implements; keep
+/// the two in sync, because [`AppShell::is_pane_visible`] uses this to decide
+/// whether a pane's change may request a window repaint.
+fn pane_is_on_screen(zoomed: Option<PaneId>, pane: PaneId) -> bool {
+    match zoomed {
+        Some(zoomed_pane) => zoomed_pane == pane,
+        None => true,
+    }
+}
+
 /// Insertion index for a tab-drag reorder: after removing the tab at `from`,
 /// dropping it on `target` places it immediately before the target. When the
 /// dragged tab sits left of the target, the target shifts left by one.
@@ -3657,7 +3698,22 @@ fn rebase_detached_tab(max_pane_id: PaneId) -> AdoptedTabIds {
 
 #[cfg(test)]
 mod tests {
-    use super::{rebase_detached_tab, reorder_insert_index};
+    use super::{pane_is_on_screen, rebase_detached_tab, reorder_insert_index};
+
+    #[test]
+    fn every_leaf_is_on_screen_without_zoom() {
+        assert!(pane_is_on_screen(None, 1));
+        assert!(pane_is_on_screen(None, 2));
+    }
+
+    #[test]
+    fn zoom_hides_every_pane_but_the_zoomed_one() {
+        // Pane 2 is zoomed: 1 and 3 keep draining their PTYs but are not
+        // painted, so their output must not request a window repaint.
+        assert!(pane_is_on_screen(Some(2), 2));
+        assert!(!pane_is_on_screen(Some(2), 1));
+        assert!(!pane_is_on_screen(Some(2), 3));
+    }
 
     #[test]
     fn reorder_insert_index_places_before_target() {
@@ -3724,8 +3780,6 @@ impl Render for AppShell {
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
         let geo = ChromeGeometry::standard();
-        let active = self.active;
-        let hovered = self.hovered_tab;
         let fullscreen = window.is_fullscreen();
         let leading = if fullscreen {
             ChromeGeometry::fullscreen_leading_pad()
@@ -3752,118 +3806,7 @@ impl Render for AppShell {
                 el.child(self.render_linux_caption_buttons(&tokens, cx))
             });
 
-        let tab_scroll = div()
-            .id("tab-scroller")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(geo.tab_gap)
-            .h_full()
-            .min_w_0()
-            .flex_shrink(1.)
-            .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll_handle)
-            .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
-                let title: SharedString = tab.title(cx);
-                let is_active = ix == active;
-                let is_hovered = hovered == Some(tab.id);
-                let tab_id = tab.id;
-                let rename_buffer = self
-                    .rename
-                    .as_ref()
-                    .filter(|s| s.tab_id == tab_id)
-                    .map(|s| s.buffer.clone());
-                let is_renaming = rename_buffer.is_some();
-
-                let is_bell = self.bell_flash_tabs.contains(&tab_id);
-                let bg = if is_bell {
-                    tokens.accent.opacity(0.35)
-                } else if is_active {
-                    tokens.active_tab_bg()
-                } else if is_hovered {
-                    tokens.hover
-                } else {
-                    // Transparent over the chrome band
-                    gpui::hsla(0.0, 0.0, 0.0, 0.0)
-                };
-                let fg = if is_active || is_bell || is_hovered {
-                    tokens.fg
-                } else {
-                    tokens.fg_muted
-                };
-
-                div()
-                    .id(("tab", tab_id))
-                    .h(geo.tab_height)
-                    .min_w(geo.tab_min_width)
-                    .max_w(geo.tab_max_width)
-                    .px(geo.tab_px)
-                    .rounded(geo.tab_radius)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .bg(bg)
-                    .text_color(fg)
-                    .text_sm()
-                    .cursor_pointer()
-                    .overflow_hidden()
-                    .when(is_renaming, |el| {
-                        el.border_1().border_color(tokens.accent)
-                    })
-                    .when(is_bell, |el| el.border_1().border_color(tokens.accent))
-                    .on_hover(cx.listener(move |this, hovered, _, cx| {
-                        if *hovered {
-                            this.hovered_tab = Some(tab_id);
-                        } else if this.hovered_tab == Some(tab_id) {
-                            this.hovered_tab = None;
-                        }
-                        cx.notify();
-                    }))
-                    // Right-click a tab to rename it inline.
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, _, _, cx| {
-                            this.begin_rename(tab_id, cx);
-                        }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // While renaming, a click shouldn't switch tabs.
-                        if this.rename.as_ref().is_some_and(|s| s.tab_id == tab_id) {
-                            return;
-                        }
-                        this.activate(ix, window, cx);
-                    }))
-                    // Drag a tab to reorder it (drop before another tab).
-                    .on_drag(tab_id, {
-                        let title = title.clone();
-                        move |_dragged: &u64, _offset, _window, cx| {
-                            let value = title.clone();
-                            cx.new(move |_| TabDragPreview { title: value })
-                        }
-                    })
-                    .on_drop::<u64>(cx.listener(move |this, dragged: &u64, window, cx| {
-                        this.reorder_tab(*dragged, tab_id, window, cx);
-                    }))
-                    .child(if let Some(buffer) = rename_buffer {
-                        let text: SharedString = format!("{buffer}|").into();
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_color(tokens.fg)
-                            .child(text)
-                    } else {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(title)
-                    })
-            }));
+        let tab_scroll = self.render_tab_strip(&tokens, &geo, window, cx);
 
         let chrome_band = div()
             .id("chrome-band")
