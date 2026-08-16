@@ -9,6 +9,7 @@ members = [
     "crates/task_types",
     "crates/release_channel",
     "crates/updater",
+    "crates/run_ledger",
     # OS-branched entry; gpui / gpui_macos / gpui_windows come from Zed via git.
     "crates/gpui_platform",
 ]
@@ -45,6 +46,7 @@ terminal = { path = "crates/terminal" }
 task_types = { path = "crates/task_types" }
 release_channel = { path = "crates/release_channel" }
 updater = { path = "crates/updater" }
+run_ledger = { path = "crates/run_ledger" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false, features = ["font-kit"] }
 
 # ---------------------------------------------------------------------------
@@ -75,6 +77,7 @@ thiserror = "2.0.12"
 url = "2.2"
 urlencoding = "2.1.2"
 ureq = { version = "3", features = ["json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 vte = { version = "0.15.0", features = ["ansi"] }
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
