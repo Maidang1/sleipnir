@@ -60,15 +60,17 @@ Sleipnir 是**你可以离开的终端**。人跑 coding agent 和长任务，Sl
 1. 回到窗口后**不切 tab** 就能知道哪个 pane 需要我（目标 < 2 秒）。
 2. 通知消失后信息仍在：半小时前那次失败仍可查、仍可跳回。
 3. 重启后能回答「上次最后跑的是什么、结果如何」。
-4. `run_ledger: off` 时行为与本设计实现前**完全一致** —— 整条功能可回退。
+4. `run_ledger: off` 且 `terminal.inject_osc133: false` 时，行为与本设计实现前**完全一致**
+   —— 整条功能可回退。（两个开关彼此独立：`run_ledger` 只控制采集与呈现，OSC 133 注入始终
+   由 `inject_osc133` 单独控制，`off` **不得**强行关闭注入 —— 那会踩到显式开启注入的用户。）
 
 ## 2. 领域模型
 
 新增术语，写入 `docs/glossary.md`（沿用其「避免」体例）：
 
 **Run（运行）**：一次命令执行，从 OSC 133 `C`（开始执行）到 `D`（结束，带退出码）。恰好属于
-一个 Pane。字段：命令行文本（脱敏后）、cwd、开始时间（wall clock）、耗时（单调时钟）、
-退出码、状态、来源（window / tab / pane id）、Anchor、是否推断、是否已看过。
+一个 Pane。字段：`RunId`、命令行文本（脱敏后）、cwd、开始时间（wall clock）、耗时（单调时钟）、
+退出码、状态、`LaunchId`、`PaneKey`、Anchor、是否推断、是否已看过（仅进程内有效，见 §3.1）。
 _避免_：Task（本仓库已用于 Zed 派生的 `SpawnInTerminal` / `TaskState`）、Command（命令是文本，
 Run 是一次执行）、Block、Job。
 
@@ -84,6 +86,28 @@ _避免_：Mark（Mark 指裸的 OSC 133 标记）、Bookmark。
 **Attention（待看）**：已结束但用户还没看过的 Run 集合。「看过」只有两种定义：focus 了那个
 Pane，或在 Ledger 面板里点过它。Attention 驱动徽标与通知，是本设计的核心概念。
 _避免_：Unread、Badge（badge 是它的一种渲染）、Alert。
+
+### 标识方案
+
+现状约束：`session.json`（`crates/sleipnir_ui/src/session.rs`）没有 window 标识，tab 只能按下标
+识别，pane 用 `id: u64` 且计数器靠 `max_pane_id()` 推进 —— **重启后新建的 pane 会复用历史
+pane id**。因此 Run 的归属不能直接用 pane id，否则 tombstone 会把别的会话的 Run 贴到无关
+pane 上。定义三个标识：
+
+**RunId**：UUID v4，Ledger 内唯一，跨重启唯一。用于面板选中、去重、合并写盘。
+
+**PaneKey**：UUID v4，**在 Pane 创建时生成**，是 Run 唯一的归属键。
+
+- `SessionNode::Leaf` 增加 `pane_key: Option<Uuid>` 字段（`#[serde(default)]`，旧 session 文件
+  读入后为 `None`，视为无历史归属）。restore 时保留原 `pane_key`；新建 Pane 生成新的 ——
+  **所以 id 复用不会造成误贴**。
+- PaneKey 全局唯一，所以「跳到那条 Run」只需 PaneKey：由它反查当前活着的 window / tab /
+  pane。面板上显示的「窗口 1 · tab 3」是运行时反查结果，**不持久化**（窗口序号本来就不稳定）。
+
+**LaunchId**：UUID v4，每次进程启动生成一次，写入该次启动产生的每条 Run。
+
+- 跳转仅在 `run.launch_id == 当前 LaunchId` 时可用；跨 launch 的记录一律不可跳转（scrollback
+  不存在，Anchor 必然失效），与 §3.3 的「锚点已失效」共用同一渲染。
 
 ### Run 状态机
 
@@ -141,6 +165,13 @@ PTY 字节
 - 四态：**● 在跑**（带 `mm:ss` 计时，tabular numerals）/ **✓ 完成未看** / **✗ 失败未看** /
   无徽标（没有待看）。
 - **看过即淡出** —— 徽标是 Attention 的投影，不是永久装饰。
+- **Attention 不跨重启**：重启是一次明确的「你回来了」，所以载入的历史 Run 全部视为已看过,
+  徽标不会在启动时凭历史数据出现（这也与 Anchor 必然失效自洽 —— 不会出现「有徽标但点不动」）。
+  重启后回看历史的唯一入口是 tombstone 横幅与 Ledger 面板。
+- **Run 结束时其 Pane 正被 focus 且窗口处于活跃状态 → 立即视为已看过**，不产生徽标。
+- **Succeeded 的最小阈值**：只有耗时 ≥ `notify_on_command_finish_secs`（默认 5s，复用已有设置键）
+  的成功 Run 才进入 Attention —— 否则前台每条 `ls` 都会闪一个 ✓。**Failed 无阈值**，一律进入。
+  两者都照常进台账，阈值只影响 Attention。
 - 多 pane 的 tab 按 **失败 > 在跑 > 成功** 聚合，显示最紧急的一个 + 计数（`✗2`）。
 - 非活动 pane 在自身角落显示同一个点（复用已有 unfocused dim 机制）。
 - Dock / 任务栏 badge = 全部窗口的待看失败数 —— **P2**。
@@ -161,7 +192,8 @@ PTY 字节
   相对时间）；分组为 **进行中 / 待看 / 今天 / 更早**。
 - 交互：`↑↓` 选择、`Enter` 跳转（激活对应 window + tab + pane 并滚到 Anchor，跳转即算已看过）、
   `Esc` 关闭；type-to-filter 沿用主题选择器的过滤模式。
-- 推断出的 Run 打「推断」标；重启前的记录标「锚点已失效」，灰显、不可跳转，命令行可复制。
+- 推断出的 Run 打「推断」标。以下两类灰显、不可跳转、命令行可复制（同一渲染）：
+  跨 launch 的历史记录（标「锚点已失效」）、本次进程内所属 Pane 已关闭的 Run（标「pane 已关闭」）。
 - 同时进命令面板与应用菜单；新增 action `toggle_run_ledger` 与 `clear_run_ledger`。
 
 ### 3.4 Tombstone
@@ -170,8 +202,23 @@ PTY 字节
 
 > 上次这里跑过 5 条命令，最后一条 `npm test` 失败（exit 1 · 昨天 23:41） 　查看台账 ⌘⇧L
 
-打字即消失。这落地了 ADR-0006 的意图，但使用**元数据而非 scrollback**，因此不踩其凭据泄露
-红线。ADR-0006 状态从 proposed 改为 accepted。
+打字即消失。归属靠 `PaneKey`：**只有从 `session.json` restore 出来、且带 `pane_key` 的 Pane**
+才可能显示横幅；匹配同 `pane_key` 的历史 Run。新建 Pane、以及旧 session 文件里没有 `pane_key`
+的 Pane，一律不显示。**该 Pane 历史 Run 数为 0 时不显示横幅**（原则 1：没有事实就不说话）——
+这同时回答了 ADR-0006 留下的 open question。
+
+### 与 ADR-0006 的关系（不是简单地改状态）
+
+ADR-0006 是 proposed，且其两条决策与本设计**直接冲突**，必须显式处置而非标 accepted：
+
+| ADR-0006 的原决策 | 本设计 | 处置 |
+|---|---|---|
+| tombstone 走 display-only 输出路径，占一个真实 grid line，可被 `⌘F` 匹配 | chrome 灰色横幅，不进网格（设计原则 2 要求） | 由 ADR-0009 **supersede** |
+| 完整命令行绝不持久化；任何记录超过程序名的改动必须重审本 ADR | 脱敏后的完整命令行写入 `runs.json` | 由 ADR-0009 **supersede**，并在 0009 中给出脱敏 + 保留窗口 + 一键清空作为新的风险控制 |
+| open question：`last_program` 未知的 idle pane 是否显示 tombstone | 历史 Run 数为 0 → 不显示 | 在 ADR-0009 中回答 |
+
+因此：ADR-0006 状态改为 **superseded by 0009**（不是 accepted），其「布局不该假装这里什么都
+没发生过」的意图由本设计承接。
 
 ### 3.5 通知重构
 
@@ -188,6 +235,7 @@ PTY 字节
 | 位置 | `~/.config/sleipnir/runs.json`（Windows `%APPDATA%\sleipnir\runs.json`），与 `session.json` 同级 |
 | 格式 | 带 `version` 字段的 JSON，沿用 `SESSION_VERSION` 模式；原子写（temp + rename） |
 | 写入时机 | Run 结束后去抖 ~2s 落盘；应用退出时落盘 |
+| 多实例并发 | 写前重读磁盘，按 `RunId` 求并集后再按开始时间排序、裁剪、整体原子写 —— 避免两个实例互相覆盖（仓库当前没有单实例约束） |
 | 上限 | 双约束：**7 天** 且 **最多 500 条**，先到先裁 |
 | 权限 | Unix 下 `0600` |
 | 绝不存储 | scrollback、任何输出内容、环境变量值 |
@@ -219,6 +267,15 @@ PTY 字节
 | 键 | 取值 | 默认 |
 |---|---|---|
 | `run_ledger` | `off` / `memory` / `persist` | `persist` |
+
+三态语义（必须逐条实现，不留推断空间）：
+
+| 值 | 采集 RunEvent | 徽标 / gutter / 面板 | 读写 `runs.json` | tombstone |
+|---|---|---|---|---|
+| `persist` | 是 | 有 | 读 + 写 | 可用 |
+| `memory` | 是 | 有 | **既不读也不写；磁盘上已有的 `runs.json` 原样保留不动**（切回 `persist` 时还在） | **不可用**（无跨重启数据） |
+| `off` | 否 | 无 | 既不读也不写，文件保留 | 不可用 |
+
 | `run_ledger_retention_days` | 整数 | `7` |
 | `run_ledger_max_runs` | 整数 | `500` |
 | `run_ledger_redact` | bool | `true` |
@@ -253,7 +310,9 @@ PTY 字节
 | `crates/run_ledger`（新，无 gpui） | `Run` / `RunState` / `Ledger` / `RunEvent` / `redact.rs` / `store.rs` |
 | `crates/terminal` | 在已有 osc133 + busy 路径上发 `RunEvent`；不感知 Ledger |
 | `crates/sleipnir_ui` | `chrome/tab_strip.rs`（从 `app_shell.rs` 拆出）、`run_ledger_panel.rs`、tombstone 横幅 |
-| `crates/sleipnir_settings` | 上表设置键 |
+| `crates/sleipnir_ui/src/session.rs` | `SessionNode::Leaf` 增加 `pane_key: Option<Uuid>`（`serde(default)`，向后兼容旧文件） |
+| `crates/sleipnir_settings` | 上表设置键；`inject_osc133` 默认值改 `true`，同步改现有单测 `inject_osc133_defaults_off`（`sleipnir_settings.rs:288/685`） |
+| `docs/settings.example.json:43` | `"inject_osc133": false` → `true` |
 | `docs/adr/0009-run-ledger-persistence.md`（新） | 持久化 + 脱敏 + 默认值决策 |
 | `docs/adr/0006-*` | 状态 proposed → accepted |
 | `docs/glossary.md` | 新增 Run / Ledger / Anchor / Attention |
@@ -265,3 +324,6 @@ PTY 字节
   `inject_osc133` 默认开、设置键、ADR-0009。
 - **P1**：Ledger 面板（浮层）+ 跳转、gutter 标记、tombstone 横幅、通知重构、叙事改写。
 - **P2**：面板可钉住为常驻侧栏、Dock / 任务栏 badge。
+
+实现计划**只覆盖 P0**；P1 与 P2 各自单独立计划。P0 的验收是成功标准 1（不切 tab 就知道哪个
+pane 需要我）+ 标准 4（可回退）；标准 2、3 由 P1 达成。
