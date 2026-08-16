@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 ### Features
 - Diff inspector overlay (`⌥⌘G` / command palette / View → Diff Inspector / chrome **Diff** button / rail `+N −M`): `git diff HEAD` of the focused pane's work tree, split (default) or unified (`v`), file tree, full-file upgrade with expandable `⋯ N hidden lines`, tree-sitter on Rust/Python/JS/JSON, minimap (`m`), word-level intra-line highlights, file/hunk jump (`n` `p` `]` `[`). Not a pane. `send_git_diff` still pastes the raw patch into the PTY
@@ -26,6 +26,7 @@
 ### Fixes
 - Side-rail git dirty mark no longer walks the work tree on the UI thread (tab switches stalled for ~1s+ in repos with `target/` / `node_modules/`)
 - Side-rail `+N −M` is line counts from `git diff --numstat HEAD`, computed off the UI thread (typing no longer flashes the row; the old index parser showed only a bogus delete count)
+- CI macOS bundle now includes `Sleipnir.sdef` so the AppleScript dictionary ships in GitHub Release builds
 
 ### Breaking Changes
 - `terminal.inject_osc133` now defaults to `true`

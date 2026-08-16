@@ -83,6 +83,7 @@ jobs:
           cp target/release/sleipnir "${APP}/Contents/MacOS/sleipnir"
           sed "s|0.1.0|${VER}|g" resources/Info.plist > "${APP}/Contents/Info.plist"
           cp resources/AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
+          cp resources/Sleipnir.sdef "${APP}/Contents/Resources/Sleipnir.sdef"
           echo "  app bundle: ${APP}"
 
       - name: Code sign
