@@ -25,5 +25,9 @@ measure() {
 
 measure "unicode" "$CORPUS/bench-unicode.txt"
 measure "ascii"   "$CORPUS/bench-ascii.txt"
+# B5a: redraw-heavy, agent-shaped content (see gen-corpus.sh).
+if [ -f "$CORPUS/bench-agent.txt" ]; then
+    measure "agent" "$CORPUS/bench-agent.txt"
+fi
 echo "BENCH_DONE" >> "$OUT"
 echo "wrote results to $OUT" >> "$OUT"

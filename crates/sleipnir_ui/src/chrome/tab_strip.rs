@@ -5,12 +5,12 @@ use gpui::{
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use run_ledger::{Badge, BadgeKind};
+use run_ledger::Badge;
 use sleipnir_settings::TerminalPalette;
 
 use crate::app_shell::{AppShell, TabDragPreview};
 use crate::chrome::{ChromeGeometry, ChromeTokens};
-use crate::chrome::tab_badge::{badge_color, badge_label, format_elapsed};
+use crate::chrome::tab_badge::{badge_color, badge_label};
 use crate::run_ledger_global::RunLedgerGlobal;
 
 impl AppShell {
@@ -18,19 +18,13 @@ impl AppShell {
         &self,
         tokens: &ChromeTokens,
         geo: &ChromeGeometry,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
         let active = self.active;
         let hovered = self.hovered_tab;
         let badges: Vec<Option<Badge>> = self.tabs.iter().map(|tab| tab_badge_for(tab, cx)).collect();
-        if badges
-            .iter()
-            .any(|b| matches!(b, Some(Badge { kind: BadgeKind::Running, .. })))
-        {
-            window.request_animation_frame();
-        }
 
         let tabs = self.tabs.iter().zip(badges).enumerate().map(|(ix, (tab, badge))| {
             let title: gpui::SharedString = tab.title(cx);
@@ -159,27 +153,14 @@ fn tab_badge_for(tab: &crate::app_shell::Tab, cx: &App) -> Option<Badge> {
 fn render_tab_badge(badge: Badge, palette: &TerminalPalette) -> impl IntoElement {
     let color = badge_color(badge.kind, palette);
     let label = badge_label(badge.kind, badge.count);
-    // Fixed slot so the title does not jump as elapsed ticks or the count changes.
-    let slot = if badge.kind == BadgeKind::Running {
-        px(52.0)
-    } else {
-        px(18.0)
-    };
+    // Fixed slot so a count change (● → ●2) does not shove the title.
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(3.0))
         .flex_shrink_0()
-        .min_w(slot)
+        .min_w(px(18.0))
         .text_color(color)
         .text_xs()
         .child(label)
-        .when(badge.kind == BadgeKind::Running, |el| {
-            el.child(
-                div()
-                    .whitespace_nowrap()
-                    .child(format_elapsed(badge.elapsed_ms)),
-            )
-        })
 }

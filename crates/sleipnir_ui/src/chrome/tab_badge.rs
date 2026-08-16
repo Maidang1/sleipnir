@@ -1,16 +1,8 @@
-//! Tab / pane Run badges: color, label, and elapsed-time formatting.
+//! Tab / pane Run badges: color and label. Running tabs show ●, not a timer.
 
 use gpui::Hsla;
 use run_ledger::BadgeKind;
 use sleipnir_settings::TerminalPalette;
-
-/// `mm:ss` for a Running badge. Minutes are not wrapped at 60.
-pub fn format_elapsed(ms: u64) -> String {
-    let total_secs = ms / 1000;
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    format!("{mins}:{secs:02}")
-}
 
 /// Icon, plus a count when the badge stands for more than one run.
 pub fn badge_label(kind: BadgeKind, count: usize) -> String {
@@ -46,13 +38,6 @@ mod tests {
         assert_eq!(badge_color(BadgeKind::Failed, &palette), palette.ansi[1]);
         assert_eq!(badge_color(BadgeKind::Running, &palette), palette.ansi[3]);
         assert_eq!(badge_color(BadgeKind::Succeeded, &palette), palette.ansi[2]);
-    }
-
-    #[test]
-    fn running_badge_formats_elapsed_as_mm_ss() {
-        assert_eq!(format_elapsed(134_000), "2:14");
-        assert_eq!(format_elapsed(59_000), "0:59");
-        assert_eq!(format_elapsed(3_601_000), "60:01");
     }
 
     #[test]

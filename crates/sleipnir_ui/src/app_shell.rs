@@ -2749,32 +2749,51 @@ impl AppShell {
     ) -> impl IntoElement {
         let section = self.settings_section;
 
-        // ── Section tab strip ────────────────────────────────────────────
-        let mut section_tabs = div()
-            .id("settings-section-tabs")
+        // ── macOS-style segmented control ────────────────────────────────
+        let seg_bg = tokens.hover;
+        let seg_active_bg = tokens.surface;
+        let mut segmented_control = div()
+            .id("settings-segment")
             .flex()
             .flex_row()
-            .items_end()
-            .gap_4()
-            .w_full()
-            .px_4()
-            .pt_1();
+            .items_center()
+            .rounded(px(8.0))
+            .bg(seg_bg)
+            .p(px(3.0))
+            .gap(px(2.0));
 
         for &s in SettingsSection::ALL {
             let active = s == section;
             let tab_id: ElementId = format!("settings-section-{}", s.id()).into();
             let label: SharedString = s.label().into();
-            section_tabs = section_tabs.child(
+            segmented_control = segmented_control.child(
                 div()
                     .id(tab_id)
                     .cursor_pointer()
-                    .pb_1p5()
-                    .text_size(px(13.0))
+                    .px(px(16.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .when(active, |el| {
-                        el.text_color(tokens.accent)
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .border_b_2()
-                            .border_color(tokens.accent)
+                        el.bg(seg_active_bg)
+                            .text_color(tokens.fg)
+                            .shadow(vec![
+                                gpui::BoxShadow {
+                                    color: Hsla::black().opacity(0.08),
+                                    offset: gpui::point(px(0.0), px(1.0)),
+                                    blur_radius: px(3.0),
+                                    spread_radius: px(0.0),
+                                    inset: false,
+                                },
+                                gpui::BoxShadow {
+                                    color: Hsla::black().opacity(0.04),
+                                    offset: gpui::point(px(0.0), px(0.5)),
+                                    blur_radius: px(1.0),
+                                    spread_radius: px(0.0),
+                                    inset: false,
+                                },
+                            ])
                     })
                     .when(!active, |el| {
                         el.text_color(tokens.fg_muted)
@@ -2799,7 +2818,7 @@ impl AppShell {
             }
         };
 
-        // ── Footer: key hints (reference: WezTerm settings) ──────────────
+        // ── Footer ─────────────────────────────────────────────────────────
         let footer = div()
             .id("settings-footer")
             .flex()
@@ -2807,8 +2826,8 @@ impl AppShell {
             .items_center()
             .justify_between()
             .w_full()
-            .px_4()
-            .py_2()
+            .px(px(20.0))
+            .py(px(12.0))
             .border_t_1()
             .border_color(tokens.border)
             .child(
@@ -2816,35 +2835,26 @@ impl AppShell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap(px(12.0))
                     .text_size(px(11.0))
                     .text_color(tokens.fg_muted)
                     .child(
                         div()
                             .flex()
                             .flex_row()
-                            .gap_1()
+                            .items_center()
+                            .gap(px(4.0))
                             .child(
                                 div()
-                                    .px_1()
-                                    .rounded(px(3.0))
+                                    .px(px(5.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
                                     .bg(tokens.hover)
+                                    .border_1()
+                                    .border_color(tokens.border)
+                                    .text_size(px(10.0))
                                     .text_color(tokens.fg)
-                                    .child("click"),
-                            )
-                            .child("apply"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .px_1()
-                                    .rounded(px(3.0))
-                                    .bg(tokens.hover)
-                                    .text_color(tokens.fg)
+                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .child("esc"),
                             )
                             .child("close"),
@@ -2859,34 +2869,56 @@ impl AppShell {
 
         let panel = div()
             .id("settings-panel")
-            .w(px(560.0))
-            .max_w(px(720.0))
-            .h(px(480.0))
-            .max_h(px(560.0))
+            .w(px(520.0))
+            .max_w(px(640.0))
+            .h(px(500.0))
+            .max_h(px(580.0))
             .flex()
             .flex_col()
-            .rounded(px(10.0))
+            .rounded(px(12.0))
             .bg(tokens.surface)
             .border_1()
             .border_color(tokens.border)
             .text_color(tokens.fg)
             .overflow_hidden()
+            .shadow(vec![
+                gpui::BoxShadow {
+                    color: Hsla::black().opacity(0.25),
+                    offset: gpui::point(px(0.0), px(8.0)),
+                    blur_radius: px(32.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                },
+                gpui::BoxShadow {
+                    color: Hsla::black().opacity(0.12),
+                    offset: gpui::point(px(0.0), px(2.0)),
+                    blur_radius: px(8.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                },
+            ])
             // Keep clicks inside the panel from reaching the backdrop.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            // Title
+            // Header: title + segmented control
             .child(
                 div()
-                    .px_4()
-                    .pt_3()
-                    .pb_1()
-                    .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(tokens.fg)
-                    .child("settings"),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .w_full()
+                    .pt(px(20.0))
+                    .pb(px(16.0))
+                    .gap(px(14.0))
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg)
+                            .child("Settings"),
+                    )
+                    .child(segmented_control),
             )
-            // Section tabs
-            .child(section_tabs)
-            // Divider under tabs
+            // Separator
             .child(
                 div()
                     .w_full()
@@ -2901,8 +2933,8 @@ impl AppShell {
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
-                    .px_4()
-                    .py_3()
+                    .px(px(20.0))
+                    .py(px(16.0))
                     .child(body),
             )
             // Footer
@@ -2928,7 +2960,7 @@ impl AppShell {
                         .top_0()
                         .left_0()
                         .size_full()
-                        .bg(Hsla::black().opacity(0.5))
+                        .bg(Hsla::black().opacity(0.45))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| {
@@ -2950,107 +2982,162 @@ impl AppShell {
         let restore = settings.restore_session;
         let ligatures = settings.font_ligatures;
 
+        // Card background: slightly elevated from surface
+        let card_bg = tokens.hover;
+
         div()
             .id("settings-general")
             .flex()
             .flex_col()
-            .gap_3()
+            .gap(px(20.0))
             .w_full()
+            // ── Application group ─────────────────────────────────────────
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(tokens.fg_muted)
-                    .child("Application"),
-            )
-            .child(self.settings_toggle_row(
-                "restore-session",
-                "Restore session on launch",
-                "Reopen tabs, splits, and working directories from the last quit",
-                restore,
-                tokens,
-                cx,
-                |this, cx| {
-                    let next = !TerminalSettings::get_global(cx).restore_session;
-                    TerminalSettings::set_restore_session(next, cx);
-                    // Drop session file writes immediately when turned off so a
-                    // later quit does not overwrite with a stale layout.
-                    if next {
-                        this.schedule_session_save(cx);
-                    }
-                    cx.notify();
-                },
-            ))
-            .child(
-                div()
-                    .mt_2()
-                    .text_size(px(11.0))
-                    .text_color(tokens.fg_muted)
-                    .child("Terminal"),
-            )
-            .child(self.settings_toggle_row(
-                "font-ligatures",
-                "Font ligatures",
-                "Enable OpenType ligatures when the font supports them (e.g. JetBrains Mono)",
-                ligatures,
-                tokens,
-                cx,
-                |_this, cx| {
-                    let next = !TerminalSettings::get_global(cx).font_ligatures;
-                    TerminalSettings::set_font_ligatures(next, cx);
-                    cx.notify();
-                },
-            ))
-            .child(self.settings_toggle_row(
-                "copy-on-select",
-                "Copy on select",
-                "Copy selected text when you release the mouse; shows a brief “copied to clipboard” toast",
-                TerminalSettings::get_global(cx).copy_on_select,
-                tokens,
-                cx,
-                |_this, cx| {
-                    let next = !TerminalSettings::get_global(cx).copy_on_select;
-                    TerminalSettings::set_copy_on_select(next, cx);
-                    cx.notify();
-                },
-            ))
-            .child(
-                div()
-                    .mt_3()
-                    .p_3()
-                    .rounded(px(6.0))
-                    .bg(tokens.hover)
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(tokens.fg)
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("Advanced"),
-                    )
+                    .gap(px(8.0))
                     .child(
                         div()
                             .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(tokens.fg_muted)
-                            .child(
-                                format!(
-                                    "Custom key bindings, font family/size, and shell options live in settings.json. Open the file and reload with {} (key bindings apply on next launch).",
-                                    crate::display_shortcut("reload_settings")
-                                ),
-                            ),
+                            .pl(px(2.0))
+                            .child("APPLICATION"),
                     )
                     .child(
                         div()
-                            .mt_1()
+                            .rounded(px(10.0))
+                            .bg(card_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .overflow_hidden()
+                            .child(self.settings_toggle_row(
+                                "restore-session",
+                                "Restore session on launch",
+                                "Reopen tabs, splits, and working directories from the last quit",
+                                restore,
+                                tokens,
+                                cx,
+                                |this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).restore_session;
+                                    TerminalSettings::set_restore_session(next, cx);
+                                    if next {
+                                        this.schedule_session_save(cx);
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                    ),
+            )
+            // ── Terminal group ────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
                             .text_size(px(11.0))
-                            .text_color(tokens.accent)
-                            .child(sleipnir_settings::config_path().display().to_string()),
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg_muted)
+                            .pl(px(2.0))
+                            .child("TERMINAL"),
+                    )
+                    .child(
+                        div()
+                            .rounded(px(10.0))
+                            .bg(card_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .overflow_hidden()
+                            .child(self.settings_toggle_row(
+                                "font-ligatures",
+                                "Font ligatures",
+                                "Enable OpenType ligatures when the font supports them (e.g. JetBrains Mono)",
+                                ligatures,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).font_ligatures;
+                                    TerminalSettings::set_font_ligatures(next, cx);
+                                    cx.notify();
+                                },
+                            ))
+                            // Separator between rows
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pl(px(14.0))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(1.0))
+                                            .bg(tokens.border),
+                                    ),
+                            )
+                            .child(self.settings_toggle_row(
+                                "copy-on-select",
+                                "Copy on select",
+                                "Copy selected text when you release the mouse; shows a brief \u{201c}copied to clipboard\u{201d} toast",
+                                TerminalSettings::get_global(cx).copy_on_select,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).copy_on_select;
+                                    TerminalSettings::set_copy_on_select(next, cx);
+                                    cx.notify();
+                                },
+                            )),
+                    ),
+            )
+            // ── Advanced card ────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg_muted)
+                            .pl(px(2.0))
+                            .child("ADVANCED"),
+                    )
+                    .child(
+                        div()
+                            .rounded(px(10.0))
+                            .bg(card_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .px(px(14.0))
+                            .py(px(12.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(tokens.fg_muted)
+                                    .child(
+                                        format!(
+                                            "Custom key bindings, font family/size, and shell options live in settings.json. Reload with {}.",
+                                            crate::display_shortcut("reload_settings")
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(tokens.accent)
+                                    .child(sleipnir_settings::config_path().display().to_string()),
+                            ),
                     ),
             )
     }
 
-    /// One toggle row: title + description + on/off marker. `on_toggle` runs on click.
+    /// One toggle row: macOS-style with inline toggle switch.
     fn settings_toggle_row(
         &self,
         id: &'static str,
@@ -3061,39 +3148,40 @@ impl AppShell {
         cx: &mut Context<Self>,
         on_toggle: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
-        let check: SharedString = if enabled { "●".into() } else { "○".into() };
-        let state: SharedString = if enabled { "On".into() } else { "Off".into() };
-        let state_color = if enabled { tokens.accent } else { tokens.fg_muted };
+        // Toggle switch colors
+        let track_bg = if enabled {
+            tokens.accent
+        } else {
+            tokens.border
+        };
+        let knob_bg = if enabled {
+            Hsla::white()
+        } else {
+            Hsla::white().opacity(0.9)
+        };
+        let knob_offset = if enabled { px(16.0) } else { px(2.0) };
 
         div()
             .id(id)
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap(px(12.0))
             .w_full()
-            .px_2()
-            .py_2()
-            .rounded(px(6.0))
+            .px(px(14.0))
+            .py(px(10.0))
             .cursor_pointer()
-            .hover(|el| el.bg(tokens.hover))
+            .hover(|el| el.bg(Hsla::white().opacity(0.03)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 on_toggle(this, cx);
             }))
-            .child(
-                div()
-                    .w(px(18.0))
-                    .text_size(px(14.0))
-                    .text_color(state_color)
-                    .child(check),
-            )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap_0p5()
+                    .gap(px(2.0))
                     .child(
                         div()
                             .text_size(px(13.0))
@@ -3107,12 +3195,34 @@ impl AppShell {
                             .child(SharedString::from(description)),
                     ),
             )
+            // macOS-style toggle switch
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(state_color)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(state),
+                    .flex_shrink_0()
+                    .w(px(34.0))
+                    .h(px(20.0))
+                    .rounded(px(10.0))
+                    .bg(track_bg)
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(2.0))
+                            .left(knob_offset)
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(px(8.0))
+                            .bg(knob_bg)
+                            .shadow(vec![
+                                gpui::BoxShadow {
+                                    color: Hsla::black().opacity(0.15),
+                                    offset: gpui::point(px(0.0), px(1.0)),
+                                    blur_radius: px(2.0),
+                                    spread_radius: px(0.0),
+                                    inset: false,
+                                },
+                            ]),
+                    ),
             )
     }
 
@@ -3132,22 +3242,24 @@ impl AppShell {
             .id("settings-theme-list")
             .flex()
             .flex_col()
-            .gap_0p5()
+            .gap(px(2.0))
             .w_full();
 
-        // Type-to-filter row.
+        // Type-to-filter: macOS-style search field.
         let filter_text: SharedString = if self.theme_query.is_empty() {
-            "Type to filter themes…".into()
+            "Search themes…".into()
         } else {
             format!("{}|", self.theme_query).into()
         };
         list = list.child(
             div()
-                .px_2()
-                .py_1()
-                .mb_1()
-                .rounded(px(4.0))
+                .px(px(10.0))
+                .py(px(7.0))
+                .mb(px(8.0))
+                .rounded(px(8.0))
                 .bg(tokens.hover)
+                .border_1()
+                .border_color(tokens.border)
                 .text_size(px(12.0))
                 .text_color(if self.theme_query.is_empty() {
                     tokens.fg_muted
@@ -3168,7 +3280,7 @@ impl AppShell {
             let label: SharedString = theme.display_name().into();
             let row_id: ElementId = format!("theme-row-{}", theme.as_str()).into();
 
-            let mut swatches = div().flex().flex_row().items_center().gap_1();
+            let mut swatches = div().flex().flex_row().items_center().gap(px(3.0));
             let swatch_colors = [
                 preview.background,
                 preview.ansi[1],
@@ -3182,41 +3294,55 @@ impl AppShell {
                 swatches = swatches.child(
                     div()
                         .id(format!("swatch-{}-{}", theme.as_str(), i))
-                        .w(px(11.0))
-                        .h(px(11.0))
-                        .rounded(px(2.0))
+                        .w(px(12.0))
+                        .h(px(12.0))
+                        .rounded(px(3.0))
                         .bg(color)
                         .border_1()
-                        .border_color(tokens.border),
+                        .border_color(Hsla::black().opacity(0.1)),
                 );
             }
 
-            // Marker: ▸ + check for active (WezTerm-like), empty space otherwise.
-            let marker: SharedString = if selected { "▸".into() } else { " ".into() };
-            let check: SharedString = if selected { "✓".into() } else { "".into() };
+            // Radio-style selection indicator
+            let radio = div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded(px(8.0))
+                .border_2()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |el| {
+                    el.border_color(tokens.accent)
+                        .child(
+                            div()
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .rounded(px(4.0))
+                                .bg(tokens.accent),
+                        )
+                })
+                .when(!selected, |el| {
+                    el.border_color(tokens.fg_muted)
+                });
 
             let row = div()
                 .id(row_id)
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap(px(10.0))
                 .w_full()
-                .px_2()
-                .py_1p5()
-                .rounded(px(4.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
                 .cursor_pointer()
                 .when(selected, |el| el.bg(tokens.hover))
                 .hover(|el| el.bg(tokens.hover))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.select_theme(theme, cx);
                 }))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .text_color(tokens.accent)
-                        .child(marker),
-                )
+                .child(radio)
                 .child(
                     div()
                         .flex_1()
@@ -3224,12 +3350,6 @@ impl AppShell {
                         .text_size(px(13.0))
                         .text_color(tokens.fg)
                         .child(label),
-                )
-                .child(
-                    div()
-                        .w(px(16.0))
-                        .text_color(tokens.accent)
-                        .child(check),
                 )
                 .child(swatches);
 
@@ -3243,12 +3363,13 @@ impl AppShell {
             names.sort();
             list = list.child(
                 div()
-                    .px_2()
-                    .pt_2()
-                    .pb_1()
+                    .px(px(10.0))
+                    .pt(px(12.0))
+                    .pb(px(4.0))
                     .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(tokens.fg_muted)
-                    .child(SharedString::from("User themes")),
+                    .child(SharedString::from("USER THEMES")),
             );
             for name in names {
                 if !matches(name) {
@@ -3261,7 +3382,7 @@ impl AppShell {
                 let label: SharedString = name.clone().into();
                 let row_id: ElementId = format!("theme-row-custom-{name}").into();
 
-                let mut swatches = div().flex().flex_row().items_center().gap_1();
+                let mut swatches = div().flex().flex_row().items_center().gap(px(3.0));
                 let swatch_colors = [
                     preview.background,
                     preview.ansi[1],
@@ -3275,40 +3396,54 @@ impl AppShell {
                     swatches = swatches.child(
                         div()
                             .id(format!("swatch-custom-{name}-{i}"))
-                            .w(px(11.0))
-                            .h(px(11.0))
-                            .rounded(px(2.0))
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .rounded(px(3.0))
                             .bg(color)
                             .border_1()
-                            .border_color(tokens.border),
+                            .border_color(Hsla::black().opacity(0.1)),
                     );
                 }
 
-                let marker: SharedString = if selected { "▸".into() } else { " ".into() };
-                let check: SharedString = if selected { "✓".into() } else { "".into() };
+                let radio = div()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .rounded(px(8.0))
+                    .border_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |el| {
+                        el.border_color(tokens.accent)
+                            .child(
+                                div()
+                                    .w(px(8.0))
+                                    .h(px(8.0))
+                                    .rounded(px(4.0))
+                                    .bg(tokens.accent),
+                            )
+                    })
+                    .when(!selected, |el| {
+                        el.border_color(tokens.fg_muted)
+                    });
 
                 let row = div()
                     .id(row_id)
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap(px(10.0))
                     .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(px(4.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(8.0))
                     .cursor_pointer()
                     .when(selected, |el| el.bg(tokens.hover))
                     .hover(|el| el.bg(tokens.hover))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         this.select_custom_theme(name.clone(), cx);
                     }))
-                    .child(
-                        div()
-                            .w(px(14.0))
-                            .text_color(tokens.accent)
-                            .child(marker),
-                    )
+                    .child(radio)
                     .child(
                         div()
                             .flex_1()
@@ -3316,12 +3451,6 @@ impl AppShell {
                             .text_size(px(13.0))
                             .text_color(tokens.fg)
                             .child(label),
-                    )
-                    .child(
-                        div()
-                            .w(px(16.0))
-                            .text_color(tokens.accent)
-                            .child(check),
                     )
                     .child(swatches);
 
@@ -3332,8 +3461,8 @@ impl AppShell {
         if rendered == 0 {
             list = list.child(
                 div()
-                    .px_2()
-                    .py_2()
+                    .px(px(10.0))
+                    .py(px(12.0))
                     .text_size(px(12.0))
                     .text_color(tokens.fg_muted)
                     .child(SharedString::from("No themes match")),

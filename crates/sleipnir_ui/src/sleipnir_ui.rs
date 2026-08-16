@@ -48,7 +48,7 @@ use sleipnir_settings::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use terminal::{
     Clear, Copy, Event, MaybeNavigationTarget, Modes, Paste, PasteText, ScrollLineDown,
     ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
@@ -105,8 +105,26 @@ pub struct TermView {
     last_input_at: Instant,
     /// Bottom toast after copy / copy-on-select.
     copy_toast: Option<CopyToast>,
+    /// Last time `render` ran, i.e. the last time this pane was actually in the
+    /// window's element tree. `AppShell::render_content` only emits the active
+    /// tab's panes (and, under pane zoom, only the zoomed one), so a stale value
+    /// means "off screen" — see [`Self::offscreen_repaint_is_throttled`].
+    last_render_at: Option<Instant>,
+    /// Last repaint we requested while off screen (throttle bookkeeping).
+    last_offscreen_notify_at: Option<Instant>,
     _spawn: Task<()>,
 }
+
+/// A pane that rendered within this window is treated as on screen. Must stay
+/// comfortably above one frame interval (8.3 ms at 120 Hz) so a visible pane is
+/// never mistaken for a hidden one.
+const ONSCREEN_WINDOW: Duration = Duration::from_millis(250);
+
+/// While off screen, request at most one repaint per this interval. Throttling
+/// rather than suppressing keeps the path self-healing: if this heuristic is ever
+/// wrong about visibility, the pane still refreshes within this bound instead of
+/// freezing.
+const OFFSCREEN_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 struct CopyToast {
     /// Hide task; dropping it cancels a previous toast.
@@ -185,8 +203,40 @@ impl TermView {
             terminal_wants_blink: true,
             last_input_at: Instant::now(),
             copy_toast: None,
+            last_render_at: None,
+            last_offscreen_notify_at: None,
             _spawn: spawn,
         }
+    }
+
+    /// Whether this pane looks like it is on screen, judged by whether `render`
+    /// ran recently. `AppShell::render_content` only builds elements for the
+    /// active tab's panes (and only the zoomed pane when a tab is zoomed), so a
+    /// pane that has not rendered inside [`ONSCREEN_WINDOW`] is hidden.
+    fn looks_onscreen(&self) -> bool {
+        self.last_render_at
+            .is_some_and(|at| at.elapsed() < ONSCREEN_WINDOW)
+    }
+
+    /// Whether a grid change may request a window repaint right now.
+    ///
+    /// On screen: always. Off screen: at most once per
+    /// [`OFFSCREEN_REPAINT_INTERVAL`], so a background pane costs a trickle of
+    /// repaints instead of one per PTY batch. Throttling instead of suppressing
+    /// is deliberate — a pane that is wrongly judged hidden still refreshes
+    /// within that bound rather than freezing.
+    fn request_repaint_allowed(&mut self) -> bool {
+        if self.looks_onscreen() {
+            return true;
+        }
+        let now = Instant::now();
+        let due = self
+            .last_offscreen_notify_at
+            .is_none_or(|at| now.duration_since(at) >= OFFSCREEN_REPAINT_INTERVAL);
+        if due {
+            self.last_offscreen_notify_at = Some(now);
+        }
+        due
     }
 
     /// Working directory of the attached PTY, if known.
@@ -217,6 +267,8 @@ impl TermView {
             terminal_wants_blink: true,
             last_input_at: Instant::now(),
             copy_toast: None,
+            last_render_at: None,
+            last_offscreen_notify_at: None,
             _spawn: Task::ready(()),
         };
         this.attach_terminal(terminal, window, cx);
@@ -256,7 +308,14 @@ impl TermView {
                             }
                         }
                     }
-                    cx.notify();
+                    // A pane that is not on screen must not drive the window's
+                    // repaint loop: a coding agent streaming in a background tab
+                    // otherwise requests ~250 repaints/second (one per 4 ms PTY
+                    // batch) while the user types in a different pane. The grid
+                    // is still updated — only the repaint request is throttled.
+                    if this.request_repaint_allowed() {
+                        cx.notify();
+                    }
                 }
                 Event::BlinkChanged(blinking) => {
                     this.terminal_wants_blink = *blinking;
@@ -670,6 +729,9 @@ impl Render for LinkPreview {
 
 impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Being rendered *is* the visibility signal: only panes that
+        // `AppShell::render_content` emits get here (see `looks_onscreen`).
+        self.last_render_at = Some(Instant::now());
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
