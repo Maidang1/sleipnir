@@ -857,6 +857,20 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// Inclusive grid range as plain text. Used to recover the command line
+/// between an OSC 133 B marker and the cursor at C.
+pub(super) fn grid_text_range(
+    term: &Term<ZedListener>,
+    start_line: i32,
+    start_col: usize,
+    end_line: i32,
+    end_col: usize,
+) -> String {
+    let start = AlacPoint::new(Line(start_line), Column(start_col));
+    let end = AlacPoint::new(Line(end_line), Column(end_col));
+    term.bounds_to_string(start, end)
+}
+
 /// The currently visible screen (scrollback excluded), for accessibility.
 pub(super) fn visible_screen_text(term: &Term<ZedListener>) -> String {
     let offset = term.grid().display_offset() as i32;

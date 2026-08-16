@@ -6090,6 +6090,7 @@ dependencies = [
  "rand 0.9.5",
  "regex",
  "release_channel",
+ "run_ledger",
  "schemars",
  "serde",
  "sleipnir_settings",

@@ -234,7 +234,7 @@ impl TermView {
                     };
                     if min_secs > 0 && mode != NotifyOnCommandFinish::Never {
                         if let Some(dur) =
-                            terminal.update(cx, |t, _| t.poll_command_finish(min_secs))
+                            terminal.update(cx, |t, cx| t.poll_command_finish(min_secs, cx))
                         {
                             let should_notify = match mode {
                                 NotifyOnCommandFinish::Never => false,
@@ -277,6 +277,7 @@ impl TermView {
                 Event::Notify(message) => {
                     notify_message("Sleipnir", message);
                 }
+                Event::RunStarted { .. } | Event::RunFinished { .. } => {}
             },
         )
         .detach();

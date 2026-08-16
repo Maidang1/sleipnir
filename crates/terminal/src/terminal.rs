@@ -4,11 +4,13 @@ mod alacritty;
 mod osc133;
 mod osc_notify;
 mod pty_info;
+mod run_tracker;
 mod shell_semantics;
 pub mod terminal_settings;
 
 pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
 pub use osc133::{Osc133Kind, Osc133Marker, Osc133Scanner, scan_osc133};
+pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
 pub use shell_semantics::{
     ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
     click_to_move_sequence, command_output_range, inject_script, triple_click_kind,
@@ -76,7 +78,8 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
+    display_only_term_config, find_from_terminal_point, full_content_range, grid_text_range,
+    last_non_empty_lines,
     make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
     scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
     set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
@@ -713,6 +716,14 @@ pub enum Event {
     CopiedToClipboard,
     /// A desktop-notification request via OSC 9 / OSC 777.
     Notify(String),
+    /// A command started in this terminal (Run Ledger).
+    RunStarted {
+        command: String,
+        cwd: Option<PathBuf>,
+        inferred: bool,
+    },
+    /// The current command finished. `exit_code` is `None` when unknown.
+    RunFinished { exit_code: Option<i32> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1066,6 +1077,8 @@ impl TerminalBuilder {
             prompt_markers: Vec::new(),
             last_busy: false,
             busy_since: None,
+            run_tracker: RunTracker::default(),
+            started_at: Instant::now(),
             init_command_startup_tx: None,
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
@@ -1346,6 +1359,8 @@ impl TerminalBuilder {
                 prompt_markers: Vec::new(),
                 last_busy: false,
                 busy_since: None,
+                run_tracker: RunTracker::default(),
+                started_at: Instant::now(),
                 init_command_startup_tx: None,
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
@@ -1564,6 +1579,10 @@ pub struct Terminal {
     last_busy: bool,
     /// When the current foreground job became busy, if any.
     busy_since: Option<Instant>,
+    /// OSC 133 / busy-probe → Run start/finish. Pure; emit happens at cx sites.
+    run_tracker: RunTracker,
+    /// Monotonic origin for Run duration math.
+    started_at: Instant,
     init_command_startup_tx: Option<Sender<()>>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
@@ -1720,11 +1739,20 @@ impl Terminal {
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
+                if let Some(out) = self
+                    .run_tracker
+                    .on_marker(Osc133Kind::CommandFinished { status: None }, self.mono_ms())
+                {
+                    self.emit_tracker_out(out, cx);
+                }
                 self.register_task_finished(Some(exit_status), cx);
             }
             TerminalBackendEvent::Osc133(payload) => {
                 if let Some(kind) = Osc133Kind::from_payload(&payload) {
                     self.record_osc133_marker(kind);
+                    if let Some(out) = self.run_tracker.take_output() {
+                        self.emit_tracker_out(out, cx);
+                    }
                 }
             }
             TerminalBackendEvent::DesktopNotification(msg) => {
@@ -2031,10 +2059,70 @@ impl Terminal {
             let drain = self.prompt_markers.len() - 500;
             self.prompt_markers.drain(0..drain);
         }
+        let at_ms = self.mono_ms();
+        match kind {
+            Osc133Kind::CommandExecuted => {
+                let command = self.read_command_between_start_and_cursor();
+                self.run_tracker
+                    .on_marker_with_command(kind, at_ms, command);
+            }
+            other => {
+                self.run_tracker.on_marker(other, at_ms);
+            }
+        }
         if matches!(kind, Osc133Kind::CommandFinished { .. }) {
             // Command ended via shell integration; clear busy timer.
             self.last_busy = false;
             self.busy_since = None;
+        }
+    }
+
+    fn mono_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    fn emit_tracker_out(&mut self, out: TrackerOut, cx: &mut Context<Self>) {
+        match out {
+            TrackerOut::Started {
+                command, inferred, ..
+            } => {
+                cx.emit(Event::RunStarted {
+                    command,
+                    cwd: self.working_directory(),
+                    inferred,
+                });
+            }
+            TrackerOut::Finished { exit_code, .. } => {
+                cx.emit(Event::RunFinished { exit_code });
+            }
+        }
+    }
+
+    /// Grid text from the most recent OSC 133 B (command start) to the cursor.
+    fn read_command_between_start_and_cursor(&self) -> Option<String> {
+        let start = self
+            .prompt_markers
+            .iter()
+            .rev()
+            .find(|m| matches!(m.kind, Osc133Kind::CommandStart))?;
+        let start_abs = start.line?;
+        let start_col = start.column.unwrap_or(0);
+        let term = self.term.lock_unfair();
+        let history = term.history_size() as i32;
+        let cursor = term.grid().cursor.point;
+        let start_line = absolute_to_grid_line(start_abs, history);
+        let text = grid_text_range(
+            &term,
+            start_line,
+            start_col,
+            cursor.line.0,
+            cursor.column.0,
+        );
+        drop(term);
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
         }
     }
 
@@ -2129,17 +2217,32 @@ impl Terminal {
     /// Returns `Some(duration)` when a previously-busy job just went idle and
     /// ran at least `min_secs` seconds — caller may show a system notification
     /// if the window is unfocused.
-    pub fn poll_command_finish(&mut self, min_secs: u64) -> Option<Duration> {
+    pub fn poll_command_finish(
+        &mut self,
+        min_secs: u64,
+        cx: &mut Context<Self>,
+    ) -> Option<Duration> {
         let busy = self.looks_busy();
         let now = Instant::now();
+        let at_ms = self.mono_ms();
         match (self.last_busy, busy) {
             (false, true) => {
                 self.last_busy = true;
                 self.busy_since = Some(now);
+                if let Some(out) = self.run_tracker.on_busy_change(
+                    true,
+                    self.foreground_process_command_name(),
+                    at_ms,
+                ) {
+                    self.emit_tracker_out(out, cx);
+                }
                 None
             }
             (true, false) => {
                 self.last_busy = false;
+                if let Some(out) = self.run_tracker.on_busy_change(false, None, at_ms) {
+                    self.emit_tracker_out(out, cx);
+                }
                 let started = self.busy_since.take()?;
                 let dur = now.saturating_duration_since(started);
                 if dur.as_secs() >= min_secs {
