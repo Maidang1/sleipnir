@@ -18,6 +18,5 @@ serde_json.workspace = true
 schemars.workspace = true
 collections.workspace = true
 log.workspace = true
-util.workspace = true
 anyhow.workspace = true
 dirs.workspace = true

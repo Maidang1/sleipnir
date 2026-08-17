@@ -3,5 +3,5 @@
 
 pub use sleipnir_settings::{
     AlternateScroll, ConfirmClose, CursorShape, TerminalBell, TerminalBlink, TerminalLineHeight,
-    TerminalSettings, Toolbar, WorkingDirectory,
+    TerminalSettings,
 };

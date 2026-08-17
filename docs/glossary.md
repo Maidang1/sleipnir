@@ -110,8 +110,7 @@ code), belonging to exactly one Pane. A Run carries a redacted command line,
 cwd, wall-clock start, monotonic duration, exit status, `RunId`, `PaneKey`,
 `LaunchId`, an Anchor, and whether it was inferred. The command line is
 redacted at capture, so memory and disk hold the same text.
-_Avoid_: Task (already taken in this repo by the Zed-derived `SpawnInTerminal`
-/ `TaskState`), Command (a command is the text; a Run is one execution),
+_Avoid_: Task, Command (a command is the text; a Run is one execution),
 Block, Job.
 
 **Ledger**:

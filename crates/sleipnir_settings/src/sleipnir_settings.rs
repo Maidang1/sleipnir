@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap as StdHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use util::shell::Shell;
 
 // ── enums (schema-compatible) ───────────────────────────────────────────────
 
@@ -72,18 +71,6 @@ pub enum NotifyOnCommandFinish {
     Unfocused,
     /// Always show a command-finish notification, even when focused.
     Always,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkingDirectory {
-    #[default]
-    CurrentProjectDirectory,
-    FirstProjectDirectory,
-    AlwaysHome,
-    Always {
-        directory: String,
-    },
 }
 
 /// Line height: bare number (Zed also accepts objects; we accept `f32` or `{"custom": n}`).
@@ -178,23 +165,10 @@ pub enum CursorShape {
     Hollow,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct Toolbar {
-    pub breadcrumbs: bool,
-}
-
-impl Default for Toolbar {
-    fn default() -> Self {
-        Self { breadcrumbs: true }
-    }
-}
-
 // ── runtime settings ────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct TerminalSettings {
-    pub shell: Shell,
-    pub working_directory: WorkingDirectory,
     pub font_size: Option<Pixels>,
     pub font_family: Option<String>,
     pub font_fallbacks: Option<FontFallbacks>,
@@ -211,7 +185,6 @@ pub struct TerminalSettings {
     pub open_links_in_mouse_mode: bool,
     pub max_scroll_history_lines: Option<usize>,
     pub scroll_multiplier: f32,
-    pub toolbar: Toolbar,
     pub minimum_contrast: f32,
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
@@ -292,8 +265,6 @@ pub fn default_font_fallbacks() -> Option<FontFallbacks> {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
-            shell: Shell::System,
-            working_directory: WorkingDirectory::AlwaysHome,
             font_size: Some(px(14.)),
             font_family: Some(default_font_family().into()),
             font_fallbacks: default_font_fallbacks(),
@@ -310,7 +281,6 @@ impl Default for TerminalSettings {
             open_links_in_mouse_mode: true,
             max_scroll_history_lines: Some(10_000),
             scroll_multiplier: 3.0,
-            toolbar: Toolbar::default(),
             minimum_contrast: 45.0,
             path_hyperlink_regexes: Vec::new(),
             path_hyperlink_timeout_ms: 50,

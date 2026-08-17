@@ -50,8 +50,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, rgb,
 };
 use sleipnir_settings::{
-    AlternateScroll, NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette,
-    TerminalSettings,
+    NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,6 +61,7 @@ use terminal::{
     SendKeystroke, SendText, ShowCharacterPalette, Terminal, TerminalBuilder, ToggleViMode,
 };
 use util::paths::PathStyle;
+use util::shell::Shell;
 
 /// Bubbled from a tab so the shell can refresh titles.
 #[derive(Clone, Debug)]
@@ -173,14 +173,13 @@ impl TermView {
             env.insert(k.clone(), v.clone());
         }
         let shell = terminal::apply_inject_to_shell(
-            settings.shell.clone(),
+            Shell::System,
             &mut env,
             settings.inject_osc133,
         );
 
         let builder_task = TerminalBuilder::new(
             cwd,
-            None,
             shell,
             env,
             settings.cursor_shape,
@@ -188,11 +187,8 @@ impl TermView {
             settings.max_scroll_history_lines,
             settings.path_hyperlink_regexes.clone(),
             settings.path_hyperlink_timeout_ms,
-            false,
             window_id,
-            None,
             cx,
-            Vec::new(),
             PathStyle::local(),
         );
 
@@ -312,36 +308,6 @@ impl TermView {
         }
     }
 
-    /// Keep display-only path for tests/demos.
-    pub fn new_display_only(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = TerminalSettings::get_global(cx);
-        let window_id = window.window_handle().window_id().as_u64();
-        let builder = TerminalBuilder::new_display_only(
-            settings.cursor_shape,
-            AlternateScroll::On,
-            settings.max_scroll_history_lines,
-            window_id,
-            cx.background_executor(),
-            PathStyle::local(),
-        );
-
-        let terminal = cx.new(|cx| builder.subscribe(cx));
-        let mut this = Self {
-            terminal: TerminalSlot::Loading,
-            focus_handle: cx.focus_handle(),
-            title: "sleipnir (display)".into(),
-            font_size_override: None,
-            terminal_wants_blink: true,
-            last_input_at: Instant::now(),
-            copy_toast: None,
-            last_render_at: None,
-            last_offscreen_notify_at: None,
-            _spawn: Task::ready(()),
-        };
-        this.attach_terminal(terminal, window, cx);
-        this
-    }
-
     fn attach_terminal(
         &mut self,
         terminal: Entity<Terminal>,
@@ -388,7 +354,7 @@ impl TermView {
                     this.terminal_wants_blink = *blinking;
                     cx.notify();
                 }
-                Event::TitleChanged | Event::BreadcrumbsChanged => {
+                Event::TitleChanged => {
                     this.title = terminal.read(cx).title(true).into();
                     cx.emit(TermViewEvent::TitleChanged);
                     cx.notify();
@@ -478,13 +444,6 @@ impl TermView {
     /// Effective font size: zoom override or settings (clamped).
     pub fn effective_font_size(&self, cx: &App) -> Pixels {
         effective_font_size(self.font_size_override, cx)
-    }
-
-    pub fn write_output(&self, bytes: &[u8], cx: &mut Context<Self>) {
-        if let TerminalSlot::Ready(terminal) = &self.terminal {
-            terminal.update(cx, |term, cx| term.write_output(bytes, cx));
-            cx.notify();
-        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {

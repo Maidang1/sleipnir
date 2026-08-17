@@ -85,7 +85,7 @@ mkdir -p "${ROOT}/docs"
   done
 
   echo "== sleipnir-only crates =="
-  for c in sleipnir_settings sleipnir sleipnir_ui task_types release_channel; do
+  for c in sleipnir_settings sleipnir sleipnir_ui release_channel; do
     if [[ -d "${ROOT}/crates/${c}" ]]; then
       echo "  crates/${c}"
     fi

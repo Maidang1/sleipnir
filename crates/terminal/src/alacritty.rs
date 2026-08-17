@@ -6,7 +6,7 @@ mod hyperlinks;
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
-    grid::{Dimensions, Grid, GridIterator, Row, Scroll as AlacScroll},
+    grid::{Dimensions, GridIterator, Scroll as AlacScroll},
     index::{Boundary, Column, Direction as AlacDirection, Line, Point as AlacPoint},
     selection::{
         Selection as AlacSelection, SelectionRange as AlacSelectionRange,
@@ -14,7 +14,7 @@ use alacritty_terminal::{
     },
     sync::FairMutex,
     term::{
-        Config, Osc52, RenderableCursor, SEMANTIC_ESCAPE_CHARS, Term, TermMode,
+        Config, RenderableCursor, SEMANTIC_ESCAPE_CHARS, Term, TermMode,
         cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink},
         search::{Match, RegexIter, RegexSearch},
     },
@@ -97,19 +97,6 @@ fn window_size_from_terminal_bounds(bounds: TerminalBounds) -> WindowSize {
     }
 }
 
-pub(super) fn display_only_term_config(
-    scrolling_history: usize,
-    cursor_shape: SettingsCursorShape,
-) -> AlacrittyTermConfig {
-    Config {
-        scrolling_history,
-        default_cursor_style: alacritty_cursor_style(cursor_shape),
-        semantic_escape_chars: format!("{SEMANTIC_ESCAPE_CHARS}─"),
-        osc52: Osc52::Disabled,
-        ..Config::default()
-    }
-}
-
 pub(super) fn pty_term_config(
     scrolling_history: usize,
     cursor_shape: SettingsCursorShape,
@@ -120,17 +107,6 @@ pub(super) fn pty_term_config(
         semantic_escape_chars: format!("{SEMANTIC_ESCAPE_CHARS}─"),
         ..Config::default()
     }
-}
-
-pub(super) fn set_default_cursor_style(
-    config: &mut AlacrittyTermConfig,
-    cursor_shape: SettingsCursorShape,
-) {
-    config.default_cursor_style = alacritty_cursor_style(cursor_shape);
-}
-
-pub(super) fn apply_config(term: &AlacrittyTermLock, config: &AlacrittyTermConfig) {
-    term.lock().set_options(config.clone());
 }
 
 pub(super) fn current_child_signal_mask() -> io::Result<tty::SignalMask> {
@@ -442,11 +418,6 @@ impl Cell {
         self.cell.c
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_character(&mut self, character: char) {
-        self.cell.c = character;
-    }
-
     #[inline]
     pub fn foreground(&self) -> Color {
         self.cell.fg
@@ -734,11 +705,6 @@ fn terminal_point_from_alacritty(point: AlacPoint) -> Point {
 }
 
 impl Range {
-    #[cfg(test)]
-    fn to_alacritty(self) -> RangeInclusive<AlacPoint> {
-        self.start.to_alacritty()..=self.end.to_alacritty()
-    }
-
     fn from_alacritty(range: RangeInclusive<AlacPoint>) -> Self {
         Self {
             start: terminal_point_from_alacritty(*range.start()),
@@ -778,10 +744,6 @@ pub(super) fn clear_saved_screen(term: &mut Term<ZedListener>) {
     if (new_cursor.line.0 as usize) < term.screen_lines() - 1 {
         term.grid_mut().reset_region((new_cursor.line + 1)..);
     }
-}
-
-pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {
-    term.grid_mut().truncate();
 }
 
 pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> Content {
@@ -874,28 +836,6 @@ pub(super) fn full_content_range(term: &Term<ZedListener>) -> Range {
     Range::from_alacritty(start..=end)
 }
 
-pub(super) fn last_non_empty_lines(term: &Term<ZedListener>, line_count: usize) -> Vec<String> {
-    let grid = term.grid();
-    let mut lines = Vec::new();
-
-    let mut current_line = grid.bottommost_line().0;
-    let topmost_line = grid.topmost_line().0;
-
-    while current_line >= topmost_line && lines.len() < line_count {
-        let (logical_line_start, logical_line) =
-            logical_line_for_row(grid, current_line, topmost_line);
-
-        if let Some(line) = process_line(logical_line) {
-            lines.push(line);
-        }
-
-        current_line = logical_line_start - 1;
-    }
-
-    lines.reverse();
-    lines
-}
-
 pub(super) fn update_vi_cursor_for_scroll(term: &mut Term<ZedListener>, scroll: Scroll) {
     match scroll {
         Scroll::Delta(delta) => {
@@ -936,81 +876,6 @@ pub(super) fn find_from_terminal_point(
 ) -> Option<HyperlinkMatch> {
     let point = point.to_alacritty().grid_clamp(term, Boundary::Grid);
     hyperlinks::find_from_grid_point(term, point, regex_searches, path_style)
-}
-
-fn logical_line_for_row(grid: &Grid<AlacCell>, current: i32, topmost: i32) -> (i32, String) {
-    let start = find_logical_line_start(grid, current, topmost);
-    let mut line = String::new();
-    for row in start..=current {
-        line.push_str(&row_to_string(&grid[Line(row)]));
-    }
-    (start, line)
-}
-
-fn find_logical_line_start(grid: &Grid<AlacCell>, current: i32, topmost: i32) -> i32 {
-    let mut line_start = current;
-    while line_start > topmost {
-        let previous_line = Line(line_start - 1);
-        let last_cell = &grid[previous_line][Column(grid.columns() - 1)];
-        if !last_cell.flags.contains(Flags::WRAPLINE) {
-            break;
-        }
-        line_start -= 1;
-    }
-    line_start
-}
-
-fn row_to_string(row: &Row<AlacCell>) -> String {
-    row[..Column(row.len())]
-        .iter()
-        .map(|cell| cell.c)
-        .collect::<String>()
-}
-
-fn process_line(line: String) -> Option<String> {
-    let trimmed = line.trim_end().to_string();
-    if !trimmed.is_empty() {
-        Some(trimmed)
-    } else {
-        None
-    }
-}
-
-/// Appends a stringified task summary to the terminal, after its output.
-///
-/// SAFETY: This function should only be called after terminal's PTY is no longer alive.
-/// New text being added to the terminal here, uses "less public" APIs,
-/// which are not maintaining the entire terminal state intact.
-///
-///
-/// The library
-///
-/// * does not increment inner grid cursor's _lines_ on `input` calls
-///   (but displaying the lines correctly and incrementing cursor's columns)
-///
-/// * ignores `\n` and \r` character input, requiring the `newline` call instead
-///
-/// * does not alter grid state after `newline` call
-///   so its `bottommost_line` is always the same additions, and
-///   the cursor's `point` is not updated to the new line and column values
-///
-/// * ??? there could be more consequences, and any further "proper" streaming from the PTY might bug and/or panic.
-///   Still, subsequent `append_text_to_term` invocations are possible and display the contents correctly.
-///
-/// Despite the quirks, this is the simplest approach to appending text to the terminal: its alternative, `grid_mut` manipulations,
-/// do not properly set the scrolling state and display odd text after appending; also those manipulations are more tedious and error-prone.
-/// The function achieves proper display and scrolling capabilities, at a cost of grid state not properly synchronized.
-/// This is enough for printing moderately-sized texts like task summaries, but might break or perform poorly for larger texts.
-pub(super) unsafe fn append_text_to_term(term: &mut Term<ZedListener>, text_lines: &[&str]) {
-    term.newline();
-    term.grid_mut().cursor.point.column = Column(0);
-    for line in text_lines {
-        for character in line.chars() {
-            term.input(character);
-        }
-        term.newline();
-        term.grid_mut().cursor.point.column = Column(0);
-    }
 }
 
 pub(super) fn search_matches(term: &AlacrittyTerm, searcher: Search) -> Vec<Range> {

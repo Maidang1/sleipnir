@@ -8,9 +8,9 @@ What stays **local** (forked or original):
 
 | Crate | Why local |
 |-------|-----------|
-| `terminal` | Heavily forked: settings/theme/task rewired to `sleipnir_settings` / `task_types` |
+| `terminal` | Heavily forked: settings/theme rewired to `sleipnir_settings` |
 | `gpui_platform` | Slim macOS application entry |
-| `sleipnir`, `sleipnir_ui`, `sleipnir_settings`, `task_types`, `release_channel` | Product code |
+| `sleipnir`, `sleipnir_ui`, `sleipnir_settings`, `release_channel` | Product code |
 | `alacritty_terminal` | **Git pin** to [Maidang1/alacritty](https://github.com/Maidang1/alacritty) (`sleipnir-osc-custom`): zed alacritty fork + OSC 133/9/777 (see [ADR-0005](docs/adr/0005-vendored-alacritty-term.md)) |
 | `vte` | **Git pin** to [Maidang1/vte](https://github.com/Maidang1/vte) (`sleipnir-osc-custom`): vte 0.15.0 + `Handler::osc_custom`; `[patch.crates-io]` forces every crate onto that rev |
 
@@ -110,7 +110,7 @@ Optional dry-run against a local Zed checkout (forks only):
 | Area | Why different |
 |------|----------------|
 | `terminal/src/terminal_settings.rs` | Thin re-export of `sleipnir_settings`, not Zed `Settings` trait |
-| `terminal/src/terminal.rs` imports | `task_types`, `sleipnir_settings::TerminalPalette` instead of `task`/`theme` |
+| `terminal/src/terminal.rs` imports | `sleipnir_settings::TerminalPalette` instead of `task`/`theme` |
 | `get_color_at_index` | Takes palette, not full `Theme` |
 | Integration tests in terminal | Stubbed / disabled |
 | `gpui_platform` | macOS application entry via `gpui_macos` |

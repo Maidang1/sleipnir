@@ -4494,7 +4494,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "util",
 ]
 
 [[package]]
@@ -4883,16 +4882,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "task_types"
-version = "0.1.1"
-dependencies = [
- "collections",
- "schemars",
- "serde",
- "util",
-]
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4922,7 +4911,6 @@ version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "async-channel",
  "collections",
  "futures",
  "futures-lite 1.13.0",
@@ -4936,11 +4924,9 @@ dependencies = [
  "regex",
  "release_channel",
  "run_ledger",
- "schemars",
  "serde",
  "sleipnir_settings",
  "sysinfo 0.37.2",
- "task_types",
  "thiserror 2.0.20",
  "url",
  "urlencoding",

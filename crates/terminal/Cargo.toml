@@ -16,7 +16,6 @@ path = "src/terminal.rs"
 doctest = false
 
 [dependencies]
-async-channel.workspace = true
 alacritty_terminal.workspace = true
 anyhow.workspace = true
 collections.workspace = true
@@ -28,10 +27,8 @@ libc.workspace = true
 log.workspace = true
 regex.workspace = true
 release_channel.workspace = true
-schemars.workspace = true
 serde.workspace = true
 sysinfo.workspace = true
-task_types.workspace = true
 sleipnir_settings.workspace = true
 thiserror.workspace = true
 url.workspace = true

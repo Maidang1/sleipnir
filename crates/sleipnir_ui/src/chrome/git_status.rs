@@ -22,24 +22,7 @@ pub struct GitSnapshot {
     pub deleted: u32,
 }
 
-impl GitSnapshot {
-    pub fn is_dirty(&self) -> bool {
-        self.added > 0 || self.deleted > 0
-    }
 
-    /// `+N −M` when dirty; omitted when clean.
-    pub fn dirty_label(&self) -> Option<String> {
-        if !self.is_dirty() {
-            return None;
-        }
-        match (self.added > 0, self.deleted > 0) {
-            (true, true) => Some(format!("+{} −{}", self.added, self.deleted)),
-            (true, false) => Some(format!("+{}", self.added)),
-            (false, true) => Some(format!("−{}", self.deleted)),
-            (false, false) => None,
-        }
-    }
-}
 
 pub trait GitFs {
     fn exists(&self, path: &Path) -> bool;
@@ -148,7 +131,8 @@ fn schedule_refresh(root: PathBuf) {
 
 /// Snapshot the work tree that contains `cwd`, or `None` if it is not a repo.
 /// Line counts require a `git` binary; missing git yields a clean branch.
-pub fn git_snapshot(cwd: &Path) -> Option<GitSnapshot> {
+#[cfg(test)]
+fn git_snapshot(cwd: &Path) -> Option<GitSnapshot> {
     let root = git_root_in(cwd, |path| RealFs.exists(path))?;
     git_snapshot_with_numstat(&root)
 }
@@ -162,7 +146,7 @@ fn git_snapshot_with_numstat(root: &Path) -> Option<GitSnapshot> {
 }
 
 /// Branch only. Dirty line counts stay 0 — callers that need them use
-/// [`cached_git_snapshot`] / [`git_snapshot`].
+/// [`cached_git_snapshot`].
 pub fn git_snapshot_in(cwd: &Path, fs: &impl GitFs) -> Option<GitSnapshot> {
     let root = git_root_in(cwd, |path| fs.exists(path))?;
     let gitdir = resolve_gitdir(&root, fs)?;
@@ -293,8 +277,7 @@ mod tests {
         write_repo(tmp.path(), "ref: refs/heads/main\n");
         let snap = git_snapshot(tmp.path()).expect("repo");
         assert_eq!(snap.branch, "main");
-        assert!(!snap.is_dirty(), "clean tree must add no dirty chrome: {snap:?}");
-        assert_eq!(snap.dirty_label(), None);
+        assert_eq!((snap.added, snap.deleted), (0, 0), "{snap:?}");
     }
 
     #[test]
@@ -306,7 +289,7 @@ mod tests {
         );
         let snap = git_snapshot(tmp.path()).expect("repo");
         assert_eq!(snap.branch, "abcdef1");
-        assert!(!snap.is_dirty());
+        assert_eq!((snap.added, snap.deleted), (0, 0));
     }
 
     #[test]
@@ -320,12 +303,7 @@ mod tests {
         assert_eq!(parse_numstat(text), (123, 5));
         assert_eq!(parse_numstat(""), (0, 0));
         let (added, deleted) = parse_numstat("110\t3\tCHANGELOG.md\n10\t2\tREADME.md\n");
-        let snap = GitSnapshot {
-            branch: "main".into(),
-            added,
-            deleted,
-        };
-        assert_eq!(snap.dirty_label().as_deref(), Some("+120 −5"));
+        assert_eq!((added, deleted), (120, 5));
     }
 
     #[test]
@@ -354,7 +332,6 @@ mod tests {
         let snap = git_snapshot(root).expect("repo");
         assert_eq!(snap.added, 3, "inserted lines: {snap:?}");
         assert_eq!(snap.deleted, 1, "deleted lines: {snap:?}");
-        assert_eq!(snap.dirty_label().as_deref(), Some("+3 −1"));
     }
 
     struct MapFs {
@@ -406,7 +383,7 @@ mod tests {
         fs.file("/repo/README.md", "hello");
         let snap = git_snapshot_in(Path::new("/repo"), &fs).expect("repo");
         assert_eq!(snap.branch, "main");
-        assert!(!snap.is_dirty());
+        assert_eq!((snap.added, snap.deleted), (0, 0));
     }
 
     #[test]

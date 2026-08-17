@@ -254,13 +254,13 @@ fn wrap_fish(
     (program.to_string(), Some(out))
 }
 
-/// Apply inject to a [`task_types::Shell`] for an interactive pane spawn.
+/// Apply inject to a [`util::shell::Shell`] for an interactive pane spawn.
 pub fn apply_inject_to_shell(
-    shell: task_types::Shell,
+    shell: util::shell::Shell,
     env: &mut HashMap<String, String>,
     enabled: bool,
-) -> task_types::Shell {
-    use task_types::Shell;
+) -> util::shell::Shell {
+    use util::shell::Shell;
     if !enabled {
         return shell;
     }

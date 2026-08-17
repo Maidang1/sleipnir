@@ -6,7 +6,6 @@ members = [
     "crates/sleipnir_settings",
     "crates/terminal",
     "crates/parse_bench",
-    "crates/task_types",
     "crates/release_channel",
     "crates/updater",
     "crates/run_ledger",
@@ -44,7 +43,6 @@ sleipnir = { path = "crates/sleipnir" }
 sleipnir_ui = { path = "crates/sleipnir_ui" }
 sleipnir_settings = { path = "crates/sleipnir_settings" }
 terminal = { path = "crates/terminal" }
-task_types = { path = "crates/task_types" }
 release_channel = { path = "crates/release_channel" }
 updater = { path = "crates/updater" }
 run_ledger = { path = "crates/run_ledger" }

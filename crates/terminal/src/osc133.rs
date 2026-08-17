@@ -192,7 +192,8 @@ fn parse_osc133_payload(buf: &[u8]) -> Option<Osc133Kind> {
 }
 
 /// One-shot parse of a complete slice (for tests / batch).
-pub fn scan_osc133(bytes: &[u8]) -> Vec<Osc133Kind> {
+#[cfg(test)]
+fn scan_osc133(bytes: &[u8]) -> Vec<Osc133Kind> {
     let mut s = Osc133Scanner::new();
     s.push(bytes)
 }
