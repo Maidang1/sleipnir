@@ -37,10 +37,16 @@ pub struct ChromeGeometry {
 
 impl ChromeGeometry {
     pub fn standard() -> Self {
+        Self::standard_for(cfg!(windows))
+    }
+
+    /// Chrome insets for a given OS family. `windows = true` uses a small
+    /// leading pad and reserves trailing space for caption buttons.
+    pub fn standard_for(windows: bool) -> Self {
         Self {
             height: px(40.0),
             traffic_light_position: point(px(12.0), px(12.0)),
-            leading_pad: traffic_light_leading_pad(),
+            leading_pad: leading_pad_for(windows),
             tab_height: px(28.0),
             rail_row_height: px(48.0),
             tab_radius: px(6.0),
@@ -52,7 +58,7 @@ impl ChromeGeometry {
             new_tab_hit: px(28.0),
             close_hit: px(24.0),
             window_radius: px(10.0),
-            trailing_pad: px(8.0),
+            trailing_pad: trailing_pad_for(windows),
             sidebar_width: px(200.0),
             sidebar_header: px(40.0),
             content_title_height: px(28.0),
@@ -73,12 +79,30 @@ impl ChromeGeometry {
 }
 
 #[inline]
+#[allow(dead_code)]
 pub fn traffic_light_leading_pad() -> Pixels {
-    if cfg!(macos_sdk_26_or_later) {
+    leading_pad_for(cfg!(windows))
+}
+
+#[inline]
+pub fn leading_pad_for(windows: bool) -> Pixels {
+    if windows {
+        px(8.0)
+    } else if cfg!(macos_sdk_26_or_later) {
         // Match Zed ui::TRAFFIC_LIGHT_PADDING without depending on ui.
         px(78.0)
     } else {
         px(71.0)
+    }
+}
+
+/// Space reserved on the right for system window controls.
+#[inline]
+pub fn trailing_pad_for(windows: bool) -> Pixels {
+    if windows {
+        px(138.0)
+    } else {
+        px(8.0)
     }
 }
 
@@ -94,9 +118,14 @@ mod tests {
         assert_eq!(g.close_hit, px(24.0));
         assert_eq!(g.new_tab_hit, px(28.0));
         let pad = traffic_light_leading_pad();
-        assert!(pad == px(71.0) || pad == px(78.0));
-        assert_eq!(g.trailing_pad, px(8.0));
-        assert!(g.leading_pad >= px(71.0));
+        if cfg!(windows) {
+            assert_eq!(pad, px(8.0));
+            assert_eq!(g.trailing_pad, px(138.0));
+        } else {
+            assert!(pad == px(71.0) || pad == px(78.0));
+            assert_eq!(g.trailing_pad, px(8.0));
+            assert!(g.leading_pad >= px(71.0));
+        }
         assert_eq!(g.sidebar_width, px(200.0));
         assert_eq!(g.sidebar_header, px(40.0));
         assert_eq!(g.content_title_height, px(28.0));
@@ -104,5 +133,15 @@ mod tests {
         assert_eq!(g.top_strip_height, px(56.0));
         assert!(g.rail_row_height > g.tab_height);
         assert!(g.top_strip_height > g.rail_row_height);
+    }
+
+    #[test]
+    fn windows_chrome_reserves_caption_not_traffic_lights() {
+        let win = ChromeGeometry::standard_for(true);
+        assert_eq!(win.leading_pad, px(8.0));
+        assert_eq!(win.trailing_pad, px(138.0));
+        let mac = ChromeGeometry::standard_for(false);
+        assert!(mac.leading_pad >= px(71.0));
+        assert_eq!(mac.trailing_pad, px(8.0));
     }
 }

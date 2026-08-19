@@ -31,6 +31,8 @@ syntax.workspace = true
 sleipnir_ctl.workspace = true
 sysinfo.workspace = true
 async-channel.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
 
 [dev-dependencies]

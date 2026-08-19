@@ -4,7 +4,7 @@
 
 # Sleipnir
 
-**面向 macOS 的原生终端：GPU 绘制，支持标签和分屏。**
+**面向 macOS 和 Windows 的原生终端：GPU 绘制，支持标签和分屏。**
 
 基于 [GPUI](https://gpui.rs)（[Zed](https://github.com/zed-industries/zed) 的 UI 框架）
 和一份 fork 过的终端后端。
@@ -19,19 +19,19 @@
 
 ## 简介
 
-Sleipnir 是独立的 macOS 终端，通过 GPUI 在 GPU 上绘制，大量输出时滚动和重绘也能跟上。
-自带真实主机 PTY、输入法、多标签和分屏、多窗口、跟随系统外观的主题，以及会把粘贴的图片写成带引号路径的剪贴板。
+Sleipnir 是独立终端，通过 GPUI 在 GPU 上绘制，大量输出时滚动和重绘也能跟上。
+自带真实主机 PTY（Windows 上是 ConPTY）、输入法、多标签和分屏、多窗口、跟随系统外观的主题，以及会把粘贴的图片写成带引号路径的剪贴板。
 
-预编译包是 macOS 的 `.dmg` / `.zip`，在
+预编译包是 macOS 的 `.dmg` / `.zip` 和 Windows 的 `*-windows-x64.zip`，在
 [GitHub Releases](https://github.com/Maidang1/sleipnir/releases)。
-不支持 Windows 和 Linux。
+不支持 Linux。
 
 名字来自北欧神话：奥丁的八腿坐骑，九界里最快的马。图标把这个抽象成马头标记，压在一段终端提示符上。
 
 ## 功能
 
-- **GPU 绘制**，滚动和重绘走 GPUI（Metal）；光标缓入缓出闪烁。
-- **标签、分屏与窗格**，默认左侧标签轨，也可以改成顶部标签条（`tab_placement: top`，设置里的 Tab placement，View → Toggle Tab Placement，或命令面板）。两种布局都按 git 工作区静默分组，不画分组标题。侧栏是两行：标题，下一行是分支和脏计数 `+N −M`。顶部条只显示窗格 cwd 的最后两级（`myself/harbor`），不显示分支和脏计数。右键重命名仍可覆盖。可以向右 / 向下分屏，跳转标签，移动焦点；组内拖动重排，拖到终端区域会拆成新窗口；把后台标签拖到当前窗格上会合并成分屏；把窗格把手拖到标签列表会抽成新标签。支持窗格放大，未聚焦窗格会变暗。识别到的编码 Agent 会显示字母标记（`claude` → `C`，`codex` → `X` 等）；普通 shell 没有占位符。有失败 Attention 的标签整块淡红，不画运行中 / 成功圆点。Mark Tab as Seen 只清 Attention，不删 Run 记录。
+- **GPU 绘制**，滚动和重绘走 GPUI（macOS 上 Metal，Windows 上 Direct3D 11）；光标缓入缓出闪烁。
+- **标签、分屏与窗格**，默认顶部标签条，也可以改成左侧标签轨（`tab_placement: side`，设置里的 Tab placement，View → Toggle Tab Placement，或命令面板）。两种布局都按 git 工作区静默分组，不画分组标题。侧栏是两行：标题，下一行是分支和脏计数 `+N −M`。顶部条只显示窗格 cwd 的最后两级（`myself/harbor`），不显示分支和脏计数。右键重命名仍可覆盖。可以向右 / 向下分屏，跳转标签，移动焦点；组内拖动重排，拖到终端区域会拆成新窗口；把后台标签拖到当前窗格上会合并成分屏；把窗格把手拖到标签列表会抽成新标签。支持窗格放大，未聚焦窗格会变暗。识别到的编码 Agent 会显示字母标记（`claude` → `C`，`codex` → `X` 等）；普通 shell 没有占位符。有失败 Attention 的标签整块淡红，不画运行中 / 成功圆点。Mark Tab as Seen 只清 Attention，不删 Run 记录。
 - **多窗口**，`⌘N` 打开独立窗口，标签和 shell 各自一套。
 - **字体缩放**，`⌘+`（以及 `-` / `0`）只改当前窗口的格子大小，不写进设置。
 - **自适应主题**，Catppuccin 各口味，加上 Tokyo Night、Nord、Gruvbox、Solarized、GitHub Dark/Light、Dracula、One Dark；`auto` 跟随系统浅色 / 深色。额外调色板放配置目录的 `themes.json`（`"theme": "kanagawa"`，见 `docs/themes.example.json`）。
@@ -52,7 +52,9 @@ Sleipnir 是独立的 macOS 终端，通过 GPUI 在 GPU 上绘制，大量输�
 
 ## 安装
 
-Sleipnir **只支持 macOS 14+**。装最新 GitHub Release：
+### macOS 14+
+
+装最新 GitHub Release：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | bash
@@ -74,18 +76,31 @@ curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/inst
 xattr -cr /Applications/Sleipnir.app
 ```
 
+### Windows 10 1809+
+
+从 [Releases](https://github.com/Maidang1/sleipnir/releases) 下载
+`Sleipnir-<ver>-windows-x64.zip`，解压后运行 `sleipnir.exe`。也可以从源码编译：
+
+```powershell
+cargo run -p sleipnir
+```
+
+设置在 `%APPDATA%\sleipnir\`。默认字体是 Cascadia Mono。快捷键走 Ctrl / Ctrl+Shift，
+不会抢走 shell 的 `Ctrl+C` / `Ctrl+W` / `Ctrl+D`。就地自动更新只在 macOS；
+Windows 上「检查更新」会打开 Releases 页面。
+
 ## 环境
 
 跑发行版需要：
 
-- macOS 14.0+（Sonoma）
+- macOS 14.0+（Sonoma），或 Windows 10 1809+ 且有 Direct3D 11 GPU
 
 从源码编译还需要：
 
 - Rust **1.95.0**（见 `rust-toolchain.toml`）
-- Xcode 和 Metal Toolchain（`xcodebuild -downloadComponent MetalToolchain`）
+- macOS：Xcode 和 Metal Toolchain（`xcodebuild -downloadComponent MetalToolchain`）
 
-这个 crate 在 Windows 和 Linux 上编不过。
+不支持 Linux。
 
 ## 编译和运行
 
@@ -97,8 +112,9 @@ cargo run -p sleipnir
 ## 配置
 
 兼容 Zed 的 `terminal.*`，再加上 Sleipnir 自己的键。设置在
-`~/.config/sleipnir/settings.json`，会话恢复在 `session.json`。
-默认字体是 **Menlo**。
+`~/.config/sleipnir/settings.json`（macOS）或 `%APPDATA%\sleipnir\settings.json`
+（Windows），会话恢复在同目录的 `session.json`。
+默认字体 macOS 是 **Menlo**，Windows 是 **Cascadia Mono**。
 
 | 键 | 含义 |
 |-----|---------|
@@ -118,7 +134,7 @@ cargo run -p sleipnir
 | `run_ledger_retention_days` | 持久化记录保留天数（默认 `7`） |
 | `run_ledger_max_runs` | 持久化条数上限，先丢最旧的（默认 `500`） |
 | `run_ledger_redact` | 采集时脱敏命令行（默认 `true`；启发式，不是保证） |
-| `tab_placement` | `side`（默认）左侧轨，标题 + 分支/`+N −M` / `top` 顶部条，只显示 cwd 路径。静默分组和组内拖动一样 |
+| `tab_placement` | `top`（默认）顶部条，只显示 cwd 路径 / `side` 左侧轨，标题 + 分支/`+N −M`。静默分组和组内拖动一样 |
 | `sidebar_width` | 左侧轨宽度，单位 px，160–320（默认 `200`）。不是实时拖动的分割条 |
 | `agent_icons` | 已知编码 Agent 的字母标记（默认 `true`） |
 | `control_surface` | 绑定本地控制套接字（默认 `false`）。`SLEIPNIR_CONTROL=1` 也会打开 |

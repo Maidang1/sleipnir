@@ -124,6 +124,7 @@ impl AppShell {
         &self,
         tokens: &ChromeTokens,
         geo: &ChromeGeometry,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = self.tabs.get(self.active);
@@ -136,27 +137,38 @@ impl AppShell {
         let label: gpui::SharedString = format!("{workspace} · {title}").into();
         let palette = TerminalPalette::get_global(cx);
 
-        self.attach_empty_drag("content-title", cx)
+        div()
+            .id("content-title-row")
             .h(geo.content_title_height)
             .w_full()
             .flex()
             .flex_row()
             .items_center()
-            .px_3()
             .min_w_0()
             .bg(tokens.content_bg)
-            .text_sm()
-            .text_color(tokens.fg_muted)
             .child(
-                div()
+                self.attach_empty_drag("content-title", cx)
+                    .h_full()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(label),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px_3()
+                    .text_sm()
+                    .text_color(tokens.fg_muted)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label),
+                    )
+                    .child(self.render_diff_chrome_button(tokens, &palette, cx)),
             )
-            .child(self.render_diff_chrome_button(tokens, &palette, cx))
+            .child(self.render_windows_titlebar_end(tokens, window, cx))
     }
 
     /// Always-visible chrome control that opens the diff inspector.

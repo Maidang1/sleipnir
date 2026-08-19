@@ -2,6 +2,9 @@ use gpui::{Context, Task};
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
 use std::{path::PathBuf, sync::Arc};
 
+#[cfg(target_os = "windows")]
+use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
+
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::{Event, Terminal};
@@ -25,6 +28,7 @@ impl ProcessIdGetter {
     }
 }
 
+#[cfg(unix)]
 impl ProcessIdGetter {
     fn pid(&self) -> Option<Pid> {
         // Negative pid means error.
@@ -43,6 +47,21 @@ impl ProcessIdGetter {
     }
 }
 
+#[cfg(windows)]
+impl ProcessIdGetter {
+    fn pid(&self) -> Option<Pid> {
+        let pid = unsafe { GetProcessId(HANDLE(self.handle as _)) };
+        // GetProcessId may fail and return zero.
+        if pid == 0 {
+            if self.fallback_pid == 0 {
+                return None;
+            }
+            return Some(Pid::from_u32(self.fallback_pid));
+        }
+        Some(Pid::from_u32(pid))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ProcessInfo {
     pub(crate) name: String,
@@ -57,10 +76,13 @@ pub(crate) struct ProcessInfo {
 /// signalled afterwards.
 #[derive(Clone, Copy)]
 pub(crate) struct TerminalProcessIds {
+    #[cfg_attr(not(unix), allow(dead_code))]
     foreground: Option<Pid>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     child: Pid,
 }
 
+#[cfg(unix)]
 impl TerminalProcessIds {
     /// The spawned child (the shell) leads its own process group, but under
     /// job control a foreground job runs in a separate process group that
@@ -96,6 +118,19 @@ impl TerminalProcessIds {
 
     pub(crate) fn kill(&self) -> bool {
         self.signal_process_groups(libc::SIGKILL)
+    }
+}
+
+#[cfg(not(unix))]
+impl TerminalProcessIds {
+    pub(crate) fn terminate(&self) -> bool {
+        false
+    }
+
+    // Windows has no process groups to escalate on; killing the child relies
+    // on [`PtyProcessInfo::kill_child_process`] instead.
+    pub(crate) fn kill(&self) -> bool {
+        false
     }
 }
 

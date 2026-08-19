@@ -6,7 +6,8 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, canvas, deferred, div, point,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, canvas,
+    deferred, div, point,
     prelude::FluentBuilder as _, px, relative, size,
 };
 use run_ledger::{PaneKey, RunEvent};
@@ -333,7 +334,7 @@ pub struct AppShell {
     /// In-progress inline tab rename, if any.
     pub(crate) rename: Option<RenameState>,
     /// Whether the settings overlay is visible.
-    settings_open: bool,
+    pub(crate) settings_open: bool,
     /// Active section tab inside the settings panel.
     settings_section: SettingsSection,
     /// Type-to-filter query for the theme picker (empty = all).
@@ -419,7 +420,11 @@ pub fn open_sleipnir_window(cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(geo.traffic_light_position),
+                traffic_light_position: if cfg!(windows) {
+                    None
+                } else {
+                    Some(geo.traffic_light_position)
+                },
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -444,7 +449,11 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(geo.traffic_light_position),
+                traffic_light_position: if cfg!(windows) {
+                    None
+                } else {
+                    Some(geo.traffic_light_position)
+                },
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -2174,6 +2183,7 @@ impl AppShell {
         None
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn all_live_panes(&self) -> Vec<(PaneKey, Entity<TermView>)> {
         let mut out = Vec::new();
         for tab in &self.tabs {
@@ -2400,8 +2410,12 @@ impl AppShell {
                 cx.notify();
             }
             CommandId::CheckForUpdates => {
-                self.update_open = true;
-                self.spawn_update_check(window, cx);
+                if !updater::in_place_update_supported() {
+                    cx.open_url(updater::RELEASES_PAGE);
+                } else {
+                    self.update_open = true;
+                    self.spawn_update_check(window, cx);
+                }
             }
             CommandId::Find => self.open_find(cx),
             CommandId::ToggleCommandPalette => self.open_palette(cx),
@@ -2695,6 +2709,10 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !updater::in_place_update_supported() {
+            cx.open_url(updater::RELEASES_PAGE);
+            return;
+        }
         // Open the update dialog and start a check.
         self.update_open = true;
         self.spawn_update_check(window, cx);
@@ -3047,7 +3065,7 @@ impl AppShell {
         self.toggle_settings(window, cx);
     }
 
-    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
         if self.settings_open {
             // Always land on Theme when reopening; future sections can restore.
@@ -3092,6 +3110,7 @@ impl AppShell {
     ) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
+            .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
@@ -3719,7 +3738,7 @@ impl AppShell {
                 div()
                     .text_size(px(11.0))
                     .text_color(tokens.fg_muted)
-                    .child("~/.config/sleipnir/settings.json"),
+                    .child(sleipnir_settings::config_path().display().to_string()),
             );
 
         let panel = div()
@@ -5057,7 +5076,11 @@ impl Render for AppShell {
                     .attach_empty_drag("chrome-drag-trailing", cx)
                     .h_full()
                     .flex_1()
-                    .min_w(geo.trailing_pad);
+                    .min_w(if cfg!(windows) {
+                        px(8.0)
+                    } else {
+                        geo.trailing_pad
+                    });
                 let tab_scroll = self.render_tab_strip(&tokens, &geo, window, cx);
                 let chrome_band = div()
                     .id("chrome-band")
@@ -5075,7 +5098,8 @@ impl Render for AppShell {
                             .px_2()
                             .child(self.render_diff_chrome_button(&tokens, &palette, cx)),
                     )
-                    .child(trailing_drag);
+                    .child(trailing_drag)
+                    .child(self.render_windows_titlebar_end(&tokens, window, cx));
                 el.child(chrome_band)
                     .when(self.find_open, |el| {
                         el.child(self.render_find_bar(&tokens, cx))
@@ -5100,7 +5124,7 @@ impl Render for AppShell {
                                 .flex_1()
                                 .min_w_0()
                                 .min_h_0()
-                                .child(self.render_content_title(&tokens, &geo, cx))
+                                .child(self.render_content_title(&tokens, &geo, window, cx))
                                 .when(self.find_open, |el| {
                                     el.child(self.render_find_bar(&tokens, cx))
                                 })
@@ -5450,6 +5474,14 @@ impl AppShell {
                     std::fs::read_to_string(h.join(".zsh_history"))
                         .ok()
                         .or_else(|| std::fs::read_to_string(h.join(".bash_history")).ok())
+                })
+            })
+            .or_else(|| {
+                dirs::data_dir().and_then(|d| {
+                    std::fs::read_to_string(
+                        d.join("Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"),
+                    )
+                    .ok()
                 })
             })
             .unwrap_or_default();

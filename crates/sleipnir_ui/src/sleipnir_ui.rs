@@ -31,7 +31,7 @@ pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_rati
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
 pub use keymap::{
     BindingContext, BuiltinAction, BuiltinBinding, builtin_bindings, display_shortcut,
-    font_zoom_key_bindings, tmux_preset_bindings,
+    font_zoom_key_bindings, last_window_close_quits, tmux_preset_bindings,
 };
 pub use pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
@@ -925,13 +925,42 @@ fn notify_command_finished(dur: std::time::Duration) {
     notify_message("Sleipnir", &format!("Command finished after {secs}s"));
 }
 
-/// Best-effort macOS desktop notification (OSC 9 / 777 / command finish).
+/// Best-effort desktop notification (OSC 9 / 777 / command finish).
 fn notify_message(title: &str, message: &str) {
-    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{escaped}\" with title \"{title}\"");
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn();
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("display notification \"{escaped}\" with title \"{title}\"");
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    #[cfg(windows)]
+    {
+        // Best-effort toast via PowerShell. Failures are silent.
+        let title = title.replace('\'', "''");
+        let message = message.replace('\'', "''");
+        let script = format!(
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; \
+             $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+             $text = $template.GetElementsByTagName('text'); \
+             $text.Item(0).AppendChild($template.CreateTextNode('{title}')) > $null; \
+             $text.Item(1).AppendChild($template.CreateTextNode('{message}')) > $null; \
+             $toast = [Windows.UI.Notifications.ToastNotification]::new($template); \
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Sleipnir').Show($toast)"
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (title, message);
+    }
+}
+
+pub fn notify_uses_osascript() -> bool {
+    cfg!(target_os = "macos")
 }
 
 /// Clamp font size for zoom / settings (pt).
@@ -969,9 +998,15 @@ fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
     let is_c = keystroke.key.eq_ignore_ascii_case("c");
     let is_v = keystroke.key.eq_ignore_ascii_case("v");
 
-    // Cmd+C/V and Ctrl+Shift+C/V. Plain Ctrl+C / Ctrl+V stay with the PTY.
+    // Cmd+C/V and Ctrl+Shift+C/V. Plain Ctrl+C always stays with the PTY.
+    // On Windows, Ctrl+V is the shipped paste binding (never Ctrl+C).
     (modifiers.platform && (is_c || is_v))
         || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v))
+        || (cfg!(windows)
+            && modifiers.control
+            && !modifiers.shift
+            && !modifiers.platform
+            && is_v)
 }
 
 /// Open web URLs, and path-like targets when `path_links` is enabled (M12).
@@ -1105,15 +1140,32 @@ fn open_path_like_target(path: &terminal::PathLikeTarget) {
     open_existing_path(&candidate);
 }
 
-/// Program used to open paths.
+/// Program used to open paths. `None` on Windows (`cmd /C start`).
 pub fn path_opener_program() -> Option<&'static str> {
-    Some("open")
+    if cfg!(windows) {
+        None
+    } else {
+        Some("open")
+    }
 }
 
 pub(crate) fn open_existing_path(candidate: &Path) {
-    match std::process::Command::new("open").arg(candidate).spawn() {
-        Ok(_) => {}
-        Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+    #[cfg(windows)]
+    {
+        match std::process::Command::new("cmd")
+            .args(["/C", "start", "", &candidate.to_string_lossy()])
+            .spawn()
+        {
+            Ok(_) => {}
+            Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match std::process::Command::new("open").arg(candidate).spawn() {
+            Ok(_) => {}
+            Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+        }
     }
 }
 
@@ -1160,20 +1212,29 @@ fn shell_quote_path(path: &Path) -> String {
     quote_path_for_shell(path)
 }
 
-/// Quote `path` for POSIX shells.
+/// Quote `path` for the compiling OS shell (POSIX or PowerShell).
 pub fn quote_path_for_shell(path: &Path) -> String {
+    quote_path_for_shell_os(path, cfg!(windows))
+}
+
+/// Quote `path`. `windows = true` uses PowerShell single-quote rules.
+pub fn quote_path_for_shell_os(path: &Path, windows: bool) -> String {
     let s = path.to_string_lossy();
     if s.is_empty() {
         return "''".to_string();
     }
     let safe = s.chars().all(|c| {
         c.is_ascii_alphanumeric()
-            || matches!(c, '/' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
+            || matches!(c, '/' | '\\' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
     });
     if safe {
         return s.into_owned();
     }
-    format!("'{}'", s.replace('\'', "'\\''"))
+    if windows {
+        format!("'{}'", s.replace('\'', "''"))
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 /// Format Finder/file-manager paths for paste: leading space, quoted paths, trailing space.
@@ -1200,7 +1261,8 @@ mod tests {
     #[test]
     fn plain_control_c_and_v_are_sent_to_the_terminal() {
         assert!(!is_clipboard_shortcut(&parse("ctrl-c")));
-        assert!(!is_clipboard_shortcut(&parse("ctrl-v")));
+        // Windows ships Ctrl+V as paste; macOS leaves plain Ctrl+V for the PTY.
+        assert_eq!(is_clipboard_shortcut(&parse("ctrl-v")), cfg!(windows));
     }
 
     #[test]
@@ -1258,7 +1320,7 @@ mod tests {
 
         let mut plain_ctrl_v = parse("ctrl-v");
         plain_ctrl_v.key = "V".into();
-        assert!(!is_clipboard_shortcut(&plain_ctrl_v));
+        assert_eq!(is_clipboard_shortcut(&plain_ctrl_v), cfg!(windows));
 
         let mut cmd_c = parse("cmd-c");
         cmd_c.key = "C".into();
@@ -1276,10 +1338,22 @@ mod tests {
             "'/tmp/has space'"
         );
         assert_eq!(
-            quote_path_for_shell(Path::new("/tmp/o'reilly")),
+            quote_path_for_shell_os(Path::new("/tmp/o'reilly"), false),
             "'/tmp/o'\\''reilly'"
         );
         assert_eq!(quote_path_for_shell(Path::new("")), "''");
+        assert_eq!(
+            quote_path_for_shell_os(Path::new(r"C:\Program Files\x"), true),
+            r"'C:\Program Files\x'"
+        );
+        assert_eq!(
+            quote_path_for_shell_os(Path::new(r"C:\o'reilly"), true),
+            r"'C:\o''reilly'"
+        );
+        assert_eq!(
+            quote_path_for_shell_os(Path::new(r"C:\safe"), true),
+            r"C:\safe"
+        );
     }
 
     #[test]
@@ -1381,8 +1455,8 @@ mod tests {
     #[test]
     fn font_zoom_shipped_keystrokes_parse_as_platform_keys() {
         let bindings = font_zoom_key_bindings();
-        let want_plus = "cmd-+";
-        let want_minus = "cmd--";
+        let want_plus = if cfg!(windows) { "ctrl-+" } else { "cmd-+" };
+        let want_minus = if cfg!(windows) { "ctrl--" } else { "cmd--" };
         assert!(
             bindings
                 .iter()
@@ -1406,10 +1480,14 @@ mod tests {
             let ks = Keystroke::parse(keystroke).unwrap_or_else(|err| {
                 panic!("shipped font-zoom keystroke {keystroke:?} must parse: {err}")
             });
-            assert!(
-                ks.modifiers.platform,
-                "{keystroke} must include cmd/platform"
-            );
+            if cfg!(windows) {
+                assert!(ks.modifiers.control, "{keystroke} must include ctrl");
+            } else {
+                assert!(
+                    ks.modifiers.platform,
+                    "{keystroke} must include cmd/platform"
+                );
+            }
             match *action {
                 "increase_font_size" => {
                     assert!(
@@ -1443,8 +1521,12 @@ mod tests {
     }
 
     #[test]
-    fn path_opener_is_open() {
-        assert_eq!(path_opener_program(), Some("open"));
+    fn path_opener_is_os_specific() {
+        assert_eq!(path_opener_program().is_some(), !cfg!(windows));
+        if !cfg!(windows) {
+            assert_eq!(path_opener_program(), Some("open"));
+        }
+        assert_eq!(notify_uses_osascript(), cfg!(target_os = "macos"));
     }
 
     /// Regression: clicking Close on the confirm dialog must not hit the
@@ -1520,6 +1602,11 @@ mod tests {
             src.contains("toggle_diff"),
             "Diff chrome button must open the inspector"
         );
+        let title = include_str!("chrome/tab_sidebar.rs");
+        assert!(
+            title.contains("render_windows_titlebar_end"),
+            "side-layout content title must host Windows caption buttons"
+        );
     }
 
     /// Empty-region window move lives on `chrome-drag-trailing`. A height-less
@@ -1536,6 +1623,14 @@ mod tests {
         assert!(
             src[band..].contains(".child(trailing_drag)"),
             "chrome-band must parent trailing_drag directly so h_full() resolves against the band height"
+        );
+        assert!(
+            src.contains("WindowControlArea::Drag"),
+            "Windows drag requires WindowControlArea::Drag (start_window_move is a no-op there)"
+        );
+        assert!(
+            src.contains("render_windows_titlebar_end"),
+            "Windows caption buttons must ship on the chrome band"
         );
     }
 }

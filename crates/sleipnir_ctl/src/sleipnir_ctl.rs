@@ -11,9 +11,16 @@ pub fn socket_path() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/sleipnir/control.sock")
+    if cfg!(windows) {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("sleipnir")
+            .join("control.sock")
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config/sleipnir/control.sock")
+    }
 }
 
 /// `SLEIPNIR_CONTROL=1` (or `true`) turns the surface on regardless of settings.

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+## 0.2.1
+
+### Features
+- **Windows:** GPUI `WindowsPlatform` + ConPTY, Ctrl/Ctrl+Shift keymap (does not steal `Ctrl+C` / `Ctrl+W` / `Ctrl+D`), `%APPDATA%\sleipnir\` settings/session, Cascadia Mono default font, PowerShell path quoting, and last-window-close quits
+- Windows custom titlebar: drawn min / max / close buttons, drag from chrome, settings gear
+- CI `windows-latest` job builds/tests `-p sleipnir` and attaches `Sleipnir-<ver>-windows-x64.zip` (plus `.sha256`) to the GitHub Release
+
+### Changes
+- Default tab placement is the top strip (`tab_placement: top`). Side rail remains available
+- README and website document Windows from source / zip; Linux stays unsupported
+- In-place auto-update remains macOS-only; Windows Check for Updates opens the releases page
+- Control surface (`sleipnir-ctl`) stays Unix-socket and is a no-op on Windows
+
 ## 0.2.0
 
 ### Features

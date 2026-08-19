@@ -341,10 +341,10 @@ mod tests {
     #[test]
     fn session_file_sits_beside_settings() {
         let path = session_path();
-        assert!(
-            path.ends_with(".config/sleipnir/session.json"),
-            "{}",
-            path.display()
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("session.json")
         );
+        assert_eq!(path.parent(), Some(sleipnir_settings::config_dir().as_path()));
     }
 }

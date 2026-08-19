@@ -6,6 +6,10 @@
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(macos_sdk_26_or_later)");
 
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
     use std::process::Command;
 
     let output = Command::new("xcrun")

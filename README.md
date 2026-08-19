@@ -4,7 +4,7 @@
 
 # Sleipnir
 
-**A fast, native terminal emulator for macOS — GPU-rendered, tab- and split-aware.**
+**A fast, native terminal emulator for macOS and Windows — GPU-rendered, tab- and split-aware.**
 
 Built on [GPUI](https://gpui.rs) (the UI framework behind [Zed](https://github.com/zed-industries/zed))
 with a forked terminal backend.
@@ -19,15 +19,15 @@ with a forked terminal backend.
 
 ## About
 
-Sleipnir is a standalone macOS terminal that renders on the GPU through GPUI, so
+Sleipnir is a standalone terminal that renders on the GPU through GPUI, so
 scrolling and redraw stay smooth even under heavy output. It ships with a real
-host PTY, IME support, multi-tab and split panes, multi-window sessions,
-adaptive theming that follows the system appearance, and a file-manager-friendly
-clipboard that turns pasted images into quoted paths.
+host PTY (ConPTY on Windows), IME support, multi-tab and split panes, multi-window
+sessions, adaptive theming that follows the system appearance, and a
+file-manager-friendly clipboard that turns pasted images into quoted paths.
 
-Prebuilt downloads are macOS `.dmg` / `.zip` on
-[GitHub Releases](https://github.com/Maidang1/sleipnir/releases). Windows and
-Linux are not supported.
+Prebuilt downloads are macOS `.dmg` / `.zip` and a Windows `*-windows-x64.zip` on
+[GitHub Releases](https://github.com/Maidang1/sleipnir/releases). Linux is not
+supported.
 
 The name comes from Norse myth — Odin's eight-legged steed, the fastest horse in the
 nine worlds. The app icon abstracts that into a minimal horse-head mark over a terminal
@@ -35,8 +35,8 @@ prompt.
 
 ## Features
 
-- **GPU rendering** — smooth scrollback and redraw via GPUI (Metal); ease-in-out cursor blink.
-- **Tabs, splits & panes** — side tab rail (default) or top strip (`tab_placement: top`, Settings → Tab placement, View → Toggle Tab Placement, or the command palette). Both group by git workspace with no group header. The rail is two lines (title, then branch + dirty `+N −M`). The top strip shows only the last two cwd components (`myself/harbor`), no branch or dirty mark. Right-click rename still overrides. Split right/down, jump tabs, move focus, drag tabs to reorder inside a group or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark (`claude` → `C`, `codex` → `X`, …); a plain shell has no placeholder. A tab with failed Attention washes faint red (no running/success dots). Mark Tab as Seen clears Attention without deleting Run records.
+- **GPU rendering** — smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D 11 on Windows); ease-in-out cursor blink.
+- **Tabs, splits & panes** — top strip (default) or side tab rail (`tab_placement: side`, Settings → Tab placement, View → Toggle Tab Placement, or the command palette). Both group by git workspace with no group header. The rail is two lines (title, then branch + dirty `+N −M`). The top strip shows only the last two cwd components (`myself/harbor`), no branch or dirty mark. Right-click rename still overrides. Split right/down, jump tabs, move focus, drag tabs to reorder inside a group or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark (`claude` → `C`, `codex` → `X`, …); a plain shell has no placeholder. A tab with failed Attention washes faint red (no running/success dots). Mark Tab as Seen clears Attention without deleting Run records.
 - **Multi-window** — `⌘N` opens an independent window with its own tabs and shells.
 - **Font zoom** — `⌘+` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
@@ -63,7 +63,9 @@ prompt.
 
 ## Install
 
-Sleipnir is **macOS 14+ only**. Latest GitHub Release:
+### macOS 14+
+
+Latest GitHub Release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | bash
@@ -88,18 +90,33 @@ and, if macOS still blocks it, run:
 xattr -cr /Applications/Sleipnir.app
 ```
 
+### Windows 10 1809+
+
+Download `Sleipnir-<ver>-windows-x64.zip` from
+[Releases](https://github.com/Maidang1/sleipnir/releases), unzip, and run
+`sleipnir.exe`. Or build from source:
+
+```powershell
+cargo run -p sleipnir
+```
+
+Settings live in `%APPDATA%\sleipnir\`. Default font is Cascadia Mono. Shortcuts
+use Ctrl / Ctrl+Shift and do not steal `Ctrl+C` / `Ctrl+W` / `Ctrl+D` from the
+shell. In-place auto-update is macOS-only; **Check for Updates** opens the
+releases page.
+
 ## Requirements
 
 To **run** a release build:
 
-- macOS 14.0+ (Sonoma)
+- macOS 14.0+ (Sonoma), or Windows 10 1809+ with a Direct3D 11 GPU
 
 To **build** from source, also:
 
 - Rust **1.95.0** (see `rust-toolchain.toml`)
-- Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+- macOS: Xcode + Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
 
-The crate fails to compile on Windows and Linux.
+Linux is not supported.
 
 ## Build & run
 
@@ -111,8 +128,9 @@ cargo run -p sleipnir
 ## Config
 
 Zed-compatible `terminal.*` keys plus Sleipnir extensions. Settings live in
-`~/.config/sleipnir/settings.json` and session restore in `session.json`.
-Default font is **Menlo**.
+`~/.config/sleipnir/settings.json` (macOS) or `%APPDATA%\sleipnir\settings.json`
+(Windows); session restore is `session.json` next to it.
+Default font is **Menlo** on macOS and **Cascadia Mono** on Windows.
 
 | Key | Meaning |
 |-----|---------|
@@ -132,7 +150,7 @@ Default font is **Menlo**.
 | `run_ledger_retention_days` | How long to keep persisted runs (default `7`) |
 | `run_ledger_max_runs` | Cap on persisted runs; oldest dropped first (default `500`) |
 | `run_ledger_redact` | Redact command lines at capture (default `true`; heuristic, not a guarantee) |
-| `tab_placement` | `side` (default) left rail with title + branch/`+N −M` / `top` strip with cwd path only. Same silent grouping and in-group drag |
+| `tab_placement` | `top` (default) strip with cwd path only / `side` left rail with title + branch/`+N −M`. Same silent grouping and in-group drag |
 | `sidebar_width` | Left rail width in px, 160–320 (default `200`). Not a live-drag divider |
 | `agent_icons` | Letter monograms for known coding-agent processes (default `true`) |
 | `control_surface` | Bind the local control socket (default `false`). Also on with `SLEIPNIR_CONTROL=1` |

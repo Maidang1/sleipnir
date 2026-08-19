@@ -1,8 +1,5 @@
 //! Sleipnir — standalone terminal (HIG-aligned window chrome).
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("Sleipnir is macOS-only");
-
 mod app_menus;
 
 use app_menus::{Hide, HideOthers, ShowAll, app_menus, Quit};
@@ -11,7 +8,8 @@ use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    BindingContext, BuiltinAction, builtin_bindings, open_sleipnir_window, tmux_preset_bindings,
+    BindingContext, BuiltinAction, builtin_bindings, last_window_close_quits, open_sleipnir_window,
+    tmux_preset_bindings,
     ActivateTab, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, Find,
     FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
     IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
@@ -30,20 +28,23 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let app = application();
-    // Last-window close does not quit. Dock / Cmd-Tab reactivation
+    // Last-window close does not quit on macOS. Dock / Cmd-Tab reactivation
     // fires `applicationShouldHandleReopen` with no visible windows; without
     // this callback the click is a no-op and the process stays headless.
-    app.on_reopen(|cx| {
-        if cx.windows().is_empty() {
-            open_sleipnir_window(cx);
-            return;
-        }
-        // All windows may be minimized; AppKit reports no visible windows and
-        // GPUI still holds the handles — bring one back instead of spawning.
-        if let Some(handle) = cx.windows().first().copied() {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-        }
-    });
+    #[cfg(target_os = "macos")]
+    {
+        app.on_reopen(|cx| {
+            if cx.windows().is_empty() {
+                open_sleipnir_window(cx);
+                return;
+            }
+            // All windows may be minimized; AppKit reports no visible windows and
+            // GPUI still holds the handles — bring one back instead of spawning.
+            if let Some(handle) = cx.windows().first().copied() {
+                let _ = handle.update(cx, |_, window, _| window.activate_window());
+            }
+        });
+    }
     app.run(|cx: &mut App| {
         AppVersion::init_with(env!("CARGO_PKG_VERSION"), cx);
         sleipnir_settings::init(cx);
@@ -56,6 +57,15 @@ fn main() {
         // AppShell's NewWindow handler dies with the last window; keep
         // New Window working while the process is still up.
         cx.on_action(|_: &NewWindow, cx| open_sleipnir_window(cx));
+
+        if last_window_close_quits() {
+            cx.on_window_closed(|cx, _window_id| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+        }
 
         let mut keys = Vec::new();
         for spec in builtin_bindings() {

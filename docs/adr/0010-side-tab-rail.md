@@ -11,8 +11,8 @@ the foreground.
 
 ## Decision
 
-1. **Default chrome is a left tab rail** (`tab_placement: side`). `top` is the
-   same tab list as a horizontal strip (grouping, drag). Width of the rail is
+1. **Default chrome is the top strip** (`tab_placement: top`). `side` is the
+   same tab list as a left rail (grouping, drag). Width of the rail is
    `sidebar_width` (160–320, default 200). Not a live-drag divider — that
    would reflow the PTY on every mouse move.
 2. **Workspace is derived**, not stored. Group by the git work tree of the
@@ -30,8 +30,8 @@ the foreground.
 
 - New tabs inherit the workspace root (git root or current cwd), not a nested
   subdirectory, so they stay in the same group.
-- A missing `tab_placement` key means side. `"tab_placement": "top"` is the
-  first-class horizontal layout, not a reduced fallback.
+- A missing `tab_placement` key means top. `"tab_placement": "side"` is the
+  first-class left rail, not a reduced fallback.
 - Rail rows are two lines (title, then branch + `+N −M`). Line counts come
   from `git diff --numstat HEAD` off the UI thread; untracked files are omitted.
 - Top-strip chips show only the last two cwd components (`myself/harbor`).

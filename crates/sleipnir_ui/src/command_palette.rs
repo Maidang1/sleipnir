@@ -294,7 +294,7 @@ pub fn commands() -> Vec<CommandItem> {
         CommandItem {
             id: CommandId::ToggleRunLedger,
             title: "Toggle Run Ledger".into(),
-            shortcut: "⌘⇧L".into(),
+            shortcut: display_shortcut("toggle_run_ledger").into(),
             keywords: "run ledger panel history attention",
         },
         CommandItem {
@@ -324,7 +324,7 @@ pub fn commands() -> Vec<CommandItem> {
         CommandItem {
             id: CommandId::ToggleHistorySearch,
             title: "Search Shell History".into(),
-            shortcut: "".into(),
+            shortcut: display_shortcut("toggle_history_search").into(),
             keywords: "history fuzzy search histfile",
         },
         CommandItem {
@@ -371,6 +371,7 @@ pub fn filter_commands(items: &[CommandItem], query: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::display_shortcut;
 
     #[test]
     fn filter_empty_returns_all() {
@@ -402,7 +403,10 @@ mod tests {
             .iter()
             .find(|i| i.id == CommandId::NewTab)
             .expect("new tab");
-        assert_eq!(new_tab.shortcut.as_ref(), "⌘T");
+        assert_eq!(
+            new_tab.shortcut.as_ref(),
+            display_shortcut("new_tab")
+        );
     }
 
     #[test]

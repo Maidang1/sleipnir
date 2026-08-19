@@ -131,6 +131,7 @@ fn walk(
 }
 
 /// Parse `lsof -nP -iTCP -sTCP:LISTEN` (or an injected table) into `(pid, addr)`.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_lsof_listen(text: &str) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -191,14 +192,21 @@ impl ProcReader for LiveProcReader {
     }
 
     fn listeners(&self) -> Vec<(u32, String)> {
-        let output = std::process::Command::new("lsof")
-            .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                parse_lsof_listen(&String::from_utf8_lossy(&out.stdout))
+        #[cfg(windows)]
+        {
+            Vec::new()
+        }
+        #[cfg(not(windows))]
+        {
+            let output = std::process::Command::new("lsof")
+                .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    parse_lsof_listen(&String::from_utf8_lossy(&out.stdout))
+                }
+                _ => Vec::new(),
             }
-            _ => Vec::new(),
         }
     }
 }

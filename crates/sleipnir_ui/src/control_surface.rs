@@ -1,19 +1,32 @@
 //! In-process Unix socket listener for ADR-0011 (`sleipnir-ctl`).
 
-use crate::app_shell::AppShell;
-use crate::run_ledger_global::RunLedgerGlobal;
-use crate::TermView;
-use gpui::{App, AsyncApp, Global, Task};
-use run_ledger::PaneKey;
-use sleipnir_ctl::{
-    enabled, socket_path, wait_matches, ControlRequest, ControlResponse, PaneSnap, WaitUntil,
-};
+use gpui::{App, Global, Task};
+use sleipnir_ctl::enabled;
 use sleipnir_settings::TerminalSettings;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc;
+
+#[cfg(unix)]
+use crate::app_shell::AppShell;
+#[cfg(unix)]
+use crate::run_ledger_global::RunLedgerGlobal;
+#[cfg(unix)]
+use crate::TermView;
+#[cfg(unix)]
+use gpui::AsyncApp;
+#[cfg(unix)]
+use run_ledger::PaneKey;
+#[cfg(unix)]
+use sleipnir_ctl::{
+    socket_path, wait_matches, ControlRequest, ControlResponse, PaneSnap, WaitUntil,
+};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 struct Job {
     req: ControlRequest,
     reply: mpsc::Sender<ControlResponse>,
@@ -51,6 +64,18 @@ pub fn reload(cx: &mut App) {
 }
 
 fn start(cx: &mut App) {
+    #[cfg(not(unix))]
+    {
+        let _ = cx;
+        log::warn!("control surface is not supported on this platform");
+        return;
+    }
+    #[cfg(unix)]
+    start_unix(cx);
+}
+
+#[cfg(unix)]
+fn start_unix(cx: &mut App) {
     let path = socket_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -89,10 +114,14 @@ fn stop(cx: &mut App) {
         let _ = stop.send(());
     }
     g._pump = Task::ready(());
-    let path = socket_path();
-    let _ = std::fs::remove_file(&path);
+    #[cfg(unix)]
+    {
+        let path = socket_path();
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
+#[cfg(unix)]
 fn accept_loop(
     listener: UnixListener,
     stop: mpsc::Receiver<()>,
@@ -117,6 +146,7 @@ fn accept_loop(
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg(unix)]
 fn handle_connection(mut stream: UnixStream, jobs: async_channel::Sender<Job>) {
     let Ok(clone) = stream.try_clone() else {
         return;
@@ -173,6 +203,7 @@ fn handle_connection(mut stream: UnixStream, jobs: async_channel::Sender<Job>) {
     }
 }
 
+#[cfg(unix)]
 async fn pump_jobs(cx: &mut AsyncApp, jobs: async_channel::Receiver<Job>) {
     while let Ok(job) = jobs.recv().await {
         match job.req {
@@ -192,6 +223,7 @@ async fn pump_jobs(cx: &mut AsyncApp, jobs: async_channel::Receiver<Job>) {
     }
 }
 
+#[cfg(unix)]
 async fn wait_until(
     cx: &mut AsyncApp,
     pane: PaneKey,
@@ -216,6 +248,7 @@ async fn wait_until(
     }
 }
 
+#[cfg(unix)]
 fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
     match req {
         ControlRequest::Ls => ControlResponse::Ls {
@@ -248,6 +281,7 @@ fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
     }
 }
 
+#[cfg(unix)]
 fn wait_status(pane: PaneKey, until: WaitUntil, cx: &mut App) -> Result<bool, String> {
     let Some(view) = view_for_pane(cx, pane) else {
         return Err(format!("pane {pane} not found"));
@@ -262,6 +296,7 @@ fn wait_status(pane: PaneKey, until: WaitUntil, cx: &mut App) -> Result<bool, St
     Ok(wait_matches(until, busy, failed, attention))
 }
 
+#[cfg(unix)]
 fn list_panes(cx: &mut App) -> Vec<PaneSnap> {
     collect_live_panes(cx)
         .into_iter()
@@ -277,6 +312,7 @@ fn list_panes(cx: &mut App) -> Vec<PaneSnap> {
         .collect()
 }
 
+#[cfg(unix)]
 fn view_for_pane(cx: &mut App, pane: PaneKey) -> Option<gpui::Entity<TermView>> {
     collect_live_panes(cx)
         .into_iter()
@@ -284,6 +320,7 @@ fn view_for_pane(cx: &mut App, pane: PaneKey) -> Option<gpui::Entity<TermView>> 
         .map(|(_, view)| view)
 }
 
+#[cfg(unix)]
 fn collect_live_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
     let mut out = Vec::new();
     for handle in cx.windows() {

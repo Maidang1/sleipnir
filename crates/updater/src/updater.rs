@@ -10,7 +10,9 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+#[cfg(unix)]
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -238,23 +240,31 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 /// Whether this platform can swap the running install in place.
 pub fn in_place_update_supported() -> bool {
-    true
+    cfg!(unix)
 }
 
 /// Resolve the `.app` bundle that contains the current executable.
 ///
-/// Returns `None` in development (running the bare `target/debug/sleipnir`),
-/// which signals callers to fall back to opening the releases page.
+/// Returns `None` in development (running the bare `target/debug/sleipnir`)
+/// and on platforms without a macOS-style bundle, which signals callers to
+/// fall back to opening the releases page.
 pub fn current_app_bundle_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    // .../Sleipnir.app/Contents/MacOS/sleipnir
-    let macos = exe.parent()?; // MacOS
-    let contents = macos.parent()?; // Contents
-    let app = contents.parent()?; // Sleipnir.app
-    if app.extension().and_then(|e| e.to_str()) == Some("app") {
-        Some(app.to_path_buf())
-    } else {
+    #[cfg(not(unix))]
+    {
         None
+    }
+    #[cfg(unix)]
+    {
+        let exe = std::env::current_exe().ok()?;
+        // .../Sleipnir.app/Contents/MacOS/sleipnir
+        let macos = exe.parent()?; // MacOS
+        let contents = macos.parent()?; // Contents
+        let app = contents.parent()?; // Sleipnir.app
+        if app.extension().and_then(|e| e.to_str()) == Some("app") {
+            Some(app.to_path_buf())
+        } else {
+            None
+        }
     }
 }
 
@@ -262,8 +272,21 @@ pub fn current_app_bundle_path() -> Option<PathBuf> {
 /// process to exit, atomically swaps the `.app`, and relaunches it.
 ///
 /// On failure to install (permissions, etc.) the helper opens the releases page
-/// for a manual install.
+/// for a manual install. Windows has no in-place helper.
 pub fn install_and_relaunch(zip_path: &Path, app_bundle: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (zip_path, app_bundle);
+        bail!("in-place update is not supported on this platform; open {RELEASES_PAGE}");
+    }
+    #[cfg(unix)]
+    {
+        install_and_relaunch_unix(zip_path, app_bundle)
+    }
+}
+
+#[cfg(unix)]
+fn install_and_relaunch_unix(zip_path: &Path, app_bundle: &Path) -> Result<()> {
     let stage = zip_path
         .parent()
         .ok_or_else(|| anyhow!("zip has no parent dir"))?
@@ -310,6 +333,7 @@ pub fn install_and_relaunch(zip_path: &Path, app_bundle: &Path) -> Result<()> {
 }
 
 /// Find the single `.app` bundle directly under `dir`.
+#[cfg(unix)]
 fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(dir).context("read extract dir")? {
         let path = entry?.path();
@@ -321,6 +345,7 @@ fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
 }
 
 /// Write a detached shell script that performs the swap-and-relaunch.
+#[cfg(unix)]
 fn write_helper_script(
     pid: u32,
     new_app: &Path,
@@ -381,6 +406,7 @@ fi
 }
 
 /// Single-quote a path for safe embedding in a POSIX shell script.
+#[cfg(unix)]
 fn shell_quote(path: &Path) -> String {
     let s = path.to_string_lossy();
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -484,10 +510,11 @@ mod tests {
     }
 
     #[test]
-    fn in_place_update_is_supported() {
-        assert!(in_place_update_supported());
+    fn in_place_update_is_unix_only() {
+        assert_eq!(in_place_update_supported(), cfg!(unix));
     }
 
+    #[cfg(unix)]
     #[test]
     fn shell_quote_escapes_single_quotes() {
         let q = shell_quote(Path::new("/tmp/it's here/Sleipnir.app"));

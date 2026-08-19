@@ -10,7 +10,7 @@
   "run_ledger_retention_days": 7,
   "run_ledger_max_runs": 500,
   "run_ledger_redact": true,
-  "tab_placement": "side",
+  "tab_placement": "top",
   "sidebar_width": 200,
   "agent_icons": true,
   "control_surface": false,

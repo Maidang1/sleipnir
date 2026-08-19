@@ -17,6 +17,9 @@ function downloadItems(release: LatestRelease | null): MenuItem[] {
   const items: MenuItem[] = []
   if (release?.dmgUrl) items.push({ href: release.dmgUrl, label: 'macOS (.dmg)' })
   if (release?.zipUrl) items.push({ href: release.zipUrl, label: 'macOS (.zip)' })
+  if (release?.windowsZipUrl) {
+    items.push({ href: release.windowsZipUrl, label: 'Windows (.zip)' })
+  }
   items.push({ href: page, label: 'All releases', muted: true, external: true })
   return items
 }

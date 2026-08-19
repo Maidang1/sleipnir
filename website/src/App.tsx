@@ -39,7 +39,7 @@ const FEATURES = [
   {
     icon: Columns2,
     title: 'Tabs, splits & pane zoom',
-    body: 'Default chrome is a left tab rail with title, branch, and dirty +N −M. The top strip shows only the last two folders of the cwd. Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. Zoom a pane with ⌘⇧Enter; inactive splits dim so focus stays clear.',
+    body: 'Default chrome is a top tab strip showing the last two folders of the cwd. The side rail instead shows title, branch, and dirty +N −M. Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. Zoom a pane with ⌘⇧Enter; inactive splits dim so focus stays clear.',
   },
   {
     icon: AppWindow,
@@ -81,7 +81,7 @@ const FEATURES = [
 const FAQ = [
   {
     q: 'Is this another Electron app?',
-    a: 'No. Sleipnir is a native macOS binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal, not a browser engine.',
+    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS and Direct3D 11 on Windows, not a browser engine.',
   },
   {
     q: 'Where does config live?',
@@ -90,7 +90,13 @@ const FAQ = [
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           ~/.config/sleipnir/settings.json
         </code>
-        . Terminal keys are Zed-compatible; hot-reload with ⌘⇧R.
+        {' '}
+        on macOS, or{' '}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
+          %APPDATA%\sleipnir\settings.json
+        </code>
+        {' '}
+        on Windows. Terminal keys are Zed-compatible; hot-reload with ⌘⇧R / Ctrl+Shift+R.
         Session layout restores from{' '}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           session.json
@@ -115,7 +121,7 @@ const FAQ = [
   },
   {
     q: 'Is Windows or Linux supported?',
-    a: 'No. Sleipnir is macOS 14+ only. There are no Windows or Linux builds.',
+    a: 'Windows 10 1809+ is supported (Direct3D 11 + ConPTY). Download the windows-x64 zip or build from source. Linux is not supported. In-place auto-update stays macOS-only.',
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',

@@ -20,7 +20,9 @@ pub use shell_semantics::{
     wrap_shell_for_inject, wrap_shell_for_inject_in,
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
+#[cfg(not(windows))]
+use anyhow::Context as _;
 use futures_lite::future::yield_now;
 use log::trace;
 
@@ -66,8 +68,9 @@ use gpui::{
     Point as GpuiPoint, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, px,
 };
 
+#[cfg(not(windows))]
+use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
-    current_child_signal_mask,
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     clear_saved_screen, content_text, display_offset,
@@ -772,6 +775,7 @@ impl TerminalBuilder {
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
+        #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
         {
@@ -854,7 +858,10 @@ impl TerminalBuilder {
                 // so terminal construction can run on a background thread without breaking Ctrl-C and other signals
                 // otherwise the terminal would inherit the background executor's signal mask which blocks
                 // some terminal signals
+                #[cfg(not(windows))]
                 child_signal_mask,
+                #[cfg(windows)]
+                false,
             );
 
             let pty = match open_pty(&pty_options, TerminalBounds::default(), window_id) {

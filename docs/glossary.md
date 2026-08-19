@@ -47,7 +47,7 @@ strip, and any window controls. It is deferential to terminal content per HIG.
 _Avoid_: Titlebar, header, toolbar.
 
 **Tab rail**:
-The left-side list of Tabs. Default chrome (`tab_placement: side`).
+The left-side list of Tabs (`tab_placement: side`). Default chrome is the top strip.
 `tab_placement: top` is the same tab list laid out as a horizontal strip
 (same grouping, in-group drag). There is no Workspace group header in
 either layout. A rail row is two lines: title, then branch + dirty

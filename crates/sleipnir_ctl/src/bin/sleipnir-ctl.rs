@@ -1,10 +1,21 @@
 //! Default-off control client (ADR-0011). Does not start a listener.
 
-use sleipnir_ctl::{socket_path, ControlRequest, ControlResponse};
-use std::io::{BufRead, Write};
-use std::os::unix::net::UnixStream;
-
 fn main() {
+    #[cfg(not(unix))]
+    {
+        eprintln!("sleipnir-ctl is not supported on this platform");
+        std::process::exit(1);
+    }
+    #[cfg(unix)]
+    unix_main();
+}
+
+#[cfg(unix)]
+fn unix_main() {
+    use sleipnir_ctl::{socket_path, ControlRequest, ControlResponse};
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixStream;
+
     let mut args = std::env::args().skip(1);
     let Some(op) = args.next() else {
         eprintln!("usage: sleipnir-ctl ls | capture <pane> | send <pane> <text> | wait <pane> free|failed|attention");

@@ -14,9 +14,15 @@ path = "src/gpui_platform.rs"
 [features]
 default = []
 # macOS always enables font-kit on the target dep below. Kept so older
-# feature flags still resolve.
+# feature flags still resolve on every OS.
 font-kit = []
 
 [dependencies]
 gpui.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { workspace = true, features = ["font-kit"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_windows.workspace = true
+gpui = { workspace = true, features = ["windows-manifest"] }
