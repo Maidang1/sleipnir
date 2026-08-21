@@ -31,6 +31,7 @@ need() {
 need curl
 need ditto
 need shasum
+need hdiutil
 need xattr
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/sleipnir-install.XXXXXX")"
@@ -53,20 +54,20 @@ if [[ -z "${VERSION}" || "${VERSION}" == "${LATEST_URL}" ]]; then
     echo "ERROR: could not resolve latest tag from ${LATEST_URL}" >&2
     exit 1
 fi
-ZIP_URL="https://github.com/${REPO}/releases/download/${TAG}/${APP_NAME}-${VERSION}-macos.zip"
-SHA_URL="${ZIP_URL}.sha256"
+DMG_URL="https://github.com/${REPO}/releases/download/${TAG}/${APP_NAME}-${VERSION}-macos.dmg"
+SHA_URL="${DMG_URL}.sha256"
 
 echo "  version: ${VERSION} (${TAG})"
 
-ZIP="${WORKDIR}/${APP_NAME}-${VERSION}-macos.zip"
-echo "  downloading $(basename "${ZIP}")…"
-curl -fL --retry 3 --retry-delay 1 -o "${ZIP}" "${ZIP_URL}"
+DMG="${WORKDIR}/${APP_NAME}-${VERSION}-macos.dmg"
+echo "  downloading $(basename "${DMG}")…"
+curl -fL --retry 3 --retry-delay 1 -o "${DMG}" "${DMG_URL}"
 
 if [[ -n "${SHA_URL}" ]]; then
-    SHA_FILE="${ZIP}.sha256"
+    SHA_FILE="${DMG}.sha256"
     curl -fL --retry 3 --retry-delay 1 -o "${SHA_FILE}" "${SHA_URL}"
     WANT="$(tr -d ' \n\r\t' < "${SHA_FILE}")"
-    GOT="$(shasum -a 256 "${ZIP}" | awk '{print $1}')"
+    GOT="$(shasum -a 256 "${DMG}" | awk '{print $1}')"
     if [[ "${WANT}" != "${GOT}" ]]; then
         echo "ERROR: SHA-256 mismatch" >&2
         echo "  expected: ${WANT}" >&2
@@ -75,16 +76,24 @@ if [[ -n "${SHA_URL}" ]]; then
     fi
     echo "  sha256: ${GOT}  ok"
 else
-    echo "  warning: no .zip.sha256 sidecar — skipping integrity check" >&2
+    echo "  warning: no .dmg.sha256 sidecar — skipping integrity check" >&2
 fi
 
-echo "  unpacking…"
-ditto -x -k "${ZIP}" "${WORKDIR}"
-APP="${WORKDIR}/${APP_NAME}.app"
-if [[ ! -d "${APP}" ]]; then
-    echo "ERROR: archive did not contain ${APP_NAME}.app" >&2
+echo "  mounting…"
+MOUNT="${WORKDIR}/mnt"
+mkdir -p "${MOUNT}"
+hdiutil attach "${DMG}" -nobrowse -noautoopen -mountpoint "${MOUNT}" >/dev/null
+detach_dmg() { hdiutil detach "${MOUNT}" -force >/dev/null 2>&1 || true; }
+trap 'detach_dmg; cleanup' EXIT
+
+MOUNTED_APP="${MOUNT}/${APP_NAME}.app"
+if [[ ! -d "${MOUNTED_APP}" ]]; then
+    echo "ERROR: disk image did not contain ${APP_NAME}.app" >&2
     exit 1
 fi
+APP="${WORKDIR}/${APP_NAME}.app"
+ditto "${MOUNTED_APP}" "${APP}"
+detach_dmg
 
 # Ad-hoc CI builds trip Gatekeeper via the download quarantine flag.
 # Clear all xattrs (including com.apple.quarantine) before first launch.

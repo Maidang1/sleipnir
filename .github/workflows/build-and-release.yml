@@ -62,17 +62,17 @@ jobs:
       - name: Release build
         run: cargo build --release -p sleipnir
 
-      - name: Package zip
+      - name: Package exe
         shell: bash
         run: |
           VER="${{ steps.version.outputs.version }}"
           mkdir -p build
-          cp target/release/sleipnir.exe build/sleipnir.exe
-          tar.exe -a -c -f "build/Sleipnir-${VER}-windows-x64.zip" -C build sleipnir.exe
+          EXE="build/Sleipnir-${VER}-windows-x64.exe"
+          cp target/release/sleipnir.exe "${EXE}"
           HASH=$(powershell.exe -NoProfile -Command \
-            "(Get-FileHash -Algorithm SHA256 'build/Sleipnir-${VER}-windows-x64.zip').Hash.ToLower()")
-          echo "${HASH}" > "build/Sleipnir-${VER}-windows-x64.zip.sha256"
-          ls -lh "build/Sleipnir-${VER}-windows-x64.zip"
+            "(Get-FileHash -Algorithm SHA256 '${EXE}').Hash.ToLower()")
+          echo "${HASH}" > "${EXE}.sha256"
+          ls -lh "${EXE}"
           echo "  sha256: ${HASH}"
 
       - name: Upload sleipnir.exe
@@ -80,9 +80,8 @@ jobs:
         with:
           name: sleipnir-windows
           path: |
-            build/Sleipnir-*-windows-x64.zip
-            build/Sleipnir-*-windows-x64.zip.sha256
-            target/release/sleipnir.exe
+            build/Sleipnir-*-windows-x64.exe
+            build/Sleipnir-*-windows-x64.exe.sha256
 
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
@@ -92,12 +91,12 @@ jobs:
         run: |
           VER="${{ steps.version.outputs.version }}"
           TAG="v${VER}"
-          ZIP="build/Sleipnir-${VER}-windows-x64.zip"
-          SHA="build/Sleipnir-${VER}-windows-x64.zip.sha256"
+          EXE="build/Sleipnir-${VER}-windows-x64.exe"
+          SHA="build/Sleipnir-${VER}-windows-x64.exe.sha256"
           # macOS job creates the release; wait until it exists.
           for i in $(seq 1 36); do
             if gh release view "${TAG}" >/dev/null 2>&1; then
-              gh release upload "${TAG}" "${ZIP}" "${SHA}" --clobber
+              gh release upload "${TAG}" "${EXE}" "${SHA}" --clobber
               echo "Uploaded Windows assets to ${TAG}"
               exit 0
             fi
@@ -189,19 +188,6 @@ jobs:
           fi
           echo "  signed: $(codesign -d --verbose=4 Sleipnir.app 2>&1 | head -3)"
 
-      - name: Package .zip
-        run: |
-          VER="${{ steps.version.outputs.version }}"
-          ditto -c -k --sequesterRsrc --keepParent Sleipnir.app \
-            "build/Sleipnir-${VER}-macos.zip"
-          du -sh "build/Sleipnir-${VER}-macos.zip"
-          echo "zip=build/Sleipnir-${VER}-macos.zip" >> "$GITHUB_ENV"
-          # SHA-256 sidecar for the auto-updater to verify downloads.
-          ( cd build && shasum -a 256 "Sleipnir-${VER}-macos.zip" \
-            | awk '{print $1}' > "Sleipnir-${VER}-macos.zip.sha256" )
-          echo "  sha256: $(cat build/Sleipnir-${VER}-macos.zip.sha256)"
-          echo "sha=build/Sleipnir-${VER}-macos.zip.sha256" >> "$GITHUB_ENV"
-
       - name: Gatekeeper bypass (ad-hoc signed apps)
         run: |
           # Remove quarantine attribute so macOS doesn't block the app on first launch
@@ -213,22 +199,37 @@ jobs:
       - name: Package .dmg
         run: |
           VER="${{ steps.version.outputs.version }}"
+          # Stage only the .app so the disk image contains nothing else.
+          rm -rf dmg-src
+          mkdir -p dmg-src build
+          cp -R Sleipnir.app dmg-src/Sleipnir.app
           hdiutil create -volname "Sleipnir-${VER}" \
-            -srcfolder build \
+            -srcfolder dmg-src \
             -ov -format UDZO \
             "build/Sleipnir-${VER}-macos.dmg"
           du -sh "build/Sleipnir-${VER}-macos.dmg"
           echo "dmg=build/Sleipnir-${VER}-macos.dmg" >> "$GITHUB_ENV"
+          echo "sha=build/Sleipnir-${VER}-macos.dmg.sha256" >> "$GITHUB_ENV"
 
       - name: Notarize
         if: env.HAS_NOTARIZATION == 'true'
         run: |
-          xcrun notarytool submit "${{ env.zip }}" \
+          xcrun notarytool submit "${{ env.dmg }}" \
             --apple-id "${{ secrets.APPLE_ID }}" \
             --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
             --team-id "${{ env.APPLE_TEAM_ID }}" \
             --wait
-          xcrun stapler staple Sleipnir.app
+          # Stapling rewrites the dmg, so the sha256 must be computed afterwards.
+          xcrun stapler staple "${{ env.dmg }}"
+
+      - name: SHA-256 sidecar
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          # Compute after any notarization/stapling so the digest matches the
+          # bytes the auto-updater / install.sh will download and verify.
+          ( cd build && shasum -a 256 "Sleipnir-${VER}-macos.dmg" \
+            | awk '{print $1}' > "Sleipnir-${VER}-macos.dmg.sha256" )
+          echo "  sha256: $(cat build/Sleipnir-${VER}-macos.dmg.sha256)"
 
       - name: Create GitHub Release
         env:
@@ -237,24 +238,22 @@ jobs:
           DRAFT: ${{ github.event.inputs.draft || 'false' }}
         run: |
           TAG="v${VERSION}"
-          ZIP="build/Sleipnir-${VERSION}-macos.zip"
-          SHA="build/Sleipnir-${VERSION}-macos.zip.sha256"
           DMG="build/Sleipnir-${VERSION}-macos.dmg"
+          SHA="build/Sleipnir-${VERSION}-macos.dmg.sha256"
 
           {
             echo "## Sleipnir v${VERSION}"
             echo ""
             echo "### Install"
             echo ""
-            echo "**macOS:** Download \`Sleipnir-${VERSION}-macos.dmg\` (recommended) or \`Sleipnir-${VERSION}-macos.zip\`."
-            echo "Open the .dmg and drag Sleipnir to Applications."
+            echo "**macOS:** Download \`Sleipnir-${VERSION}-macos.dmg\`, open it, and drag Sleipnir to Applications."
             echo ""
             echo "> **Note:** The macOS build is ad-hoc signed (no Apple Developer certificate in CI)."
             echo "> On first launch Gatekeeper will show \"Sleipnir is an unidentified developer\"."
             echo "> Right-click the app and choose **Open** to bypass."
             echo ""
-            echo "**Windows:** Download \`Sleipnir-${VERSION}-windows-x64.zip\`, unzip, and run \`sleipnir.exe\`."
-            echo "The Windows zip is attached by the Windows job a few minutes after this release is created."
+            echo "**Windows:** Download \`Sleipnir-${VERSION}-windows-x64.exe\` and run it."
+            echo "The Windows \`.exe\` is attached by the Windows job a few minutes after this release is created."
             echo "In-place auto-update stays macOS-only; Check for Updates opens this page."
             echo ""
             echo "Linux is not supported."
@@ -276,8 +275,7 @@ jobs:
             --title "Sleipnir v${VERSION}" \
             --notes-file release-notes.md \
             "${DRAFT_FLAG[@]}" \
-            "${ZIP}" \
-            "${SHA}" \
-            "${DMG}"
+            "${DMG}" \
+            "${SHA}"
 
           echo "Published: $(gh release view "${TAG}" --json url --jq '.url')"

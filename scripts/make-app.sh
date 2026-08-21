@@ -7,7 +7,7 @@
 # Options:
 #   --sign <identity>   Code-sign with the given identity (default: ad-hoc if none)
 #   --notarize          Notarize after signing (requires APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD)
-#   --dmg               Also create a .dmg after packaging
+#   --dmg               No-op (a .dmg is always produced); kept for compatibility
 #   --release           Build in release mode (default: release)
 #
 # Environment:
@@ -110,11 +110,22 @@ fi
 codesign --verify --deep --strict "${APP}" 2>&1 | head -5 || true
 spctl --assess --type execute --verbose=4 "${APP}/Contents/MacOS/${APP_NAME}" 2>&1 || true
 
-# ── Package .zip ──────────────────────────────────────────────────────────────
-ZIP="${BUILD_DIR}/${APP_NAME}-${VERSION}-macos.zip"
-rm -f "${ZIP}"
-ditto -c -k --sequesterRsrc --keepParent "${APP}" "${ZIP}"
-echo "  zip: ${ZIP} ($(du -sh "${ZIP}" | cut -f1))"
+# ── Package .dmg ──────────────────────────────────────────────────────────────
+# Stage only the .app so the disk image contains nothing else.
+DMG_SRC="${BUILD_DIR}/dmg-src"
+rm -rf "${DMG_SRC}"
+mkdir -p "${DMG_SRC}"
+ditto "${APP}" "${DMG_SRC}/${APP_BUNDLE}"
+
+DMG="${BUILD_DIR}/${APP_NAME}-${VERSION}-macos.dmg"
+rm -f "${DMG}"
+VOL_NAME="${APP_NAME}-${VERSION}"
+hdiutil create -volname "${VOL_NAME}" \
+    -srcfolder "${DMG_SRC}" \
+    -ov -format UDZO \
+    "${DMG}"
+rm -rf "${DMG_SRC}"
+echo "  dmg: ${DMG} ($(du -sh "${DMG}" | cut -f1))"
 
 # ── (Optional) Notarize ──────────────────────────────────────────────────────
 if [[ "${NOTARIZE}" == "true" ]]; then
@@ -123,29 +134,22 @@ if [[ "${NOTARIZE}" == "true" ]]; then
         exit 1
     fi
     echo "  notarizing..."
-    xcrun notarytool submit "${ZIP}" \
+    xcrun notarytool submit "${DMG}" \
         --apple-id "${APPLE_ID}" \
         --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
         --team-id "692T845H5K" \
         --wait
-    xcrun stapler staple "${APP}"
+    xcrun stapler staple "${DMG}"
     echo "  notarized ✓"
 fi
 
-# ── (Optional) Create .dmg ───────────────────────────────────────────────────
-if [[ "${MAKE_DMG}" == "true" ]]; then
-    DMG="${BUILD_DIR}/${APP_NAME}-${VERSION}-macos.dmg"
-    rm -f "${DMG}"
-    # Volume name for the dmg
-    VOL_NAME="${APP_NAME}-${VERSION}"
-    hdiutil create -volname "${VOL_NAME}" \
-        -srcfolder "${BUILD_DIR}" \
-        -ov -format UDZO \
-        "${DMG}"
-    echo "  dmg: ${DMG} ($(du -sh "${DMG}" | cut -f1))"
-fi
+# SHA-256 sidecar for the auto-updater / install.sh to verify downloads.
+# Computed after any notarization/stapling so the digest matches the shipped bytes.
+( cd "${BUILD_DIR}" && shasum -a 256 "$(basename "${DMG}")" \
+    | awk '{print $1}' > "$(basename "${DMG}").sha256" )
+echo "  sha256: $(cat "${DMG}.sha256")"
 
 echo ""
 echo "=== Done ==="
 echo "  artifacts in: ${BUILD_DIR}/"
-ls -lh "${BUILD_DIR}"/*.zip "${BUILD_DIR}"/*.dmg 2>/dev/null || true
+ls -lh "${BUILD_DIR}"/*.dmg "${BUILD_DIR}"/*.dmg.sha256 2>/dev/null || true

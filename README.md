@@ -25,7 +25,7 @@ host PTY (ConPTY on Windows), IME support, multi-tab and split panes, multi-wind
 sessions, adaptive theming that follows the system appearance, and a
 file-manager-friendly clipboard that turns pasted images into quoted paths.
 
-Prebuilt downloads are macOS `.dmg` / `.zip` and a Windows `*-windows-x64.zip` on
+Prebuilt downloads are a macOS `.dmg` and a Windows `*-windows-x64.exe` on
 [GitHub Releases](https://github.com/Maidang1/sleipnir/releases). Linux is not
 supported.
 
@@ -71,8 +71,8 @@ Latest GitHub Release:
 curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | bash
 ```
 
-The script downloads `Sleipnir-<ver>-macos.zip`, checks it against the published
-`.zip.sha256` sidecar, copies the app to `/Applications`, and runs `xattr -cr`
+The script downloads `Sleipnir-<ver>-macos.dmg`, checks it against the published
+`.dmg.sha256` sidecar, mounts it, copies the app to `/Applications`, and runs `xattr -cr`
 to drop the quarantine flag. CI builds are ad-hoc signed (no Developer ID), so
 without that step Gatekeeper shows “unidentified developer” on first launch.
 
@@ -83,7 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/inst
   | PREFIX="$HOME/Applications" SLEIPNIR_NO_OPEN=1 bash
 ```
 
-Or grab the `.dmg` / `.zip` from [Releases](https://github.com/Maidang1/sleipnir/releases)
+Or grab the `.dmg` from [Releases](https://github.com/Maidang1/sleipnir/releases)
 and, if macOS still blocks it, run:
 
 ```bash
@@ -92,18 +92,19 @@ xattr -cr /Applications/Sleipnir.app
 
 ### Windows 10 1809+
 
-Download `Sleipnir-<ver>-windows-x64.zip` from
-[Releases](https://github.com/Maidang1/sleipnir/releases), unzip, and run
-`sleipnir.exe`. Or build from source:
+Download `Sleipnir-<ver>-windows-x64.exe` from
+[Releases](https://github.com/Maidang1/sleipnir/releases) and run it. Or build from source:
 
 ```powershell
 cargo run -p sleipnir
 ```
 
-Settings live in `%APPDATA%\sleipnir\`. Default font is Cascadia Mono. Shortcuts
-use Ctrl / Ctrl+Shift and do not steal `Ctrl+C` / `Ctrl+W` / `Ctrl+D` from the
-shell. In-place auto-update is macOS-only; **Check for Updates** opens the
-releases page.
+Settings live in `%APPDATA%\sleipnir\`. Default font is Cascadia Mono. The app
+never binds a bare `Ctrl+<key>` — those stay with the shell/TUI (`Ctrl+C` /
+`Ctrl+D` / `Ctrl+V` / `Ctrl+1`…`9`, etc.). App shortcuts live on `Ctrl+Shift+*`
+(primary, mirrors macOS `⌘`) and `Ctrl+Alt+*` (pane geometry, mirrors macOS
+`⌘⌥`); copy/paste also accept `Ctrl+Insert` / `Shift+Insert`. In-place
+auto-update is macOS-only; **Check for Updates** opens the releases page.
 
 ## Requirements
 
@@ -226,8 +227,8 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
 - Open the update dialog via **Sleipnir → Check for Updates…** (`⌘⇧U`).
   Sleipnir does **not** check for updates automatically on launch.
 - If a newer version is found, choosing **Download & Install** fetches the
-  `Sleipnir-<ver>-macos.zip` artifact and verifies it against the published
-  `.zip.sha256` sidecar before staging. Because CI builds are ad-hoc signed (no Apple
+  `Sleipnir-<ver>-macos.dmg` artifact and verifies it against the published
+  `.dmg.sha256` sidecar before staging. Because CI builds are ad-hoc signed (no Apple
   Developer certificate), this SHA-256 check is the integrity guarantee — the download is
   rejected on any mismatch.
 - **Restart & Update** swaps the running `.app` in place and relaunches. If the bundle
@@ -280,14 +281,14 @@ to bump the pin.
 ### Local build
 
 ```bash
-# Build and package as .app + .zip (macOS)
+# Build and package as .app + .dmg (macOS)
 ./scripts/make-app.sh
 
 # With developer certificate signing (macOS)
 ./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)"
 
-# Create a .dmg (requires signing)
-./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --dmg
+# Notarize the .dmg (requires signing)
+./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --notarize
 ```
 
 The macOS bundle uses [`resources/AppIcon.icns`](resources/AppIcon.icns), generated from
@@ -308,8 +309,8 @@ git push origin v0.2.0
 ### CI (GitHub Actions)
 
 Triggered automatically on git tags (`v*`). Also supports manual dispatch.
-The workflow builds and tests on `macos-latest` and publishes the `.dmg`, `.zip`,
-and `.zip.sha256` to the GitHub Release.
+The workflow builds and tests on `macos-latest` and publishes the `.dmg`
+and `.dmg.sha256` to the GitHub Release. The Windows job attaches `.exe` and `.exe.sha256`.
 
 ```bash
 gh workflow run build-and-release.yml \

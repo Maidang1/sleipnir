@@ -39,17 +39,16 @@ fi
 echo "=== publish-release  v${VERSION} ==="
 
 # ── Validate artifacts ────────────────────────────────────────────────────────
-ZIP="${ARTIFACT_DIR}/${APP_NAME:-Sleipnir}-${VERSION}-macos.zip"
-SHA="${ZIP}.sha256"
 DMG="${ARTIFACT_DIR}/${APP_NAME:-Sleipnir}-${VERSION}-macos.dmg"
+SHA="${DMG}.sha256"
 
-if [[ ! -f "${ZIP}" ]]; then
-    echo "ERROR: zip not found at ${ZIP}" >&2
+if [[ ! -f "${DMG}" ]]; then
+    echo "ERROR: dmg not found at ${DMG}" >&2
     exit 1
 fi
 
 # SHA-256 sidecar for the auto-updater to verify downloads.
-( cd "${ARTIFACT_DIR}" && shasum -a 256 "$(basename "${ZIP}")" \
+( cd "${ARTIFACT_DIR}" && shasum -a 256 "$(basename "${DMG}")" \
     | awk '{print $1}' > "$(basename "${SHA}")" )
 echo "  sha256: $(cat "${SHA}")"
 
@@ -85,8 +84,7 @@ if [[ ! -s "${NOTES_FILE}" ]]; then
 - Initial macOS release build.
 
 ### Install
-Download \`Sleipnir-${VERSION}-macos.dmg\` (recommended) or \`Sleipnir-${VERSION}-macos.zip\`.
-Open the .dmg and drag Sleipnir to Applications.
+Download \`Sleipnir-${VERSION}-macos.dmg\`, open it, and drag Sleipnir to Applications.
 
 ### Requirements
 - macOS 14.0+ (Sonoma)
@@ -103,9 +101,8 @@ gh release create "${TAG}" \
     --notes-file "${NOTES_FILE}" \
     ${RELEASE_ARGS:-} \
     --draft=false \
-    "${ZIP}" \
-    "${SHA}" \
-    "${DMG:+${DMG}}"
+    "${DMG}" \
+    "${SHA}"
 
 echo ""
 echo "=== Published ==="

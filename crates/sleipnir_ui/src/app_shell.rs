@@ -287,7 +287,7 @@ pub struct AvailableUpdate {
     pub version: String,
     pub tag: String,
     pub notes: String,
-    zip_url: String,
+    artifact_url: String,
     sha256_url: String,
 }
 
@@ -343,8 +343,8 @@ pub struct AppShell {
     update_state: UpdateUiState,
     /// Whether the update dialog is visible.
     update_open: bool,
-    /// Verified update zip path, ready to install on restart.
-    staged_zip: Option<std::path::PathBuf>,
+    /// Verified update dmg path, ready to install on restart.
+    staged_dmg: Option<std::path::PathBuf>,
     /// Command palette open state (M9).
     palette_open: bool,
     palette_query: String,
@@ -492,7 +492,7 @@ impl AppShell {
             theme_query: String::new(),
             update_state: UpdateUiState::Idle,
             update_open: false,
-            staged_zip: None,
+            staged_dmg: None,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -2748,7 +2748,7 @@ impl AppShell {
                             version: info.version.to_string(),
                             tag: info.tag,
                             notes: info.notes,
-                            zip_url: info.zip_url,
+                            artifact_url: info.artifact_url,
                             sha256_url: info.sha256_url,
                         });
                     }
@@ -2788,7 +2788,7 @@ impl AppShell {
             },
             tag: update.tag.clone(),
             notes: update.notes.clone(),
-            zip_url: update.zip_url.clone(),
+            artifact_url: update.artifact_url.clone(),
             sha256_url: update.sha256_url.clone(),
         };
         let dest = std::env::temp_dir().join(format!("sleipnir-update-{}", std::process::id()));
@@ -2799,10 +2799,10 @@ impl AppShell {
                 .await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(zip_path) => {
-                        // Remember where the verified zip landed so a restart
+                    Ok(dmg_path) => {
+                        // Remember where the verified dmg landed so a restart
                         // can install it.
-                        this.staged_zip = Some(zip_path);
+                        this.staged_dmg = Some(dmg_path);
                         this.update_state = UpdateUiState::ReadyToRestart(update.clone());
                     }
                     Err(err) => {
@@ -2820,11 +2820,11 @@ impl AppShell {
 
     /// Install the staged update and relaunch, or fall back to the releases page.
     fn install_and_restart(&mut self, cx: &mut Context<Self>) {
-        let Some(zip) = self.staged_zip.clone() else {
+        let Some(dmg) = self.staged_dmg.clone() else {
             return;
         };
         match updater::current_app_bundle_path() {
-            Some(app) => match updater::install_and_relaunch(&zip, &app) {
+            Some(app) => match updater::install_and_relaunch(&dmg, &app) {
                 Ok(()) => cx.quit(),
                 Err(err) => {
                     log::warn!("install failed: {err:#}");

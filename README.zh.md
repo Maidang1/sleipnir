@@ -22,7 +22,7 @@
 Sleipnir 是独立终端，通过 GPUI 在 GPU 上绘制，大量输出时滚动和重绘也能跟上。
 自带真实主机 PTY（Windows 上是 ConPTY）、输入法、多标签和分屏、多窗口、跟随系统外观的主题，以及会把粘贴的图片写成带引号路径的剪贴板。
 
-预编译包是 macOS 的 `.dmg` / `.zip` 和 Windows 的 `*-windows-x64.zip`，在
+预编译包是 macOS 的 `.dmg` 和 Windows 的 `*-windows-x64.exe`，在
 [GitHub Releases](https://github.com/Maidang1/sleipnir/releases)。
 不支持 Linux。
 
@@ -60,7 +60,7 @@ Sleipnir 是独立终端，通过 GPUI 在 GPU 上绘制，大量输出时滚动
 curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | bash
 ```
 
-脚本会下载 `Sleipnir-<ver>-macos.zip`，对照发布的 `.zip.sha256` 校验，复制到 `/Applications`，再跑 `xattr -cr` 去掉隔离标记。CI 构建是 ad-hoc 签名（没有 Developer ID），不做这一步的话，第一次打开 Gatekeeper 会报 unidentified developer。
+脚本会下载 `Sleipnir-<ver>-macos.dmg`，对照发布的 `.dmg.sha256` 校验，挂载后把 app 复制到 `/Applications`，再跑 `xattr -cr` 去掉隔离标记。CI 构建是 ad-hoc 签名（没有 Developer ID），不做这一步的话，第一次打开 Gatekeeper 会报 unidentified developer。
 
 想装到别的目录，或装完不要自动打开：
 
@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/inst
   | PREFIX="$HOME/Applications" SLEIPNIR_NO_OPEN=1 bash
 ```
 
-也可以从 [Releases](https://github.com/Maidang1/sleipnir/releases) 拿 `.dmg` / `.zip`。
+也可以从 [Releases](https://github.com/Maidang1/sleipnir/releases) 拿 `.dmg`。
 如果 macOS 还是拦，执行：
 
 ```bash
@@ -79,7 +79,7 @@ xattr -cr /Applications/Sleipnir.app
 ### Windows 10 1809+
 
 从 [Releases](https://github.com/Maidang1/sleipnir/releases) 下载
-`Sleipnir-<ver>-windows-x64.zip`，解压后运行 `sleipnir.exe`。也可以从源码编译：
+`Sleipnir-<ver>-windows-x64.exe`，直接运行。也可以从源码编译：
 
 ```powershell
 cargo run -p sleipnir
@@ -208,8 +208,8 @@ Sleipnir 可以从 [GitHub Releases](https://github.com/Maidang1/sleipnir/releas
 
 - 用 **Sleipnir → Check for Updates…**（`⌘⇧U`）打开更新对话框。
   启动时**不会**自动查更新。
-- 发现新版本后，选 **Download & Install** 会拉 `Sleipnir-<ver>-macos.zip`，
-  对照发布的 `.zip.sha256` 校验再暂存。CI 构建是 ad-hoc 签名（没有 Apple
+- 发现新版本后，选 **Download & Install** 会拉 `Sleipnir-<ver>-macos.dmg`，
+  对照发布的 `.dmg.sha256` 校验再暂存。CI 构建是 ad-hoc 签名（没有 Apple
   Developer 证书），完整性靠这次 SHA-256 检查，对不上就拒绝下载。
 - **Restart & Update** 原地替换正在跑的 `.app` 再启动。如果包所在位置写不进去
   （比如别人拥有的受保护 `/Applications` 安装），会退回去打开发布页，让你手动装。
@@ -257,14 +257,14 @@ GPUI 栈**没有** vendoring。根目录 `Cargo.toml` 把 `zed-industries/zed` �
 ### 本地构建
 
 ```bash
-# 打成 .app + .zip（macOS）
+# 打成 .app + .dmg（macOS）
 ./scripts/make-app.sh
 
 # 用开发者证书签名（macOS）
 ./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)"
 
-# 再打 .dmg（需要签名）
-./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --dmg
+# 公证 .dmg（需要签名）
+./scripts/make-app.sh --sign "Apple Development: you@domain.com (TEAMID)" --notarize
 ```
 
 macOS 包用 [`resources/AppIcon.icns`](resources/AppIcon.icns)，从
@@ -278,15 +278,15 @@ git tag v0.2.0
 git push origin v0.2.0
 
 # 或者先构建再发布
-./scripts/make-app.sh --sign "..." --dmg
+./scripts/make-app.sh --sign "..."
 ./scripts/publish-release.sh 0.2.0 ./build
 ```
 
 ### CI（GitHub Actions）
 
 推 `v*` tag 会自动跑，也支持手动触发。
-工作流在 `macos-latest` 上构建和测试，把 `.dmg`、`.zip` 和 `.zip.sha256`
-挂到 GitHub Release。
+工作流在 `macos-latest` 上构建和测试，把 `.dmg` 和 `.dmg.sha256`
+挂到 GitHub Release；Windows job 附上 `.exe` 和 `.exe.sha256`。
 
 ```bash
 gh workflow run build-and-release.yml \

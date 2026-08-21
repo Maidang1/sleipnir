@@ -107,7 +107,9 @@ pub fn builtin_bindings_for(windows: bool) -> Vec<BuiltinBinding> {
     } else {
         macos_static_bindings()
     };
-    let tab_mod = if windows { "ctrl" } else { "cmd" };
+    // macOS uses bare `cmd-N`; Windows keeps digits free for the shell and
+    // TUIs, so tab activation lives on `ctrl-shift-N`.
+    let tab_mod = if windows { "ctrl-shift" } else { "cmd" };
     for n in 1..=9usize {
         out.push(BuiltinBinding {
             key: format!("{tab_mod}-{n}"),
@@ -205,57 +207,72 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
 
 fn windows_static_bindings() -> Vec<BuiltinBinding> {
     use BindingContext::{Both, Global, Terminal};
+    // Windows convention: the app layer never grabs a bare `ctrl-<key>` — those
+    // belong to the shell/TUI (ctrl-c/d/z/l/r/u/w/a/e, ctrl-v literal-next,
+    // ctrl-1..9). Everything the app owns lives on `ctrl-shift-*` (primary,
+    // mirrors macOS `cmd-*`) or `ctrl-alt-*` (pane geometry + secondary,
+    // mirrors macOS `cmd-alt-*`). Copy/paste also accept the Windows-native
+    // Insert combos.
     vec![
         b("alt-f4", BuiltinAction::Quit, Global),
-        b("ctrl-q", BuiltinAction::Quit, Global),
+        b("ctrl-shift-q", BuiltinAction::Quit, Global),
+        // Clipboard
         b("ctrl-shift-c", BuiltinAction::Copy, Terminal),
         b("ctrl-insert", BuiltinAction::Copy, Terminal),
         b("ctrl-shift-v", BuiltinAction::Paste, Terminal),
         b("shift-insert", BuiltinAction::Paste, Terminal),
-        b("ctrl-v", BuiltinAction::Paste, Terminal),
         b("ctrl-alt-v", BuiltinAction::PasteText, Terminal),
         b("ctrl-shift-a", BuiltinAction::SelectAll, Terminal),
-        b("ctrl-shift-l", BuiltinAction::Clear, Terminal),
+        b("ctrl-shift-k", BuiltinAction::Clear, Terminal),
         b("ctrl-shift-space", BuiltinAction::ToggleViMode, Terminal),
+        // Scrolling
         b("shift-up", BuiltinAction::ScrollLineUp, Terminal),
         b("shift-down", BuiltinAction::ScrollLineDown, Terminal),
         b("shift-pageup", BuiltinAction::ScrollPageUp, Terminal),
         b("shift-pagedown", BuiltinAction::ScrollPageDown, Terminal),
         b("shift-home", BuiltinAction::ScrollToTop, Terminal),
         b("shift-end", BuiltinAction::ScrollToBottom, Terminal),
+        // Word motion (pass ANSI to the shell)
         b("alt-left", BuiltinAction::SendText("\u{1b}b"), Terminal),
         b("alt-right", BuiltinAction::SendText("\u{1b}f"), Terminal),
         b("alt-b", BuiltinAction::SendText("\u{1b}b"), Terminal),
         b("alt-f", BuiltinAction::SendText("\u{1b}f"), Terminal),
         b("ctrl-delete", BuiltinAction::SendText("\u{1b}[3;5~"), Terminal),
+        // Tabs & windows
         b("ctrl-shift-t", BuiltinAction::NewTab, Both),
         b("ctrl-shift-w", BuiltinAction::CloseTab, Both),
         b("ctrl-shift-n", BuiltinAction::NewWindow, Both),
         b("ctrl-tab", BuiltinAction::NextTab, Both),
         b("ctrl-shift-tab", BuiltinAction::PrevTab, Both),
+        b("ctrl-shift-]", BuiltinAction::NextTab, Both),
+        b("ctrl-shift-[", BuiltinAction::PrevTab, Both),
+        // App & settings
         b("ctrl-shift-r", BuiltinAction::ReloadSettings, Both),
         b("ctrl-,", BuiltinAction::OpenSettings, Global),
         b("ctrl-shift-p", BuiltinAction::ToggleCommandPalette, Global),
-        b("ctrl-shift-alt-p", BuiltinAction::CycleTheme, Both),
-        b("alt-shift-d", BuiltinAction::SplitRight, Both),
-        b("alt-shift--", BuiltinAction::SplitDown, Both),
+        b("ctrl-shift-y", BuiltinAction::CycleTheme, Both),
+        b("ctrl-shift-u", BuiltinAction::CheckForUpdates, Both),
+        // Pane geometry (ctrl-alt-*, mirrors macOS cmd-alt-*)
+        b("ctrl-alt-d", BuiltinAction::SplitRight, Both),
+        b("ctrl-alt-shift-d", BuiltinAction::SplitDown, Both),
         b("ctrl-alt-left", BuiltinAction::FocusPaneLeft, Both),
         b("ctrl-alt-right", BuiltinAction::FocusPaneRight, Both),
         b("ctrl-alt-up", BuiltinAction::FocusPaneUp, Both),
         b("ctrl-alt-down", BuiltinAction::FocusPaneDown, Both),
-        b("ctrl-shift-u", BuiltinAction::CheckForUpdates, Both),
+        b("ctrl-shift-enter", BuiltinAction::TogglePaneZoom, Both),
+        // Find
         b("ctrl-shift-f", BuiltinAction::Find, Both),
         b("ctrl-shift-g", BuiltinAction::FindNext, Both),
-        b("ctrl-shift-alt-g", BuiltinAction::FindPrev, Both),
-        b("ctrl-shift-enter", BuiltinAction::TogglePaneZoom, Both),
+        b("ctrl-alt-g", BuiltinAction::FindPrev, Both),
+        // Tools & overlays
         b("ctrl-shift-b", BuiltinAction::ToggleBroadcast, Both),
         b("ctrl-shift-up", BuiltinAction::JumpPrevPrompt, Both),
         b("ctrl-shift-down", BuiltinAction::JumpNextPrompt, Both),
         b("ctrl-shift-o", BuiltinAction::ToggleQuickSelect, Both),
         b("ctrl-alt-n", BuiltinAction::OpenQuickTerminal, Both),
-        b("ctrl-shift-j", BuiltinAction::ToggleRunLedger, Both),
+        b("ctrl-shift-l", BuiltinAction::ToggleRunLedger, Both),
         b("ctrl-shift-;", BuiltinAction::ToggleHistorySearch, Both),
-        b("ctrl-alt-g", BuiltinAction::ToggleDiff, Both),
+        b("ctrl-alt-shift-g", BuiltinAction::ToggleDiff, Both),
     ]
 }
 
@@ -276,10 +293,10 @@ pub fn font_zoom_key_bindings() -> &'static [(&'static str, &'static str)] {
 pub fn font_zoom_key_bindings_for(windows: bool) -> &'static [(&'static str, &'static str)] {
     if windows {
         &[
-            ("ctrl-=", "increase_font_size"),
-            ("ctrl-+", "increase_font_size"),
-            ("ctrl--", "decrease_font_size"),
-            ("ctrl-0", "reset_font_size"),
+            ("ctrl-shift-=", "increase_font_size"),
+            ("ctrl-shift-+", "increase_font_size"),
+            ("ctrl-shift--", "decrease_font_size"),
+            ("ctrl-shift-0", "reset_font_size"),
         ]
     } else {
         &[
@@ -316,9 +333,9 @@ pub fn display_shortcut_for(id: &str, windows: bool) -> &'static str {
         ("next_tab", _) => "⌃Tab",
         ("prev_tab", _) => "⌃⇧Tab",
         ("split_right", false) => "⌘D",
-        ("split_right", true) => "Alt+Shift+D",
+        ("split_right", true) => "Ctrl+Alt+D",
         ("split_down", false) => "⌘⇧D",
-        ("split_down", true) => "Alt+Shift+-",
+        ("split_down", true) => "Ctrl+Alt+Shift+D",
         ("find", false) => "⌘F",
         ("find", true) => "Ctrl+Shift+F",
         ("open_settings", false) => "⌘,",
@@ -326,7 +343,7 @@ pub fn display_shortcut_for(id: &str, windows: bool) -> &'static str {
         ("reload_settings", false) => "⌘⇧R",
         ("reload_settings", true) => "Ctrl+Shift+R",
         ("cycle_theme", false) => "⌘⇧P",
-        ("cycle_theme", true) => "Ctrl+Shift+Alt+P",
+        ("cycle_theme", true) => "Ctrl+Shift+Y",
         ("check_for_updates", false) => "⌘⇧U",
         ("check_for_updates", true) => "Ctrl+Shift+U",
         ("toggle_command_palette", false) => "⌘⇧K",
@@ -334,11 +351,11 @@ pub fn display_shortcut_for(id: &str, windows: bool) -> &'static str {
         ("new_window", false) => "⌘N",
         ("new_window", true) => "Ctrl+Shift+N",
         ("increase_font_size", false) => "⌘+",
-        ("increase_font_size", true) => "Ctrl++",
+        ("increase_font_size", true) => "Ctrl+Shift++",
         ("decrease_font_size", false) => "⌘-",
-        ("decrease_font_size", true) => "Ctrl+-",
+        ("decrease_font_size", true) => "Ctrl+Shift+-",
         ("reset_font_size", false) => "⌘0",
-        ("reset_font_size", true) => "Ctrl+0",
+        ("reset_font_size", true) => "Ctrl+Shift+0",
         ("toggle_pane_zoom", false) => "⌘⇧Enter",
         ("toggle_pane_zoom", true) => "Ctrl+Shift+Enter",
         ("toggle_broadcast", false) => "⌘⇧B",
@@ -352,11 +369,11 @@ pub fn display_shortcut_for(id: &str, windows: bool) -> &'static str {
         ("open_quick_terminal", false) => "⌘⇧N",
         ("open_quick_terminal", true) => "Ctrl+Alt+N",
         ("toggle_run_ledger", false) => "⌘⇧L",
-        ("toggle_run_ledger", true) => "Ctrl+Shift+J",
+        ("toggle_run_ledger", true) => "Ctrl+Shift+L",
         ("toggle_history_search", false) => "⌘⇧;",
         ("toggle_history_search", true) => "Ctrl+Shift+;",
         ("toggle_diff", false) => "⌥⌘G",
-        ("toggle_diff", true) => "Ctrl+Alt+G",
+        ("toggle_diff", true) => "Ctrl+Alt+Shift+G",
         ("secondary_click", false) => "⌘",
         ("secondary_click", true) => "Ctrl",
         _ => "",
@@ -379,11 +396,20 @@ mod tests {
         let keys = keys_for(true);
         assert!(keys.iter().any(|k| k == "ctrl-shift-t"));
         assert!(keys.iter().any(|k| k == "ctrl-shift-w"));
-        assert!(keys.iter().any(|k| k == "ctrl-v"));
+        assert!(keys.iter().any(|k| k == "ctrl-shift-v"));
         assert!(keys.iter().any(|k| k == "ctrl-,"));
         assert!(keys.iter().any(|k| k == "ctrl-shift-p"));
-        assert!(keys.iter().any(|k| k == "ctrl-shift-j"));
-        assert!(keys.iter().any(|k| k == "ctrl-alt-g"));
+        assert!(keys.iter().any(|k| k == "ctrl-shift-l"));
+        assert!(keys.iter().any(|k| k == "ctrl-alt-shift-g"));
+        // Tab activation lives on ctrl-shift-N so shell/TUI keep ctrl-1..9.
+        assert!(keys.iter().any(|k| k == "ctrl-shift-1"));
+        assert!(keys.iter().any(|k| k == "ctrl-shift-9"));
+        assert!(
+            !keys.iter().any(|k| ("1"..="9").contains(&k.as_str())
+                || k == "ctrl-1"
+                || k == "ctrl-9"),
+            "must not bind bare ctrl-digit tab keys: {keys:?}"
+        );
         let settings_ctx: Vec<_> = builtin_bindings_for(true)
             .into_iter()
             .filter(|b| b.key == "ctrl-,")
@@ -393,19 +419,20 @@ mod tests {
         assert!(
             !keys
                 .iter()
-                .any(|k| k == "ctrl-c" || k == "ctrl-w" || k == "ctrl-d"),
-            "must not bind Ctrl+C/W/D as app shortcuts: {keys:?}"
+                .any(|k| k == "ctrl-c" || k == "ctrl-w" || k == "ctrl-d" || k == "ctrl-v"),
+            "must not bind ctrl-C/W/D/V as app shortcuts (shell owns them): {keys:?}"
         );
         assert!(
             !keys.iter().any(|k| k.starts_with("cmd-")),
             "Windows table must not use cmd-: {keys:?}"
         );
-        let actions: Vec<_> = builtin_bindings_for(true)
+        // Paste is only on ctrl-shift-v / shift-insert now.
+        let paste_keys: Vec<_> = builtin_bindings_for(true)
             .into_iter()
-            .filter(|b| b.key == "ctrl-v")
-            .map(|b| b.action)
+            .filter(|b| b.action == BuiltinAction::Paste)
+            .map(|b| b.key)
             .collect();
-        assert_eq!(actions, vec![BuiltinAction::Paste]);
+        assert_eq!(paste_keys, vec!["ctrl-shift-v", "shift-insert"]);
     }
 
     #[test]
@@ -424,13 +451,13 @@ mod tests {
         let win = font_zoom_key_bindings_for(true);
         assert!(
             win.iter()
-                .any(|(k, a)| *k == "ctrl-+" && *a == "increase_font_size")
+                .any(|(k, a)| *k == "ctrl-shift-+" && *a == "increase_font_size")
         );
         assert!(
             win.iter()
-                .any(|(k, a)| *k == "ctrl--" && *a == "decrease_font_size")
+                .any(|(k, a)| *k == "ctrl-shift--" && *a == "decrease_font_size")
         );
-        assert!(win.iter().all(|(k, _)| k.starts_with("ctrl-")));
+        assert!(win.iter().all(|(k, _)| k.starts_with("ctrl-shift-")));
 
         let mac = font_zoom_key_bindings_for(false);
         assert!(
@@ -438,6 +465,38 @@ mod tests {
                 .any(|(k, a)| *k == "cmd-+" && *a == "increase_font_size")
         );
         assert!(mac.iter().all(|(k, _)| k.starts_with("cmd-")));
+    }
+
+    #[test]
+    fn windows_app_layer_never_binds_bare_ctrl_key() {
+        // Any `ctrl-<x>` chord the app owns must also carry shift or alt so it
+        // cannot shadow a shell/TUI control key. `ctrl-,` (settings) and
+        // `ctrl-tab`/`ctrl-shift-tab` (tab cycling, non-printable) are allowed.
+        let allowed_bare = ["ctrl-,", "ctrl-tab", "ctrl-delete", "ctrl-insert"];
+        for b in builtin_bindings_for(true) {
+            let k = &b.key;
+            if !k.starts_with("ctrl-") || allowed_bare.contains(&k.as_str()) {
+                continue;
+            }
+            assert!(
+                k.contains("shift") || k.contains("alt"),
+                "bare ctrl chord would steal a shell key: {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_duplicate_keys_per_os() {
+        for windows in [true, false] {
+            let mut seen = std::collections::HashSet::new();
+            for b in builtin_bindings_for(windows) {
+                assert!(
+                    seen.insert(b.key.clone()),
+                    "duplicate key {} (windows={windows})",
+                    b.key
+                );
+            }
+        }
     }
 
     #[test]

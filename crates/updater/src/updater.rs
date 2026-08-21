@@ -1,6 +1,6 @@
 //! Lightweight self-updater for Sleipnir.
 //!
-//! Queries GitHub Releases for the latest version, downloads the macOS `.zip`
+//! Queries GitHub Releases for the latest version, downloads the macOS `.dmg`
 //! artifact, verifies its SHA-256 against the published `.sha256` sidecar, then
 //! atomically replaces the running `.app` bundle via a detached helper script
 //! and relaunches.
@@ -33,9 +33,9 @@ pub struct ReleaseInfo {
     pub tag: String,
     /// Release notes / body (markdown).
     pub notes: String,
-    /// Direct download URL for the macOS `.zip` artifact.
-    pub zip_url: String,
-    /// Direct download URL for the `.zip.sha256` sidecar.
+    /// Direct download URL for the macOS `.dmg` artifact.
+    pub artifact_url: String,
+    /// Direct download URL for the `.dmg.sha256` sidecar.
     pub sha256_url: String,
 }
 
@@ -68,9 +68,9 @@ pub fn is_newer(current: &str, latest: &semver::Version) -> bool {
 }
 
 /// Asset filename marker and file extension for the macOS release artifact.
-/// macOS ships `*-macos.zip`; the SHA-256 sidecar is `<artifact>.sha256`.
+/// macOS ships `*-macos.dmg`; the SHA-256 sidecar is `<artifact>.sha256`.
 pub fn platform_asset_markers() -> (&'static str, &'static str) {
-    ("-macos", ".zip")
+    ("-macos", ".dmg")
 }
 
 /// Select the release artifact and its `.sha256` sidecar for the current OS.
@@ -131,12 +131,12 @@ pub fn parse_release(release: &Value) -> Result<ReleaseInfo> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let (zip_url, sha256_url) = pick_asset(release)?;
+    let (artifact_url, sha256_url) = pick_asset(release)?;
     Ok(ReleaseInfo {
         version,
         tag,
         notes,
-        zip_url,
+        artifact_url,
         sha256_url,
     })
 }
@@ -160,8 +160,8 @@ fn parse_sha256_sidecar(body: &str) -> Result<String> {
 // GPUI's smol-based executor. (reqwest/hyper require a Tokio reactor and panic
 // otherwise — do not reintroduce it here.)
 
-/// Max bytes we'll read for the release `.zip` (guards against runaway reads).
-const MAX_ZIP_BYTES: u64 = 512 * 1024 * 1024;
+/// Max bytes we'll read for the release `.dmg` (guards against runaway reads).
+const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Query GitHub for the latest release and compare against `current_version`.
 ///
@@ -186,9 +186,9 @@ pub fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
     }
 }
 
-/// Download the release `.zip`, verify its SHA-256, and return the local path.
+/// Download the release `.dmg`, verify its SHA-256, and return the local path.
 ///
-/// The zip is written to `dest_dir`, which the caller owns and should clean up.
+/// The dmg is written to `dest_dir`, which the caller owns and should clean up.
 /// Blocking — call from `cx.background_spawn`.
 pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dest_dir)
@@ -204,16 +204,16 @@ pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBu
         .context("read sha256 sidecar body")?;
     let expected = parse_sha256_sidecar(&sidecar)?;
 
-    // Zip payload.
-    let bytes = ureq::get(&info.zip_url)
+    // Disk-image payload.
+    let bytes = ureq::get(&info.artifact_url)
         .header("User-Agent", USER_AGENT)
         .call()
-        .context("download release zip")?
+        .context("download release dmg")?
         .body_mut()
         .with_config()
-        .limit(MAX_ZIP_BYTES)
+        .limit(MAX_ARTIFACT_BYTES)
         .read_to_vec()
-        .context("read release zip body")?;
+        .context("read release dmg body")?;
 
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
@@ -268,44 +268,85 @@ pub fn current_app_bundle_path() -> Option<PathBuf> {
     }
 }
 
-/// Extract the downloaded zip, then spawn a detached helper that waits for this
-/// process to exit, atomically swaps the `.app`, and relaunches it.
+/// Mount the downloaded dmg, copy the `.app` out, detach the image, then spawn
+/// a detached helper that waits for this process to exit, atomically swaps the
+/// `.app`, and relaunches it.
 ///
 /// On failure to install (permissions, etc.) the helper opens the releases page
 /// for a manual install. Windows has no in-place helper.
-pub fn install_and_relaunch(zip_path: &Path, app_bundle: &Path) -> Result<()> {
+pub fn install_and_relaunch(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
     #[cfg(not(unix))]
     {
-        let _ = (zip_path, app_bundle);
+        let _ = (dmg_path, app_bundle);
         bail!("in-place update is not supported on this platform; open {RELEASES_PAGE}");
     }
     #[cfg(unix)]
     {
-        install_and_relaunch_unix(zip_path, app_bundle)
+        install_and_relaunch_unix(dmg_path, app_bundle)
     }
 }
 
 #[cfg(unix)]
-fn install_and_relaunch_unix(zip_path: &Path, app_bundle: &Path) -> Result<()> {
-    let stage = zip_path
+fn install_and_relaunch_unix(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
+    let stage = dmg_path
         .parent()
-        .ok_or_else(|| anyhow!("zip has no parent dir"))?
+        .ok_or_else(|| anyhow!("dmg has no parent dir"))?
         .join("extract");
     // Clean any prior extraction.
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage).context("create extract dir")?;
 
-    // Use ditto to preserve resource forks / signatures.
-    let status = std::process::Command::new("/usr/bin/ditto")
-        .arg("-x")
-        .arg("-k")
-        .arg(zip_path)
-        .arg(&stage)
+    // Mount the dmg at a private mountpoint (no Finder window, no browse).
+    let mount = dmg_path
+        .parent()
+        .ok_or_else(|| anyhow!("dmg has no parent dir"))?
+        .join("mnt");
+    let _ = std::process::Command::new("/usr/bin/hdiutil")
+        .arg("detach")
+        .arg(&mount)
+        .arg("-force")
+        .status();
+    let _ = std::fs::remove_dir_all(&mount);
+    std::fs::create_dir_all(&mount).context("create mount dir")?;
+    let status = std::process::Command::new("/usr/bin/hdiutil")
+        .arg("attach")
+        .arg(dmg_path)
+        .arg("-nobrowse")
+        .arg("-noautoopen")
+        .arg("-mountpoint")
+        .arg(&mount)
         .status()
-        .context("run ditto to extract zip")?;
+        .context("run hdiutil attach")?;
     if !status.success() {
-        bail!("ditto extraction failed");
+        bail!("hdiutil attach failed");
     }
+
+    // Copy the .app out of the mounted image, then detach it (always).
+    let copy_result = (|| -> Result<()> {
+        let mounted_app = find_app_bundle(&mount)?;
+        let out = stage.join(
+            mounted_app
+                .file_name()
+                .unwrap_or_else(|| "Sleipnir.app".as_ref()),
+        );
+        // Use ditto to preserve resource forks / signatures.
+        let status = std::process::Command::new("/usr/bin/ditto")
+            .arg(&mounted_app)
+            .arg(&out)
+            .status()
+            .context("run ditto to copy app out of dmg")?;
+        if !status.success() {
+            bail!("ditto copy failed");
+        }
+        Ok(())
+    })();
+
+    let _ = std::process::Command::new("/usr/bin/hdiutil")
+        .arg("detach")
+        .arg(&mount)
+        .arg("-force")
+        .status();
+    copy_result?;
 
     // Locate the extracted .app (top-level entry ending in .app).
     let new_app = find_app_bundle(&stage)?;
@@ -322,7 +363,7 @@ fn install_and_relaunch_unix(zip_path: &Path, app_bundle: &Path) -> Result<()> {
         pid,
         &new_app,
         app_bundle,
-        zip_path.parent().unwrap_or(Path::new("/tmp")),
+        dmg_path.parent().unwrap_or(Path::new("/tmp")),
     )?;
 
     std::process::Command::new("/bin/sh")
@@ -447,31 +488,31 @@ mod tests {
     }
 
     #[test]
-    fn pick_asset_selects_zip_and_sidecar() {
+    fn pick_asset_selects_dmg_and_sidecar() {
         let release = json!({
             "assets": [
+                {"name": "Sleipnir-0.2.0-windows-x64.exe",
+                 "browser_download_url": "https://x/exe"},
                 {"name": "Sleipnir-0.2.0-macos.dmg",
                  "browser_download_url": "https://x/dmg"},
-                {"name": "Sleipnir-0.2.0-macos.zip",
-                 "browser_download_url": "https://x/zip"},
-                {"name": "Sleipnir-0.2.0-macos.zip.sha256",
+                {"name": "Sleipnir-0.2.0-macos.dmg.sha256",
                  "browser_download_url": "https://x/sha"}
             ]
         });
-        let (zip, sha) = pick_asset_for(&release, "-macos", ".zip").unwrap();
-        assert_eq!(zip, "https://x/zip");
+        let (dmg, sha) = pick_asset_for(&release, "-macos", ".dmg").unwrap();
+        assert_eq!(dmg, "https://x/dmg");
         assert_eq!(sha, "https://x/sha");
     }
 
     #[test]
-    fn pick_asset_errors_without_zip() {
+    fn pick_asset_errors_without_dmg() {
         let release = json!({
             "assets": [
-                {"name": "Sleipnir-0.2.0-macos.dmg",
-                 "browser_download_url": "https://x/dmg"}
+                {"name": "Sleipnir-0.2.0-windows-x64.exe",
+                 "browser_download_url": "https://x/exe"}
             ]
         });
-        assert!(pick_asset_for(&release, "-macos", ".zip").is_err());
+        assert!(pick_asset_for(&release, "-macos", ".dmg").is_err());
     }
 
     #[test]
@@ -492,7 +533,7 @@ mod tests {
         assert_eq!(info.version, semver::Version::new(0, 2, 0));
         assert_eq!(info.tag, "v0.2.0");
         assert_eq!(info.notes, "notes here");
-        assert_eq!(info.zip_url, "https://x/zip");
+        assert_eq!(info.artifact_url, "https://x/zip");
         assert_eq!(info.sha256_url, "https://x/sha");
     }
 
@@ -501,7 +542,7 @@ mod tests {
         let hex = "a".repeat(64);
         assert_eq!(parse_sha256_sidecar(&hex).unwrap(), hex);
         // shasum-style with filename.
-        let line = format!("{hex}  Sleipnir-0.2.0-macos.zip");
+        let line = format!("{hex}  Sleipnir-0.2.0-macos.dmg");
         assert_eq!(parse_sha256_sidecar(&line).unwrap(), hex);
         // uppercase normalized to lowercase.
         let upper = "A".repeat(64);
