@@ -1,6 +1,5 @@
 //! Single-window multi-tab shell for sleipnir (HIG-aligned chrome).
 
-use crate::chrome::tab_sidebar;
 use gpui::{
     App, AppContext as _, BorrowAppContext, Bounds, ClickEvent, Context, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton,
@@ -12,7 +11,7 @@ use gpui::{
 };
 use run_ledger::{PaneKey, RunEvent};
 use sleipnir_settings::{
-    Appearance, ConfirmClose, TabPlacement, TerminalPalette, TerminalSettings, ThemeName,
+    Appearance, ConfirmClose, TerminalPalette, TerminalSettings, ThemeName,
     ThemeSetting, palette_for_theme,
 };
 
@@ -117,8 +116,6 @@ actions!(
         SendGitDiff,
         /// Fuzzy search shell history in chrome (does not take the PTY line).
         ToggleHistorySearch,
-        /// Switch tab chrome between the side rail and the top strip.
-        ToggleTabPlacement,
         /// Toggle the git diff inspector overlay.
         ToggleDiff,
     ]
@@ -1182,11 +1179,7 @@ impl AppShell {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
-        let buffer = if TerminalSettings::get_global(cx).tab_placement == TabPlacement::Side {
-            tab.title(cx).to_string()
-        } else {
-            tab.path_label(cx).to_string()
-        };
+        let buffer = tab.path_label(cx).to_string();
         self.rename = Some(RenameState { tab_id, buffer });
         cx.notify();
     }
@@ -1731,21 +1724,6 @@ impl AppShell {
     ) {
         self.ledger_open = !self.ledger_open;
         cx.notify();
-    }
-
-    fn toggle_tab_placement(&mut self, cx: &mut Context<Self>) {
-        let next = TerminalSettings::get_global(cx).tab_placement.toggle();
-        TerminalSettings::set_tab_placement(next, cx);
-        cx.notify();
-    }
-
-    fn on_toggle_tab_placement(
-        &mut self,
-        _: &ToggleTabPlacement,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_tab_placement(cx);
     }
 
     fn on_send_selection(
@@ -2454,7 +2432,6 @@ impl AppShell {
                 }
             }
             CommandId::TogglePaneFacts => self.toggle_pane_facts(cx),
-            CommandId::ToggleTabPlacement => self.toggle_tab_placement(cx),
             CommandId::ToggleDiff => self.toggle_diff(window, cx),
         }
     }
@@ -3896,14 +3873,7 @@ impl AppShell {
                                     }
                                     cx.notify();
                                 },
-                            ))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .pl(px(14.0))
-                                    .child(div().w_full().h(px(1.0)).bg(tokens.border)),
-                            )
-                            .child(self.settings_tab_placement_row(tokens, cx)),
+                            )),
                     ),
             )
             // ── Terminal group ────────────────────────────────────────────
@@ -4013,114 +3983,6 @@ impl AppShell {
             )
     }
 
-    fn settings_tab_placement_row(
-        &self,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let current = TerminalSettings::get_global(cx).tab_placement;
-        div()
-            .id("tab-placement")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .w_full()
-            .px(px(14.0))
-            .py(px(10.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(tokens.fg)
-                            .child("Tab placement"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(tokens.fg_muted)
-                            .child("Side rail or top strip — same tab features either way"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_row()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(tokens.border)
-                    .overflow_hidden()
-                    .child(self.settings_choice_chip(
-                        "tab-placement-side",
-                        "Side",
-                        current == TabPlacement::Side,
-                        tokens,
-                        cx,
-                        |_, cx| {
-                            TerminalSettings::set_tab_placement(TabPlacement::Side, cx);
-                            cx.notify();
-                        },
-                    ))
-                    .child(self.settings_choice_chip(
-                        "tab-placement-top",
-                        "Top",
-                        current == TabPlacement::Top,
-                        tokens,
-                        cx,
-                        |_, cx| {
-                            TerminalSettings::set_tab_placement(TabPlacement::Top, cx);
-                            cx.notify();
-                        },
-                    )),
-            )
-    }
-
-    fn settings_choice_chip(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        selected: bool,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .px(px(10.0))
-            .py(px(4.0))
-            .text_size(px(12.0))
-            .cursor_pointer()
-            .bg(if selected {
-                tokens.accent.opacity(0.85)
-            } else {
-                gpui::hsla(0.0, 0.0, 0.0, 0.0)
-            })
-            .text_color(if selected {
-                Hsla::white()
-            } else {
-                tokens.fg_muted
-            })
-            .hover(|el| {
-                if selected {
-                    el
-                } else {
-                    el.bg(tokens.hover).text_color(tokens.fg)
-                }
-            })
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                on_click(this, cx);
-            }))
-            .child(SharedString::from(label))
-    }
-
-    /// One toggle row: macOS-style with inline toggle switch.
     fn settings_toggle_row(
         &self,
         id: &'static str,
@@ -4879,9 +4741,7 @@ impl Render for AppShell {
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
-        let settings = TerminalSettings::get_global(cx);
-        let geo = ChromeGeometry::standard().with_sidebar_width(settings.sidebar_width);
-        let side = tab_sidebar::is_side_placement(cx);
+        let geo = ChromeGeometry::standard();
         let fullscreen = window.is_fullscreen();
         let leading = if fullscreen {
             ChromeGeometry::fullscreen_leading_pad()
@@ -4889,11 +4749,7 @@ impl Render for AppShell {
             geo.leading_pad
         };
         let chrome_h = geo.height;
-        let banner_top = if side {
-            geo.content_title_height
-        } else {
-            chrome_h
-        };
+        let banner_top = chrome_h;
 
         div()
             .size_full()
@@ -5066,8 +4922,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_send_git_diff))
             .on_action(cx.listener(Self::on_toggle_diff))
             .on_action(cx.listener(Self::on_toggle_history_search))
-            .on_action(cx.listener(Self::on_toggle_tab_placement))
-            .when(!side, |el| {
+            .child({
                 let leading_drag = self
                     .attach_empty_drag("chrome-drag-leading", cx)
                     .h_full()
@@ -5100,37 +4955,15 @@ impl Render for AppShell {
                     )
                     .child(trailing_drag)
                     .child(self.render_windows_titlebar_end(&tokens, window, cx));
-                el.child(chrome_band)
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(chrome_band)
                     .when(self.find_open, |el| {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
                     .child(self.render_content(&tokens, window, cx))
-            })
-            .when(side, |el| {
-                el.child(
-                    div()
-                        .id("side-layout")
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .child(self.render_tab_sidebar(&tokens, &geo, window, cx))
-                        .child(
-                            div()
-                                .id("side-content")
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .child(self.render_content_title(&tokens, &geo, window, cx))
-                                .when(self.find_open, |el| {
-                                    el.child(self.render_find_bar(&tokens, cx))
-                                })
-                                .child(self.render_content(&tokens, window, cx)),
-                        ),
-                )
             })
             .when(self.broadcast, |el| {
                 el.child(

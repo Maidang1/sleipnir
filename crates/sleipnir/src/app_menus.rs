@@ -10,7 +10,7 @@ use sleipnir_ui::{
     JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings,
     PipeSelection, PrevTab, ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown,
     SplitRight, ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    ToggleQuickSelect, ToggleRunLedger, ToggleTabPlacement,
+    ToggleQuickSelect, ToggleRunLedger,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -72,7 +72,6 @@ fn shared_edit_view_window() -> [Menu; 3] {
             MenuItem::separator(),
             MenuItem::action("Toggle Pane Zoom", TogglePaneZoom),
             MenuItem::action("Toggle Broadcast Input", ToggleBroadcast),
-            MenuItem::action("Toggle Tab Placement", ToggleTabPlacement),
             MenuItem::separator(),
             MenuItem::action("Previous Prompt", JumpPrevPrompt),
             MenuItem::action("Next Prompt", JumpNextPrompt),

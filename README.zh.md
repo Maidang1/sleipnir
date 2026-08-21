@@ -31,7 +31,7 @@ Sleipnir 是独立终端，通过 GPUI 在 GPU 上绘制，大量输出时滚动
 ## 功能
 
 - **GPU 绘制**，滚动和重绘走 GPUI（macOS 上 Metal，Windows 上 Direct3D 11）；光标缓入缓出闪烁。
-- **标签、分屏与窗格**，默认顶部标签条，也可以改成左侧标签轨（`tab_placement: side`，设置里的 Tab placement，View → Toggle Tab Placement，或命令面板）。两种布局都按 git 工作区静默分组，不画分组标题。侧栏是两行：标题，下一行是分支和脏计数 `+N −M`。顶部条只显示窗格 cwd 的最后两级（`myself/harbor`），不显示分支和脏计数。右键重命名仍可覆盖。可以向右 / 向下分屏，跳转标签，移动焦点；组内拖动重排，拖到终端区域会拆成新窗口；把后台标签拖到当前窗格上会合并成分屏；把窗格把手拖到标签列表会抽成新标签。支持窗格放大，未聚焦窗格会变暗。识别到的编码 Agent 会显示字母标记（`claude` → `C`，`codex` → `X` 等）；普通 shell 没有占位符。有失败 Attention 的标签整块淡红，不画运行中 / 成功圆点。Mark Tab as Seen 只清 Attention，不删 Run 记录。
+- **标签、分屏与窗格**，顶部标签条按 git 工作区静默分组，不画分组标题，每个标签只显示窗格 cwd 的最后两级（`myself/harbor`）。右键重命名仍可覆盖。可以向右 / 向下分屏，跳转标签，移动焦点；组内拖动重排，拖到终端区域会拆成新窗口；把后台标签拖到当前窗格上会合并成分屏；把窗格把手拖到标签列表会抽成新标签。支持窗格放大，未聚焦窗格会变暗。识别到的编码 Agent 会显示字母标记（`claude` → `C`，`codex` → `X` 等）；普通 shell 没有占位符。有失败 Attention 的标签整块淡红，不画运行中 / 成功圆点。Mark Tab as Seen 只清 Attention，不删 Run 记录。
 - **多窗口**，`⌘N` 打开独立窗口，标签和 shell 各自一套。
 - **字体缩放**，`⌘+`（以及 `-` / `0`）只改当前窗口的格子大小，不写进设置。
 - **自适应主题**，Catppuccin 各口味，加上 Tokyo Night、Nord、Gruvbox、Solarized、GitHub Dark/Light、Dracula、One Dark；`auto` 跟随系统浅色 / 深色。额外调色板放配置目录的 `themes.json`（`"theme": "kanagawa"`，见 `docs/themes.example.json`）。
@@ -123,7 +123,7 @@ cargo run -p sleipnir
 | `restore_session` | 启动时恢复标签 / 分屏 / cwd（默认 `true`） |
 | `confirm_close` | `dirty` / `always` / `never`，忙窗格关闭前提示（默认 `dirty`） |
 | `path_links` | ⌘-点击打开路径类目标（默认 `true`） |
-| `key_bindings` | 额外组合键（`{ "key": "cmd-alt-t", "action": "new_tab" }`）。动作：`new_tab`、`close_tab`、`next_tab`、`prev_tab`、`split_right`、`split_down`、`new_window`、`open_settings`、`reload_settings`、`cycle_theme`、`find`、`toggle_command_palette`、`increase_font_size`、`decrease_font_size`、`reset_font_size`、`toggle_pane_zoom`、`toggle_broadcast`、`jump_prev_prompt`、`jump_next_prompt`、`toggle_quick_select`、`open_quick_terminal`、`export_scrollback`、`check_for_updates`、`clear_run_ledger`、`toggle_run_ledger`、`mark_tab_seen`、`toggle_pane_facts`、`send_selection`、`pipe_selection`、`send_git_diff`、`toggle_diff`、`toggle_history_search`、`toggle_tab_placement`。可选 `context`：`AppShell` / `Terminal`。改完要重启才生效。 |
+| `key_bindings` | 额外组合键（`{ "key": "cmd-alt-t", "action": "new_tab" }`）。动作：`new_tab`、`close_tab`、`next_tab`、`prev_tab`、`split_right`、`split_down`、`new_window`、`open_settings`、`reload_settings`、`cycle_theme`、`find`、`toggle_command_palette`、`increase_font_size`、`decrease_font_size`、`reset_font_size`、`toggle_pane_zoom`、`toggle_broadcast`、`jump_prev_prompt`、`jump_next_prompt`、`toggle_quick_select`、`open_quick_terminal`、`export_scrollback`、`check_for_updates`、`clear_run_ledger`、`toggle_run_ledger`、`mark_tab_seen`、`toggle_pane_facts`、`send_selection`、`pipe_selection`、`send_git_diff`、`toggle_diff`、`toggle_history_search`。可选 `context`：`AppShell` / `Terminal`。改完要重启才生效。 |
 | `terminal.font_ligatures` | 打开 OpenType 连字（默认 `false`） |
 | `terminal.copy_on_select` | 鼠标松开即复制（默认 `false`；设置里可切） |
 | `terminal.bell` | `off` / `system` / `visual`（默认 `off`） |
@@ -134,8 +134,6 @@ cargo run -p sleipnir
 | `run_ledger_retention_days` | 持久化记录保留天数（默认 `7`） |
 | `run_ledger_max_runs` | 持久化条数上限，先丢最旧的（默认 `500`） |
 | `run_ledger_redact` | 采集时脱敏命令行（默认 `true`；启发式，不是保证） |
-| `tab_placement` | `top`（默认）顶部条，只显示 cwd 路径 / `side` 左侧轨，标题 + 分支/`+N −M`。静默分组和组内拖动一样 |
-| `sidebar_width` | 左侧轨宽度，单位 px，160–320（默认 `200`）。不是实时拖动的分割条 |
 | `agent_icons` | 已知编码 Agent 的字母标记（默认 `true`） |
 | `control_surface` | 绑定本地控制套接字（默认 `false`）。`SLEIPNIR_CONTROL=1` 也会打开 |
 | `show_tray_icon` | 菜单栏 Attention 条目（默认 `true`）。Dock 角标是另一回事 |

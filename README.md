@@ -36,7 +36,7 @@ prompt.
 ## Features
 
 - **GPU rendering** — smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D 11 on Windows); ease-in-out cursor blink.
-- **Tabs, splits & panes** — top strip (default) or side tab rail (`tab_placement: side`, Settings → Tab placement, View → Toggle Tab Placement, or the command palette). Both group by git workspace with no group header. The rail is two lines (title, then branch + dirty `+N −M`). The top strip shows only the last two cwd components (`myself/harbor`), no branch or dirty mark. Right-click rename still overrides. Split right/down, jump tabs, move focus, drag tabs to reorder inside a group or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark (`claude` → `C`, `codex` → `X`, …); a plain shell has no placeholder. A tab with failed Attention washes faint red (no running/success dots). Mark Tab as Seen clears Attention without deleting Run records.
+- **Tabs, splits & panes** — a top strip that groups by git workspace with no group header, showing the last two cwd components (`myself/harbor`) per tab. Right-click rename overrides. Split right/down, jump tabs, move focus, drag tabs to reorder inside a group or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark (`claude` → `C`, `codex` → `X`, …); a plain shell has no placeholder. A tab with failed Attention washes faint red (no running/success dots). Mark Tab as Seen clears Attention without deleting Run records.
 - **Multi-window** — `⌘N` opens an independent window with its own tabs and shells.
 - **Font zoom** — `⌘+` (and `-` / `0`) resize the grid for the current window (not persisted).
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
@@ -140,7 +140,7 @@ Default font is **Menlo** on macOS and **Cascadia Mono** on Windows.
 | `restore_session` | Restore tabs/splits/cwd on launch (default `true`) |
 | `confirm_close` | `dirty` / `always` / `never` — prompt before closing a busy pane (default `dirty`) |
 | `path_links` | Open path-like targets on ⌘-click (default `true`) |
-| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`, `mark_tab_seen`, `toggle_pane_facts`, `send_selection`, `pipe_selection`, `send_git_diff`, `toggle_diff`, `toggle_history_search`, `toggle_tab_placement`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
+| `key_bindings` | Extra chords (`{ "key": "cmd-alt-t", "action": "new_tab" }`). Actions: `new_tab`, `close_tab`, `next_tab`, `prev_tab`, `split_right`, `split_down`, `new_window`, `open_settings`, `reload_settings`, `cycle_theme`, `find`, `toggle_command_palette`, `increase_font_size`, `decrease_font_size`, `reset_font_size`, `toggle_pane_zoom`, `toggle_broadcast`, `jump_prev_prompt`, `jump_next_prompt`, `toggle_quick_select`, `open_quick_terminal`, `export_scrollback`, `check_for_updates`, `clear_run_ledger`, `toggle_run_ledger`, `mark_tab_seen`, `toggle_pane_facts`, `send_selection`, `pipe_selection`, `send_git_diff`, `toggle_diff`, `toggle_history_search`. Optional `context`: `AppShell` / `Terminal`. Restart to apply. |
 | `terminal.font_ligatures` | Enable OpenType ligatures (default `false`) |
 | `terminal.copy_on_select` | Copy selection on mouse-up (default `false`; toggle in Settings) |
 | `terminal.bell` | `off` / `system` / `visual` (default `off`) |
@@ -151,8 +151,6 @@ Default font is **Menlo** on macOS and **Cascadia Mono** on Windows.
 | `run_ledger_retention_days` | How long to keep persisted runs (default `7`) |
 | `run_ledger_max_runs` | Cap on persisted runs; oldest dropped first (default `500`) |
 | `run_ledger_redact` | Redact command lines at capture (default `true`; heuristic, not a guarantee) |
-| `tab_placement` | `top` (default) strip with cwd path only / `side` left rail with title + branch/`+N −M`. Same silent grouping and in-group drag |
-| `sidebar_width` | Left rail width in px, 160–320 (default `200`). Not a live-drag divider |
 | `agent_icons` | Letter monograms for known coding-agent processes (default `true`) |
 | `control_surface` | Bind the local control socket (default `false`). Also on with `SLEIPNIR_CONTROL=1` |
 | `show_tray_icon` | Menu-bar Attention item (default `true`). Dock badge is independent |

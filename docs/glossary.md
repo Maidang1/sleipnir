@@ -46,16 +46,13 @@ The custom chrome of a Window: traffic-light clearance, the Tab rail or top tab
 strip, and any window controls. It is deferential to terminal content per HIG.
 _Avoid_: Titlebar, header, toolbar.
 
-**Tab rail**:
-The left-side list of Tabs (`tab_placement: side`). Default chrome is the top strip.
-`tab_placement: top` is the same tab list laid out as a horizontal strip
-(same grouping, in-group drag). There is no Workspace group header in
-either layout. A rail row is two lines: title, then branch + dirty
-`+N −M`. A top-strip chip shows only the last two cwd components
-(`myself/harbor`), or a user rename. Failed Attention washes the chip a
-faint red instead of drawing a run glyph. Running and Succeeded never
-appear on the chip.
-_Avoid_: Sidebar (the rail is the tab list, not a second panel), activity bar.
+**Tab strip**:
+The horizontal list of Tabs across the top of the window, grouped by
+Workspace with no group header. A chip shows only the last two cwd
+components (`myself/harbor`), or a user rename. Failed Attention washes
+the chip a faint red instead of drawing a run glyph. Running and Succeeded
+never appear on the chip.
+_Avoid_: Sidebar, tab rail (the side rail was removed), activity bar.
 
 **Workspace**:
 A grouping key for Tabs, derived from the git work tree of the Tab's active Pane

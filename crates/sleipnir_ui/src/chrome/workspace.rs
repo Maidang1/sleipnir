@@ -20,18 +20,6 @@ impl WorkspaceKey {
             None => Self::Home,
         }
     }
-
-    /// Short label: directory basename, or `~`.
-    pub fn name(&self) -> String {
-        match self {
-            Self::Home => "~".into(),
-            Self::Path(path) => path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| path.display().to_string()),
-        }
-    }
 }
 
 /// Tab-chip path: last two cwd components, e.g. `/Users/me/src/app` → `src/app`.
@@ -129,15 +117,6 @@ mod tests {
         assert_eq!(
             WorkspaceKey::of(Some(Path::new("/tmp/scratch"))),
             WorkspaceKey::Path(PathBuf::from("/tmp/scratch"))
-        );
-    }
-
-    #[test]
-    fn workspace_name_is_basename_or_home() {
-        assert_eq!(WorkspaceKey::Home.name(), "~");
-        assert_eq!(
-            WorkspaceKey::Path(PathBuf::from("/Users/me/harbor")).name(),
-            "harbor"
         );
     }
 

@@ -157,6 +157,22 @@ pub fn wrap_shell_for_inject_in(
         );
         return (program.to_string(), args);
     }
+    // The app can be launched from another terminal and inherit its integration
+    // markers. They describe the parent process, not this new PTY; leaving them
+    // set makes our injected script return before emitting OSC 133 B, so command
+    // input selection falls back to the entire terminal buffer.
+    for key in [
+        "ITERM_SESSION_ID",
+        "GHOSTTY_RESOURCES_DIR",
+        "KITTY_SHELL_INTEGRATION",
+        "WEZTERM_EXECUTABLE",
+        "SLEIPNIR_OSC133_LOADED",
+    ] {
+        // Alacritty starts login shells through `login -p`, which preserves the
+        // parent process environment in addition to this map. An explicit empty
+        // value shadows stale parent markers; removing the key is insufficient.
+        env.insert(key.into(), String::new());
+    }
     env.insert("SLEIPNIR_SHELL_INTEGRATION".into(), "1".into());
     match shell {
         InjectShell::Zsh => wrap_zsh(program, args, env, script_dir),
@@ -314,15 +330,22 @@ pub fn click_to_move_sequence(req: ClickToMove) -> Option<Vec<u8>> {
     if req.alt_screen {
         return None;
     }
-    let prompt_line = req.prompt_line?;
+    // Click-to-move only makes sense on the row the cursor is on: we move the
+    // shell cursor horizontally with CSI C/D. Clicking a different row can't be
+    // expressed as pure left/right motion, so ignore it.
     if req.click_line != req.cursor_line {
         return None;
     }
-    if req.cursor_line < prompt_line || req.click_line < prompt_line {
-        return None;
-    }
-    if req.click_column < req.prompt_prefix_cols {
-        return None;
+    // With OSC 133 shell integration we know the prompt bounds and refuse to
+    // move into the non-editable prefix. Without it, we still allow moving on
+    // the cursor's own row — arrow-key motion is harmless.
+    if let Some(prompt_line) = req.prompt_line {
+        if req.cursor_line < prompt_line || req.click_line < prompt_line {
+            return None;
+        }
+        if req.click_column < req.prompt_prefix_cols {
+            return None;
+        }
     }
     let delta = req.click_column as i32 - req.cursor_column as i32;
     if delta == 0 {
@@ -334,6 +357,36 @@ pub fn click_to_move_sequence(req: ClickToMove) -> Option<Vec<u8>> {
         ((-delta) as usize, b"\x1b[D".as_slice())
     };
     Some(seq.repeat(n))
+}
+
+/// Inclusive range for an editor-style Select All inside the active command line.
+///
+/// OSC 133's command-start column is preferred. When shell integration is not
+/// available, select only the occupied cells before the cursor on its row;
+/// never fall back to the terminal's entire scrollback buffer.
+pub fn command_input_selection_range(
+    command_start: Option<crate::Point>,
+    cursor: crate::Point,
+    occupied_columns: usize,
+) -> Option<crate::Range> {
+    let start = command_start
+        .filter(|start| start.line == cursor.line && start.column < cursor.column)
+        .unwrap_or_else(|| crate::Point::new(cursor.line, 0));
+    let end_column = cursor.column.max(occupied_columns).checked_sub(1)?;
+    if end_column < start.column {
+        return None;
+    }
+    Some(crate::Range::new(
+        start,
+        crate::Point::new(cursor.line, end_column),
+    ))
+}
+
+/// Bytes that clear the whole current input line for an editor-style "delete
+/// selection" gesture: ctrl-e (jump to line end) then ctrl-u (kill to line
+/// start). Works in readline/zsh emacs mode regardless of cursor position.
+pub fn clear_input_line_sequence() -> Vec<u8> {
+    vec![0x05, 0x15]
 }
 
 /// How a triple-click should select.
@@ -589,6 +642,40 @@ mod tests {
     }
 
     #[test]
+    fn wrap_on_supported_shell_clears_inherited_foreign_terminal_markers() {
+        let dir = std::env::temp_dir().join(format!(
+            "sleipnir-osc133-{}-{}",
+            std::process::id(),
+            "foreign-env"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut env = collections::HashMap::from_iter([
+            ("ITERM_SESSION_ID".into(), "stale-iterm".into()),
+            ("GHOSTTY_RESOURCES_DIR".into(), "/stale/ghostty".into()),
+            ("KITTY_SHELL_INTEGRATION".into(), "enabled".into()),
+            ("WEZTERM_EXECUTABLE".into(), "/Applications/Kaku.app".into()),
+        ]);
+
+        let _ = wrap_shell_for_inject_in("zsh", None, &mut env, true, &dir);
+
+        for key in [
+            "ITERM_SESSION_ID",
+            "GHOSTTY_RESOURCES_DIR",
+            "KITTY_SHELL_INTEGRATION",
+            "WEZTERM_EXECUTABLE",
+            "SLEIPNIR_OSC133_LOADED",
+        ] {
+            assert_eq!(
+                env.get(key).map(String::as_str),
+                Some(""),
+                "{key} must explicitly shadow the parent environment because login -p preserves omitted variables"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn wrap_on_unsupported_shell_is_a_noop() {
         let mut env = collections::HashMap::default();
         let (program, args) =
@@ -745,10 +832,58 @@ mod tests {
     }
 
     #[test]
-    fn click_to_move_noop_without_prompt_markers() {
+    fn click_to_move_without_prompt_markers_still_moves_on_cursor_row() {
+        // Without OSC 133 we can't know the prompt prefix, but moving the shell
+        // cursor on its own row is safe, so we still emit the motion.
         let mut req = move_req(20, 10);
         req.prompt_line = None;
-        assert_eq!(click_to_move_sequence(req), None);
+        let bytes = click_to_move_sequence(req).expect("cursor-row move");
+        assert_eq!(bytes, b"\x1b[C".repeat(10));
+    }
+
+    #[test]
+    fn select_all_without_shell_marker_stays_on_the_cursor_row() {
+        let range =
+            command_input_selection_range(None, crate::Point::new(4, 8), 8).expect("typed command");
+
+        assert_eq!(range.start(), crate::Point::new(4, 0));
+        assert_eq!(range.end(), crate::Point::new(4, 7));
+    }
+
+    #[test]
+    fn select_all_prefers_the_osc133_command_start_column() {
+        let range = command_input_selection_range(
+            Some(crate::Point::new(4, 3)),
+            crate::Point::new(4, 8),
+            8,
+        )
+        .expect("typed command");
+
+        assert_eq!(range.start(), crate::Point::new(4, 3));
+        assert_eq!(range.end(), crate::Point::new(4, 7));
+    }
+
+    #[test]
+    fn select_all_without_input_has_no_range() {
+        assert_eq!(
+            command_input_selection_range(None, crate::Point::new(4, 0), 0),
+            None
+        );
+    }
+
+    #[test]
+    fn clear_input_line_is_ctrl_e_then_ctrl_u() {
+        // ctrl-e (0x05) jumps to end, ctrl-u (0x15) kills to start → whole line.
+        assert_eq!(clear_input_line_sequence(), vec![0x05, 0x15]);
+    }
+
+    #[test]
+    fn click_to_move_without_markers_ignores_prefix_guard() {
+        // No prompt marker → no prefix guard; clicking a low column just moves left.
+        let mut req = move_req(3, 10);
+        req.prompt_line = None;
+        let bytes = click_to_move_sequence(req).expect("cursor-row move");
+        assert_eq!(bytes, b"\x1b[D".repeat(7));
     }
 
     #[test]

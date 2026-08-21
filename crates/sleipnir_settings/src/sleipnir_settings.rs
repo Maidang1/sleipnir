@@ -97,33 +97,6 @@ impl TerminalLineHeight {
     }
 }
 
-/// Where tab chips live in the window chrome.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TabPlacement {
-    /// Vertical rail on the left, grouped by workspace.
-    Side,
-    /// Horizontal strip across the top. Default. Same tab features as [`Self::Side`].
-    #[default]
-    Top,
-}
-
-impl TabPlacement {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Side => "side",
-            Self::Top => "top",
-        }
-    }
-
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Side => Self::Top,
-            Self::Top => Self::Side,
-        }
-    }
-}
-
 /// Optional keymap overlay. Extra `key_bindings` still win.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
@@ -132,15 +105,6 @@ pub enum KeybindingPreset {
     Default,
     /// Prefix-style pane/tab chords: `ctrl-b` then `c` / `%` / `"` / arrows.
     Tmux,
-}
-
-pub const SIDEBAR_WIDTH_MIN: f32 = 160.0;
-pub const SIDEBAR_WIDTH_MAX: f32 = 320.0;
-pub const SIDEBAR_WIDTH_DEFAULT: f32 = 200.0;
-
-/// Clamp a user `sidebar_width` to the supported range.
-pub fn clamp_sidebar_width(width: f32) -> f32 {
-    width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
 }
 
 /// Where the Run Ledger keeps its data.
@@ -223,10 +187,6 @@ pub struct TerminalSettings {
     pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
     pub run_ledger_redact: bool,
-    /// Side rail (default) or the top tab strip. Same tab features either way.
-    pub tab_placement: TabPlacement,
-    /// Left rail width in logical pixels (clamped 160–320).
-    pub sidebar_width: f32,
     /// Draw agent monograms on tab chips.
     pub agent_icons: bool,
     /// Default-off external control surface (ADR-0011).
@@ -332,8 +292,6 @@ impl Default for TerminalSettings {
             run_ledger_retention_days: 7,
             run_ledger_max_runs: 500,
             run_ledger_redact: true,
-            tab_placement: TabPlacement::Top,
-            sidebar_width: SIDEBAR_WIDTH_DEFAULT,
             agent_icons: true,
             control_surface: false,
             show_tray_icon: true,
@@ -443,21 +401,6 @@ impl TerminalSettings {
             log::warn!("failed to persist copy_on_select={enabled}: {err}");
         } else {
             log::info!("copy_on_select -> {enabled} (persisted)");
-        }
-    }
-
-    /// Switch tab chrome between the side rail and the top strip.
-    pub fn set_tab_placement(placement: TabPlacement, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.tab_placement = placement;
-        apply_loaded(settings, cx);
-        if let Err(err) = persist_string_key("tab_placement", placement.as_str()) {
-            log::warn!(
-                "failed to persist tab_placement={}: {err}",
-                placement.as_str()
-            );
-        } else {
-            log::info!("tab_placement -> {} (persisted)", placement.as_str());
         }
     }
 
@@ -575,12 +518,6 @@ struct SettingsFile {
     run_ledger_max_runs: Option<usize>,
     #[serde(default)]
     run_ledger_redact: Option<bool>,
-    /// side | top. Default side.
-    #[serde(default)]
-    tab_placement: Option<TabPlacement>,
-    /// Left rail width. Clamped to 160–320.
-    #[serde(default)]
-    sidebar_width: Option<f32>,
     /// Draw agent monograms on tabs. Default true.
     #[serde(default)]
     agent_icons: Option<bool>,
@@ -728,12 +665,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.run_ledger_redact {
         settings.run_ledger_redact = v;
     }
-    if let Some(v) = file.tab_placement {
-        settings.tab_placement = v;
-    }
-    if let Some(v) = file.sidebar_width {
-        settings.sidebar_width = clamp_sidebar_width(v);
-    }
     if let Some(v) = file.agent_icons {
         settings.agent_icons = v;
     }
@@ -850,8 +781,6 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         run_ledger_retention_days: Some(7),
         run_ledger_max_runs: Some(500),
         run_ledger_redact: Some(true),
-        tab_placement: Some(TabPlacement::Top),
-        sidebar_width: Some(SIDEBAR_WIDTH_DEFAULT),
         agent_icons: Some(true),
         control_surface: Some(false),
         show_tray_icon: Some(true),
@@ -944,14 +873,6 @@ fn persist_bool_key(key: &str, value: bool) -> anyhow::Result<()> {
     let raw = read_settings_raw()?;
     let json = merge_settings_json(raw.as_deref(), |doc| {
         doc[key] = serde_json::Value::Bool(value);
-    });
-    write_settings_json(&json)
-}
-
-fn persist_string_key(key: &str, value: &str) -> anyhow::Result<()> {
-    let raw = read_settings_raw()?;
-    let json = merge_settings_json(raw.as_deref(), |doc| {
-        doc[key] = serde_json::Value::String(value.to_string());
     });
     write_settings_json(&json)
 }
@@ -1242,50 +1163,11 @@ mod tests {
     #[test]
     fn tab_rail_keys_default_when_absent() {
         let s = TerminalSettings::default();
-        assert_eq!(s.tab_placement, TabPlacement::Top);
-        assert_eq!(s.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(s.agent_icons);
         let file: SettingsFile = serde_json::from_str("{}").unwrap();
         let mut settings = TerminalSettings::default();
         merge_file(&mut settings, file);
-        assert_eq!(settings.tab_placement, TabPlacement::Top);
-        assert_eq!(settings.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(settings.agent_icons);
-    }
-
-    #[test]
-    fn tab_placement_parses_top() {
-        let file: SettingsFile = serde_json::from_str(r#"{"tab_placement":"top"}"#).unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert_eq!(settings.tab_placement, TabPlacement::Top);
-    }
-
-    #[test]
-    fn tab_placement_toggle_and_merge() {
-        assert_eq!(TabPlacement::Side.toggle(), TabPlacement::Top);
-        assert_eq!(TabPlacement::Top.toggle(), TabPlacement::Side);
-        assert_eq!(TabPlacement::Side.as_str(), "side");
-        assert_eq!(TabPlacement::Top.as_str(), "top");
-        let out = merge_settings_json(Some(r#"{ "theme": "mocha" }"#), |v| {
-            v["tab_placement"] = serde_json::Value::String(TabPlacement::Top.as_str().into());
-        });
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["theme"], "mocha");
-        assert_eq!(v["tab_placement"], "top");
-    }
-
-    #[test]
-    fn sidebar_width_is_clamped() {
-        let file: SettingsFile = serde_json::from_str(r#"{"sidebar_width":80}"#).unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert_eq!(settings.sidebar_width, SIDEBAR_WIDTH_MIN);
-
-        let file: SettingsFile = serde_json::from_str(r#"{"sidebar_width":900}"#).unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert_eq!(settings.sidebar_width, SIDEBAR_WIDTH_MAX);
     }
 
     #[test]

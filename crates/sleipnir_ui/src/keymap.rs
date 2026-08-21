@@ -145,6 +145,9 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
         b("ctrl-shift-v", BuiltinAction::Paste, Terminal),
         b("ctrl-cmd-v", BuiltinAction::PasteText, Terminal),
         b("cmd-a", BuiltinAction::SelectAll, Terminal),
+        // Editor-style select-all. Shell readline beginning-of-line stays
+        // reachable via cmd-left (which sends ctrl-a to the PTY).
+        b("ctrl-a", BuiltinAction::SelectAll, Terminal),
         b("cmd-k", BuiltinAction::Clear, Terminal),
         b("ctrl-cmd-space", BuiltinAction::ShowCharacterPalette, Terminal),
         b("ctrl-shift-space", BuiltinAction::ToggleViMode, Terminal),
@@ -444,6 +447,20 @@ mod tests {
         assert!(keys.iter().any(|k| k == "cmd-d"));
         assert!(keys.iter().any(|k| k == "cmd-alt-g"));
         assert!(!keys.iter().any(|k| k == "ctrl-v"));
+    }
+
+    #[test]
+    fn macos_binds_ctrl_a_and_cmd_a_to_select_all() {
+        let select_all: Vec<_> = builtin_bindings_for(false)
+            .into_iter()
+            .filter(|b| b.action == BuiltinAction::SelectAll)
+            .map(|b| b.key)
+            .collect();
+        assert!(select_all.contains(&"cmd-a".to_string()));
+        assert!(
+            select_all.contains(&"ctrl-a".to_string()),
+            "ctrl-a should select all (editor-style): {select_all:?}"
+        );
     }
 
     #[test]

@@ -39,7 +39,6 @@ pub enum CommandId {
     PipeSelection,
     SendGitDiff,
     ToggleHistorySearch,
-    ToggleTabPlacement,
     ToggleDiff,
 }
 
@@ -77,7 +76,6 @@ impl CommandId {
             CommandId::PipeSelection => "pipe_selection",
             CommandId::SendGitDiff => "send_git_diff",
             CommandId::ToggleHistorySearch => "toggle_history_search",
-            CommandId::ToggleTabPlacement => "toggle_tab_placement",
             CommandId::ToggleDiff => "toggle_diff",
         }
     }
@@ -115,7 +113,6 @@ impl CommandId {
             "pipe_selection" => Some(CommandId::PipeSelection),
             "send_git_diff" => Some(CommandId::SendGitDiff),
             "toggle_history_search" | "history_search" => Some(CommandId::ToggleHistorySearch),
-            "toggle_tab_placement" | "tab_placement" => Some(CommandId::ToggleTabPlacement),
             "toggle_diff" => Some(CommandId::ToggleDiff),
             _ => None,
         }
@@ -327,12 +324,6 @@ pub fn commands() -> Vec<CommandItem> {
             shortcut: display_shortcut("toggle_history_search").into(),
             keywords: "history fuzzy search histfile",
         },
-        CommandItem {
-            id: CommandId::ToggleTabPlacement,
-            title: "Toggle Tab Placement".into(),
-            shortcut: "".into(),
-            keywords: "tabs side top rail strip placement chrome",
-        },
     ]
 }
 
@@ -444,16 +435,6 @@ mod tests {
                 .iter()
                 .any(|i| i.id == CommandId::TogglePaneFacts),
             "Toggle Pane Facts must appear in the palette"
-        );
-        assert_eq!(
-            CommandId::from_str("toggle_tab_placement"),
-            Some(CommandId::ToggleTabPlacement)
-        );
-        assert!(
-            commands()
-                .iter()
-                .any(|i| i.id == CommandId::ToggleTabPlacement),
-            "Toggle Tab Placement must appear in the palette"
         );
         assert_eq!(
             CommandId::from_str("toggle_diff"),

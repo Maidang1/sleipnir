@@ -10,7 +10,6 @@ pub(crate) mod history_search;
 pub(crate) mod pane_facts;
 pub(crate) mod send_context;
 pub(crate) mod tombstone;
-pub(crate) mod tab_sidebar;
 mod tab_strip;
 pub(crate) mod window_controls;
 pub(crate) mod workspace;

@@ -16,13 +16,14 @@ pub use osc133::{
 pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
 pub use shell_semantics::{
     ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
-    click_to_move_sequence, command_output_range, inject_script, triple_click_kind,
-    wrap_shell_for_inject, wrap_shell_for_inject_in,
+    clear_input_line_sequence, click_to_move_sequence, command_input_selection_range,
+    command_output_range, inject_script, triple_click_kind, wrap_shell_for_inject,
+    wrap_shell_for_inject_in,
 };
 
-use anyhow::{Result, bail};
 #[cfg(not(windows))]
 use anyhow::Context as _;
+use anyhow::{Result, bail};
 use futures_lite::future::yield_now;
 use log::trace;
 
@@ -73,13 +74,12 @@ use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
-    clear_saved_screen, content_text, display_offset,
-    find_from_terminal_point, full_content_range, grid_text_range,
+    clear_saved_screen, content_text, display_offset, find_from_terminal_point, grid_text_range,
     make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
     scroll_display, scroll_to_point, search_matches, selection_text,
-    set_selection as set_term_selection, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    set_selection as set_term_selection, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode,
+    total_lines, update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
     visible_screen_text as term_visible_screen_text,
 };
 use crate::mappings::colors::to_vte_rgb;
@@ -530,9 +530,13 @@ pub enum Event {
         column: Option<usize>,
     },
     /// The current command finished. `exit_code` is `None` when unknown.
-    RunFinished { exit_code: Option<i32> },
+    RunFinished {
+        exit_code: Option<i32>,
+    },
     /// Overlay triangle on a command start/end line was clicked.
-    GutterClicked { line: i32 },
+    GutterClicked {
+        line: i32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -894,6 +898,7 @@ impl TerminalBuilder {
                 mouse_down_position: None,
                 matches: Vec::new(),
                 selection_head: None,
+                frozen_selection: None,
                 scroll_px: px(0.),
                 next_link_id: 0,
                 selection_phase: SelectionPhase::Ended,
@@ -1054,6 +1059,10 @@ pub struct Terminal {
     pub matches: Vec<Range>,
     pub last_content: Content,
     pub selection_head: Option<Point>,
+    /// Frozen "select all" range that survives alacritty's internal selection
+    /// clearing (shells frequently erase lines which drops the selection).
+    /// Cleared on next user input or explicit click.
+    frozen_selection: Option<SelectionRange>,
     title_override: Option<String>,
     scroll_px: Pixels,
     next_link_id: usize,
@@ -1268,7 +1277,18 @@ impl Terminal {
 
             InternalEvent::Copy(keep_selection) => {
                 trace!("Copying selection: keep_selection={keep_selection:?}");
-                if let Some(txt) = selection_text(term) {
+                let txt = selection_text(term).or_else(|| {
+                    // Alacritty's selection was cleared; use the frozen range.
+                    let frozen = self.frozen_selection?;
+                    Some(grid_text_range(
+                        term,
+                        frozen.start.line,
+                        frozen.start.column,
+                        frozen.end.line,
+                        frozen.end.column,
+                    ))
+                });
+                if let Some(txt) = txt {
                     if !txt.is_empty() {
                         cx.write_to_clipboard(ClipboardItem::new_string(txt));
                         cx.emit(Event::CopiedToClipboard);
@@ -1277,6 +1297,7 @@ impl Terminal {
                         let settings = TerminalSettings::get_global(cx);
                         settings.keep_selection_on_copy
                     }) {
+                        self.frozen_selection = None;
                         self.events.push_back(InternalEvent::SetSelection(None));
                     }
                 }
@@ -1543,13 +1564,7 @@ impl Terminal {
         let history = term.history_size() as i32;
         let cursor = term.grid().cursor.point;
         let start_line = absolute_to_grid_line(start_abs, history);
-        let text = grid_text_range(
-            &term,
-            start_line,
-            start_col,
-            cursor.line.0,
-            cursor.column.0,
-        );
+        let text = grid_text_range(&term, start_line, start_col, cursor.line.0, cursor.column.0);
         drop(term);
         if text.trim().is_empty() {
             None
@@ -1725,10 +1740,54 @@ impl Terminal {
     }
 
     pub fn select_all(&mut self) {
-        let term = self.term.lock();
-        let range = full_content_range(&term);
-        drop(term);
+        // This action is editor-style select-all for the active command input.
+        // It must never delegate to alacritty's full-buffer select-all fallback.
+        let Some(range) = self.command_input_range() else {
+            self.frozen_selection = None;
+            self.set_selection(None);
+            return;
+        };
+        // Freeze so it survives alacritty's internal line-erase/scroll clearing.
+        let sel_range = SelectionRange {
+            start: range.start(),
+            end: range.end(),
+            is_block: false,
+        };
+        self.frozen_selection = Some(sel_range);
         self.set_selection(Some(Selection::simple_range(range)));
+    }
+
+    /// Grid range of the active command input. OSC 133 supplies the precise
+    /// prompt boundary; without it, selection stays on the cursor's occupied row.
+    fn command_input_range(&self) -> Option<Range> {
+        let term = self.term.lock_unfair();
+        let history = term.history_size() as i32;
+        let cursor = Point::new(
+            term.grid().cursor.point.line.0,
+            term.grid().cursor.point.column.0,
+        );
+        let occupied_columns = self
+            .last_content
+            .cells
+            .iter()
+            .filter(|cell| cell.point.line == cursor.line && cell.character() != ' ')
+            .map(|cell| cell.point.column + 1)
+            .max()
+            .unwrap_or(0);
+        let command_start = self
+            .prompt_markers
+            .iter()
+            .rev()
+            .find(|marker| matches!(marker.kind, Osc133Kind::CommandStart))
+            .and_then(|marker| {
+                Some(Point::new(
+                    absolute_to_grid_line(marker.line?, history),
+                    marker.column.unwrap_or(0),
+                ))
+            });
+        drop(term);
+
+        command_input_selection_range(command_start, cursor, occupied_columns)
     }
 
     fn set_selection(&mut self, selection: Option<Selection>) {
@@ -1834,6 +1893,8 @@ impl Terminal {
 
     fn write_input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         let input = input.into();
+        // Any user input clears the frozen select-all range.
+        self.frozen_selection = None;
         if input.contains(&b'\r') {
             let term = self.term.lock_unfair();
             self.pending_cwd_boundary = Some(Self::scrollback_position(
@@ -1965,6 +2026,22 @@ impl Terminal {
             return true;
         }
 
+        // When the command input is fully selected (select-all) and the user
+        // presses Backspace/Delete, clear the whole input line at once
+        // (readline ctrl-u), matching editor-style "delete selection".
+        if self.frozen_selection.is_some() {
+            let key = keystroke.key.as_str();
+            let plain = !keystroke.modifiers.control
+                && !keystroke.modifiers.alt
+                && !keystroke.modifiers.platform
+                && !keystroke.modifiers.function;
+            if plain && matches!(key, "backspace" | "delete") {
+                self.frozen_selection = None;
+                self.input(clear_input_line_sequence());
+                return true;
+            }
+        }
+
         // Keep default terminal behavior
         let esc = to_esc_str(keystroke, self.last_content.mode, option_as_meta);
         if let Some(esc) = esc {
@@ -2016,6 +2093,24 @@ impl Terminal {
         }
 
         self.last_content = make_content(&terminal, &self.last_content);
+        drop(terminal);
+
+        // A frozen "select all" must survive alacritty's internal selection
+        // mutation (shells constantly erase/scroll the prompt line, which drops
+        // or rotates the native selection). While frozen, own the selection
+        // outright regardless of alacritty's current state.
+        if let Some(frozen) = self.frozen_selection {
+            self.last_content.selection = Some(frozen);
+            let term = self.term.lock_unfair();
+            self.last_content.selection_text = Some(grid_text_range(
+                &term,
+                frozen.start.line,
+                frozen.start.column,
+                frozen.end.line,
+                frozen.end.column,
+            ));
+            drop(term);
+        }
     }
 
     pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
@@ -2194,6 +2289,8 @@ impl Terminal {
     }
 
     pub fn mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        // Any mouse interaction clears the frozen select-all.
+        self.frozen_selection = None;
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         let point = grid_point(
             position,
@@ -2201,12 +2298,18 @@ impl Terminal {
             self.last_content.display_offset,
         );
 
-        if e.button == MouseButton::Left && e.modifiers.alt && !e.modifiers.secondary() {
-            if let Some(bytes) = self.click_to_move_bytes(point) {
-                if !bytes.is_empty() {
-                    self.write_to_pty(bytes);
+        if e.button == MouseButton::Left && !e.modifiers.secondary() {
+            // Alt+Click always attempts cursor move (original behavior).
+            // Plain single click on the prompt line also moves the cursor
+            // instead of starting a selection, giving a text-editor-like feel.
+            let try_move = e.modifiers.alt || (!e.modifiers.shift && e.click_count == 1);
+            if try_move {
+                if let Some(bytes) = self.click_to_move_bytes(point) {
+                    if !bytes.is_empty() {
+                        self.write_to_pty(bytes);
+                    }
+                    return;
                 }
-                return;
             }
         }
 
@@ -2508,9 +2611,7 @@ impl Terminal {
     fn cwd_at_line(&self, line: i32, history_size: usize) -> Option<PathBuf> {
         // Once the scrollback cap is reached, evictions move retained lines without changing
         // `history_size`, so stored row offsets no longer identify their original lines.
-        if self.cwd_history.is_empty()
-            || history_size >= self.term_config.scrolling_history
-        {
+        if self.cwd_history.is_empty() || history_size >= self.term_config.scrolling_history {
             return self.working_directory();
         }
         let scrollback_position = Self::scrollback_position(line, history_size);

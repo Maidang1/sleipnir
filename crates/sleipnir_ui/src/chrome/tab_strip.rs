@@ -15,13 +15,6 @@ use crate::chrome::workspace::{WorkspaceKey, group_tabs};
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::run_ledger_global::RunLedgerGlobal;
 
-/// Side rail vs top strip: same chip, different sizing and active fill.
-#[derive(Clone, Copy)]
-pub(crate) enum TabChipLayout {
-    Rail,
-    Strip,
-}
-
 impl AppShell {
     pub(crate) fn render_tab_strip(
         &self,
@@ -70,7 +63,6 @@ impl AppShell {
                     tokens,
                     geo,
                     &palette,
-                    TabChipLayout::Strip,
                     cx,
                 ));
             }
@@ -113,6 +105,64 @@ impl AppShell {
             .children(chips)
             .child(plus)
     }
+
+    /// Chrome control that opens the diff inspector.
+    /// Only visible when the active tab is inside a git work tree.
+    pub(crate) fn render_diff_chrome_button(
+        &self,
+        tokens: &ChromeTokens,
+        palette: &TerminalPalette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (branch, added, deleted) = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab_git_facts(tab, cx))
+            .unwrap_or((None, 0, 0));
+        let in_git = branch.is_some();
+        let open = self.diff_open;
+        // Hide entirely (no layout space) when not in a git repo and diff is closed.
+        let show = in_git || open;
+        div()
+            .id("diff-chrome-button")
+            .when(show, |el| {
+                el.flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(open, |el| {
+                        el.bg(tokens.accent.opacity(0.2)).text_color(tokens.fg)
+                    })
+                    .when(!open, |el| {
+                        el.text_color(tokens.fg_muted)
+                            .hover(|style| style.bg(tokens.hover).text_color(tokens.fg))
+                    })
+                    .child(gpui::SharedString::from("Diff"))
+                    .when(added > 0, |el| {
+                        el.child(
+                            div()
+                                .text_color(palette.ansi[2])
+                                .child(gpui::SharedString::from(format!("+{added}"))),
+                        )
+                    })
+                    .when(deleted > 0, |el| {
+                        el.child(
+                            div()
+                                .text_color(palette.ansi[1])
+                                .child(gpui::SharedString::from(format!("−{deleted}"))),
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_diff(window, cx);
+                    }))
+            })
+    }
 }
 
 pub(crate) fn render_tab_chip(
@@ -127,22 +177,17 @@ pub(crate) fn render_tab_chip(
     tokens: &ChromeTokens,
     geo: &ChromeGeometry,
     palette: &TerminalPalette,
-    layout: TabChipLayout,
     cx: &mut Context<AppShell>,
 ) -> gpui::AnyElement {
     let title: gpui::SharedString = if let Some(buffer) = rename_buffer.as_ref() {
         format!("{buffer}|").into()
     } else {
-        match layout {
-            TabChipLayout::Rail => tab.title(cx),
-            TabChipLayout::Strip => tab.path_label(cx),
-        }
+        tab.path_label(cx)
     };
     let tab_id = tab.id;
     let is_renaming = rename_buffer.is_some();
     let failed = tab_has_failed_attention(badge);
     let bg = chip_background(
-        layout,
         is_active,
         is_hovered,
         is_bell,
@@ -155,20 +200,8 @@ pub(crate) fn render_tab_chip(
     } else {
         tokens.fg_muted
     };
-    let (branch, added, deleted) = match layout {
-        TabChipLayout::Rail => tab_git_facts(tab, cx),
-        TabChipLayout::Strip => (None, 0, 0),
-    };
-    let show_subtitle = matches!(layout, TabChipLayout::Rail)
-        && (branch.is_some() || added > 0 || deleted > 0);
-    let element_id = match layout {
-        TabChipLayout::Rail => ("tab-row", tab_id),
-        TabChipLayout::Strip => ("tab", tab_id),
-    };
-    let chip_height = match layout {
-        TabChipLayout::Rail => geo.rail_row_height,
-        TabChipLayout::Strip => geo.tab_height,
-    };
+    let element_id = ("tab", tab_id);
+    let chip_height = geo.tab_height;
 
     let body = div()
         .flex_1()
@@ -185,19 +218,7 @@ pub(crate) fn render_tab_chip(
                 .flex_row()
                 .items_center()
                 .child(truncated_label(title.clone())),
-        )
-        .when(show_subtitle, |el| {
-            el.child(render_git_subtitle(
-                ix,
-                tab_id,
-                branch,
-                added,
-                deleted,
-                tokens,
-                palette,
-                cx,
-            ))
-        });
+        );
 
     let chip = div()
         .id(element_id)
@@ -215,10 +236,7 @@ pub(crate) fn render_tab_chip(
         .overflow_hidden()
         .when(is_renaming, |el| el.border_1().border_color(tokens.accent))
         .when(is_bell, |el| el.border_1().border_color(tokens.accent));
-    let chip = match layout {
-        TabChipLayout::Rail => chip.w_full(),
-        TabChipLayout::Strip => chip.min_w(geo.tab_min_width).max_w(geo.tab_max_width),
-    };
+    let chip = chip.min_w(geo.tab_min_width).max_w(geo.tab_max_width);
 
     chip.on_hover(cx.listener(move |this, hovered, _, cx| {
         if *hovered {
@@ -279,69 +297,6 @@ pub(crate) fn tab_git_facts(tab: &Tab, cx: &App) -> (Option<String>, u32, u32) {
     }
 }
 
-fn render_git_subtitle(
-    ix: usize,
-    tab_id: u64,
-    branch: Option<String>,
-    added: u32,
-    deleted: u32,
-    tokens: &ChromeTokens,
-    palette: &TerminalPalette,
-    cx: &mut Context<AppShell>,
-) -> impl IntoElement {
-    let dirty = added > 0 || deleted > 0;
-    div()
-        .id(("tab-git", tab_id))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .text_xs()
-        .text_color(tokens.fg_muted)
-        .when(dirty, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.text_color(tokens.fg))
-                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    let _ = event;
-                    cx.stop_propagation();
-                    this.activate(ix, window, cx);
-                    if !this.diff_open {
-                        this.toggle_diff(window, cx);
-                    } else {
-                        this.refresh_diff(true, window, cx);
-                    }
-                }))
-        })
-        .when(branch.is_some(), |el| {
-            el.child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(tokens.fg_muted)
-                    .child("⎇"),
-            )
-        })
-        .when_some(branch, |el, name| el.child(truncated_label(name)))
-        .when(added > 0, |el| {
-            el.child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(palette.ansi[2])
-                    .child(gpui::SharedString::from(format!("+{added}"))),
-            )
-        })
-        .when(deleted > 0, |el| {
-            el.child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(palette.ansi[1])
-                    .child(gpui::SharedString::from(format!("−{deleted}"))),
-            )
-        })
-}
-
-/// Title / path / branch text that shrinks inside the chip and paints `…`.
 fn truncated_label(text: impl Into<gpui::SharedString>) -> impl IntoElement {
     div()
         .flex_1()
@@ -377,7 +332,6 @@ pub(crate) fn tab_has_failed_attention(badge: Option<Badge>) -> bool {
 }
 
 fn chip_background(
-    layout: TabChipLayout,
     is_active: bool,
     is_hovered: bool,
     is_bell: bool,
@@ -394,13 +348,9 @@ fn chip_background(
         return palette.ansi[1].opacity(amount);
     }
     if is_active {
-        return match layout {
-            // Rail selected connects to the content column.
-            TabChipLayout::Rail => tokens.content_bg,
-            // Strip sits on the titlebar: a solid content_bg card reads too
-            // bright / too tall. Use a whisper of foreground instead.
-            TabChipLayout::Strip => tokens.fg.opacity(0.06),
-        };
+        // Strip sits on the titlebar: a solid content_bg card reads too
+        // bright / too tall. Use a whisper of foreground instead.
+        return tokens.fg.opacity(0.06);
     }
     if is_hovered {
         return tokens.hover.opacity(0.55);
@@ -435,7 +385,6 @@ mod tests {
         let palette = palette_for_theme(ThemeName::Mocha, Appearance::Dark);
         let tokens = ChromeTokens::from_palette(&palette, true);
         let bg = chip_background(
-            TabChipLayout::Strip,
             true,
             false,
             false,
@@ -456,7 +405,6 @@ mod tests {
         let palette = palette_for_theme(ThemeName::Mocha, Appearance::Dark);
         let tokens = ChromeTokens::from_palette(&palette, true);
         let bg = chip_background(
-            TabChipLayout::Strip,
             false,
             false,
             false,

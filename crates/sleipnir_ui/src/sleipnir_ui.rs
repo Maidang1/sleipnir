@@ -24,7 +24,7 @@ pub use app_shell::{
     OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown, SplitRight,
     MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleBroadcast,
     ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    ToggleQuickSelect, ToggleRunLedger, ToggleTabPlacement,
+    ToggleQuickSelect, ToggleRunLedger,
     UpdateUiState, open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
@@ -1593,19 +1593,19 @@ mod tests {
 
     #[test]
     fn chrome_exposes_a_diff_button() {
-        let src = include_str!("chrome/tab_sidebar.rs");
+        let src = include_str!("chrome/tab_strip.rs");
         assert!(
             src.contains(r#".id("diff-chrome-button")"#),
-            "content title must ship a clickable Diff control"
+            "tab strip must ship a clickable Diff control"
         );
         assert!(
             src.contains("toggle_diff"),
             "Diff chrome button must open the inspector"
         );
-        let title = include_str!("chrome/tab_sidebar.rs");
+        let band = include_str!("app_shell.rs");
         assert!(
-            title.contains("render_windows_titlebar_end"),
-            "side-layout content title must host Windows caption buttons"
+            band.contains("render_windows_titlebar_end"),
+            "chrome band must host Windows caption buttons"
         );
     }
 
