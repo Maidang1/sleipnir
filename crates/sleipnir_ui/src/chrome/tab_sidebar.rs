@@ -171,56 +171,62 @@ impl AppShell {
             .child(self.render_windows_titlebar_end(tokens, window, cx))
     }
 
-    /// Always-visible chrome control that opens the diff inspector.
+    /// Chrome control that opens the diff inspector.
+    /// Only visible when the active tab is inside a git work tree.
     pub(crate) fn render_diff_chrome_button(
         &self,
         tokens: &ChromeTokens,
         palette: &TerminalPalette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (_, added, deleted) = self
+        let (branch, added, deleted) = self
             .tabs
             .get(self.active)
             .map(|tab| tab_git_facts(tab, cx))
             .unwrap_or((None, 0, 0));
+        let in_git = branch.is_some();
         let open = self.diff_open;
+        // Hide entirely (no layout space) when not in a git repo and diff is closed.
+        let show = in_git || open;
         div()
             .id("diff-chrome-button")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .flex_shrink_0()
-            .px_2()
-            .py_0p5()
-            .rounded(px(4.0))
-            .text_xs()
-            .cursor_pointer()
-            .when(open, |el| {
-                el.bg(tokens.accent.opacity(0.2)).text_color(tokens.fg)
+            .when(show, |el| {
+                el.flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(open, |el| {
+                        el.bg(tokens.accent.opacity(0.2)).text_color(tokens.fg)
+                    })
+                    .when(!open, |el| {
+                        el.text_color(tokens.fg_muted)
+                            .hover(|style| style.bg(tokens.hover).text_color(tokens.fg))
+                    })
+                    .child(gpui::SharedString::from("Diff"))
+                    .when(added > 0, |el| {
+                        el.child(
+                            div()
+                                .text_color(palette.ansi[2])
+                                .child(gpui::SharedString::from(format!("+{added}"))),
+                        )
+                    })
+                    .when(deleted > 0, |el| {
+                        el.child(
+                            div()
+                                .text_color(palette.ansi[1])
+                                .child(gpui::SharedString::from(format!("−{deleted}"))),
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_diff(window, cx);
+                    }))
             })
-            .when(!open, |el| {
-                el.text_color(tokens.fg_muted)
-                    .hover(|style| style.bg(tokens.hover).text_color(tokens.fg))
-            })
-            .child(gpui::SharedString::from("Diff"))
-            .when(added > 0, |el| {
-                el.child(
-                    div()
-                        .text_color(palette.ansi[2])
-                        .child(gpui::SharedString::from(format!("+{added}"))),
-                )
-            })
-            .when(deleted > 0, |el| {
-                el.child(
-                    div()
-                        .text_color(palette.ansi[1])
-                        .child(gpui::SharedString::from(format!("−{deleted}"))),
-                )
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.toggle_diff(window, cx);
-            }))
     }
 }
 
