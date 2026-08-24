@@ -540,10 +540,10 @@ jobs:
           for asset in "${assets[@]}"; do
             test -f "${asset}"
           done
-          IS_DRAFT="$(gh release view "${TAG}" --json isDraft --jq '.isDraft')"
+          IS_DRAFT="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
           if [[ "${IS_DRAFT}" != "true" ]]; then
             echo "ERROR: refusing to overwrite published release ${TAG}" >&2
             exit 1
           fi
-          gh release upload "${TAG}" "${assets[@]}" --clobber
+          gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" "${assets[@]}" --clobber
           echo "Uploaded exactly ten Windows and Linux assets to draft ${TAG}"

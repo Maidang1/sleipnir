@@ -158,7 +158,8 @@ require(upload, [
     "needs: [build-and-release, windows-check, linux-check]",
     "actions/download-artifact@v4", "name: sleipnir-windows",
     "pattern: sleipnir-linux-*", "merge-multiple: true",
-    'test "${#assets[@]}" -eq 10', "gh release upload",
+    'test "${#assets[@]}" -eq 10', 'gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}"',
+    'gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}"',
     "Upload exactly ten Windows and Linux release files",
     'isDraft', '!= "true"',
 ], "release-assets-upload")
