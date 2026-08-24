@@ -362,8 +362,7 @@ X11 窗口，并为每个架构上传一个 `.deb`、一个便携 tarball，以�
 
 ```bash
 gh workflow run build-and-release.yml \
-  -f version=0.2.0 \
-  -f draft=false
+  -f version=0.2.0
 ```
 
 **需要的 GitHub Secrets**（仓库 Settings → Secrets and variables → Actions）：

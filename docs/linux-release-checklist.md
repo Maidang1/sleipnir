@@ -10,7 +10,7 @@ Use this checklist for every Sleipnir release that publishes Linux artifacts. Th
 
 - [ ] Record the release tag, test date, tester, machine or VM image, desktop session, GPU/driver, and links to CI runs in the release-tracking issue.
 - [ ] Verify the synchronized upload attached exactly ten non-macOS files: the Windows `.exe` and sidecar plus one `.deb`, one portable `.tar.gz`, and their digest-only `.sha256` sidecars for each of x86_64 and ARM64.
-- [ ] Verify all four checksums independently after downloading the release assets.
+- [ ] Verify all five SHA-256 sidecars independently after downloading the exact ten-file synchronized Windows and Linux asset set.
 
 ## Ubuntu 22.04 GNOME Wayland — required release gate
 

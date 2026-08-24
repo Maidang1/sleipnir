@@ -69,7 +69,7 @@ impl AppShell {
                 .flex_shrink_0()
                 .h_full()
                 .child(self.render_titlebar_settings_button(tokens, cx))
-                .child(self.render_desktop_caption_buttons(tokens, window))
+                .child(self.render_desktop_caption_buttons(tokens, window, cx))
         }
     }
 
@@ -110,6 +110,7 @@ impl AppShell {
         &self,
         tokens: &ChromeTokens,
         window: &Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let maximized = window.is_maximized();
         div()
@@ -124,6 +125,7 @@ impl AppShell {
                 CaptionButtonAction::Minimize,
                 tokens,
                 false,
+                cx,
             ))
             .child(platform_caption_button(
                 "caption-max",
@@ -131,6 +133,7 @@ impl AppShell {
                 CaptionButtonAction::MaximizeRestore,
                 tokens,
                 false,
+                cx,
             ))
             .child(platform_caption_button(
                 "caption-close",
@@ -138,6 +141,7 @@ impl AppShell {
                 CaptionButtonAction::Close,
                 tokens,
                 true,
+                cx,
             ))
     }
 }
@@ -149,6 +153,7 @@ fn platform_caption_button(
     action: CaptionButtonAction,
     tokens: &ChromeTokens,
     is_close: bool,
+    _cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
     windows_caption_button(id, glyph, action, tokens, is_close)
 }
@@ -160,8 +165,9 @@ fn platform_caption_button(
     action: CaptionButtonAction,
     tokens: &ChromeTokens,
     is_close: bool,
+    cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
-    linux_caption_button(id, glyph, action, tokens, is_close)
+    linux_caption_button(id, glyph, action, tokens, is_close, cx)
 }
 
 #[cfg(windows)]
@@ -183,15 +189,18 @@ fn linux_caption_button(
     action: CaptionButtonAction,
     tokens: &ChromeTokens,
     is_close: bool,
+    cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
-    caption_button_base(id, glyph, tokens, is_close).on_click(move |_, window, cx| {
-        cx.stop_propagation();
-        match action {
-            CaptionButtonAction::Minimize => window.minimize_window(),
-            CaptionButtonAction::MaximizeRestore => window.zoom_window(),
-            CaptionButtonAction::Close => window.remove_window(),
-        }
-    })
+    caption_button_base(id, glyph, tokens, is_close).on_click(cx.listener(
+        move |this, _, window, cx| {
+            cx.stop_propagation();
+            match action {
+                CaptionButtonAction::Minimize => window.minimize_window(),
+                CaptionButtonAction::MaximizeRestore => window.zoom_window(),
+                CaptionButtonAction::Close => this.request_close_window(window, cx),
+            }
+        },
+    ))
 }
 
 #[cfg(windows)]
@@ -258,9 +267,14 @@ mod tests {
             .split("fn linux_caption_button")
             .nth(1)
             .expect("Linux caption-button implementation");
-        for method in ["minimize_window()", "zoom_window()", "remove_window()"] {
+        for method in ["minimize_window()", "zoom_window()"] {
             assert!(linux.contains(method), "Linux click path missing {method}");
         }
+        assert!(linux.contains("this.request_close_window(window, cx)"));
+        assert!(
+            !linux.contains("remove_window()"),
+            "Linux caption close must delegate to AppShell's safe close path"
+        );
         assert!(linux.contains(".on_click("));
 
         let windows = src

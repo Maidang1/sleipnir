@@ -388,6 +388,8 @@ pub struct AppShell {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConfirmKind {
     ClosePane,
+    #[cfg(target_os = "linux")]
+    CloseWindow,
     ClearRunLedger,
 }
 
@@ -1704,6 +1706,45 @@ impl AppShell {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_confirm.is_some() {
+            return;
+        }
+        let policy = TerminalSettings::get_global(cx).confirm_close;
+        let needs_confirm = match policy {
+            ConfirmClose::Never => false,
+            ConfirmClose::Always => true,
+            ConfirmClose::Dirty => self.any_pane_is_dirty(cx),
+        };
+        if needs_confirm {
+            self.close_confirm = Some(CloseConfirmState {
+                message: "A process is still running. Close this window anyway?".into(),
+                kind: ConfirmKind::CloseWindow,
+            });
+            cx.notify();
+        } else {
+            self.finish_window_close(window, cx);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn any_pane_is_dirty(&self, cx: &App) -> bool {
+        self.tabs.iter().any(|tab| {
+            let mut leaves = Vec::new();
+            tab.tree.leaves(&mut leaves);
+            leaves.iter().any(|(_, view)| view.read(cx).looks_busy(cx))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_window_close(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.emit_all_panes_closed(cx);
+        self.persist_session_now(cx);
+        RunLedgerGlobal::flush_now_in(cx);
+        window.remove_window();
+    }
+
     fn request_clear_run_ledger(&mut self, cx: &mut Context<Self>) {
         if self.close_confirm.is_some() {
             return;
@@ -1719,6 +1760,8 @@ impl AppShell {
         let kind = self.close_confirm.take().map(|s| s.kind);
         match kind {
             Some(ConfirmKind::ClearRunLedger) => self.clear_run_ledger(cx),
+            #[cfg(target_os = "linux")]
+            Some(ConfirmKind::CloseWindow) => self.finish_window_close(window, cx),
             _ => self.close_active_pane(window, cx),
         }
     }
@@ -4682,6 +4725,28 @@ mod tests {
         traffic_light_position_for,
     };
     use gpui::{point, px};
+
+    #[test]
+    fn safe_window_close_finishes_runtime_before_removal() {
+        let src = include_str!("app_shell.rs");
+        let needle = ["fn finish_window_", "close("].concat();
+        let method = src
+            .split(&needle)
+            .nth(1)
+            .expect("shared window-close finalizer");
+        let body = method.split("\n    }").next().expect("finalizer body");
+        for required in [
+            "emit_all_panes_closed(cx)",
+            "persist_session_now(cx)",
+            "RunLedgerGlobal::flush_now_in(cx)",
+            "window.remove_window()",
+        ] {
+            assert!(
+                body.contains(required),
+                "close finalizer missing {required}"
+            );
+        }
+    }
 
     #[test]
     fn traffic_lights_are_only_positioned_on_macos() {

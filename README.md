@@ -390,8 +390,7 @@ architecture.
 
 ```bash
 gh workflow run build-and-release.yml \
-  -f version=0.2.0 \
-  -f draft=false
+  -f version=0.2.0
 ```
 
 **Required GitHub Secrets** (repo Settings → Secrets and variables → Actions):
