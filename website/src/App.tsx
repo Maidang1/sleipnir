@@ -34,17 +34,17 @@ const FEATURES = [
   {
     icon: Zap,
     title: 'Native down to the frame',
-    body: 'Rust and GPUI, the GPU framework behind Zed. Metal on macOS. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output. No Electron tax.',
+    body: 'Rust and GPUI, the GPU framework behind Zed. Metal on macOS, Direct3D 11 on Windows, and Vulkan on Linux. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output. No Electron tax.',
   },
   {
     icon: Columns2,
     title: 'Tabs, splits & pane zoom',
-    body: 'Default chrome is a top tab strip showing the last two folders of the cwd. The side rail instead shows title, branch, and dirty +N −M. Split right or down, jump tabs with ⌘1–9, move focus with ⌘⌥ arrows. Zoom a pane with ⌘⇧Enter; inactive splits dim so focus stays clear.',
+    body: 'Default chrome is a top tab strip showing the last two folders of the cwd. The side rail instead shows title, branch, and dirty +N −M. Split right or down, jump tabs with ⌘1–9 / Ctrl+Shift+1–9, and move focus with ⌘⌥ / Ctrl+Alt+Arrow. Zoom a pane with ⌘⇧Enter / Ctrl+Shift+Enter; inactive splits dim so focus stays clear.',
   },
   {
     icon: AppWindow,
     title: 'Multi-window & font zoom',
-    body: '⌘N opens an independent window with its own tabs and shells. Resize the grid with ⌘+ (and − / 0). Window-scoped, not written to settings.',
+    body: '⌘N or Ctrl+Shift+N opens an independent window with its own tabs and shells. Resize the grid with ⌘+ or Ctrl+Shift++ (and − / 0). Window-scoped, not written to settings.',
   },
   {
     icon: Palette,
@@ -54,34 +54,34 @@ const FEATURES = [
   {
     icon: ImageIcon,
     title: 'Paste that understands the file manager',
-    body: 'A screenshot on the clipboard becomes a quoted temp path. Finder selections paste as quoted paths. ⌃⌘V forces text-only.',
+    body: 'A screenshot on the clipboard becomes a quoted temp path. File-manager selections paste as quoted paths. Use ⌃⌘V or Ctrl+Alt+V to force text-only.',
   },
   {
     icon: Keyboard,
     title: 'Keyboard first',
-    body: 'Command palette (⌘⇧K), vi mode, configurable key bindings, find in scrollback, and close confirm when a job is running.',
+    body: 'Command palette (⌘⇧K / Ctrl+Shift+P), vi mode, configurable key bindings, find in scrollback, and close confirm when a job is running.',
   },
   {
     icon: Link2,
     title: 'Paths, links & shell markers',
-    body: '⌘-click paths open in the default app. Optional system or visual bell. Jump previous/next shell prompt when OSC 133 markers are present.',
+    body: '⌘-click or Ctrl-click paths to open them in the default app. Optional system or visual bell. Jump previous/next shell prompt when OSC 133 markers are present.',
   },
   {
     icon: Maximize2,
     title: 'Daily extras without bloat',
-    body: 'Run Ledger (⌘⇧L) remembers redacted command runs. Quick Terminal, Quick Select, optional content opacity, and a macOS notification when a long command finishes while you are in another app.',
+    body: 'Run Ledger (⌘⇧L / Ctrl+Shift+L) remembers redacted command runs. Quick Terminal, Quick Select, optional content opacity, and a desktop notification when a long command finishes while you are in another app.',
   },
   {
     icon: RefreshCw,
     title: 'Quietly current',
-    body: 'Check for updates when you want (⌘⇧U). Downloads verify against a published SHA-256 sidecar before install. Session layout restores on launch.',
+    body: 'Check for updates when you want (⌘⇧U / Ctrl+Shift+U). Downloads verify against a published SHA-256 sidecar. macOS can update in place; Windows and Linux open Releases for a manual install. Session layout restores on launch.',
   },
 ]
 
 const FAQ = [
   {
     q: 'Is this another Electron app?',
-    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS and Direct3D 11 on Windows, not a browser engine.',
+    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS, Direct3D 11 on Windows, and Vulkan on Linux—not a browser engine.',
   },
   {
     q: 'Where does config live?',
@@ -91,7 +91,7 @@ const FAQ = [
           ~/.config/sleipnir/settings.json
         </code>
         {' '}
-        on macOS, or{' '}
+        on macOS and Linux, or{' '}
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
           %APPDATA%\sleipnir\settings.json
         </code>
@@ -113,15 +113,15 @@ const FAQ = [
   },
   {
     q: 'Does it auto-update on launch?',
-    a: 'No. Updates are manual via Sleipnir → Check for Updates… (⌘⇧U). Artifacts are verified with a .zip.sha256 sidecar before install.',
+    a: 'No. Updates are manual via Sleipnir → Check for Updates… (⌘⇧U / Ctrl+Shift+U). macOS can verify and install the published .dmg in place; on Windows and Linux, the action opens GitHub Releases for a manual install.',
   },
   {
     q: 'macOS says the app is from an unidentified developer.',
-    a: 'CI builds are ad-hoc signed. The one-line installer runs xattr -cr after copying to /Applications so Gatekeeper does not quarantine the download. If you installed from a .dmg or .zip instead, run xattr -cr /Applications/Sleipnir.app, then open the app.',
+    a: 'CI builds are ad-hoc signed. The one-line installer runs xattr -cr after copying to /Applications so Gatekeeper does not quarantine the download. If you installed from a .dmg instead, run xattr -cr /Applications/Sleipnir.app, then open the app.',
   },
   {
-    q: 'Is Windows or Linux supported?',
-    a: 'Windows 10 1809+ is supported (Direct3D 11 + ConPTY). Download the windows-x64 zip or build from source. Linux is not supported. In-place auto-update stays macOS-only.',
+    q: 'Which platforms are supported?',
+    a: 'macOS 14+ uses Metal. Windows 10 1809+ uses Direct3D 11 and ConPTY. Linux is officially supported on Ubuntu 22.04+ with Vulkan on Wayland or X11; x86_64 and ARM64 .deb packages and portable tarballs are available. Other glibc 2.35+ desktop distributions are best effort. In-place updates stay macOS-only.',
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',
@@ -193,10 +193,10 @@ export default function App() {
           <section className="px-5 pt-14 pb-14 md:px-10 md:pt-24">
             <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
               <Command className="size-3.5" />
-              Built on GPUI · macOS
+              Built on GPUI · macOS · Windows · Linux
             </div>
             <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.4rem] md:leading-[1.04]">
-              A fast native terminal for macOS.
+              A fast native terminal for macOS, Windows, and Linux.
             </h1>
             <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
               GPU-rendered through GPUI. Side tab rail, splits, multi-window,
@@ -270,8 +270,8 @@ export default function App() {
             <SectionLabel>Download</SectionLabel>
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">Get Sleipnir</h2>
             <p className="mt-2 max-w-lg text-sm text-muted-foreground">
-              Free and open source. One-line install below, or download a .dmg
-              or .zip.
+              Free and open source. Use the one-line installer below, or choose
+              a macOS, Windows, or Linux package for your architecture.
             </p>
             <InstallCommand className="mt-6" />
             <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
