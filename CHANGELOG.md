@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0
+
 ### Features
 - **Linux support restored:** native x86_64 and ARM64 builds use Vulkan on Wayland or X11, with Ubuntu 22.04+ officially supported and other glibc 2.35+ desktop distributions supported on a best-effort basis
 - GitHub Releases include `sleipnir_<ver>_amd64.deb`, `Sleipnir-<ver>-linux-x86_64.tar.gz`, `sleipnir_<ver>_arm64.deb`, and `Sleipnir-<ver>-linux-aarch64.tar.gz`, each with a SHA-256 sidecar
