@@ -48,6 +48,8 @@ INSTALL_DESKTOP_TMP="${CLEANUP_TMP}/desktop.tmp"
 INSTALL_ICON_TMP="${CLEANUP_TMP}/icon.tmp"
 mkdir -p "${WORKDIR}"
 touch "${INSTALL_BINARY_TMP}" "${INSTALL_DESKTOP_TMP}" "${INSTALL_ICON_TMP}"
+# cleanup is defined by the sourced installer above.
+# shellcheck disable=SC2218
 cleanup
 [[ ! -e "${WORKDIR}" ]] || fail "cleanup left the installer work directory"
 [[ ! -e "${INSTALL_BINARY_TMP}" && ! -e "${INSTALL_DESKTOP_TMP}" && ! -e "${INSTALL_ICON_TMP}" ]] \
