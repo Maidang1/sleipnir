@@ -855,12 +855,6 @@ pub(super) fn screen_lines(term: &Term<ZedListener>) -> usize {
     term.screen_lines()
 }
 
-pub(super) fn full_content_range(term: &Term<ZedListener>) -> Range {
-    let start = AlacPoint::new(term.topmost_line(), Column(0));
-    let end = AlacPoint::new(term.bottommost_line(), term.last_column());
-    Range::from_alacritty(start..=end)
-}
-
 pub(super) fn update_vi_cursor_for_scroll(term: &mut Term<ZedListener>, scroll: Scroll) {
     match scroll {
         Scroll::Delta(delta) => {

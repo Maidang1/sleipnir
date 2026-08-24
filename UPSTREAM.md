@@ -9,7 +9,7 @@ What stays **local** (forked or original):
 | Crate | Why local |
 |-------|-----------|
 | `terminal` | Heavily forked: settings/theme rewired to `sleipnir_settings` |
-| `gpui_platform` | Slim macOS application entry |
+| `gpui_platform` | Slim macOS, Windows, and Linux application entry |
 | `sleipnir`, `sleipnir_ui`, `sleipnir_settings`, `release_channel` | Product code |
 | `alacritty_terminal` | **Git pin** to [Maidang1/alacritty](https://github.com/Maidang1/alacritty) (`sleipnir-osc-custom`): zed alacritty fork + OSC 133/9/777 (see [ADR-0005](docs/adr/0005-vendored-alacritty-term.md)) |
 | `vte` | **Git pin** to [Maidang1/vte](https://github.com/Maidang1/vte) (`sleipnir-osc-custom`): vte 0.15.0 + `Handler::osc_custom`; `[patch.crates-io]` forces every crate onto that rev |
@@ -22,7 +22,7 @@ What stays **local** (forked or original):
 |------|--------|
 | Source | `https://github.com/zed-industries/zed` |
 | **Zed `rev`** | `371a7d4ba2fd0064b79a0bc67d28e57a906779dc` (2026-08-09) |
-| Packages from that rev | `gpui`, `gpui_macos`, `gpui_windows`, `collections`, `util`, `util_macros` (+ their transitive Zed crates) |
+| Packages from that rev | `gpui`, `gpui_macos`, `gpui_windows`, `gpui_linux`, `collections`, `util`, `util_macros` (+ their transitive Zed crates) |
 | `alacritty_terminal` | `git = "https://github.com/Maidang1/alacritty"` **rev `561594caa275f00914a039356816fe70467a2d44`** (zed `4c129667` + OSC patch) |
 | `vte` | `git = "https://github.com/Maidang1/vte"` **rev `94ce0d5fb89392da3b1b243b43e401068fb54937`** (`v0.15.0` + `osc_custom`) |
 | Rust toolchain | `1.95.0` (`rust-toolchain.toml`, match Zed) |
@@ -36,8 +36,10 @@ After each successful upgrade, update this table and the `rev` values in root `C
 
 ```toml
 # root Cargo.toml (pattern)
-gpui = { git = "https://github.com/zed-industries/zed", rev = "<SAME>", default-features = false, features = ["font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "<SAME>", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_macos = { git = "https://github.com/zed-industries/zed", rev = "<SAME>", ... }
+gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "<SAME>", ... }
+gpui_linux = { git = "https://github.com/zed-industries/zed", rev = "<SAME>", default-features = false, features = ["wayland", "x11"] }
 collections = { git = "https://github.com/zed-industries/zed", rev = "<SAME>" }
 util = { git = "https://github.com/zed-industries/zed", rev = "<SAME>" }
 ```
@@ -90,12 +92,12 @@ git -C /path/to/alacritty log --oneline 4c129667..origin/master -i --grep='panic
    [Maidang1/alacritty](https://github.com/Maidang1/alacritty) pin; if Zed moved,
    merge that rev into `sleipnir-osc-custom` and re-apply the OSC patch.
 3. In root `Cargo.toml`, replace **all** Zed `rev = "…"` with the new commit (same string everywhere).
-4. Build:  
+4. Verify `gpui` and `gpui_linux` still enable both `wayland` and `x11`; keep the Linux target dependency and the forwarding `gpui_platform` features in sync.
+5. Build:
    `cargo build -p sleipnir`
-5. Fix **local** breaks only (`terminal`, `sleipnir_ui`, `gpui_platform`, settings). Do not vendor GPUI back unless you must patch upstream.
-6. Smoke:  
-   `cargo run -p sleipnir` — shell, tabs (`⌘T`), settings reload (`⌘⇧R`).
-7. Commit with Zed rev + alacritty rev in the message; update this table.
+6. Fix **local** breaks only (`terminal`, `sleipnir_ui`, `gpui_platform`, settings). Do not vendor GPUI back unless you must patch upstream.
+7. Smoke macOS/Windows plus Linux on both Wayland and X11: shell, tabs (`⌘T` or `Ctrl+Shift+T`), and settings reload (`⌘⇧R` or `Ctrl+Shift+R`).
+8. Commit with Zed rev + alacritty rev in the message; update this table.
 
 Optional dry-run against a local Zed checkout (forks only):
 
@@ -113,7 +115,7 @@ Optional dry-run against a local Zed checkout (forks only):
 | `terminal/src/terminal.rs` imports | `sleipnir_settings::TerminalPalette` instead of `task`/`theme` |
 | `get_color_at_index` | Takes palette, not full `Theme` |
 | Integration tests in terminal | Stubbed / disabled |
-| `gpui_platform` | macOS / Windows application entry via `gpui_macos` / `gpui_windows` |
+| `gpui_platform` | macOS / Windows / Linux application entry via `gpui_macos` / `gpui_windows` / `gpui_linux`; Linux forwards the `wayland` and `x11` features |
 | UI | `sleipnir_ui` is original; not Zed `terminal_view` |
 
 ---

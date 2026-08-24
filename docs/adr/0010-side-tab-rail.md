@@ -1,6 +1,11 @@
 # Side tab rail, derived workspaces, owned agent marks
 
-**Status:** accepted
+**Status:** superseded (side rail removed; chrome is the top strip only)
+
+> **Update:** The `side` tab placement and the `tab_placement` / `sidebar_width`
+> settings were removed. The chrome is now the top strip exclusively. The
+> derived-workspace grouping and owned agent marks below still apply to the top
+> strip; the rail-specific parts are historical.
 
 ## Context
 

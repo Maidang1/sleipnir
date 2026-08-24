@@ -9,11 +9,6 @@ on:
         description: 'Release version (e.g. 0.2.0)'
         required: true
         type: string
-      draft:
-        description: 'Create as draft release'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -44,15 +39,23 @@ jobs:
       - name: Determine version
         id: version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VER="${GITHUB_REF#refs/tags/}"
           else
-            VER=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+            VER="$(cargo metadata --no-deps --format-version 1 \
+              | python -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "sleipnir"))')"
           fi
           VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
@@ -64,8 +67,9 @@ jobs:
 
       - name: Package exe
         shell: bash
+        env:
+          VER: ${{ steps.version.outputs.version }}
         run: |
-          VER="${{ steps.version.outputs.version }}"
           mkdir -p build
           EXE="build/Sleipnir-${VER}-windows-x64.exe"
           cp target/release/sleipnir.exe "${EXE}"
@@ -83,28 +87,213 @@ jobs:
             build/Sleipnir-*-windows-x64.exe
             build/Sleipnir-*-windows-x64.exe.sha256
 
-      - name: Attach to GitHub Release
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+  linux-check:
+    name: Linux ${{ matrix.artifact-suffix }} build, test & package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            expected-arch: x86_64
+            expected-machine: Advanced Micro Devices X86-64
+            deb-arch: amd64
+            artifact-suffix: x86_64
+          - runner: ubuntu-22.04-arm
+            expected-arch: aarch64
+            expected-machine: AArch64
+            deb-arch: arm64
+            artifact-suffix: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Assert native architecture
+        run: test "$(uname -m)" = "${{ matrix.expected-arch }}"
+
+      - name: Install Linux build and validation dependencies
         run: |
-          VER="${{ steps.version.outputs.version }}"
-          TAG="v${VER}"
-          EXE="build/Sleipnir-${VER}-windows-x64.exe"
-          SHA="build/Sleipnir-${VER}-windows-x64.exe.sha256"
-          # macOS job creates the release; wait until it exists.
-          for i in $(seq 1 36); do
-            if gh release view "${TAG}" >/dev/null 2>&1; then
-              gh release upload "${TAG}" "${EXE}" "${SHA}" --clobber
-              echo "Uploaded Windows assets to ${TAG}"
-              exit 0
-            fi
-            echo "release ${TAG} not ready yet (${i}/36); sleeping"
-            sleep 10
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libglib2.0-dev \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            python3-pil \
+            dpkg-dev \
+            desktop-file-utils \
+            libnotify-bin \
+            xdg-utils \
+            xvfb \
+            xdotool \
+            shellcheck
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Determine version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VER="${GITHUB_REF#refs/tags/}"
+          else
+            VER="$(cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "sleipnir"))')"
+          fi
+          VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Test packaging and installer scripts
+        run: |
+          bash scripts/tests/test-linux-package.sh
+          bash scripts/tests/test-install.sh
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/install.sh scripts/make-linux-package.sh scripts/tests/*.sh
+
+      - name: Build release binary once
+        run: cargo build --release -p sleipnir
+
+      - name: Package existing native ELF
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          SLEIPNIR_VERSION="${VER}" ./scripts/make-linux-package.sh \
+            --binary target/release/sleipnir \
+            --out build
+          test -f "build/Sleipnir-${VER}-linux-${{ matrix.artifact-suffix }}.tar.gz"
+          test -f "build/sleipnir_${VER}_${{ matrix.deb-arch }}.deb"
+
+      - name: Validate Linux release artifacts
+        env:
+          VER: ${{ steps.version.outputs.version }}
+          EXPECTED_MACHINE: ${{ matrix.expected-machine }}
+          DEB_ARCH: ${{ matrix.deb-arch }}
+          PORTABLE_ARCH: ${{ matrix.artifact-suffix }}
+        run: |
+          TARBALL="Sleipnir-${VER}-linux-${PORTABLE_ARCH}.tar.gz"
+          DEB="sleipnir_${VER}_${DEB_ARCH}.deb"
+
+          readelf -h target/release/sleipnir | grep -F "${EXPECTED_MACHINE}"
+
+          tar_contents="$(tar -tzf "build/${TARBALL}")"
+          tar_root="Sleipnir-${VER}-linux-${PORTABLE_ARCH}"
+          for path in \
+            "${tar_root}/sleipnir" \
+            "${tar_root}/sleipnir.desktop" \
+            "${tar_root}/sleipnir.png" \
+            "${tar_root}/README.txt" \
+            "${tar_root}/LICENSE"; do
+            grep -Fx "${path}" <<<"${tar_contents}"
           done
-          echo "ERROR: GitHub release ${TAG} did not appear in time" >&2
-          exit 1
+
+          test "$(dpkg-deb --field "build/${DEB}" Architecture)" = "${DEB_ARCH}"
+          depends="$(dpkg-deb --field "build/${DEB}" Depends)"
+          for package in \
+            libx11-6 libxcb1 libxkbcommon0 libxkbcommon-x11-0 \
+            libvulkan1 libwayland-client0 libfontconfig1 xdg-utils libnotify-bin; do
+            grep -Eq "(^|, )${package}([ (]|,|$)" <<<"${depends}"
+          done
+
+          deb_contents="$(dpkg-deb --contents "build/${DEB}")"
+          for path in \
+            './usr/bin/sleipnir' \
+            './usr/share/applications/sleipnir.desktop' \
+            './usr/share/icons/hicolor/48x48/apps/sleipnir.png' \
+            './usr/share/icons/hicolor/64x64/apps/sleipnir.png' \
+            './usr/share/icons/hicolor/128x128/apps/sleipnir.png' \
+            './usr/share/icons/hicolor/256x256/apps/sleipnir.png' \
+            './usr/share/icons/hicolor/512x512/apps/sleipnir.png' \
+            './usr/share/doc/sleipnir/README.txt' \
+            './usr/share/doc/sleipnir/changelog.gz' \
+            './usr/share/doc/sleipnir/copyright' \
+            './usr/share/licenses/sleipnir/LICENSE'; do
+            grep -F "${path}" <<<"${deb_contents}"
+          done
+
+          desktop-file-validate resources/linux/sleipnir.desktop
+          for artifact in "build/${TARBALL}" "build/${DEB}"; do
+            expected="$(tr -d '[:space:]' < "${artifact}.sha256")"
+            [[ "${expected}" =~ ^[0-9a-f]{64}$ ]]
+            actual="$(sha256sum "${artifact}" | awk '{print $1}')"
+            test "${expected}" = "${actual}"
+          done
+
+      - name: Smoke X11 window creation
+        run: |
+          unset WAYLAND_DISPLAY
+          export LIBGL_ALWAYS_SOFTWARE=1
+          xvfb-run -a -s '-screen 0 1280x720x24' bash -euo pipefail <<'SH'
+          target/release/sleipnir >sleipnir-smoke.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          found=0
+          for _ in $(seq 1 40); do
+            if xdotool search --onlyvisible --pid "$pid" >/dev/null 2>&1; then
+              found=1
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              cat sleipnir-smoke.log >&2
+              exit 1
+            fi
+            sleep 0.25
+          done
+          if [[ "${found}" != "1" ]]; then
+            cat sleipnir-smoke.log >&2
+            echo "ERROR: Sleipnir stayed alive but did not create a visible X11 window" >&2
+            exit 1
+          fi
+          SH
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: sleipnir-linux-${{ matrix.artifact-suffix }}
+          if-no-files-found: error
+          path: |
+            build/Sleipnir-${{ steps.version.outputs.version }}-linux-${{ matrix.artifact-suffix }}.tar.gz
+            build/Sleipnir-${{ steps.version.outputs.version }}-linux-${{ matrix.artifact-suffix }}.tar.gz.sha256
+            build/sleipnir_${{ steps.version.outputs.version }}_${{ matrix.deb-arch }}.deb
+            build/sleipnir_${{ steps.version.outputs.version }}_${{ matrix.deb-arch }}.deb.sha256
 
   build-and-release:
     name: Build & Publish
@@ -141,15 +330,23 @@ jobs:
 
       - name: Determine version
         id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VER="${GITHUB_REF#refs/tags/}"
           else
-            VER=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+            VER="$(cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "sleipnir"))')"
           fi
-          VER="${VER#v}"   # normalize: strip any leading 'v'
+          VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
@@ -235,7 +432,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
-          DRAFT: ${{ github.event.inputs.draft || 'false' }}
         run: |
           TAG="v${VERSION}"
           DMG="build/Sleipnir-${VERSION}-macos.dmg"
@@ -256,26 +452,98 @@ jobs:
             echo "The Windows \`.exe\` is attached by the Windows job a few minutes after this release is created."
             echo "In-place auto-update stays macOS-only; Check for Updates opens this page."
             echo ""
-            echo "Linux is not supported."
+            echo "**Linux x86_64:** Download \`sleipnir_${VERSION}_amd64.deb\` or \`Sleipnir-${VERSION}-linux-x86_64.tar.gz\`."
+            echo "**Linux ARM64:** Download \`sleipnir_${VERSION}_arm64.deb\` or \`Sleipnir-${VERSION}-linux-aarch64.tar.gz\`."
+            echo "Linux assets may appear after this release is created while the two native Linux jobs finish."
+            echo "Ubuntu 22.04+ is supported with Vulkan on Wayland or X11. Other glibc 2.35+ desktop distributions are best effort."
+            echo "In-place updates are macOS-only; Linux Check for Updates opens this release for manual installation."
             echo ""
             echo "### Requirements"
-            echo "- macOS 14.0+ (Sonoma), or Windows 10 1809+ with a Direct3D 11 GPU"
+            echo "- macOS 14.0+ (Sonoma), Windows 10 1809+ with a Direct3D 11 GPU, or Ubuntu 22.04+ with Vulkan and Wayland/X11"
             echo "- Rust 1.95+ (only needed for building from source)"
             echo ""
             echo "### Source"
             echo "https://github.com/Maidang1/sleipnir"
           } > release-notes.md
 
-          DRAFT_FLAG=()
-          if [[ "${DRAFT}" == "true" ]]; then
-            DRAFT_FLAG=(--draft)
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            IS_DRAFT="$(gh release view "${TAG}" --json isDraft --jq '.isDraft')"
+            if [[ "${IS_DRAFT}" != "true" ]]; then
+              echo "ERROR: refusing to overwrite published release ${TAG}" >&2
+              exit 1
+            fi
+            gh release edit "${TAG}" \
+              --title "Sleipnir v${VERSION}" \
+              --notes-file release-notes.md
+            gh release upload "${TAG}" "${DMG}" "${SHA}" --clobber
+          else
+            gh release create "${TAG}" \
+              --draft \
+              --title "Sleipnir v${VERSION}" \
+              --notes-file release-notes.md \
+              "${DMG}" \
+              "${SHA}"
           fi
 
-          gh release create "${TAG}" \
-            --title "Sleipnir v${VERSION}" \
-            --notes-file release-notes.md \
-            "${DRAFT_FLAG[@]}" \
-            "${DMG}" \
-            "${SHA}"
+          echo "Draft ready: $(gh release view "${TAG}" --json url --jq '.url')"
 
-          echo "Published: $(gh release view "${TAG}" --json url --jq '.url')"
+  release-assets-upload:
+    name: Attach complete Windows and Linux release assets
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    needs: [build-and-release, windows-check, linux-check]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Download Windows release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sleipnir-windows
+          path: build/release
+
+      - name: Download both Linux architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sleipnir-linux-*
+          path: build/release
+          merge-multiple: true
+
+      - name: Upload exactly ten Windows and Linux release files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          else
+            VER="${GITHUB_REF#refs/tags/}"
+          fi
+          VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
+          TAG="v${VER}"
+          assets=(
+            "build/release/Sleipnir-${VER}-windows-x64.exe"
+            "build/release/Sleipnir-${VER}-windows-x64.exe.sha256"
+            "build/release/Sleipnir-${VER}-linux-x86_64.tar.gz"
+            "build/release/Sleipnir-${VER}-linux-x86_64.tar.gz.sha256"
+            "build/release/sleipnir_${VER}_amd64.deb"
+            "build/release/sleipnir_${VER}_amd64.deb.sha256"
+            "build/release/Sleipnir-${VER}-linux-aarch64.tar.gz"
+            "build/release/Sleipnir-${VER}-linux-aarch64.tar.gz.sha256"
+            "build/release/sleipnir_${VER}_arm64.deb"
+            "build/release/sleipnir_${VER}_arm64.deb.sha256"
+          )
+          test "${#assets[@]}" -eq 10
+          for asset in "${assets[@]}"; do
+            test -f "${asset}"
+          done
+          IS_DRAFT="$(gh release view "${TAG}" --json isDraft --jq '.isDraft')"
+          if [[ "${IS_DRAFT}" != "true" ]]; then
+            echo "ERROR: refusing to overwrite published release ${TAG}" >&2
+            exit 1
+          fi
+          gh release upload "${TAG}" "${assets[@]}" --clobber
+          echo "Uploaded exactly ten Windows and Linux assets to draft ${TAG}"

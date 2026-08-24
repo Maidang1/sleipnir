@@ -10,8 +10,6 @@ pub struct ChromeGeometry {
     pub traffic_light_position: Point<Pixels>,
     pub leading_pad: Pixels,
     pub tab_height: Pixels,
-    /// Two-line side-rail row (title + branch). Top-strip chips stay on `tab_height`.
-    pub rail_row_height: Pixels,
     pub tab_radius: Pixels,
     pub tab_min_width: Pixels,
     pub tab_max_width: Pixels,
@@ -25,30 +23,29 @@ pub struct ChromeGeometry {
     pub window_radius: Pixels,
     /// Trailing inset so tab chips stay clear of system caption buttons.
     pub trailing_pad: Pixels,
-    /// Left tab rail width (side placement).
-    pub sidebar_width: Pixels,
-    /// Top of the rail reserved for traffic lights + window drag.
-    pub sidebar_header: Pixels,
-    /// Thin content-column title / drag bar (side placement).
-    pub content_title_height: Pixels,
-    /// Top-strip band height (two-line chips + padding).
-    pub top_strip_height: Pixels,
 }
 
 impl ChromeGeometry {
     pub fn standard() -> Self {
-        Self::standard_for(cfg!(windows))
+        Self::standard_for(cfg!(not(target_os = "macos")))
     }
 
-    /// Chrome insets for a given OS family. `windows = true` uses a small
-    /// leading pad and reserves trailing space for caption buttons.
-    pub fn standard_for(windows: bool) -> Self {
+    /// Chrome insets for a windowed platform family.
+    pub fn standard_for(desktop_controls: bool) -> Self {
+        Self::for_window(desktop_controls, false)
+    }
+
+    /// Chrome insets for the platform and current fullscreen state.
+    pub fn for_window(desktop_controls: bool, fullscreen: bool) -> Self {
         Self {
             height: px(40.0),
             traffic_light_position: point(px(12.0), px(12.0)),
-            leading_pad: leading_pad_for(windows),
+            leading_pad: if fullscreen {
+                Self::fullscreen_leading_pad()
+            } else {
+                leading_pad_for(desktop_controls)
+            },
             tab_height: px(28.0),
-            rail_row_height: px(48.0),
             tab_radius: px(6.0),
             tab_min_width: px(80.0),
             tab_max_width: px(220.0),
@@ -58,21 +55,15 @@ impl ChromeGeometry {
             new_tab_hit: px(28.0),
             close_hit: px(24.0),
             window_radius: px(10.0),
-            trailing_pad: trailing_pad_for(windows),
-            sidebar_width: px(200.0),
-            sidebar_header: px(40.0),
-            content_title_height: px(28.0),
-            top_strip_height: px(56.0),
+            trailing_pad: if fullscreen {
+                px(0.0)
+            } else {
+                trailing_pad_for(desktop_controls)
+            },
         }
     }
 
-    /// Apply a settings-clamped rail width.
-    pub fn with_sidebar_width(mut self, width: f32) -> Self {
-        self.sidebar_width = px(width);
-        self
-    }
-
-    /// Leading pad when the window is fullscreen (traffic lights restored by platform).
+    /// Leading pad when the window is fullscreen.
     pub fn fullscreen_leading_pad() -> Pixels {
         px(8.0)
     }
@@ -81,12 +72,12 @@ impl ChromeGeometry {
 #[inline]
 #[allow(dead_code)]
 pub fn traffic_light_leading_pad() -> Pixels {
-    leading_pad_for(cfg!(windows))
+    leading_pad_for(cfg!(not(target_os = "macos")))
 }
 
 #[inline]
-pub fn leading_pad_for(windows: bool) -> Pixels {
-    if windows {
+pub fn leading_pad_for(desktop_controls: bool) -> Pixels {
+    if desktop_controls {
         px(8.0)
     } else if cfg!(macos_sdk_26_or_later) {
         // Match Zed ui::TRAFFIC_LIGHT_PADDING without depending on ui.
@@ -98,12 +89,8 @@ pub fn leading_pad_for(windows: bool) -> Pixels {
 
 /// Space reserved on the right for system window controls.
 #[inline]
-pub fn trailing_pad_for(windows: bool) -> Pixels {
-    if windows {
-        px(138.0)
-    } else {
-        px(8.0)
-    }
+pub fn trailing_pad_for(desktop_controls: bool) -> Pixels {
+    if desktop_controls { px(138.0) } else { px(8.0) }
 }
 
 #[cfg(test)]
@@ -118,30 +105,27 @@ mod tests {
         assert_eq!(g.close_hit, px(24.0));
         assert_eq!(g.new_tab_hit, px(28.0));
         let pad = traffic_light_leading_pad();
-        if cfg!(windows) {
-            assert_eq!(pad, px(8.0));
-            assert_eq!(g.trailing_pad, px(138.0));
-        } else {
+        if cfg!(target_os = "macos") {
             assert!(pad == px(71.0) || pad == px(78.0));
             assert_eq!(g.trailing_pad, px(8.0));
             assert!(g.leading_pad >= px(71.0));
+        } else {
+            assert_eq!(pad, px(8.0));
+            assert_eq!(g.trailing_pad, px(138.0));
         }
-        assert_eq!(g.sidebar_width, px(200.0));
-        assert_eq!(g.sidebar_header, px(40.0));
-        assert_eq!(g.content_title_height, px(28.0));
-        assert_eq!(g.rail_row_height, px(48.0));
-        assert_eq!(g.top_strip_height, px(56.0));
-        assert!(g.rail_row_height > g.tab_height);
-        assert!(g.top_strip_height > g.rail_row_height);
     }
 
     #[test]
-    fn windows_chrome_reserves_caption_not_traffic_lights() {
-        let win = ChromeGeometry::standard_for(true);
-        assert_eq!(win.leading_pad, px(8.0));
-        assert_eq!(win.trailing_pad, px(138.0));
-        let mac = ChromeGeometry::standard_for(false);
-        assert!(mac.leading_pad >= px(71.0));
-        assert_eq!(mac.trailing_pad, px(8.0));
+    fn desktop_chrome_reserves_caption_buttons_only_when_windowed() {
+        let desktop = ChromeGeometry::for_window(true, false);
+        assert_eq!(desktop.leading_pad, px(8.0));
+        assert_eq!(desktop.trailing_pad, px(138.0));
+
+        let desktop_fullscreen = ChromeGeometry::for_window(true, true);
+        assert_eq!(desktop_fullscreen.trailing_pad, px(0.0));
+
+        let macos = ChromeGeometry::for_window(false, false);
+        assert!(macos.leading_pad >= px(71.0));
+        assert_eq!(macos.trailing_pad, px(8.0));
     }
 }

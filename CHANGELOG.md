@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Features
+- **Linux support restored:** native x86_64 and ARM64 builds use Vulkan on Wayland or X11, with Ubuntu 22.04+ officially supported and other glibc 2.35+ desktop distributions supported on a best-effort basis
+- GitHub Releases include `sleipnir_<ver>_amd64.deb`, `Sleipnir-<ver>-linux-x86_64.tar.gz`, `sleipnir_<ver>_arm64.deb`, and `Sleipnir-<ver>-linux-aarch64.tar.gz`, each with a SHA-256 sidecar
+- The shared one-line installer detects macOS or Linux, verifies SHA-256, defaults to the matching `.deb` on Linux, and supports rootless tarball installation with `curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/install.sh | SLEIPNIR_TARBALL=1 bash`
+- Linux uses `xdg-open` for paths, `notify-send` for completion notifications, Ubuntu Mono with DejaVu Sans Mono and Liberation Mono fallbacks, `~/.config/sleipnir/` for settings/session data, and the Ctrl-based desktop keymap
+- Native Ubuntu 22.04 CI jobs build, test, package, and run an X11 smoke test on x86_64 and ARM64
+
+### Changes
+- In-place update remains available only on macOS. Windows and Linux **Check for Updates** opens GitHub Releases for a manual install
+
 ## 0.2.1
 
 ### Features

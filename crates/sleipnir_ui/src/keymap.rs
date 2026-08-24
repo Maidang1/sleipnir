@@ -97,19 +97,21 @@ pub fn tmux_preset_bindings() -> Vec<BuiltinBinding> {
 
 /// Bindings for the compiling OS.
 pub fn builtin_bindings() -> Vec<BuiltinBinding> {
-    builtin_bindings_for(cfg!(windows))
+    builtin_bindings_for(cfg!(target_os = "macos"), cfg!(target_os = "linux"))
 }
 
-/// Bindings for a given OS family. `windows = true` uses Ctrl/Ctrl+Shift.
-pub fn builtin_bindings_for(windows: bool) -> Vec<BuiltinBinding> {
-    let mut out = if windows {
-        windows_static_bindings()
-    } else {
+/// Bindings for a given OS family. Windows and Linux use Ctrl/Ctrl+Shift.
+pub fn builtin_bindings_for(macos: bool, linux: bool) -> Vec<BuiltinBinding> {
+    debug_assert!(!(macos && linux));
+    let non_macos = !macos;
+    let mut out = if macos {
         macos_static_bindings()
+    } else {
+        desktop_static_bindings()
     };
-    // macOS uses bare `cmd-N`; Windows keeps digits free for the shell and
-    // TUIs, so tab activation lives on `ctrl-shift-N`.
-    let tab_mod = if windows { "ctrl-shift" } else { "cmd" };
+    // macOS uses bare `cmd-N`; Windows/Linux keep digits free for the shell
+    // and TUIs, so tab activation lives on `ctrl-shift-N`.
+    let tab_mod = if non_macos { "ctrl-shift" } else { "cmd" };
     for n in 1..=9usize {
         out.push(BuiltinBinding {
             key: format!("{tab_mod}-{n}"),
@@ -117,7 +119,7 @@ pub fn builtin_bindings_for(windows: bool) -> Vec<BuiltinBinding> {
             context: BindingContext::Both,
         });
     }
-    for (key, action) in font_zoom_key_bindings_for(windows) {
+    for (key, action) in font_zoom_key_bindings_for(non_macos) {
         let action = match *action {
             "increase_font_size" => BuiltinAction::IncreaseFontSize,
             "decrease_font_size" => BuiltinAction::DecreaseFontSize,
@@ -145,8 +147,15 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
         b("ctrl-shift-v", BuiltinAction::Paste, Terminal),
         b("ctrl-cmd-v", BuiltinAction::PasteText, Terminal),
         b("cmd-a", BuiltinAction::SelectAll, Terminal),
+        // Editor-style select-all. Shell readline beginning-of-line stays
+        // reachable via cmd-left (which sends ctrl-a to the PTY).
+        b("ctrl-a", BuiltinAction::SelectAll, Terminal),
         b("cmd-k", BuiltinAction::Clear, Terminal),
-        b("ctrl-cmd-space", BuiltinAction::ShowCharacterPalette, Terminal),
+        b(
+            "ctrl-cmd-space",
+            BuiltinAction::ShowCharacterPalette,
+            Terminal,
+        ),
         b("ctrl-shift-space", BuiltinAction::ToggleViMode, Terminal),
         b("shift-up", BuiltinAction::ScrollLineUp, Terminal),
         b("shift-down", BuiltinAction::ScrollLineDown, Terminal),
@@ -163,15 +172,27 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
             BuiltinAction::SendKeystroke("ctrl-u"),
             Terminal,
         ),
-        b("cmd-delete", BuiltinAction::SendKeystroke("ctrl-k"), Terminal),
+        b(
+            "cmd-delete",
+            BuiltinAction::SendKeystroke("ctrl-k"),
+            Terminal,
+        ),
         b("cmd-left", BuiltinAction::SendKeystroke("ctrl-a"), Terminal),
-        b("cmd-right", BuiltinAction::SendKeystroke("ctrl-e"), Terminal),
+        b(
+            "cmd-right",
+            BuiltinAction::SendKeystroke("ctrl-e"),
+            Terminal,
+        ),
         b("alt-left", BuiltinAction::SendText("\u{1b}b"), Terminal),
         b("alt-right", BuiltinAction::SendText("\u{1b}f"), Terminal),
         b("alt-b", BuiltinAction::SendText("\u{1b}b"), Terminal),
         b("alt-f", BuiltinAction::SendText("\u{1b}f"), Terminal),
         b("alt-delete", BuiltinAction::SendText("\u{1b}d"), Terminal),
-        b("ctrl-delete", BuiltinAction::SendText("\u{1b}[3;5~"), Terminal),
+        b(
+            "ctrl-delete",
+            BuiltinAction::SendText("\u{1b}[3;5~"),
+            Terminal,
+        ),
         b("cmd-t", BuiltinAction::NewTab, Both),
         b("cmd-w", BuiltinAction::CloseTab, Both),
         b("cmd-n", BuiltinAction::NewWindow, Both),
@@ -205,14 +226,14 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
     ]
 }
 
-fn windows_static_bindings() -> Vec<BuiltinBinding> {
+fn desktop_static_bindings() -> Vec<BuiltinBinding> {
     use BindingContext::{Both, Global, Terminal};
-    // Windows convention: the app layer never grabs a bare `ctrl-<key>` — those
-    // belong to the shell/TUI (ctrl-c/d/z/l/r/u/w/a/e, ctrl-v literal-next,
-    // ctrl-1..9). Everything the app owns lives on `ctrl-shift-*` (primary,
-    // mirrors macOS `cmd-*`) or `ctrl-alt-*` (pane geometry + secondary,
-    // mirrors macOS `cmd-alt-*`). Copy/paste also accept the Windows-native
-    // Insert combos.
+    // Windows/Linux convention: the app layer never grabs a bare `ctrl-<key>`
+    // that belongs to the shell/TUI (ctrl-c/d/z/l/r/u/w/a/e, ctrl-v
+    // literal-next, ctrl-1..9). Everything the app owns lives on
+    // `ctrl-shift-*` (primary, mirrors macOS `cmd-*`) or `ctrl-alt-*` (pane
+    // geometry + secondary, mirrors macOS `cmd-alt-*`). Copy/paste also accept
+    // the desktop-native Insert combos.
     vec![
         b("alt-f4", BuiltinAction::Quit, Global),
         b("ctrl-shift-q", BuiltinAction::Quit, Global),
@@ -237,7 +258,11 @@ fn windows_static_bindings() -> Vec<BuiltinBinding> {
         b("alt-right", BuiltinAction::SendText("\u{1b}f"), Terminal),
         b("alt-b", BuiltinAction::SendText("\u{1b}b"), Terminal),
         b("alt-f", BuiltinAction::SendText("\u{1b}f"), Terminal),
-        b("ctrl-delete", BuiltinAction::SendText("\u{1b}[3;5~"), Terminal),
+        b(
+            "ctrl-delete",
+            BuiltinAction::SendText("\u{1b}[3;5~"),
+            Terminal,
+        ),
         // Tabs & windows
         b("ctrl-shift-t", BuiltinAction::NewTab, Both),
         b("ctrl-shift-w", BuiltinAction::CloseTab, Both),
@@ -286,12 +311,12 @@ fn b(key: &'static str, action: BuiltinAction, context: BindingContext) -> Built
 
 /// Font-zoom keystroke table for the compiling OS.
 pub fn font_zoom_key_bindings() -> &'static [(&'static str, &'static str)] {
-    font_zoom_key_bindings_for(cfg!(windows))
+    font_zoom_key_bindings_for(cfg!(not(target_os = "macos")))
 }
 
-/// Font-zoom keystroke table. `windows = true` uses `ctrl-*`.
-pub fn font_zoom_key_bindings_for(windows: bool) -> &'static [(&'static str, &'static str)] {
-    if windows {
+/// Font-zoom keystroke table. `non_macos = true` uses `ctrl-*`.
+pub fn font_zoom_key_bindings_for(non_macos: bool) -> &'static [(&'static str, &'static str)] {
+    if non_macos {
         &[
             ("ctrl-shift-=", "increase_font_size"),
             ("ctrl-shift-+", "increase_font_size"),
@@ -310,22 +335,22 @@ pub fn font_zoom_key_bindings_for(windows: bool) -> &'static [(&'static str, &'s
 
 /// Whether the last window closing should terminate the process.
 pub fn last_window_close_quits() -> bool {
-    last_window_close_quits_for(cfg!(not(target_os = "macos")))
+    last_window_close_quits_for(cfg!(target_os = "macos"))
 }
 
-/// `non_macos = true` → quit (Windows). macOS keeps the process for Dock reopen.
-pub fn last_window_close_quits_for(non_macos: bool) -> bool {
-    non_macos
+/// macOS keeps the process for Dock reopen; Windows and Linux quit.
+pub fn last_window_close_quits_for(macos: bool) -> bool {
+    !macos
 }
 
 /// Human-readable shortcut for a command id on this OS.
 pub fn display_shortcut(id: &str) -> &'static str {
-    display_shortcut_for(id, cfg!(windows))
+    display_shortcut_for(id, cfg!(not(target_os = "macos")))
 }
 
 /// Human-readable shortcut for a command id.
-pub fn display_shortcut_for(id: &str, windows: bool) -> &'static str {
-    match (id, windows) {
+pub fn display_shortcut_for(id: &str, non_macos: bool) -> &'static str {
+    match (id, non_macos) {
         ("new_tab", false) => "⌘T",
         ("new_tab", true) => "Ctrl+Shift+T",
         ("close_tab", false) => "⌘W",
@@ -385,10 +410,32 @@ mod tests {
     use super::*;
 
     fn keys_for(windows: bool) -> Vec<String> {
-        builtin_bindings_for(windows)
+        builtin_bindings_for(!windows, false)
             .into_iter()
             .map(|b| b.key)
             .collect()
+    }
+
+    #[test]
+    fn linux_bindings_use_desktop_ctrl_chords_without_stealing_shell_keys() {
+        let keys: Vec<_> = builtin_bindings_for(false, true)
+            .into_iter()
+            .map(|binding| binding.key)
+            .collect();
+        for expected in [
+            "ctrl-shift-t",
+            "ctrl-shift-c",
+            "ctrl-shift-v",
+            "ctrl-alt-v",
+            "ctrl-shift-1",
+            "ctrl-shift-9",
+        ] {
+            assert!(keys.iter().any(|key| key == expected), "missing {expected}");
+        }
+        for reserved in ["ctrl-c", "ctrl-w", "ctrl-d", "ctrl-v", "ctrl-1", "ctrl-9"] {
+            assert!(!keys.iter().any(|key| key == reserved), "stole {reserved}");
+        }
+        assert!(!keys.iter().any(|key| key.starts_with("cmd-")));
     }
 
     #[test]
@@ -405,12 +452,12 @@ mod tests {
         assert!(keys.iter().any(|k| k == "ctrl-shift-1"));
         assert!(keys.iter().any(|k| k == "ctrl-shift-9"));
         assert!(
-            !keys.iter().any(|k| ("1"..="9").contains(&k.as_str())
-                || k == "ctrl-1"
-                || k == "ctrl-9"),
+            !keys
+                .iter()
+                .any(|k| ("1"..="9").contains(&k.as_str()) || k == "ctrl-1" || k == "ctrl-9"),
             "must not bind bare ctrl-digit tab keys: {keys:?}"
         );
-        let settings_ctx: Vec<_> = builtin_bindings_for(true)
+        let settings_ctx: Vec<_> = builtin_bindings_for(false, false)
             .into_iter()
             .filter(|b| b.key == "ctrl-,")
             .map(|b| b.context)
@@ -427,7 +474,7 @@ mod tests {
             "Windows table must not use cmd-: {keys:?}"
         );
         // Paste is only on ctrl-shift-v / shift-insert now.
-        let paste_keys: Vec<_> = builtin_bindings_for(true)
+        let paste_keys: Vec<_> = builtin_bindings_for(false, false)
             .into_iter()
             .filter(|b| b.action == BuiltinAction::Paste)
             .map(|b| b.key)
@@ -444,6 +491,20 @@ mod tests {
         assert!(keys.iter().any(|k| k == "cmd-d"));
         assert!(keys.iter().any(|k| k == "cmd-alt-g"));
         assert!(!keys.iter().any(|k| k == "ctrl-v"));
+    }
+
+    #[test]
+    fn macos_binds_ctrl_a_and_cmd_a_to_select_all() {
+        let select_all: Vec<_> = builtin_bindings_for(true, false)
+            .into_iter()
+            .filter(|b| b.action == BuiltinAction::SelectAll)
+            .map(|b| b.key)
+            .collect();
+        assert!(select_all.contains(&"cmd-a".to_string()));
+        assert!(
+            select_all.contains(&"ctrl-a".to_string()),
+            "ctrl-a should select all (editor-style): {select_all:?}"
+        );
     }
 
     #[test]
@@ -473,7 +534,7 @@ mod tests {
         // cannot shadow a shell/TUI control key. `ctrl-,` (settings) and
         // `ctrl-tab`/`ctrl-shift-tab` (tab cycling, non-printable) are allowed.
         let allowed_bare = ["ctrl-,", "ctrl-tab", "ctrl-delete", "ctrl-insert"];
-        for b in builtin_bindings_for(true) {
+        for b in builtin_bindings_for(false, false) {
             let k = &b.key;
             if !k.starts_with("ctrl-") || allowed_bare.contains(&k.as_str()) {
                 continue;
@@ -489,7 +550,7 @@ mod tests {
     fn no_duplicate_keys_per_os() {
         for windows in [true, false] {
             let mut seen = std::collections::HashSet::new();
-            for b in builtin_bindings_for(windows) {
+            for b in builtin_bindings_for(!windows, false) {
                 assert!(
                     seen.insert(b.key.clone()),
                     "duplicate key {} (windows={windows})",
@@ -500,9 +561,9 @@ mod tests {
     }
 
     #[test]
-    fn last_window_quits_off_macos() {
-        assert!(!last_window_close_quits_for(false));
-        assert!(last_window_close_quits_for(true));
+    fn last_window_quits_on_windows_and_linux_only() {
+        assert!(!last_window_close_quits_for(true));
+        assert!(last_window_close_quits_for(false));
         assert_eq!(last_window_close_quits(), cfg!(not(target_os = "macos")));
     }
 }

@@ -1,13 +1,14 @@
 # Sleipnir
 
-A standalone terminal emulator built on GPUI (macOS only). This
+A standalone terminal emulator built on GPUI for macOS, Windows, and Linux. This
 glossary fixes the language for the window/tab/pane model and its interaction surface.
 
 ## Window & layout
 
 **Window**:
-One OS window (AppKit `NSWindow`).
-Sleipnir may open several. Each hosts one chrome band and one content area.
+One native operating-system window (AppKit on macOS, Win32 on Windows, or a
+Wayland/X11 window on Linux). Sleipnir may open several. Each hosts one chrome
+band and one content area.
 _Avoid_: App, screen.
 
 **Tab**:
@@ -42,20 +43,18 @@ _Avoid_: Focused terminal, current pane.
 ## Chrome & appearance
 
 **Chrome**:
-The custom chrome of a Window: traffic-light clearance, the Tab rail or top tab
-strip, and any window controls. It is deferential to terminal content per HIG.
+The custom chrome of a Window: the Tab rail or top tab strip plus native-style
+window controls and their reserved space. It stays visually secondary to terminal
+content across supported platforms.
 _Avoid_: Titlebar, header, toolbar.
 
-**Tab rail**:
-The left-side list of Tabs (`tab_placement: side`). Default chrome is the top strip.
-`tab_placement: top` is the same tab list laid out as a horizontal strip
-(same grouping, in-group drag). There is no Workspace group header in
-either layout. A rail row is two lines: title, then branch + dirty
-`+N −M`. A top-strip chip shows only the last two cwd components
-(`myself/harbor`), or a user rename. Failed Attention washes the chip a
-faint red instead of drawing a run glyph. Running and Succeeded never
-appear on the chip.
-_Avoid_: Sidebar (the rail is the tab list, not a second panel), activity bar.
+**Tab strip**:
+The horizontal list of Tabs across the top of the window, grouped by
+Workspace with no group header. A chip shows only the last two cwd
+components (`myself/harbor`), or a user rename. Failed Attention washes
+the chip a faint red instead of drawing a run glyph. Running and Succeeded
+never appear on the chip.
+_Avoid_: Sidebar, tab rail (the side rail was removed), activity bar.
 
 **Workspace**:
 A grouping key for Tabs, derived from the git work tree of the Tab's active Pane
@@ -73,8 +72,8 @@ A window-level overlay that renders the active Pane's git work tree as a
 `git diff HEAD` (split or unified, file tree, expandable hidden context after
 a full-file upgrade, word-level intra-line highlights, tree-sitter on a
 small language set, optional minimap). Not a Pane. Not persisted. Open from
-the chrome **Diff** button, the rail `+N −M` counts, `⌥⌘G`, the command
-palette, or View → Diff Inspector. `v` toggles split / unified; `m` toggles
+the chrome **Diff** button, the rail `+N −M` counts, the platform shortcut, the
+command palette, or View → Diff Inspector. `v` toggles split / unified; `m` toggles
 the minimap. Click `⋯ N hidden lines` to expand a gap.
 _Avoid_: Diff pane, review tab, source control panel.
 
@@ -129,15 +128,14 @@ _Avoid_: Mark (a Mark is a raw OSC 133 marker), Bookmark.
 **Attention**:
 The set of finished Runs the user has not yet seen. "Seen" means the Pane was
 focused, or the Run was clicked in the Ledger panel, or Mark Tab as Seen ran.
-Attention drives the tab wash, the menu-bar item, the Dock badge, and
-notifications. Tab chrome only washes Failed; Running and Succeeded stay in
+Attention drives the tab wash, platform status indicators, and notifications. Tab chrome only washes Failed; Running and Succeeded stay in
 the Ledger. It does not survive a restart (loaded history is marked seen).
 _Avoid_: Unread, Badge (a badge is one rendering of Attention; tab chrome no
 longer draws one), Alert.
 
 **Tombstone**:
 A chrome banner above the grid after session restore, generated from prior-launch
-Run metadata. It is not VT content and is not searchable with `⌘F`. It
+Run metadata. It is not VT content and is not searchable with the Find action. It
 dismisses on type. Hidden when `show_tombstone` is false, or when the last
 command was still running or unrecognized.
 _Avoid_: Restored output, grid line (ADR-0006's grid-line tombstone is superseded).

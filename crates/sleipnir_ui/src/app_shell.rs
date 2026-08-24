@@ -1,19 +1,17 @@
 //! Single-window multi-tab shell for sleipnir (HIG-aligned chrome).
 
-use crate::chrome::tab_sidebar;
 use gpui::{
     App, AppContext as _, BorrowAppContext, Bounds, ClickEvent, Context, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, canvas,
-    deferred, div, point,
-    prelude::FluentBuilder as _, px, relative, size,
+    deferred, div, point, prelude::FluentBuilder as _, px, relative, size,
 };
 use run_ledger::{PaneKey, RunEvent};
 use sleipnir_settings::{
-    Appearance, ConfirmClose, TabPlacement, TerminalPalette, TerminalSettings, ThemeName,
-    ThemeSetting, palette_for_theme,
+    Appearance, ConfirmClose, TerminalPalette, TerminalSettings, ThemeName, ThemeSetting,
+    palette_for_theme,
 };
 
 use crate::TermView;
@@ -25,12 +23,12 @@ use crate::pane_tree::{
     Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
     neighbor,
 };
-use crate::tab_convert::{TabView, extract_pane, merge_tab};
 use crate::run_ledger_global::RunLedgerGlobal;
 use crate::session::{
     SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, restore_pane_key,
     sanitize_session, save_session, session_path,
 };
+use crate::tab_convert::{TabView, extract_pane, merge_tab};
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
 fn appearance_of(a: gpui::WindowAppearance) -> Appearance {
@@ -117,8 +115,6 @@ actions!(
         SendGitDiff,
         /// Fuzzy search shell history in chrome (does not take the PTY line).
         ToggleHistorySearch,
-        /// Switch tab chrome between the side rail and the top strip.
-        ToggleTabPlacement,
         /// Toggle the git diff inspector overlay.
         ToggleDiff,
     ]
@@ -392,6 +388,8 @@ pub struct AppShell {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConfirmKind {
     ClosePane,
+    #[cfg(target_os = "linux")]
+    CloseWindow,
     ClearRunLedger,
 }
 
@@ -410,6 +408,30 @@ impl Focusable for AppShell {
 
 impl EventEmitter<()> for AppShell {}
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_window_open_diagnostic(source: &str) -> String {
+    format!(
+        "{source}\nLinux window creation failed. Check WAYLAND_DISPLAY or DISPLAY, \
+         install libvulkan1 and mesa-vulkan-drivers, or install the vendor \
+         Vulkan driver for your GPU."
+    )
+}
+
+fn traffic_light_position_for(
+    macos: bool,
+    position: gpui::Point<Pixels>,
+) -> Option<gpui::Point<Pixels>> {
+    macos.then_some(position)
+}
+
+fn log_window_open_error(err: &impl std::fmt::Display) {
+    #[cfg(target_os = "linux")]
+    log::error!("{}", linux_window_open_diagnostic(&format!("{err:#}")));
+
+    #[cfg(not(target_os = "linux"))]
+    log::error!("failed to open window: {err:#}");
+}
+
 /// Open a new independent Sleipnir window (startup + ⌘N).
 pub fn open_sleipnir_window(cx: &mut App) {
     let geo = ChromeGeometry::standard();
@@ -420,11 +442,10 @@ pub fn open_sleipnir_window(cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                traffic_light_position: if cfg!(windows) {
-                    None
-                } else {
-                    Some(geo.traffic_light_position)
-                },
+                traffic_light_position: traffic_light_position_for(
+                    cfg!(target_os = "macos"),
+                    geo.traffic_light_position,
+                ),
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -433,7 +454,7 @@ pub fn open_sleipnir_window(cx: &mut App) {
         },
         |window, cx| cx.new(|cx| AppShell::new(window, cx)),
     ) {
-        log::error!("failed to open window: {err:#}");
+        log_window_open_error(&err);
     }
 }
 
@@ -449,11 +470,10 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some("Sleipnir".into()),
                 appears_transparent: true,
-                traffic_light_position: if cfg!(windows) {
-                    None
-                } else {
-                    Some(geo.traffic_light_position)
-                },
+                traffic_light_position: traffic_light_position_for(
+                    cfg!(target_os = "macos"),
+                    geo.traffic_light_position,
+                ),
             }),
             app_owns_titlebar_drag: true,
             window_background: WindowBackgroundAppearance::Opaque,
@@ -468,7 +488,7 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
             })
         },
     ) {
-        log::error!("failed to open window: {err:#}");
+        log_window_open_error(&err);
     }
 }
 
@@ -1182,11 +1202,7 @@ impl AppShell {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
-        let buffer = if TerminalSettings::get_global(cx).tab_placement == TabPlacement::Side {
-            tab.title(cx).to_string()
-        } else {
-            tab.path_label(cx).to_string()
-        };
+        let buffer = tab.path_label(cx).to_string();
         self.rename = Some(RenameState { tab_id, buffer });
         cx.notify();
     }
@@ -1690,6 +1706,45 @@ impl AppShell {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_confirm.is_some() {
+            return;
+        }
+        let policy = TerminalSettings::get_global(cx).confirm_close;
+        let needs_confirm = match policy {
+            ConfirmClose::Never => false,
+            ConfirmClose::Always => true,
+            ConfirmClose::Dirty => self.any_pane_is_dirty(cx),
+        };
+        if needs_confirm {
+            self.close_confirm = Some(CloseConfirmState {
+                message: "A process is still running. Close this window anyway?".into(),
+                kind: ConfirmKind::CloseWindow,
+            });
+            cx.notify();
+        } else {
+            self.finish_window_close(window, cx);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn any_pane_is_dirty(&self, cx: &App) -> bool {
+        self.tabs.iter().any(|tab| {
+            let mut leaves = Vec::new();
+            tab.tree.leaves(&mut leaves);
+            leaves.iter().any(|(_, view)| view.read(cx).looks_busy(cx))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_window_close(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.emit_all_panes_closed(cx);
+        self.persist_session_now(cx);
+        RunLedgerGlobal::flush_now_in(cx);
+        window.remove_window();
+    }
+
     fn request_clear_run_ledger(&mut self, cx: &mut Context<Self>) {
         if self.close_confirm.is_some() {
             return;
@@ -1705,6 +1760,8 @@ impl AppShell {
         let kind = self.close_confirm.take().map(|s| s.kind);
         match kind {
             Some(ConfirmKind::ClearRunLedger) => self.clear_run_ledger(cx),
+            #[cfg(target_os = "linux")]
+            Some(ConfirmKind::CloseWindow) => self.finish_window_close(window, cx),
             _ => self.close_active_pane(window, cx),
         }
     }
@@ -1731,21 +1788,6 @@ impl AppShell {
     ) {
         self.ledger_open = !self.ledger_open;
         cx.notify();
-    }
-
-    fn toggle_tab_placement(&mut self, cx: &mut Context<Self>) {
-        let next = TerminalSettings::get_global(cx).tab_placement.toggle();
-        TerminalSettings::set_tab_placement(next, cx);
-        cx.notify();
-    }
-
-    fn on_toggle_tab_placement(
-        &mut self,
-        _: &ToggleTabPlacement,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_tab_placement(cx);
     }
 
     fn on_send_selection(
@@ -1793,10 +1835,15 @@ impl AppShell {
         cx.notify();
     }
 
-    pub(crate) fn refresh_diff(&mut self, force: bool, _window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self
-            .active_working_directory(cx)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    pub(crate) fn refresh_diff(
+        &mut self,
+        force: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.active_working_directory(cx).unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
         let root = crate::chrome::workspace::git_root(&cwd).unwrap_or_else(|| cwd.clone());
         if !force {
             if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_ref() {
@@ -1821,10 +1868,7 @@ impl AppShell {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
-        self.diff_view = Some(crate::diff::DiffView::Loading {
-            title,
-            generation,
-        });
+        self.diff_view = Some(crate::diff::DiffView::Loading { title, generation });
         self.diff_open = true;
         cx.spawn(async move |this, cx| {
             let outcome = cx
@@ -2113,9 +2157,11 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let found = self.tabs.iter().enumerate().find_map(|(ix, tab)| {
-            tab.tree.pane_id_for_key(pane).map(|id| (ix, id))
-        });
+        let found = self
+            .tabs
+            .iter()
+            .enumerate()
+            .find_map(|(ix, tab)| tab.tree.pane_id_for_key(pane).map(|id| (ix, id)));
         let Some((ix, id)) = found else {
             return;
         };
@@ -2136,7 +2182,9 @@ impl AppShell {
         });
         if let Some(anchor) = anchor {
             if let Some(view) = self.view_for_pane(pane) {
-                view.update(cx, |v, cx| v.scroll_to_anchor(anchor.line, anchor.column, cx));
+                view.update(cx, |v, cx| {
+                    v.scroll_to_anchor(anchor.line, anchor.column, cx)
+                });
             }
         }
         crate::attention_chrome::refresh(cx);
@@ -2192,12 +2240,7 @@ impl AppShell {
         out
     }
 
-    fn on_mark_tab_seen(
-        &mut self,
-        _: &MarkTabSeen,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_mark_tab_seen(&mut self, _: &MarkTabSeen, _window: &mut Window, cx: &mut Context<Self>) {
         self.mark_active_tab_seen(cx);
     }
 
@@ -2412,10 +2455,10 @@ impl AppShell {
             CommandId::CheckForUpdates => {
                 if !updater::in_place_update_supported() {
                     cx.open_url(updater::RELEASES_PAGE);
-                } else {
-                    self.update_open = true;
-                    self.spawn_update_check(window, cx);
+                    return;
                 }
+                self.update_open = true;
+                self.spawn_update_check(window, cx);
             }
             CommandId::Find => self.open_find(cx),
             CommandId::ToggleCommandPalette => self.open_palette(cx),
@@ -2454,7 +2497,6 @@ impl AppShell {
                 }
             }
             CommandId::TogglePaneFacts => self.toggle_pane_facts(cx),
-            CommandId::ToggleTabPlacement => self.toggle_tab_placement(cx),
             CommandId::ToggleDiff => self.toggle_diff(window, cx),
         }
     }
@@ -3896,14 +3938,7 @@ impl AppShell {
                                     }
                                     cx.notify();
                                 },
-                            ))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .pl(px(14.0))
-                                    .child(div().w_full().h(px(1.0)).bg(tokens.border)),
-                            )
-                            .child(self.settings_tab_placement_row(tokens, cx)),
+                            )),
                     ),
             )
             // ── Terminal group ────────────────────────────────────────────
@@ -4013,114 +4048,6 @@ impl AppShell {
             )
     }
 
-    fn settings_tab_placement_row(
-        &self,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let current = TerminalSettings::get_global(cx).tab_placement;
-        div()
-            .id("tab-placement")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .w_full()
-            .px(px(14.0))
-            .py(px(10.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(tokens.fg)
-                            .child("Tab placement"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(tokens.fg_muted)
-                            .child("Side rail or top strip — same tab features either way"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_row()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(tokens.border)
-                    .overflow_hidden()
-                    .child(self.settings_choice_chip(
-                        "tab-placement-side",
-                        "Side",
-                        current == TabPlacement::Side,
-                        tokens,
-                        cx,
-                        |_, cx| {
-                            TerminalSettings::set_tab_placement(TabPlacement::Side, cx);
-                            cx.notify();
-                        },
-                    ))
-                    .child(self.settings_choice_chip(
-                        "tab-placement-top",
-                        "Top",
-                        current == TabPlacement::Top,
-                        tokens,
-                        cx,
-                        |_, cx| {
-                            TerminalSettings::set_tab_placement(TabPlacement::Top, cx);
-                            cx.notify();
-                        },
-                    )),
-            )
-    }
-
-    fn settings_choice_chip(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        selected: bool,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .px(px(10.0))
-            .py(px(4.0))
-            .text_size(px(12.0))
-            .cursor_pointer()
-            .bg(if selected {
-                tokens.accent.opacity(0.85)
-            } else {
-                gpui::hsla(0.0, 0.0, 0.0, 0.0)
-            })
-            .text_color(if selected {
-                Hsla::white()
-            } else {
-                tokens.fg_muted
-            })
-            .hover(|el| {
-                if selected {
-                    el
-                } else {
-                    el.bg(tokens.hover).text_color(tokens.fg)
-                }
-            })
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                on_click(this, cx);
-            }))
-            .child(SharedString::from(label))
-    }
-
-    /// One toggle row: macOS-style with inline toggle switch.
     fn settings_toggle_row(
         &self,
         id: &'static str,
@@ -4711,17 +4638,13 @@ impl AppShell {
 }
 
 fn facts_section(tokens: &ChromeTokens, title: &str, lines: Vec<String>) -> impl IntoElement {
-    let mut col = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(tokens.fg_muted)
-                .child(SharedString::from(title.to_string())),
-        );
+    let mut col = div().flex().flex_col().gap_1().child(
+        div()
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(tokens.fg_muted)
+            .child(SharedString::from(title.to_string())),
+    );
     for line in lines {
         col = col.child(
             div()
@@ -4797,7 +4720,73 @@ fn rebase_detached_tab(max_pane_id: PaneId) -> AdoptedTabIds {
 
 #[cfg(test)]
 mod tests {
-    use super::{pane_is_on_screen, rebase_detached_tab, reorder_insert_index};
+    use super::{
+        linux_window_open_diagnostic, pane_is_on_screen, rebase_detached_tab, reorder_insert_index,
+        traffic_light_position_for,
+    };
+    use gpui::{point, px};
+
+    #[test]
+    fn safe_window_close_finishes_runtime_before_removal() {
+        let src = include_str!("app_shell.rs");
+        let needle = ["fn finish_window_", "close("].concat();
+        let method = src
+            .split(&needle)
+            .nth(1)
+            .expect("shared window-close finalizer");
+        let body = method.split("\n    }").next().expect("finalizer body");
+        for required in [
+            "emit_all_panes_closed(cx)",
+            "persist_session_now(cx)",
+            "RunLedgerGlobal::flush_now_in(cx)",
+            "window.remove_window()",
+        ] {
+            assert!(
+                body.contains(required),
+                "close finalizer missing {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn traffic_lights_are_only_positioned_on_macos() {
+        let position = point(px(12.0), px(12.0));
+        assert_eq!(traffic_light_position_for(true, position), Some(position));
+        assert_eq!(traffic_light_position_for(false, position), None);
+    }
+
+    #[test]
+    fn unsupported_update_entries_return_after_opening_releases() {
+        let src = include_str!("app_shell.rs");
+        let palette_entry = src
+            .split("CommandId::CheckForUpdates =>")
+            .nth(1)
+            .expect("command-palette update entry");
+        let action_entry = src
+            .split("fn on_check_for_updates")
+            .nth(1)
+            .expect("action update entry");
+        for entry in [palette_entry, action_entry] {
+            let gate = entry
+                .split("if !updater::in_place_update_supported()")
+                .nth(1)
+                .expect("in-place capability gate");
+            let body = gate.split('}').next().expect("gate body");
+            assert!(body.contains("cx.open_url(updater::RELEASES_PAGE)"));
+            assert!(body.contains("return;"));
+        }
+    }
+
+    #[test]
+    fn linux_window_open_diagnostic_keeps_source_and_actionable_hints() {
+        let message = linux_window_open_diagnostic("Vulkan adapter unavailable");
+        assert!(message.contains("Vulkan adapter unavailable"));
+        assert!(message.contains("WAYLAND_DISPLAY"));
+        assert!(message.contains("DISPLAY"));
+        assert!(message.contains("libvulkan1"));
+        assert!(message.contains("mesa-vulkan-drivers"));
+        assert!(message.contains("vendor Vulkan driver"));
+    }
 
     #[test]
     fn every_leaf_is_on_screen_without_zoom() {
@@ -4879,21 +4868,11 @@ impl Render for AppShell {
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
-        let settings = TerminalSettings::get_global(cx);
-        let geo = ChromeGeometry::standard().with_sidebar_width(settings.sidebar_width);
-        let side = tab_sidebar::is_side_placement(cx);
         let fullscreen = window.is_fullscreen();
-        let leading = if fullscreen {
-            ChromeGeometry::fullscreen_leading_pad()
-        } else {
-            geo.leading_pad
-        };
+        let geo = ChromeGeometry::for_window(cfg!(not(target_os = "macos")), fullscreen);
+        let leading = geo.leading_pad;
         let chrome_h = geo.height;
-        let banner_top = if side {
-            geo.content_title_height
-        } else {
-            chrome_h
-        };
+        let banner_top = chrome_h;
 
         div()
             .size_full()
@@ -5066,8 +5045,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_send_git_diff))
             .on_action(cx.listener(Self::on_toggle_diff))
             .on_action(cx.listener(Self::on_toggle_history_search))
-            .on_action(cx.listener(Self::on_toggle_tab_placement))
-            .when(!side, |el| {
+            .child({
                 let leading_drag = self
                     .attach_empty_drag("chrome-drag-leading", cx)
                     .h_full()
@@ -5076,11 +5054,7 @@ impl Render for AppShell {
                     .attach_empty_drag("chrome-drag-trailing", cx)
                     .h_full()
                     .flex_1()
-                    .min_w(if cfg!(windows) {
-                        px(8.0)
-                    } else {
-                        geo.trailing_pad
-                    });
+                    .min_w(geo.trailing_pad);
                 let tab_scroll = self.render_tab_strip(&tokens, &geo, window, cx);
                 let chrome_band = div()
                     .id("chrome-band")
@@ -5099,38 +5073,18 @@ impl Render for AppShell {
                             .child(self.render_diff_chrome_button(&tokens, &palette, cx)),
                     )
                     .child(trailing_drag)
-                    .child(self.render_windows_titlebar_end(&tokens, window, cx));
-                el.child(chrome_band)
+                    .when(!fullscreen, |el| {
+                        el.child(self.render_desktop_titlebar_end(&tokens, window, cx))
+                    });
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(chrome_band)
                     .when(self.find_open, |el| {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
                     .child(self.render_content(&tokens, window, cx))
-            })
-            .when(side, |el| {
-                el.child(
-                    div()
-                        .id("side-layout")
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .child(self.render_tab_sidebar(&tokens, &geo, window, cx))
-                        .child(
-                            div()
-                                .id("side-content")
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .child(self.render_content_title(&tokens, &geo, window, cx))
-                                .when(self.find_open, |el| {
-                                    el.child(self.render_find_bar(&tokens, cx))
-                                })
-                                .child(self.render_content(&tokens, window, cx)),
-                        ),
-                )
             })
             .when(self.broadcast, |el| {
                 el.child(
@@ -5212,11 +5166,7 @@ impl Render for AppShell {
 }
 
 impl AppShell {
-    fn render_pane_facts(
-        &self,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_pane_facts(&self, tokens: &ChromeTokens, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::chrome::pane_facts::localhost_copy;
         let facts = self.facts.clone().unwrap_or_default();
 
@@ -5273,7 +5223,9 @@ impl AppShell {
                             .cursor_pointer()
                             .child("copy")
                             .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    text.clone(),
+                                ));
                             })),
                     );
                 }
@@ -5661,9 +5613,11 @@ fn run_id_for_gutter(
     pane: PaneKey,
     line: i32,
 ) -> Option<run_ledger::RunId> {
-    if let Some(run) = snapshot.iter().rev().find(|run| {
-        run.pane == pane && run.anchor.is_some_and(|anchor| anchor.line == line)
-    }) {
+    if let Some(run) = snapshot
+        .iter()
+        .rev()
+        .find(|run| run.pane == pane && run.anchor.is_some_and(|anchor| anchor.line == line))
+    {
         return Some(run.id);
     }
     snapshot
@@ -5692,7 +5646,10 @@ mod gutter_jump_tests {
             None,
             0,
             false,
-            Some(Anchor { line: 10, column: 0 }),
+            Some(Anchor {
+                line: 10,
+                column: 0,
+            }),
         ));
         ledger.apply(RunEvent::finished(pane, Some(0), 5));
         ledger.apply(RunEvent::started_at(
@@ -5701,7 +5658,10 @@ mod gutter_jump_tests {
             None,
             10,
             false,
-            Some(Anchor { line: 20, column: 0 }),
+            Some(Anchor {
+                line: 20,
+                column: 0,
+            }),
         ));
         let snap = ledger.snapshot();
         let first = snap.iter().find(|r| r.command == "first").unwrap().id;

@@ -12,13 +12,24 @@ type MenuItem = {
   external?: boolean
 }
 
-function downloadItems(release: LatestRelease | null): MenuItem[] {
+export function downloadItems(release: LatestRelease | null): MenuItem[] {
   const page = release?.htmlUrl ?? FALLBACK_RELEASES_URL
   const items: MenuItem[] = []
   if (release?.dmgUrl) items.push({ href: release.dmgUrl, label: 'macOS (.dmg)' })
-  if (release?.zipUrl) items.push({ href: release.zipUrl, label: 'macOS (.zip)' })
-  if (release?.windowsZipUrl) {
-    items.push({ href: release.windowsZipUrl, label: 'Windows (.zip)' })
+  if (release?.windowsExeUrl) {
+    items.push({ href: release.windowsExeUrl, label: 'Windows x64 (.exe)' })
+  }
+  if (release?.linuxX64DebUrl) {
+    items.push({ href: release.linuxX64DebUrl, label: 'Linux x86_64 (.deb)' })
+  }
+  if (release?.linuxX64TarUrl) {
+    items.push({ href: release.linuxX64TarUrl, label: 'Linux x86_64 (.tar.gz)' })
+  }
+  if (release?.linuxArm64DebUrl) {
+    items.push({ href: release.linuxArm64DebUrl, label: 'Linux ARM64 (.deb)' })
+  }
+  if (release?.linuxArm64TarUrl) {
+    items.push({ href: release.linuxArm64TarUrl, label: 'Linux ARM64 (.tar.gz)' })
   }
   items.push({ href: page, label: 'All releases', muted: true, external: true })
   return items

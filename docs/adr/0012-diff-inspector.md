@@ -33,8 +33,7 @@ It is not a Pane and is not persisted in `session.json`.
   ([ADR-0008](0008-no-builtin-ai.md)).
 
 Default chord is `⌥⌘G` (`cmd-alt-g`). `⌘⇧G` remains Find Previous.
-The chrome **Diff** button (content title on the side rail, tab band on the
-top strip) and the rail `+N −M` counts also open it.
+The chrome **Diff** button in the tab band also opens it.
 
 ## Consequences
 

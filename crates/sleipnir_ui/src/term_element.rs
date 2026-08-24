@@ -1,5 +1,6 @@
 //! Terminal grid painter + input (M2).
 
+use crate::cursor_blink_alpha;
 use gpui::{
     App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
     GlobalElementId, InputHandler, InteractiveElement, IntoElement, LayoutId, MouseButton,
@@ -8,15 +9,12 @@ use gpui::{
     relative, size,
 };
 use itertools::Itertools;
-use crate::cursor_blink_alpha;
-use sleipnir_settings::{
-    TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index,
-};
+use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
 use std::time::Instant;
 use terminal::{
     Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
-    Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
+    Rgb, Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
 };
 
 pub struct TermElement {
@@ -137,7 +135,6 @@ pub struct LayoutState {
     dimensions: TerminalBounds,
     batches: Vec<BatchedTextRun>,
     backgrounds: Vec<BgRect>,
-    selection: Vec<BgRect>,
     search_rects: Vec<BgRect>,
     /// Underlines for the hovered hyperlink (M11).
     hover_underlines: Vec<BgRect>,
@@ -279,8 +276,14 @@ impl Element for TermElement {
                     terminal.last_content().clone()
                 });
 
-                let (batches, backgrounds) =
-                    layout_grid(&content.cells, &text_style, font_size, palette.as_ref());
+                let selection_range = content.selection.map(|sel| sel.point_range());
+                let (batches, backgrounds) = layout_grid(
+                    &content.cells,
+                    &text_style,
+                    font_size,
+                    palette.as_ref(),
+                    selection_range,
+                );
 
                 log::debug!(
                     "term prepaint: cells={} batches={} cell_w={:?} font={:?} cursor=({},{})",
@@ -292,12 +295,9 @@ impl Element for TermElement {
                     content.cursor.point.column,
                 );
 
-                let selection = content
-                    .selection
-                    .map(|sel| {
-                        selection_rects(sel.point_range(), content.display_offset, palette.as_ref())
-                    })
-                    .unwrap_or_default();
+                // Selection is now rendered as reverse-video inside layout_grid
+                // (glyph recolored over a selection-colored cell), so there is
+                // no separate selection overlay layer.
 
                 // Search highlights (M10): paint under selection, above cell bg.
                 let search_matches = terminal.read(cx).matches.clone();
@@ -374,11 +374,8 @@ impl Element for TermElement {
                     }
                 };
 
-                let blink_alpha = cursor_blink_alpha(
-                    last_input_at.elapsed(),
-                    terminal_wants_blink,
-                    blinking,
-                );
+                let blink_alpha =
+                    cursor_blink_alpha(last_input_at.elapsed(), terminal_wants_blink, blinking);
                 let blink_animating = focused
                     && match blinking {
                         TerminalBlink::Off => false,
@@ -391,7 +388,6 @@ impl Element for TermElement {
                     dimensions,
                     batches,
                     backgrounds,
-                    selection,
                     search_rects,
                     hover_underlines,
                     background_color: {
@@ -449,13 +445,10 @@ impl Element for TermElement {
                     };
                     window.set_cursor_style(cursor_style, &layout.hitbox);
 
-                    for bg in &layout.search_rects {
-                        paint_bg(origin, bg, &layout.dimensions, window);
-                    }
-                    for bg in &layout.selection {
-                        paint_bg(origin, bg, &layout.dimensions, window);
-                    }
                     for bg in &layout.backgrounds {
+                        paint_bg(origin, bg, &layout.dimensions, window);
+                    }
+                    for bg in &layout.search_rects {
                         paint_bg(origin, bg, &layout.dimensions, window);
                     }
                     // Hover link underlines (M11): thin strip at bottom of each cell span.
@@ -466,12 +459,7 @@ impl Element for TermElement {
                         batch.paint(origin, &layout.dimensions, window, cx);
                     }
                     for mark in &layout.gutter {
-                        paint_gutter_triangle(
-                            origin,
-                            mark,
-                            &layout.dimensions,
-                            window,
-                        );
+                        paint_gutter_triangle(origin, mark, &layout.dimensions, window);
                     }
 
                     if self.focused
@@ -581,7 +569,12 @@ impl IntoElement for TermElement {
     }
 }
 
-fn paint_bg(origin: GpuiPoint<Pixels>, bg: &BgRect, dimensions: &TerminalBounds, window: &mut Window) {
+fn paint_bg(
+    origin: GpuiPoint<Pixels>,
+    bg: &BgRect,
+    dimensions: &TerminalBounds,
+    window: &mut Window,
+) {
     let rect = Bounds::new(
         point(
             origin.x + bg.start_col as f32 * dimensions.cell_width,
@@ -652,11 +645,7 @@ fn paint_gutter_triangle(
     }
 }
 
-fn try_gutter_click(
-    terminal: &Entity<Terminal>,
-    e: &MouseDownEvent,
-    cx: &mut App,
-) -> bool {
+fn try_gutter_click(terminal: &Entity<Terminal>, e: &MouseDownEvent, cx: &mut App) -> bool {
     let content = terminal.read(cx).last_content().clone();
     if content.mode.contains(Modes::ALT_SCREEN) {
         return false;
@@ -684,14 +673,6 @@ fn try_gutter_click(
         cx.notify();
     });
     true
-}
-
-fn selection_rects(
-    range: TerminalRange,
-    display_offset: usize,
-    palette: &TerminalPalette,
-) -> Vec<BgRect> {
-    range_rects(range, display_offset, palette.selection.opacity(0.55))
 }
 
 /// Convert a terminal point range into display-space background rects.
@@ -737,11 +718,48 @@ fn range_rects(range: TerminalRange, display_offset: usize, color: gpui::Hsla) -
     rects
 }
 
+/// Whether a grid point falls inside an (inclusive) selection range.
+fn point_in_range(point: terminal::Point, range: &TerminalRange) -> bool {
+    let start = range.start();
+    let end = range.end();
+    // Normalize so start <= end in reading order (line, then column).
+    let (start, end) = if (start.line, start.column) <= (end.line, end.column) {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let after_start =
+        point.line > start.line || (point.line == start.line && point.column >= start.column);
+    let before_end =
+        point.line < end.line || (point.line == end.line && point.column <= end.column);
+    after_start && before_end
+}
+
+/// Append a single-cell background rect, coalescing with the previous rect when
+/// it is the same color on the same display line and directly adjacent.
+fn push_bg(backgrounds: &mut Vec<BgRect>, line: i32, col: i32, color: gpui::Hsla) {
+    if let Some(last) = backgrounds.last_mut()
+        && last.color == color
+        && last.line == line
+        && last.end_col + 1 == col
+    {
+        last.end_col = col;
+    } else {
+        backgrounds.push(BgRect {
+            line,
+            start_col: col,
+            end_col: col,
+            color,
+        });
+    }
+}
+
 fn layout_grid(
     cells: &[IndexedCell],
     text_style: &TextStyle,
     font_size: Pixels,
     palette: &TerminalPalette,
+    selection: Option<TerminalRange>,
 ) -> (Vec<BatchedTextRun>, Vec<BgRect>) {
     let mut batches: Vec<BatchedTextRun> = Vec::new();
     let mut backgrounds: Vec<BgRect> = Vec::new();
@@ -762,30 +780,38 @@ fn layout_grid(
                 std::mem::swap(&mut fg, &mut bg);
             }
 
-            if !is_default_background_color(bg) {
+            // Selected cells get a solid highlight and a contrasting foreground,
+            // matching native terminals instead of tinting the original glyph.
+            let selected = selection
+                .as_ref()
+                .is_some_and(|sel| point_in_range(indexed.point, sel));
+
+            if selected {
+                let col = indexed.point.column as i32;
+                push_bg(
+                    &mut backgrounds,
+                    display_line,
+                    col,
+                    selection_background(palette),
+                );
+            } else if !is_default_background_color(bg) {
                 let color = convert_color(&bg, palette);
                 let col = indexed.point.column as i32;
-                if let Some(last) = backgrounds.last_mut()
-                    && last.color == color
-                    && last.line == display_line
-                    && last.end_col + 1 == col
-                {
-                    last.end_col = col;
-                } else {
-                    backgrounds.push(BgRect {
-                        line: display_line,
-                        start_col: col,
-                        end_col: col,
-                        color,
-                    });
-                }
+                push_bg(&mut backgrounds, display_line, col, color);
             }
 
             if cell.is_wide_char_spacer() || is_blank(cell) {
                 continue;
             }
 
-            let color = convert_color(&fg, palette);
+            let color = convert_color(
+                &if selected {
+                    selection_foreground(palette)
+                } else {
+                    fg
+                },
+                palette,
+            );
             let run = TextRun {
                 len: cell.character().len_utf8(),
                 font: text_style.font(),
@@ -903,10 +929,7 @@ fn paint_terminal_cursor(
         CursorShape::Underline => {
             let h = (dimensions.line_height * 0.12).max(px(1.));
             let underline = Bounds::new(
-                point(
-                    cell_origin.x,
-                    cell_origin.y + dimensions.line_height - h,
-                ),
+                point(cell_origin.x, cell_origin.y + dimensions.line_height - h),
                 size(dimensions.cell_width, h),
             );
             window.paint_quad(fill(underline, cursor_color));
@@ -917,6 +940,56 @@ fn paint_terminal_cursor(
             window.paint_quad(fill(bar, cursor_color));
         }
     }
+}
+
+/// Use the active theme's ANSI red for an unmistakable selected-input fill.
+fn selection_background(palette: &TerminalPalette) -> gpui::Hsla {
+    palette.ansi[1]
+}
+
+/// Pick a foreground that stays legible over the configured selection fill.
+fn selection_foreground(palette: &TerminalPalette) -> Color {
+    let background = selection_rgb(selection_background(palette));
+    let foreground = selection_rgb(palette.foreground);
+    let terminal_background = selection_rgb(palette.background);
+    let foreground_contrast = rgb_contrast(foreground, background);
+    let terminal_background_contrast = rgb_contrast(terminal_background, background);
+    let selected = if terminal_background_contrast > foreground_contrast {
+        terminal_background
+    } else {
+        foreground
+    };
+    Color::Spec(Rgb {
+        r: selected.0,
+        g: selected.1,
+        b: selected.2,
+    })
+}
+
+fn selection_rgb(color: gpui::Hsla) -> (u8, u8, u8) {
+    let rgba: gpui::Rgba = color.into();
+    (
+        (rgba.r.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgba.g.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgba.b.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
+fn rgb_contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
+    let luminance = |rgb: (u8, u8, u8)| {
+        let channel = |value: u8| {
+            let value = value as f32 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb.0) + 0.7152 * channel(rgb.1) + 0.0722 * channel(rgb.2)
+    };
+    let a = luminance(a);
+    let b = luminance(b);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 fn convert_color(color: &Color, palette: &TerminalPalette) -> gpui::Hsla {
@@ -981,6 +1054,30 @@ struct TerminalInputHandler {
     cursor_bounds: Option<Bounds<Pixels>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
+
+    #[test]
+    fn selection_background_uses_theme_ansi_red() {
+        let palette = palette_for_theme(ThemeName::Dracula, Appearance::Dark);
+
+        assert_eq!(selection_background(&palette), palette.ansi[1]);
+        assert_ne!(selection_background(&palette), palette.selection);
+    }
+
+    #[test]
+    fn selection_foreground_changes_when_the_original_glyph_is_low_contrast() {
+        let mut palette = palette_for_theme(ThemeName::Dracula, Appearance::Dark);
+        palette.foreground = palette.selection;
+        let selected = selection_foreground(&palette);
+
+        assert_eq!(convert_color(&selected, &palette), palette.background);
+        assert_ne!(convert_color(&selected, &palette), palette.selection);
+    }
+}
+
 impl InputHandler for TerminalInputHandler {
     fn selected_text_range(
         &mut self,
@@ -994,7 +1091,11 @@ impl InputHandler for TerminalInputHandler {
         })
     }
 
-    fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut App) -> Option<StdRange<usize>> {
+    fn marked_text_range(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<StdRange<usize>> {
         None
     }
 
