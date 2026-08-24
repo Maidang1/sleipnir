@@ -11,7 +11,7 @@ pub mod terminal_settings;
 pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
 pub use osc133::{
     GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
-    gutter_marks_from_markers,
+    gutter_marks_from_markers, rebase_markers_after_history_shrink,
 };
 pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
 pub use shell_semantics::{
@@ -913,6 +913,7 @@ impl TerminalBuilder {
                 child_exited: None,
                 keyboard_input_sent: false,
                 osc133: Osc133Scanner::new(),
+                last_history_size: 0,
                 osc_notify: OscNotifyScanner::new(),
                 prompt_markers: Vec::new(),
                 last_busy: false,
@@ -1076,6 +1077,9 @@ pub struct Terminal {
     keyboard_input_sent: bool,
     /// OSC 133 scanner (M14 shell integration detect).
     osc133: Osc133Scanner,
+    /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) means
+    /// gutter marker lines must be rebased.
+    last_history_size: usize,
     osc_notify: OscNotifyScanner,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
@@ -1539,12 +1543,12 @@ impl Terminal {
         self.last_content.mode.contains(Modes::ALT_SCREEN)
     }
 
-    /// Overlay triangles for command start/end. Empty on the alt screen.
+    /// Command start/end triangles are disabled: they only mark command
+    /// boundaries and are not needed by hunk jumps or the Run Ledger, so
+    /// returning nothing keeps the gutter clear. The marker log is still kept
+    /// up to date for prompt jump / click-to-move / command extraction.
     pub fn gutter_overlay(&self) -> Vec<GutterMark> {
-        if self.is_alt_screen() {
-            return Vec::new();
-        }
-        gutter_marks_from_markers(&self.prompt_markers)
+        Vec::new()
     }
 
     pub fn emit_gutter_click(&mut self, line: i32, cx: &mut Context<Self>) {
@@ -2091,6 +2095,16 @@ impl Terminal {
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
+
+        // A shrinking scrollback (e.g. `clear` sends `ED 3`, or an app clear
+        // dropped saved lines) invalidates the absolute lines stored in the
+        // gutter markers; rebase them so triangles don't strand on wrong rows.
+        let history_size = terminal.history_size();
+        if history_size < self.last_history_size {
+            let removed = (self.last_history_size - history_size) as i32;
+            rebase_markers_after_history_shrink(&mut self.prompt_markers, removed);
+        }
+        self.last_history_size = history_size;
 
         self.last_content = make_content(&terminal, &self.last_content);
         drop(terminal);

@@ -66,6 +66,25 @@ pub fn absolute_to_display_line(absolute: i32, history_size: i32, display_offset
     absolute - history_size + display_offset as i32
 }
 
+/// Rebase marker lines after the scrollback history shrank by `removed` lines
+/// (e.g. the shell cleared scrollback with `ED 3`, or an app-side clear
+/// dropped saved lines). Absolute marker lines are `cursor + history` at record
+/// time, so removing `removed` history lines shifts every still-live line down
+/// by `removed`; markers that sat inside the removed region are gone.
+pub fn rebase_markers_after_history_shrink(markers: &mut Vec<Osc133Marker>, removed: i32) {
+    if removed <= 0 {
+        return;
+    }
+    markers.retain_mut(|m| match m.line {
+        Some(line) if line >= removed => {
+            m.line = Some(line - removed);
+            true
+        }
+        Some(_) => false,
+        None => true,
+    });
+}
+
 /// Pair each OSC 133 C with the following D. An unmatched C is a running start mark.
 pub fn gutter_marks_from_markers(markers: &[Osc133Marker]) -> Vec<GutterMark> {
     let mut out = Vec::new();
@@ -314,5 +333,34 @@ mod tests {
     fn absolute_display_line_uses_viewport_top() {
         assert_eq!(absolute_to_display_line(100, 80, 10), 30);
         assert_eq!(absolute_to_display_line(70, 80, 0), -10);
+    }
+
+    #[test]
+    fn history_shrink_shifts_survivors_and_drops_cleared() {
+        use Osc133Kind::*;
+        let mut markers = vec![
+            Osc133Marker { kind: PromptStart, line: Some(2), column: Some(0) },
+            Osc133Marker { kind: CommandExecuted, line: Some(5), column: Some(3) },
+            Osc133Marker { kind: CommandFinished { status: Some(0) }, line: Some(12), column: Some(0) },
+        ];
+        // Scrollback shrank by 5 lines (e.g. `clear` sent ED 3). Lines below
+        // 5 are gone; survivors shift down by 5.
+        rebase_markers_after_history_shrink(&mut markers, 5);
+        assert_eq!(markers.len(), 2);
+        assert_eq!(markers[0].kind, CommandExecuted);
+        assert_eq!(markers[0].line, Some(0));
+        assert_eq!(markers[1].kind, CommandFinished { status: Some(0) });
+        assert_eq!(markers[1].line, Some(7));
+    }
+
+    #[test]
+    fn history_shrink_zero_is_noop() {
+        let mut markers = vec![Osc133Marker {
+            kind: Osc133Kind::PromptStart,
+            line: Some(3),
+            column: Some(0),
+        }];
+        rebase_markers_after_history_shrink(&mut markers, 0);
+        assert_eq!(markers[0].line, Some(3));
     }
 }
