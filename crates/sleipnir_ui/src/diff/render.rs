@@ -3,15 +3,13 @@
 use std::ops::Range;
 
 use gpui::{
-    Bounds, Context, Entity, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Window, canvas, deferred,
-    div, fill, list, point, prelude::FluentBuilder as _, px, size,
+    Bounds, Context, Entity, HighlightStyle, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
+    Window, canvas, deferred, div, fill, list, point, prelude::FluentBuilder as _, px, size,
 };
 use sleipnir_settings::TerminalPalette;
 
-use super::{
-    Cell, DiffView, DisplayRow, LineKind, TreeEntry, file_index_at, row_height,
-};
+use super::{Cell, DiffView, DisplayRow, LineKind, TreeEntry, file_index_at, row_height};
 use crate::app_shell::AppShell;
 use crate::chrome::ChromeTokens;
 use diff_core::FileStatus;
@@ -45,44 +43,39 @@ impl AppShell {
             _ => "".into(),
         };
 
-        let header = div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(tokens.border)
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(tokens.fg)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(palette.ansi[2])
-                    .child(stats),
-            )
-            .child(div().flex_1())
-            .child(self.render_mode_chip(tokens, cx))
-            .child(self.render_minimap_chip(tokens, cx))
-            .child(
-                header_chip("diff-refresh", "Refresh", tokens)
-                    .on_click(cx.listener(|this, _, window, cx| this.refresh_diff(true, window, cx))),
-            )
-            .child(
-                header_chip("diff-send", "Send to pane", tokens)
-                    .on_click(cx.listener(|this, _, _, cx| this.send_open_diff_to_pty(cx))),
-            )
-            .child(
-                header_chip("diff-close", "Close", tokens)
-                    .on_click(cx.listener(|this, _, window, cx| this.close_diff(window, cx))),
-            );
+        let header =
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(tokens.border)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(tokens.fg)
+                        .child(title),
+                )
+                .child(div().text_xs().text_color(palette.ansi[2]).child(stats))
+                .child(div().flex_1())
+                .child(self.render_mode_chip(tokens, cx))
+                .child(self.render_minimap_chip(tokens, cx))
+                .child(header_chip("diff-refresh", "Refresh", tokens).on_click(
+                    cx.listener(|this, _, window, cx| this.refresh_diff(true, window, cx)),
+                ))
+                .child(
+                    header_chip("diff-send", "Send to pane", tokens)
+                        .on_click(cx.listener(|this, _, _, cx| this.send_open_diff_to_pty(cx))),
+                )
+                .child(
+                    header_chip("diff-close", "Close", tokens)
+                        .on_click(cx.listener(|this, _, window, cx| this.close_diff(window, cx))),
+                );
 
         let body = match self.diff_view.as_ref() {
             None | Some(DiffView::Loading { .. }) => centered(tokens, "Loading diff…"),
@@ -95,7 +88,7 @@ impl AppShell {
                 let row_h = row_height(font_size);
                 let list_palette = palette.clone();
                 let list_tokens = tokens.clone();
-                let list_entity = entity.clone();
+                let list_entity = entity;
                 let rows = list(scroll, move |ix, _window, cx| {
                     let this = list_entity.read(cx);
                     let Some(DiffView::Ready(session)) = this.diff_view.as_ref() else {
@@ -200,8 +193,12 @@ impl AppShell {
             self.diff_view.as_ref(),
             Some(DiffView::Ready(session)) if session.minimap_visible
         );
-        header_chip("diff-minimap", if on { "Minimap" } else { "Minimap off" }, tokens)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_minimap(cx)))
+        header_chip(
+            "diff-minimap",
+            if on { "Minimap" } else { "Minimap off" },
+            tokens,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_minimap(cx)))
     }
 
     fn render_diff_minimap(
@@ -280,11 +277,7 @@ impl AppShell {
             .into_any_element()
     }
 
-    fn render_mode_chip(
-        &self,
-        tokens: &ChromeTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_mode_chip(&self, tokens: &ChromeTokens, cx: &mut Context<Self>) -> impl IntoElement {
         let label = match self.diff_view.as_ref() {
             Some(DiffView::Ready(session)) => session.mode.label(),
             _ => "Split",
@@ -338,7 +331,10 @@ impl AppShell {
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(tokens.fg_muted)
-                    .child(SharedString::from(format!("Files · {}", session.tree.len()))),
+                    .child(SharedString::from(format!(
+                        "Files · {}",
+                        session.tree.len()
+                    ))),
             )
             .child(list)
             .into_any_element()
@@ -508,12 +504,7 @@ fn render_row(
                         .child(SharedString::from(marker)),
                 )
                 .child(wrapped_line_text(
-                    text,
-                    syntax,
-                    intra,
-                    word_bg,
-                    palette,
-                    tokens,
+                    text, syntax, intra, word_bg, palette, tokens,
                 ))
                 .into_any_element()
         }

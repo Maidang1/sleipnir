@@ -189,7 +189,7 @@ mod tests {
     fn rows_are_newest_first() {
         let older = run_at("old", 1_000, Some(0));
         let newer = run_at("new", 2_000, Some(1));
-        let rows = rows_from_runs(&[older.clone(), newer.clone()]);
+        let rows = rows_from_runs(&[older, newer.clone()]);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].command, "new");
         assert_eq!(rows[0].id, newer.id);

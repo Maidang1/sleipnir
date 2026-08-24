@@ -23,12 +23,14 @@ pub fn caption_bar_width() -> gpui::Pixels {
     px(CAPTION_BUTTON_WIDTH * 3.0)
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptionButtonStrategy {
     PlatformHitTest,
     ExplicitClick,
 }
 
+#[cfg(test)]
 fn caption_button_strategy_for(linux: bool) -> CaptionButtonStrategy {
     if linux {
         CaptionButtonStrategy::ExplicitClick

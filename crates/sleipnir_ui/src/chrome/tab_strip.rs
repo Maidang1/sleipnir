@@ -123,45 +123,43 @@ impl AppShell {
         let open = self.diff_open;
         // Hide entirely (no layout space) when not in a git repo and diff is closed.
         let show = in_git || open;
-        div()
-            .id("diff-chrome-button")
-            .when(show, |el| {
-                el.flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .flex_shrink_0()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(4.0))
-                    .text_xs()
-                    .cursor_pointer()
-                    .when(open, |el| {
-                        el.bg(tokens.accent.opacity(0.2)).text_color(tokens.fg)
-                    })
-                    .when(!open, |el| {
-                        el.text_color(tokens.fg_muted)
-                            .hover(|style| style.bg(tokens.hover).text_color(tokens.fg))
-                    })
-                    .child(gpui::SharedString::from("Diff"))
-                    .when(added > 0, |el| {
-                        el.child(
-                            div()
-                                .text_color(palette.ansi[2])
-                                .child(gpui::SharedString::from(format!("+{added}"))),
-                        )
-                    })
-                    .when(deleted > 0, |el| {
-                        el.child(
-                            div()
-                                .text_color(palette.ansi[1])
-                                .child(gpui::SharedString::from(format!("−{deleted}"))),
-                        )
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_diff(window, cx);
-                    }))
-            })
+        div().id("diff-chrome-button").when(show, |el| {
+            el.flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .px_2()
+                .py_0p5()
+                .rounded(px(4.0))
+                .text_xs()
+                .cursor_pointer()
+                .when(open, |el| {
+                    el.bg(tokens.accent.opacity(0.2)).text_color(tokens.fg)
+                })
+                .when(!open, |el| {
+                    el.text_color(tokens.fg_muted)
+                        .hover(|style| style.bg(tokens.hover).text_color(tokens.fg))
+                })
+                .child(gpui::SharedString::from("Diff"))
+                .when(added > 0, |el| {
+                    el.child(
+                        div()
+                            .text_color(palette.ansi[2])
+                            .child(gpui::SharedString::from(format!("+{added}"))),
+                    )
+                })
+                .when(deleted > 0, |el| {
+                    el.child(
+                        div()
+                            .text_color(palette.ansi[1])
+                            .child(gpui::SharedString::from(format!("−{deleted}"))),
+                    )
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_diff(window, cx);
+                }))
+        })
     }
 }
 
@@ -187,14 +185,7 @@ pub(crate) fn render_tab_chip(
     let tab_id = tab.id;
     let is_renaming = rename_buffer.is_some();
     let failed = tab_has_failed_attention(badge);
-    let bg = chip_background(
-        is_active,
-        is_hovered,
-        is_bell,
-        failed,
-        tokens,
-        palette,
-    );
+    let bg = chip_background(is_active, is_hovered, is_bell, failed, tokens, palette);
     let fg = if is_active || is_bell || is_hovered || failed {
         tokens.fg
     } else {
@@ -259,7 +250,6 @@ pub(crate) fn render_tab_chip(
         this.activate(ix, window, cx);
     }))
     .on_drag(tab_id, {
-        let title = title.clone();
         move |_dragged: &u64, _offset, _window, cx| {
             let value = title.clone();
             cx.new(move |_| TabDragPreview { title: value })
@@ -384,14 +374,7 @@ mod tests {
         use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
         let palette = palette_for_theme(ThemeName::Mocha, Appearance::Dark);
         let tokens = ChromeTokens::from_palette(&palette, true);
-        let bg = chip_background(
-            true,
-            false,
-            false,
-            false,
-            &tokens,
-            &palette,
-        );
+        let bg = chip_background(true, false, false, false, &tokens, &palette);
         assert!(
             bg.a < 0.12,
             "selected strip fill must stay faint, got alpha {}",
@@ -404,14 +387,7 @@ mod tests {
         use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
         let palette = palette_for_theme(ThemeName::Mocha, Appearance::Dark);
         let tokens = ChromeTokens::from_palette(&palette, true);
-        let bg = chip_background(
-            false,
-            false,
-            false,
-            true,
-            &tokens,
-            &palette,
-        );
+        let bg = chip_background(false, false, false, true, &tokens, &palette);
         assert!((bg.a - 0.12).abs() < 1e-5);
         assert_eq!(bg.h, palette.ansi[1].h);
     }
