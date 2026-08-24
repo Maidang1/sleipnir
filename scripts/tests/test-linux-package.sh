@@ -87,6 +87,43 @@ for entry in \
     assert_file_contains "${DESKTOP}" "${entry}"
 done
 
+# Native Linux release CI must build and validate both supported architectures.
+WORKFLOW="${ROOT}/.github/workflows/build-and-release.yml"
+for workflow_policy in \
+    'linux-check:' \
+    'runner: ubuntu-22.04' \
+    'runner: ubuntu-22.04-arm' \
+    'expected-arch: x86_64' \
+    'expected-arch: aarch64' \
+    'deb-arch: amd64' \
+    'deb-arch: arm64' \
+    "test \"\$(uname -m)\" = \"\${{ matrix.expected-arch }}\"" \
+    'cargo test --workspace' \
+    'bash scripts/tests/test-linux-package.sh' \
+    'bash scripts/tests/test-install.sh' \
+    'shellcheck scripts/install.sh scripts/make-linux-package.sh scripts/tests/*.sh' \
+    '--binary target/release/sleipnir' \
+    'readelf -h target/release/sleipnir' \
+    'desktop-file-validate resources/linux/sleipnir.desktop' \
+    'dpkg-deb --field' \
+    'dpkg-deb --contents' \
+    'xvfb-run' \
+    'xdotool search --onlyvisible' \
+    'actions/upload-artifact@v4' \
+    'gh release upload' \
+    "test \"\${#assets[@]}\" -eq 4" \
+    'Linux assets may appear after this release is created' \
+    'In-place updates are macOS-only'; do
+    assert_file_contains "${WORKFLOW}" "${workflow_policy}"
+done
+for dependency in \
+    pkg-config libfontconfig-dev libfreetype-dev libx11-dev libxkbcommon-dev \
+    libxkbcommon-x11-dev libwayland-dev libglib2.0-dev libvulkan1 \
+    mesa-vulkan-drivers python3-pil dpkg-dev desktop-file-utils libnotify-bin \
+    xdg-utils xvfb xdotool shellcheck; do
+    assert_file_contains "${WORKFLOW}" "${dependency}"
+done
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sleipnir-package-test.XXXXXX")"
 cleanup() { rm -rf "${TMP}"; }
 trap cleanup EXIT
