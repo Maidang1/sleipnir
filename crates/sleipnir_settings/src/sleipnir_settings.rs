@@ -215,26 +215,33 @@ pub struct KeyBindingSpec {
 
 /// Default monospace family for this OS.
 pub fn default_font_family() -> &'static str {
-    default_font_family_for(cfg!(windows))
+    default_font_family_for(cfg!(windows), cfg!(target_os = "linux"))
 }
 
-/// Default monospace family. `windows = true` selects Cascadia Mono.
-pub fn default_font_family_for(windows: bool) -> &'static str {
-    if windows {
+/// Default monospace family for Windows, Linux, or macOS.
+pub fn default_font_family_for(windows: bool, linux: bool) -> &'static str {
+    if linux {
+        "Ubuntu Mono"
+    } else if windows {
         "Cascadia Mono"
     } else {
         "Menlo"
     }
 }
 
-/// Fallback families so a missing Cascadia Mono still renders a grid.
+/// Fallback families so the preferred platform font still renders a grid.
 pub fn default_font_fallbacks() -> Option<FontFallbacks> {
-    default_font_fallbacks_for(cfg!(windows))
+    default_font_fallbacks_for(cfg!(windows), cfg!(target_os = "linux"))
 }
 
-/// Fallback families. `windows = true` adds Consolas / Courier New.
-pub fn default_font_fallbacks_for(windows: bool) -> Option<FontFallbacks> {
-    if windows {
+/// Fallback families for Windows, Linux, or macOS.
+pub fn default_font_fallbacks_for(windows: bool, linux: bool) -> Option<FontFallbacks> {
+    if linux {
+        Some(FontFallbacks::from_fonts(vec![
+            "DejaVu Sans Mono".into(),
+            "Liberation Mono".into(),
+        ]))
+    } else if windows {
         Some(FontFallbacks::from_fonts(vec![
             "Consolas".into(),
             "Courier New".into(),
@@ -675,7 +682,8 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
         settings.show_tray_icon = v;
     }
     if file.pipe_selection_command.is_some() {
-        settings.pipe_selection_command = file.pipe_selection_command.filter(|s| !s.trim().is_empty());
+        settings.pipe_selection_command =
+            file.pipe_selection_command.filter(|s| !s.trim().is_empty());
     }
     if let Some(v) = file.keybinding_preset {
         settings.keybinding_preset = v;
@@ -1065,15 +1073,20 @@ mod tests {
     }
 
     #[test]
-    fn default_font_is_os_specific() {
-        assert_eq!(default_font_family_for(false), "Menlo");
-        assert_eq!(default_font_family_for(true), "Cascadia Mono");
+    fn default_font_is_platform_specific() {
+        assert_eq!(default_font_family_for(false, false), "Menlo");
+        assert_eq!(default_font_family_for(true, false), "Cascadia Mono");
+        assert_eq!(default_font_family_for(false, true), "Ubuntu Mono");
+
+        let linux_fallbacks = default_font_fallbacks_for(false, true).unwrap();
         assert_eq!(
-            TerminalSettings::default().font_family.as_deref(),
-            Some(default_font_family())
+            linux_fallbacks.fallback_list(),
+            &[
+                "DejaVu Sans Mono".to_string(),
+                "Liberation Mono".to_string()
+            ]
         );
-        assert!(default_font_fallbacks_for(true).is_some());
-        assert!(default_font_fallbacks_for(false).is_none());
+        assert!(default_font_fallbacks_for(false, false).is_none());
     }
 
     #[test]
@@ -1087,12 +1100,12 @@ mod tests {
     }
 
     #[test]
-    fn config_path_uses_os_config_dir_on_windows() {
-        let unix = config_path_for(false);
+    fn config_path_uses_os_config_dir_on_windows_and_unix() {
+        let linux = config_path_for(false);
         assert!(
-            unix.ends_with(".config/sleipnir/settings.json"),
-            "unix path was {}",
-            unix.display()
+            linux.ends_with(".config/sleipnir/settings.json"),
+            "Unix/macOS/Linux path was {}",
+            linux.display()
         );
 
         let win = config_path_for(true);

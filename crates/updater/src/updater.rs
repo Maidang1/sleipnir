@@ -10,9 +10,9 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::io::Write as _;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -83,11 +83,7 @@ pub fn pick_asset(release: &Value) -> Result<(String, String)> {
 
 /// Select a release artifact matching `marker` + `extension` (and its sidecar).
 /// Testable for any OS by passing explicit markers.
-pub fn pick_asset_for(
-    release: &Value,
-    marker: &str,
-    extension: &str,
-) -> Result<(String, String)> {
+pub fn pick_asset_for(release: &Value, marker: &str, extension: &str) -> Result<(String, String)> {
     let assets = release
         .get("assets")
         .and_then(Value::as_array)
@@ -96,7 +92,10 @@ pub fn pick_asset_for(
     let mut artifact_url = None;
     let mut sha_url = None;
     for asset in assets {
-        let name = asset.get("name").and_then(Value::as_str).unwrap_or_default();
+        let name = asset
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let url = asset
             .get("browser_download_url")
             .and_then(Value::as_str)
@@ -113,8 +112,8 @@ pub fn pick_asset_for(
 
     let artifact_url =
         artifact_url.ok_or_else(|| anyhow!("no `*{marker}*{extension}` asset in release"))?;
-    let sha256_url = sha_url
-        .ok_or_else(|| anyhow!("no `*{marker}*{extension}.sha256` asset in release"))?;
+    let sha256_url =
+        sha_url.ok_or_else(|| anyhow!("no `*{marker}*{extension}.sha256` asset in release"))?;
     Ok((artifact_url, sha256_url))
 }
 
@@ -173,10 +172,7 @@ pub fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
         .header("Accept", "application/vnd.github+json")
         .call()
         .context("request latest release")?;
-    let release: Value = resp
-        .body_mut()
-        .read_json()
-        .context("decode release JSON")?;
+    let release: Value = resp.body_mut().read_json().context("decode release JSON")?;
 
     let info = parse_release(&release)?;
     if is_newer(current_version, &info.version) {
@@ -231,16 +227,22 @@ pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBu
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        use std::fmt::Write;
-        write!(s, "{b:02x}").unwrap();
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            use std::fmt::Write;
+            write!(s, "{b:02x}").unwrap();
+            s
+        })
 }
 
 /// Whether this platform can swap the running install in place.
 pub fn in_place_update_supported() -> bool {
-    cfg!(unix)
+    in_place_update_supported_for(cfg!(target_os = "macos"))
+}
+
+fn in_place_update_supported_for(macos: bool) -> bool {
+    macos
 }
 
 /// Resolve the `.app` bundle that contains the current executable.
@@ -249,11 +251,11 @@ pub fn in_place_update_supported() -> bool {
 /// and on platforms without a macOS-style bundle, which signals callers to
 /// fall back to opening the releases page.
 pub fn current_app_bundle_path() -> Option<PathBuf> {
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "macos"))]
     {
         None
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     {
         let exe = std::env::current_exe().ok()?;
         // .../Sleipnir.app/Contents/MacOS/sleipnir
@@ -273,21 +275,21 @@ pub fn current_app_bundle_path() -> Option<PathBuf> {
 /// `.app`, and relaunches it.
 ///
 /// On failure to install (permissions, etc.) the helper opens the releases page
-/// for a manual install. Windows has no in-place helper.
+/// for a manual install. Non-macOS platforms have no in-place helper.
 pub fn install_and_relaunch(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (dmg_path, app_bundle);
         bail!("in-place update is not supported on this platform; open {RELEASES_PAGE}");
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     {
-        install_and_relaunch_unix(dmg_path, app_bundle)
+        install_and_relaunch_macos(dmg_path, app_bundle)
     }
 }
 
-#[cfg(unix)]
-fn install_and_relaunch_unix(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
+#[cfg(target_os = "macos")]
+fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
     let stage = dmg_path
         .parent()
         .ok_or_else(|| anyhow!("dmg has no parent dir"))?
@@ -374,7 +376,7 @@ fn install_and_relaunch_unix(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
 }
 
 /// Find the single `.app` bundle directly under `dir`.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(dir).context("read extract dir")? {
         let path = entry?.path();
@@ -386,7 +388,7 @@ fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
 }
 
 /// Write a detached shell script that performs the swap-and-relaunch.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn write_helper_script(
     pid: u32,
     new_app: &Path,
@@ -447,7 +449,7 @@ fi
 }
 
 /// Single-quote a path for safe embedding in a POSIX shell script.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn shell_quote(path: &Path) -> String {
     let s = path.to_string_lossy();
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -551,11 +553,23 @@ mod tests {
     }
 
     #[test]
-    fn in_place_update_is_unix_only() {
-        assert_eq!(in_place_update_supported(), cfg!(unix));
+    fn in_place_update_is_macos_only() {
+        assert!(in_place_update_supported_for(true));
+        assert!(!in_place_update_supported_for(false));
+        assert_eq!(in_place_update_supported(), cfg!(target_os = "macos"));
+
+        let src = include_str!("updater.rs");
+        assert!(
+            src.contains("in_place_update_supported_for(cfg!(target_os = \"macos\"))"),
+            "capability detection must be macOS-specific"
+        );
+        assert!(
+            !src.contains("pub fn in_place_update_supported() -> bool {\n    cfg!(unix)"),
+            "Linux is Unix but must never enter DMG replacement"
+        );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn shell_quote_escapes_single_quotes() {
         let q = shell_quote(Path::new("/tmp/it's here/Sleipnir.app"));
