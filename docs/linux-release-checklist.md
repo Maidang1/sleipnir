@@ -1,15 +1,15 @@
 # Linux release checklist
 
-Use this checklist for every Sleipnir release that publishes Linux artifacts. Record screenshots, logs, package output, and any exception in the release-tracking issue before checking an item.
+Use this checklist for every Sleipnir release that publishes Linux artifacts. The release workflow always creates a draft and uploads Linux files only after the macOS release job and both native Linux builds succeed. Record screenshots, logs, package output, and any exception in the release-tracking issue before checking an item.
 
 **Release-tracking issue:** [open or update the Linux release evidence issue](https://github.com/Maidang1/sleipnir/issues)
 
-> Do not undraft or announce the release until the Ubuntu 22.04 GNOME Wayland result and its evidence are recorded in the release-tracking issue.
+> Keep the workflow-created release in draft. Do not undraft or announce it until the Ubuntu 22.04 GNOME Wayland result and its evidence are recorded in the release-tracking issue.
 
 ## Environment and assets
 
 - [ ] Record the release tag, test date, tester, machine or VM image, desktop session, GPU/driver, and links to CI runs in the release-tracking issue.
-- [ ] Verify the release contains exactly one `.deb`, one portable `.tar.gz`, and their digest-only `.sha256` sidecars for each of x86_64 and ARM64.
+- [ ] Verify the synchronized upload attached exactly ten non-macOS files: the Windows `.exe` and sidecar plus one `.deb`, one portable `.tar.gz`, and their digest-only `.sha256` sidecars for each of x86_64 and ARM64.
 - [ ] Verify all four checksums independently after downloading the release assets.
 
 ## Ubuntu 22.04 GNOME Wayland — required release gate
@@ -49,4 +49,4 @@ Use this checklist for every Sleipnir release that publishes Linux artifacts. Re
 ## Final evidence gate
 
 - [ ] Link all Wayland, Xorg/XWayland, x86_64, ARM64, package, installer, integration, and update evidence from the release-tracking issue.
-- [ ] Confirm the Wayland result is recorded, then undraft and announce the release.
+- [ ] Confirm the Wayland result is recorded and all eight Linux files are attached to the draft, then manually undraft and announce the release.

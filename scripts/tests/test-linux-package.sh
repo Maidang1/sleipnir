@@ -87,42 +87,129 @@ for entry in \
     assert_file_contains "${DESKTOP}" "${entry}"
 done
 
-# Native Linux release CI must build and validate both supported architectures.
+# Parse bounded job blocks so unrelated macOS/Windows text cannot satisfy the
+# Linux build or synchronized-upload policy assertions.
 WORKFLOW="${ROOT}/.github/workflows/build-and-release.yml"
-for workflow_policy in \
-    'linux-check:' \
-    'runner: ubuntu-22.04' \
-    'runner: ubuntu-22.04-arm' \
-    'expected-arch: x86_64' \
-    'expected-arch: aarch64' \
-    'deb-arch: amd64' \
-    'deb-arch: arm64' \
-    "test \"\$(uname -m)\" = \"\${{ matrix.expected-arch }}\"" \
-    'cargo test --workspace' \
-    'bash scripts/tests/test-linux-package.sh' \
-    'bash scripts/tests/test-install.sh' \
-    'shellcheck scripts/install.sh scripts/make-linux-package.sh scripts/tests/*.sh' \
-    '--binary target/release/sleipnir' \
-    'readelf -h target/release/sleipnir' \
-    'desktop-file-validate resources/linux/sleipnir.desktop' \
-    'dpkg-deb --field' \
-    'dpkg-deb --contents' \
-    'xvfb-run' \
-    'xdotool search --onlyvisible' \
-    'actions/upload-artifact@v4' \
-    'gh release upload' \
-    "test \"\${#assets[@]}\" -eq 4" \
-    'Linux assets may appear after this release is created' \
-    'In-place updates are macOS-only'; do
-    assert_file_contains "${WORKFLOW}" "${workflow_policy}"
-done
-for dependency in \
-    pkg-config libfontconfig-dev libfreetype-dev libx11-dev libxkbcommon-dev \
-    libxkbcommon-x11-dev libwayland-dev libglib2.0-dev libvulkan1 \
-    mesa-vulkan-drivers python3-pil dpkg-dev desktop-file-utils libnotify-bin \
-    xdg-utils xvfb xdotool shellcheck; do
-    assert_file_contains "${WORKFLOW}" "${dependency}"
-done
+python3 - "${WORKFLOW}" <<'PY'
+import pathlib, re, sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+
+def job(name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        text,
+    )
+    if not match:
+        raise SystemExit(f"missing workflow job: {name}")
+    return match.group(0)
+
+def require(block: str, needles: list[str], scope: str) -> None:
+    for needle in needles:
+        if needle not in block:
+            raise SystemExit(f"{scope} missing: {needle}")
+
+linux = job("linux-check")
+expected_matrix = [
+    ("ubuntu-22.04", "x86_64", "Advanced Micro Devices X86-64", "amd64", "x86_64"),
+    ("ubuntu-22.04-arm", "aarch64", "AArch64", "arm64", "aarch64"),
+]
+matrix_records = re.findall(
+    r'(?m)^          - runner: (\S+)\n'
+    r'            expected-arch: (\S+)\n'
+    r'            expected-machine: (.+)\n'
+    r'            deb-arch: (\S+)\n'
+    r'            artifact-suffix: (\S+)$',
+    linux,
+)
+if matrix_records != expected_matrix:
+    raise SystemExit(f"linux-check matrix mismatch: {matrix_records!r}")
+require(linux, [
+    'test "$(uname -m)" = "${{ matrix.expected-arch }}"',
+    "cargo test --workspace", "bash scripts/tests/test-linux-package.sh",
+    "bash scripts/tests/test-install.sh",
+    "shellcheck scripts/install.sh scripts/make-linux-package.sh scripts/tests/*.sh",
+    "--binary target/release/sleipnir", "readelf -h target/release/sleipnir",
+    "desktop-file-validate resources/linux/sleipnir.desktop",
+    "dpkg-deb --field", "dpkg-deb --contents", "xvfb-run",
+    'xdotool search --onlyvisible --pid "$pid"', "actions/upload-artifact@v4",
+], "linux-check")
+if "gh release upload" in linux:
+    raise SystemExit("linux-check must not race independently to upload release assets")
+for dependency in [
+    "pkg-config", "libfontconfig-dev", "libfreetype-dev", "libx11-dev",
+    "libxkbcommon-dev", "libxkbcommon-x11-dev", "libwayland-dev",
+    "libglib2.0-dev", "libvulkan1", "mesa-vulkan-drivers", "python3-pil",
+    "dpkg-dev", "desktop-file-utils", "libnotify-bin", "xdg-utils", "xvfb",
+    "xdotool", "shellcheck",
+]:
+    require(linux, [dependency], "linux-check dependencies")
+
+windows = job("windows-check")
+if "gh release upload" in windows:
+    raise SystemExit("windows-check must only upload an Actions artifact")
+require(windows, ["actions/upload-artifact@v4", "name: sleipnir-windows"], "windows-check")
+
+upload = job("release-assets-upload")
+if "linux-release-upload:" in text:
+    raise SystemExit("legacy Linux-only release upload job must be removed")
+require(upload, [
+    "needs: [build-and-release, windows-check, linux-check]",
+    "actions/download-artifact@v4", "name: sleipnir-windows",
+    "pattern: sleipnir-linux-*", "merge-multiple: true",
+    'test "${#assets[@]}" -eq 10', "gh release upload",
+    "Upload exactly ten Windows and Linux release files",
+    'isDraft', '!= "true"',
+], "release-assets-upload")
+expected_upload_paths = [
+    'build/release/Sleipnir-${VER}-windows-x64.exe',
+    'build/release/Sleipnir-${VER}-windows-x64.exe.sha256',
+    'build/release/Sleipnir-${VER}-linux-x86_64.tar.gz',
+    'build/release/Sleipnir-${VER}-linux-x86_64.tar.gz.sha256',
+    'build/release/sleipnir_${VER}_amd64.deb',
+    'build/release/sleipnir_${VER}_amd64.deb.sha256',
+    'build/release/Sleipnir-${VER}-linux-aarch64.tar.gz',
+    'build/release/Sleipnir-${VER}-linux-aarch64.tar.gz.sha256',
+    'build/release/sleipnir_${VER}_arm64.deb',
+    'build/release/sleipnir_${VER}_arm64.deb.sha256',
+]
+array_match = re.search(r'(?ms)^\s+assets=\(\n(?P<items>.*?)^\s+\)\s*$', upload)
+if not array_match:
+    raise SystemExit("release-assets-upload missing assets array")
+actual_upload_paths = re.findall(r'^\s+"([^"]+)"\s*$', array_match.group("items"), re.M)
+if actual_upload_paths != expected_upload_paths:
+    raise SystemExit(f"release upload paths mismatch: {actual_upload_paths!r}")
+
+macos = job("build-and-release")
+require(macos, [
+    "--draft", "Linux x86_64", "Linux ARM64", "Ubuntu 22.04+",
+    "In-place updates are macOS-only", "gh release view", "isDraft",
+    "gh release edit", "gh release upload", '!= "true"',
+], "build-and-release")
+if "DRAFT_FLAG" in macos:
+    raise SystemExit("release creation must not conditionally remove --draft")
+
+version_validation = 'invalid release version'
+semver_components = [
+    "(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)",
+    "(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?",
+    "(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?",
+]
+for job_name, block in [
+    ("windows-check", windows), ("linux-check", linux),
+    ("build-and-release", macos), ("release-assets-upload", upload),
+]:
+    require(block, [
+        "INPUT_VERSION: ${{ github.event.inputs.version }}", version_validation,
+        *semver_components,
+    ], job_name)
+    for line in block.splitlines():
+        if "${{ github.event.inputs.version }}" in line and not line.strip().startswith("INPUT_VERSION:"):
+            raise SystemExit(f"{job_name} interpolates workflow_dispatch version directly: {line.strip()}")
+
+if re.search(r"(?m)^\s+draft:\n", text) or re.search(r"(?m)^\s+draft:\s*(true|false)\s*$", text):
+    raise SystemExit("workflow_dispatch must not offer a publish-without-evidence draft toggle")
+PY
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sleipnir-package-test.XXXXXX")"
 cleanup() { rm -rf "${TMP}"; }

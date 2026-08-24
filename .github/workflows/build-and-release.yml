@@ -9,11 +9,6 @@ on:
         description: 'Release version (e.g. 0.2.0)'
         required: true
         type: string
-      draft:
-        description: 'Create as draft release'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -44,15 +39,23 @@ jobs:
       - name: Determine version
         id: version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VER="${GITHUB_REF#refs/tags/}"
           else
-            VER=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+            VER="$(cargo metadata --no-deps --format-version 1 \
+              | python -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "sleipnir"))')"
           fi
           VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
@@ -64,8 +67,9 @@ jobs:
 
       - name: Package exe
         shell: bash
+        env:
+          VER: ${{ steps.version.outputs.version }}
         run: |
-          VER="${{ steps.version.outputs.version }}"
           mkdir -p build
           EXE="build/Sleipnir-${VER}-windows-x64.exe"
           cp target/release/sleipnir.exe "${EXE}"
@@ -82,29 +86,6 @@ jobs:
           path: |
             build/Sleipnir-*-windows-x64.exe
             build/Sleipnir-*-windows-x64.exe.sha256
-
-      - name: Attach to GitHub Release
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          VER="${{ steps.version.outputs.version }}"
-          TAG="v${VER}"
-          EXE="build/Sleipnir-${VER}-windows-x64.exe"
-          SHA="build/Sleipnir-${VER}-windows-x64.exe.sha256"
-          # macOS job creates the release; wait until it exists.
-          for i in $(seq 1 36); do
-            if gh release view "${TAG}" >/dev/null 2>&1; then
-              gh release upload "${TAG}" "${EXE}" "${SHA}" --clobber
-              echo "Uploaded Windows assets to ${TAG}"
-              exit 0
-            fi
-            echo "release ${TAG} not ready yet (${i}/36); sleeping"
-            sleep 10
-          done
-          echo "ERROR: GitHub release ${TAG} did not appear in time" >&2
-          exit 1
 
   linux-check:
     name: Linux ${{ matrix.artifact-suffix }} build, test & package
@@ -177,16 +158,23 @@ jobs:
       - name: Determine version
         id: version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VER="${GITHUB_REF#refs/tags/}"
           else
             VER="$(cargo metadata --no-deps --format-version 1 \
               | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "sleipnir"))')"
           fi
           VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
@@ -279,7 +267,7 @@ jobs:
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
           found=0
           for _ in $(seq 1 40); do
-            if xdotool search --onlyvisible --name 'Sleipnir' >/dev/null 2>&1; then
+            if xdotool search --onlyvisible --pid "$pid" >/dev/null 2>&1; then
               found=1
               break
             fi
@@ -306,39 +294,6 @@ jobs:
             build/Sleipnir-${{ steps.version.outputs.version }}-linux-${{ matrix.artifact-suffix }}.tar.gz.sha256
             build/sleipnir_${{ steps.version.outputs.version }}_${{ matrix.deb-arch }}.deb
             build/sleipnir_${{ steps.version.outputs.version }}_${{ matrix.deb-arch }}.deb.sha256
-
-      - name: Attach Linux assets to GitHub Release
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VER: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-          DEB_ARCH: ${{ matrix.deb-arch }}
-          PORTABLE_ARCH: ${{ matrix.artifact-suffix }}
-        run: |
-          assets=(
-            "build/Sleipnir-${VER}-linux-${PORTABLE_ARCH}.tar.gz"
-            "build/Sleipnir-${VER}-linux-${PORTABLE_ARCH}.tar.gz.sha256"
-            "build/sleipnir_${VER}_${DEB_ARCH}.deb"
-            "build/sleipnir_${VER}_${DEB_ARCH}.deb.sha256"
-          )
-          test "${#assets[@]}" -eq 4
-          for asset in "${assets[@]}"; do
-            test -f "${asset}"
-          done
-
-          # The macOS job creates the release; wait until it exists.
-          for i in $(seq 1 36); do
-            if gh release view "${TAG}" >/dev/null 2>&1; then
-              gh release upload "${TAG}" "${assets[@]}" --clobber
-              echo "Uploaded exactly four ${PORTABLE_ARCH} Linux assets to ${TAG}"
-              exit 0
-            fi
-            echo "release ${TAG} not ready yet (${i}/36); sleeping"
-            sleep 10
-          done
-          echo "ERROR: GitHub release ${TAG} did not appear in time" >&2
-          exit 1
 
   build-and-release:
     name: Build & Publish
@@ -375,15 +330,23 @@ jobs:
 
       - name: Determine version
         id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VER="${GITHUB_REF#refs/tags/}"
           else
-            VER=$(grep '^version' crates/sleipnir/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+            VER="$(cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "sleipnir"))')"
           fi
-          VER="${VER#v}"   # normalize: strip any leading 'v'
+          VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
@@ -469,7 +432,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
-          DRAFT: ${{ github.event.inputs.draft || 'false' }}
         run: |
           TAG="v${VERSION}"
           DMG="build/Sleipnir-${VERSION}-macos.dmg"
@@ -504,16 +466,84 @@ jobs:
             echo "https://github.com/Maidang1/sleipnir"
           } > release-notes.md
 
-          DRAFT_FLAG=()
-          if [[ "${DRAFT}" == "true" ]]; then
-            DRAFT_FLAG=(--draft)
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            IS_DRAFT="$(gh release view "${TAG}" --json isDraft --jq '.isDraft')"
+            if [[ "${IS_DRAFT}" != "true" ]]; then
+              echo "ERROR: refusing to overwrite published release ${TAG}" >&2
+              exit 1
+            fi
+            gh release edit "${TAG}" \
+              --title "Sleipnir v${VERSION}" \
+              --notes-file release-notes.md
+            gh release upload "${TAG}" "${DMG}" "${SHA}" --clobber
+          else
+            gh release create "${TAG}" \
+              --draft \
+              --title "Sleipnir v${VERSION}" \
+              --notes-file release-notes.md \
+              "${DMG}" \
+              "${SHA}"
           fi
 
-          gh release create "${TAG}" \
-            --title "Sleipnir v${VERSION}" \
-            --notes-file release-notes.md \
-            "${DRAFT_FLAG[@]}" \
-            "${DMG}" \
-            "${SHA}"
+          echo "Draft ready: $(gh release view "${TAG}" --json url --jq '.url')"
 
-          echo "Published: $(gh release view "${TAG}" --json url --jq '.url')"
+  release-assets-upload:
+    name: Attach complete Windows and Linux release assets
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    needs: [build-and-release, windows-check, linux-check]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Download Windows release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sleipnir-windows
+          path: build/release
+
+      - name: Download both Linux architecture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sleipnir-linux-*
+          path: build/release
+          merge-multiple: true
+
+      - name: Upload exactly ten Windows and Linux release files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            VER="${INPUT_VERSION}"
+          else
+            VER="${GITHUB_REF#refs/tags/}"
+          fi
+          VER="${VER#v}"
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${VER}" =~ ${SEMVER_RE} ]]; then
+            echo "ERROR: invalid release version: ${VER}" >&2
+            exit 1
+          fi
+          TAG="v${VER}"
+          assets=(
+            "build/release/Sleipnir-${VER}-windows-x64.exe"
+            "build/release/Sleipnir-${VER}-windows-x64.exe.sha256"
+            "build/release/Sleipnir-${VER}-linux-x86_64.tar.gz"
+            "build/release/Sleipnir-${VER}-linux-x86_64.tar.gz.sha256"
+            "build/release/sleipnir_${VER}_amd64.deb"
+            "build/release/sleipnir_${VER}_amd64.deb.sha256"
+            "build/release/Sleipnir-${VER}-linux-aarch64.tar.gz"
+            "build/release/Sleipnir-${VER}-linux-aarch64.tar.gz.sha256"
+            "build/release/sleipnir_${VER}_arm64.deb"
+            "build/release/sleipnir_${VER}_arm64.deb.sha256"
+          )
+          test "${#assets[@]}" -eq 10
+          for asset in "${assets[@]}"; do
+            test -f "${asset}"
+          done
+          IS_DRAFT="$(gh release view "${TAG}" --json isDraft --jq '.isDraft')"
+          if [[ "${IS_DRAFT}" != "true" ]]; then
+            echo "ERROR: refusing to overwrite published release ${TAG}" >&2
+            exit 1
+          fi
+          gh release upload "${TAG}" "${assets[@]}" --clobber
+          echo "Uploaded exactly ten Windows and Linux assets to draft ${TAG}"
