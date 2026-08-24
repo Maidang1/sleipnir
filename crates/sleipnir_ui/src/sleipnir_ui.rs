@@ -11,8 +11,8 @@ mod keymap;
 mod pane_tree;
 mod run_ledger_global;
 mod run_ledger_panel;
-mod tab_convert;
 mod session;
+mod tab_convert;
 mod term_element;
 
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
@@ -20,12 +20,11 @@ pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 pub use app_shell::{
     ActivateTab, AppShell, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize,
     ExportScrollback, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
-    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown, SplitRight,
-    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleBroadcast,
+    FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
+    NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
+    ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight, ToggleBroadcast,
     ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    ToggleQuickSelect, ToggleRunLedger,
-    UpdateUiState, open_sleipnir_window,
+    ToggleQuickSelect, ToggleRunLedger, UpdateUiState, open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
@@ -172,11 +171,8 @@ impl TermView {
         for (k, v) in &settings.env {
             env.insert(k.clone(), v.clone());
         }
-        let shell = terminal::apply_inject_to_shell(
-            Shell::System,
-            &mut env,
-            settings.inject_osc133,
-        );
+        let shell =
+            terminal::apply_inject_to_shell(Shell::System, &mut env, settings.inject_osc133);
 
         let builder_task = TerminalBuilder::new(
             cwd,
@@ -266,8 +262,7 @@ impl TermView {
 
     /// Spawned shell pid for this pane, when the PTY is local.
     pub fn shell_pid(&self, cx: &App) -> Option<u32> {
-        self.terminal_entity()
-            .and_then(|t| t.read(cx).shell_pid())
+        self.terminal_entity().and_then(|t| t.read(cx).shell_pid())
     }
 
     /// Current grid selection, if any.
@@ -925,6 +920,24 @@ fn notify_command_finished(dur: std::time::Duration) {
     notify_message("Sleipnir", &format!("Command finished after {secs}s"));
 }
 
+/// Notification program for a given desktop platform.
+#[cfg(any(target_os = "linux", test))]
+fn notification_program_for(windows: bool, linux: bool) -> &'static str {
+    if windows {
+        "powershell"
+    } else if linux {
+        "notify-send"
+    } else {
+        "osascript"
+    }
+}
+
+/// Arguments passed directly to `notify-send`, without shell interpolation.
+#[cfg(any(target_os = "linux", test))]
+fn linux_notification_args<'a>(title: &'a str, message: &'a str) -> [&'a str; 4] {
+    ["--app-name", "Sleipnir", title, message]
+}
+
 /// Best-effort desktop notification (OSC 9 / 777 / command finish).
 fn notify_message(title: &str, message: &str) {
     #[cfg(target_os = "macos")]
@@ -953,14 +966,27 @@ fn notify_message(title: &str, message: &str) {
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .spawn();
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        match std::process::Command::new(notification_program_for(false, true))
+            .args(linux_notification_args(title, message))
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::spawn(move || match child.wait() {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => log::warn!("notify-send exited with {status}"),
+                    Err(err) => log::warn!("failed waiting for notify-send: {err}"),
+                });
+            }
+            Err(err) => log::warn!("failed to start notify-send: {err}"),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         let _ = (title, message);
     }
-}
-
-pub fn notify_uses_osascript() -> bool {
-    cfg!(target_os = "macos")
 }
 
 /// Clamp font size for zoom / settings (pt).
@@ -1002,11 +1028,7 @@ fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
     // On Windows, Ctrl+V is the shipped paste binding (never Ctrl+C).
     (modifiers.platform && (is_c || is_v))
         || (modifiers.control && modifiers.shift && !modifiers.platform && (is_c || is_v))
-        || (cfg!(windows)
-            && modifiers.control
-            && !modifiers.shift
-            && !modifiers.platform
-            && is_v)
+        || (cfg!(windows) && modifiers.control && !modifiers.shift && !modifiers.platform && is_v)
 }
 
 /// Open web URLs, and path-like targets when `path_links` is enabled (M12).
@@ -1142,8 +1164,15 @@ fn open_path_like_target(path: &terminal::PathLikeTarget) {
 
 /// Program used to open paths. `None` on Windows (`cmd /C start`).
 pub fn path_opener_program() -> Option<&'static str> {
-    if cfg!(windows) {
+    path_opener_program_for(cfg!(windows), cfg!(target_os = "linux"))
+}
+
+/// Select the native path opener for Windows, Linux, or macOS.
+pub fn path_opener_program_for(windows: bool, linux: bool) -> Option<&'static str> {
+    if windows {
         None
+    } else if linux {
+        Some("xdg-open")
     } else {
         Some("open")
     }
@@ -1162,9 +1191,13 @@ pub(crate) fn open_existing_path(candidate: &Path) {
     }
     #[cfg(not(windows))]
     {
-        match std::process::Command::new("open").arg(candidate).spawn() {
+        let program = path_opener_program().expect("non-Windows platforms have a path opener");
+        match std::process::Command::new(program).arg(candidate).spawn() {
             Ok(_) => {}
-            Err(err) => log::warn!("failed to open {}: {err}", candidate.display()),
+            Err(err) => log::warn!(
+                "failed to start {program} for {}: {err}",
+                candidate.display()
+            ),
         }
     }
 }
@@ -1225,7 +1258,10 @@ pub fn quote_path_for_shell_os(path: &Path, windows: bool) -> String {
     }
     let safe = s.chars().all(|c| {
         c.is_ascii_alphanumeric()
-            || matches!(c, '/' | '\\' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+')
+            || matches!(
+                c,
+                '/' | '\\' | '.' | '_' | '-' | '=' | ',' | ':' | '@' | '+'
+            )
     });
     if safe {
         return s.into_owned();
@@ -1455,8 +1491,16 @@ mod tests {
     #[test]
     fn font_zoom_shipped_keystrokes_parse_as_platform_keys() {
         let bindings = font_zoom_key_bindings();
-        let want_plus = if cfg!(windows) { "ctrl-+" } else { "cmd-+" };
-        let want_minus = if cfg!(windows) { "ctrl--" } else { "cmd--" };
+        let want_plus = if cfg!(target_os = "macos") {
+            "cmd-+"
+        } else {
+            "ctrl-shift-+"
+        };
+        let want_minus = if cfg!(target_os = "macos") {
+            "cmd--"
+        } else {
+            "ctrl-shift--"
+        };
         assert!(
             bindings
                 .iter()
@@ -1480,13 +1524,13 @@ mod tests {
             let ks = Keystroke::parse(keystroke).unwrap_or_else(|err| {
                 panic!("shipped font-zoom keystroke {keystroke:?} must parse: {err}")
             });
-            if cfg!(windows) {
-                assert!(ks.modifiers.control, "{keystroke} must include ctrl");
-            } else {
+            if cfg!(target_os = "macos") {
                 assert!(
                     ks.modifiers.platform,
                     "{keystroke} must include cmd/platform"
                 );
+            } else {
+                assert!(ks.modifiers.control, "{keystroke} must include ctrl");
             }
             match *action {
                 "increase_font_size" => {
@@ -1521,12 +1565,21 @@ mod tests {
     }
 
     #[test]
-    fn path_opener_is_os_specific() {
-        assert_eq!(path_opener_program().is_some(), !cfg!(windows));
-        if !cfg!(windows) {
-            assert_eq!(path_opener_program(), Some("open"));
-        }
-        assert_eq!(notify_uses_osascript(), cfg!(target_os = "macos"));
+    fn desktop_commands_are_platform_specific() {
+        assert_eq!(path_opener_program_for(false, false), Some("open"));
+        assert_eq!(path_opener_program_for(true, false), None);
+        assert_eq!(path_opener_program_for(false, true), Some("xdg-open"));
+        assert_eq!(notification_program_for(false, false), "osascript");
+        assert_eq!(notification_program_for(true, false), "powershell");
+        assert_eq!(notification_program_for(false, true), "notify-send");
+    }
+
+    #[test]
+    fn linux_notification_arguments_do_not_use_a_shell() {
+        assert_eq!(
+            linux_notification_args("Sleipnir", "build; rm -rf /"),
+            ["--app-name", "Sleipnir", "Sleipnir", "build; rm -rf /"]
+        );
     }
 
     /// Regression: clicking Close on the confirm dialog must not hit the
@@ -1604,8 +1657,8 @@ mod tests {
         );
         let band = include_str!("app_shell.rs");
         assert!(
-            band.contains("render_windows_titlebar_end"),
-            "chrome band must host Windows caption buttons"
+            band.contains("render_desktop_titlebar_end"),
+            "chrome band must host non-macOS desktop caption buttons"
         );
     }
 
@@ -1626,11 +1679,11 @@ mod tests {
         );
         assert!(
             src.contains("WindowControlArea::Drag"),
-            "Windows drag requires WindowControlArea::Drag (start_window_move is a no-op there)"
+            "desktop drag requires WindowControlArea::Drag"
         );
         assert!(
-            src.contains("render_windows_titlebar_end"),
-            "Windows caption buttons must ship on the chrome band"
+            src.contains("render_desktop_titlebar_end"),
+            "desktop caption buttons must ship on the chrome band"
         );
     }
 }

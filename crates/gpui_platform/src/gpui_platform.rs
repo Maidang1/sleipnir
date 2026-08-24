@@ -20,6 +20,7 @@ fn linux_startup_diagnostic(source: &str) -> String {
 #[cfg(any(target_os = "linux", test))]
 fn linux_display_preflight(
     headless: bool,
+    zed_headless: bool,
     wayland_display: Option<&str>,
     x11_display: Option<&str>,
 ) -> Result<(), String> {
@@ -27,7 +28,7 @@ fn linux_display_preflight(
         .into_iter()
         .flatten()
         .any(|display| !display.is_empty());
-    if headless || has_display {
+    if headless || zed_headless || has_display {
         Ok(())
     } else {
         Err(linux_startup_diagnostic(
@@ -55,6 +56,7 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
     {
         linux_display_preflight(
             headless,
+            std::env::var_os("ZED_HEADLESS").is_some(),
             std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
             std::env::var("DISPLAY").ok().as_deref(),
         )
@@ -99,11 +101,12 @@ mod tests {
 
     #[test]
     fn linux_display_preflight_allows_headless_and_requires_a_gui_display() {
-        assert!(linux_display_preflight(true, None, None).is_ok());
-        assert!(linux_display_preflight(false, Some("wayland-0"), None).is_ok());
-        assert!(linux_display_preflight(false, None, Some(":0")).is_ok());
+        assert!(linux_display_preflight(true, false, None, None).is_ok());
+        assert!(linux_display_preflight(false, true, None, None).is_ok());
+        assert!(linux_display_preflight(false, false, Some("wayland-0"), None).is_ok());
+        assert!(linux_display_preflight(false, false, None, Some(":0")).is_ok());
 
-        let message = linux_display_preflight(false, None, None).unwrap_err();
+        let message = linux_display_preflight(false, false, None, None).unwrap_err();
         assert!(message.contains("no usable Linux display"));
         assert!(message.contains("WAYLAND_DISPLAY"));
         assert!(message.contains("DISPLAY"));
@@ -139,9 +142,10 @@ mod tests {
             "graphical Linux startup must reject a missing display"
         );
         assert!(
-            impl_src.contains("std::env::var(\"WAYLAND_DISPLAY\")")
+            impl_src.contains("std::env::var_os(\"ZED_HEADLESS\")")
+                && impl_src.contains("std::env::var(\"WAYLAND_DISPLAY\")")
                 && impl_src.contains("std::env::var(\"DISPLAY\")"),
-            "Linux startup must preflight both display environment variables"
+            "Linux startup must preflight the headless override and both display variables"
         );
         assert!(
             impl_src.contains("target_os = \"linux\""),
