@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.1
+
+### Fixes
+- Pane gutter no longer paints the command start/end triangles over the first column of terminal output; the run markers are still tracked for hunk jumps, prompt jump, click-to-move, and the Run Ledger
+- Command markers rebase when the shell or the app clears scrollback (`clear` sends `ED 3`), so leftover triangles no longer strand on the wrong rows after a clear
+
 ## 0.3.0
 
 ### Features
