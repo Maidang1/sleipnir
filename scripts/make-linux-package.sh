@@ -321,7 +321,8 @@ import sys
 from PIL import Image
 source, output, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with Image.open(source) as image:
-    image.convert("RGBA").resize((size, size), Image.Resampling.LANCZOS).save(output, "PNG", optimize=False)
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    image.convert("RGBA").resize((size, size), resample).save(output, "PNG", optimize=False)
 PY
     done
 
