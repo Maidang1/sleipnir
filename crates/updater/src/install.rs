@@ -92,7 +92,7 @@ pub fn updates_root() -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn create_transaction(
+pub fn new_transaction(
     root: &Path,
     installed_app: &Path,
     artifact: &Path,
@@ -112,7 +112,7 @@ pub fn create_transaction(
     std::fs::set_permissions(&transaction_dir, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
     let path = transaction_dir.join("transaction.json");
-    let mut transaction = Transaction::new(
+    let transaction = Transaction::new(
         transaction_id,
         nonce,
         old_version.to_string(),
@@ -131,12 +131,19 @@ pub fn create_transaction(
         artifact.to_path_buf(),
     )
     .map_err(|e| e.to_string())?;
+    Ok((path, transaction))
+}
+
+pub fn activate_prepared_transaction(
+    root: &Path,
+    path: &Path,
+    transaction: &mut Transaction,
+) -> Result<(), String> {
     transaction
         .transition(Phase::Prepared)
         .map_err(|e| e.to_string())?;
-    save_atomic(&path, &transaction).map_err(|e| e.to_string())?;
-    write_active_pointer(root, &path)?;
-    Ok((path, transaction))
+    save_atomic(path, transaction).map_err(|e| e.to_string())?;
+    write_active_pointer(root, path)
 }
 
 #[cfg(target_os = "macos")]
@@ -299,9 +306,11 @@ mod tests {
         let root = tempdir().unwrap();
         let installed = root.path().join("Sleipnir.app");
         let artifact = root.path().join("update.dmg");
-        create_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap();
-        let error = create_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42)
-            .unwrap_err();
+        let (path, mut transaction) =
+            new_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap();
+        activate_prepared_transaction(root.path(), &path, &mut transaction).unwrap();
+        let error =
+            new_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap_err();
         assert!(error.contains("already active"));
     }
 }

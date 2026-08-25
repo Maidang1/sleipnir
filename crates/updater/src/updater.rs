@@ -416,7 +416,7 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
     // Materialize the candidate beside the installed app so RENAME_SWAP is
     // same-volume and atomic. Failure here leaves the running app untouched.
     let root = crate::install::updates_root().map_err(anyhow::Error::msg)?;
-    let (transaction_path, transaction) = crate::install::create_transaction(
+    let (transaction_path, mut transaction) = crate::install::new_transaction(
         &root,
         app_bundle,
         dmg_path,
@@ -447,6 +447,8 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
 
         validate_candidate_bundle(candidate, &transaction.new_version)?;
         let packaged_helper = candidate.join("Contents/MacOS/sleipnir-update-helper");
+        crate::install::activate_prepared_transaction(&root, &transaction_path, &mut transaction)
+            .map_err(anyhow::Error::msg)?;
         let transaction_dir = transaction_path.parent().expect("transaction has parent");
         let helper = transaction_dir.join("update-helper");
         std::fs::copy(&packaged_helper, &helper).context("copy update supervisor")?;
