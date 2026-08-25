@@ -70,12 +70,10 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
             Ok(true) => {}
             Ok(false) => {
                 let _ = self.fs.transition(tx, Phase::Prepared);
-                let _ = self.launcher.launch(&tx.installed_bundle_path);
                 return SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout);
             }
             Err(_) => {
                 let _ = self.fs.transition(tx, Phase::Prepared);
-                let _ = self.launcher.launch(&tx.installed_bundle_path);
                 return SupervisorResult::Stopped(UpdateErrorCode::OldProcessWatchFailed);
             }
         }
@@ -160,12 +158,12 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
             let _ = self.fs.transition(tx, Phase::RecoveryRequired);
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::RollbackFailed);
         }
+        if self.fs.transition(tx, Phase::RolledBack).is_err() {
+            return SupervisorResult::RecoveryRequired(UpdateErrorCode::RecoveryStateInconsistent);
+        }
         if self.launcher.launch(&tx.installed_bundle_path).is_err() {
             let _ = self.fs.transition(tx, Phase::RecoveryRequired);
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::CandidateLaunchFailed);
-        }
-        if self.fs.transition(tx, Phase::RolledBack).is_err() {
-            return SupervisorResult::RecoveryRequired(UpdateErrorCode::RecoveryStateInconsistent);
         }
         SupervisorResult::RolledBack(cause)
     }

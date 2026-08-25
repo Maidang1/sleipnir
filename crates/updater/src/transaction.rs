@@ -201,6 +201,7 @@ impl Transaction {
                 )
                 | (AwaitingHealth, Committed | RollingBack | RecoveryRequired)
                 | (RollingBack, RolledBack | RecoveryRequired)
+                | (RolledBack, RecoveryRequired)
         );
         if !legal {
             return Err(error(

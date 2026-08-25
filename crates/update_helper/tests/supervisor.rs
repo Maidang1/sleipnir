@@ -149,7 +149,7 @@ fn old_process_timeout_never_swaps() {
         SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout)
     );
     assert_eq!(supervisor.fs.swaps, 0);
-    assert_eq!(supervisor.launcher.launches, 1);
+    assert_eq!(supervisor.launcher.launches, 0);
     assert_eq!(tx.phase, Phase::Prepared);
     assert_eq!(tx.error_code, Some(UpdateErrorCode::OldProcessExitTimeout));
 }
