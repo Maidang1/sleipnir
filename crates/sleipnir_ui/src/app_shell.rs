@@ -468,7 +468,13 @@ fn open_shell_window(
 
 /// Open a new independent Sleipnir window (startup + ⌘N).
 pub fn open_sleipnir_window(cx: &mut App) {
-    open_shell_window(|window, cx| cx.new(|cx| AppShell::new(window, cx)), cx);
+    let _ = try_open_sleipnir_window(cx);
+}
+
+/// Open the startup window and report whether GPUI created it successfully.
+/// Candidate update health is reported only after this returns `Some`.
+pub fn try_open_sleipnir_window(cx: &mut App) -> Option<WindowHandle<AppShell>> {
+    open_shell_window(|window, cx| cx.new(|cx| AppShell::new(window, cx)), cx)
 }
 
 /// Open a window whose first tab starts in `cwd`. Does not restore a session.

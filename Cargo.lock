@@ -5815,6 +5815,7 @@ dependencies = [
  "sleipnir_settings",
  "sleipnir_ui",
  "terminal",
+ "updater",
 ]
 
 [[package]]

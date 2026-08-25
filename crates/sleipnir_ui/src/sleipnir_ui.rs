@@ -28,6 +28,7 @@ pub use app_shell::{
     ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight, ToggleBroadcast,
     ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
     ToggleQuickSelect, ToggleRunLedger, UpdateUiState, open_sleipnir_window,
+    try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};

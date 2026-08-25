@@ -15,7 +15,7 @@ use sleipnir_ui::{
     ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
     ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
     TogglePaneZoom, ToggleQuickSelect, ToggleRunLedger, builtin_bindings, install_finder_services,
-    last_window_close_quits, open_sleipnir_window, tmux_preset_bindings,
+    last_window_close_quits, open_sleipnir_window, tmux_preset_bindings, try_open_sleipnir_window,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -89,8 +89,41 @@ fn main() {
         // didFinishLaunching returns so a cold-start invocation is not dropped.
         install_finder_services(cx);
 
-        open_sleipnir_window(cx);
+        let opened = try_open_sleipnir_window(cx).is_some();
         cx.activate(true);
+        if opened {
+            report_candidate_health();
+        }
+    });
+}
+
+fn report_candidate_health() {
+    let Ok(root) = updater::install::updates_root() else {
+        return;
+    };
+    let Ok(Some(transaction_path)) = updater::install::read_active_pointer(&root) else {
+        return;
+    };
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(10) {
+            let executable = match std::env::current_exe() {
+                Ok(path) => path,
+                Err(error) => {
+                    log::warn!("update health check cannot resolve executable: {error}");
+                    return;
+                }
+            };
+            match updater::install::write_health_marker(&transaction_path, &version, &executable) {
+                Ok(true) => return,
+                Ok(false) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(error) => {
+                    log::warn!("update health confirmation failed: {error}");
+                    return;
+                }
+            }
+        }
     });
 }
 
