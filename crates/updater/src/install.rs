@@ -38,10 +38,28 @@ pub fn write_active_pointer(root: &Path, transaction_path: &Path) -> Result<(), 
         transaction_path: transaction_path.to_path_buf(),
     };
     let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
-    let tmp = root.join("active.json.tmp");
+    let tmp = root.join(format!("active-{}.json.tmp", std::process::id()));
     let path = root.join("active.json");
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, path).map_err(|e| e.to_string())
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
+    match std::fs::hard_link(&tmp, &path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "another update transaction is already active".into()
+            } else {
+                error.to_string()
+            })
+        }
+    }
 }
 
 pub fn read_active_pointer(root: &Path) -> Result<Option<PathBuf>, String> {
