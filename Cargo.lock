@@ -6852,14 +6852,17 @@ name = "updater"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "dirs",
  "ed25519-dalek",
  "log",
+ "rand 0.9.5",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "ureq",
+ "uuid",
 ]
 
 [[package]]
