@@ -6,6 +6,7 @@ pub trait FileSystem {
     fn transition(&mut self, tx: &mut Transaction, next: Phase) -> Result<(), TransactionError>;
     fn swap(&mut self, installed: &Path, adjacent: &Path) -> Result<(), String>;
     fn health_marker(&mut self) -> Result<Option<HealthMarker>, String>;
+    fn cleanup_committed_backup(&mut self, adjacent: &Path) -> Result<(), String>;
 }
 
 pub trait ProcessWatcher {
@@ -123,6 +124,8 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
                             UpdateErrorCode::RecoveryStateInconsistent,
                         );
                     }
+                    let adjacent = tx.adjacent_candidate_path.clone();
+                    let _ = self.fs.cleanup_committed_backup(&adjacent);
                     return SupervisorResult::Committed;
                 }
                 _ => self.clock.sleep_one_second(),
@@ -162,7 +165,12 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::RecoveryStateInconsistent);
         }
         if self.launcher.launch(&tx.installed_bundle_path).is_err() {
-            let _ = self.fs.transition(tx, Phase::RecoveryRequired);
+            updater::transaction::force_recovery_required(
+                tx,
+                UpdateErrorCode::CandidateLaunchFailed,
+                "restored application could not be launched",
+            );
+            let _ = self.fs.persist(tx);
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::CandidateLaunchFailed);
         }
         SupervisorResult::RolledBack(cause)

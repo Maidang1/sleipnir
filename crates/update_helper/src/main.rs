@@ -37,6 +37,14 @@ impl FileSystem for RealFileSystem {
             Err(error) => Err(error.to_string()),
         }
     }
+
+    fn cleanup_committed_backup(&mut self, adjacent: &Path) -> Result<(), String> {
+        std::fs::remove_dir_all(adjacent).map_err(|e| e.to_string())?;
+        if let Some(parent) = adjacent.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]

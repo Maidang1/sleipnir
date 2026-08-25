@@ -262,6 +262,15 @@ pub fn save_atomic(path: &Path, transaction: &Transaction) -> Result<(), Transac
     Ok(())
 }
 
+pub fn force_recovery_required(
+    transaction: &mut Transaction,
+    code: UpdateErrorCode,
+    message: impl Into<String>,
+) {
+    transaction.phase = Phase::RecoveryRequired;
+    transaction.fail(code, message);
+}
+
 pub fn load(path: &Path) -> Result<Transaction, TransactionError> {
     let bytes = std::fs::read(path)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;

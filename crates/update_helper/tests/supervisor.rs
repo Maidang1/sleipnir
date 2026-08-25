@@ -11,6 +11,7 @@ struct FakeFs {
     marker: Option<HealthMarker>,
     swap_fails_at: Option<usize>,
     observed_helper_ready: bool,
+    cleanup_calls: usize,
 }
 
 impl FileSystem for FakeFs {
@@ -33,6 +34,10 @@ impl FileSystem for FakeFs {
     }
     fn health_marker(&mut self) -> Result<Option<HealthMarker>, String> {
         Ok(self.marker.clone())
+    }
+    fn cleanup_committed_backup(&mut self, _: &Path) -> Result<(), String> {
+        self.cleanup_calls += 1;
+        Ok(())
     }
 }
 
@@ -113,6 +118,7 @@ fn harness(tx: &Transaction) -> Supervisor<FakeFs, FakeProcesses, FakeLauncherSe
             marker: Some(marker(tx, 99)),
             swap_fails_at: None,
             observed_helper_ready: false,
+            cleanup_calls: 0,
         },
         processes: FakeProcesses {
             watch_registered: Ok(()),
@@ -136,6 +142,7 @@ fn healthy_candidate_commits_after_stability_window() {
     assert_eq!(tx.phase, Phase::Committed);
     assert_eq!(supervisor.fs.swaps, 1);
     assert!(supervisor.fs.observed_helper_ready);
+    assert_eq!(supervisor.fs.cleanup_calls, 1);
     assert_eq!(supervisor.clock.0, 5);
 }
 
