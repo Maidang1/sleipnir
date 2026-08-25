@@ -12,6 +12,7 @@
 #
 # Environment:
 #   GH_TOKEN           (optional, also read from gh auth)
+#   SLEIPNIR_UPDATE_SIGNING_KEY  Base64-encoded Ed25519 PKCS#8 PEM private key
 
 set -euo pipefail
 
@@ -51,6 +52,19 @@ fi
 ( cd "${ARTIFACT_DIR}" && shasum -a 256 "$(basename "${DMG}")" \
     | awk '{print $1}' > "$(basename "${SHA}")" )
 echo "  sha256: $(cat "${SHA}")"
+
+if [[ -z "${SLEIPNIR_UPDATE_SIGNING_KEY:-}" ]]; then
+    echo "ERROR: SLEIPNIR_UPDATE_SIGNING_KEY is required to publish auto-update metadata" >&2
+    exit 1
+fi
+MANIFEST="${ARTIFACT_DIR}/sleipnir-update-v1.json"
+MANIFEST_SIGNATURE="${MANIFEST}.sig"
+"${ROOT}/scripts/sign-update-manifest.py" \
+    --version "${VERSION}" \
+    --dmg "${DMG}" \
+    --output "${MANIFEST}" \
+    --signature "${MANIFEST_SIGNATURE}"
+test -s "${MANIFEST}" && test -s "${MANIFEST_SIGNATURE}"
 
 # ── Create / update GitHub Release ───────────────────────────────────────────
 TAG="v${VERSION}"
@@ -102,7 +116,9 @@ gh release create "${TAG}" \
     ${RELEASE_ARGS:-} \
     --draft=false \
     "${DMG}" \
-    "${SHA}"
+    "${SHA}" \
+    "${MANIFEST}" \
+    "${MANIFEST_SIGNATURE}"
 
 echo ""
 echo "=== Published ==="
