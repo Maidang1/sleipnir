@@ -400,6 +400,7 @@ gh workflow run build-and-release.yml \
 |--------|-------------|
 | `CODE_SIGNING_CERT_P12` | Base64-encoded `.p12` certificate file |
 | `CODE_SIGNING_CERT_PASSWORD` | Password for the `.p12` file |
+| `SLEIPNIR_UPDATE_SIGNING_KEY` | Base64-encoded Ed25519 PKCS#8 PEM private key used to sign `sleipnir-update-v1.json` |
 | `APPLE_ID` | Apple ID email for notarization |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for notarization |
 | `APPLE_TEAM_ID` | Apple Developer team ID |

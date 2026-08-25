@@ -371,6 +371,7 @@ gh workflow run build-and-release.yml \
 |--------|-------------|
 | `CODE_SIGNING_CERT_P12` | Base64 编码的 `.p12` 证书 |
 | `CODE_SIGNING_CERT_PASSWORD` | `.p12` 密码 |
+| `SLEIPNIR_UPDATE_SIGNING_KEY` | 用于签署 `sleipnir-update-v1.json` 的 Base64 编码 Ed25519 PKCS#8 PEM 私钥 |
 | `APPLE_ID` | 公证用的 Apple ID 邮箱 |
 | `APPLE_APP_SPECIFIC_PASSWORD` | 公证用的 App 专用密码 |
 | `APPLE_TEAM_ID` | Apple Developer team ID |

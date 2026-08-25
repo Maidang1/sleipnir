@@ -31,6 +31,7 @@ def main() -> int:
         "minimum_updater_schema": 1,
     }
     args.output.write_bytes(json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode())
+    args.signature.unlink(missing_ok=True)
 
     encoded_key = os.environ.get("SLEIPNIR_UPDATE_SIGNING_KEY")
     if not encoded_key:
