@@ -251,13 +251,11 @@ pub fn write_health_marker(
         .parent()
         .unwrap()
         .join("health-ready.json.tmp");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)
-        .map_err(|e| e.to_string())?;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(target_os = "macos")]
+    options.mode(0o600);
+    let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())?;
