@@ -350,8 +350,8 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Build release binary
-        run: cargo build --release -p sleipnir
+      - name: Build release binaries
+        run: cargo build --release -p sleipnir -p sleipnir-update-helper
 
       - name: Assemble .app bundle
         run: |
@@ -360,6 +360,9 @@ jobs:
           rm -rf "${APP}" build
           mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" build
           cp target/release/sleipnir "${APP}/Contents/MacOS/sleipnir"
+          cp target/release/sleipnir-update-helper "${APP}/Contents/MacOS/sleipnir-update-helper"
+          chmod 755 "${APP}/Contents/MacOS/sleipnir" "${APP}/Contents/MacOS/sleipnir-update-helper"
+          file "${APP}/Contents/MacOS/sleipnir-update-helper"
           sed "s|0.1.0|${VER}|g" resources/Info.plist > "${APP}/Contents/Info.plist"
           cp resources/AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
           cp resources/Sleipnir.sdef "${APP}/Contents/Resources/Sleipnir.sdef"
@@ -419,13 +422,25 @@ jobs:
           # Stapling rewrites the dmg, so the sha256 must be computed afterwards.
           xcrun stapler staple "${{ env.dmg }}"
 
-      - name: SHA-256 sidecar
+      - name: SHA-256 sidecar and signed update manifest
+        env:
+          SLEIPNIR_UPDATE_SIGNING_KEY: ${{ secrets.SLEIPNIR_UPDATE_SIGNING_KEY }}
         run: |
           VER="${{ steps.version.outputs.version }}"
-          # Compute after any notarization/stapling so the digest matches the
-          # bytes the auto-updater / install.sh will download and verify.
+          if [[ -z "${SLEIPNIR_UPDATE_SIGNING_KEY}" ]]; then
+            echo "ERROR: SLEIPNIR_UPDATE_SIGNING_KEY is required for release publishing" >&2
+            exit 1
+          fi
+          # Compute after any notarization/stapling so every verifier sees the
+          # exact bytes uploaded to GitHub Releases.
           ( cd build && shasum -a 256 "Sleipnir-${VER}-macos.dmg" \
             | awk '{print $1}' > "Sleipnir-${VER}-macos.dmg.sha256" )
+          scripts/sign-update-manifest.py \
+            --version "${VER}" \
+            --dmg "build/Sleipnir-${VER}-macos.dmg" \
+            --output build/sleipnir-update-v1.json \
+            --signature build/sleipnir-update-v1.json.sig
+          test -s build/sleipnir-update-v1.json.sig
           echo "  sha256: $(cat build/Sleipnir-${VER}-macos.dmg.sha256)"
 
       - name: Create GitHub Release
@@ -436,6 +451,9 @@ jobs:
           TAG="v${VERSION}"
           DMG="build/Sleipnir-${VERSION}-macos.dmg"
           SHA="build/Sleipnir-${VERSION}-macos.dmg.sha256"
+          MANIFEST="build/sleipnir-update-v1.json"
+          MANIFEST_SIGNATURE="build/sleipnir-update-v1.json.sig"
+          test -s "${MANIFEST}" && test -s "${MANIFEST_SIGNATURE}"
 
           {
             echo "## Sleipnir v${VERSION}"
@@ -475,14 +493,16 @@ jobs:
             gh release edit "${TAG}" \
               --title "Sleipnir v${VERSION}" \
               --notes-file release-notes.md
-            gh release upload "${TAG}" "${DMG}" "${SHA}" --clobber
+            gh release upload "${TAG}" "${DMG}" "${SHA}" "${MANIFEST}" "${MANIFEST_SIGNATURE}" --clobber
           else
             gh release create "${TAG}" \
               --draft \
               --title "Sleipnir v${VERSION}" \
               --notes-file release-notes.md \
               "${DMG}" \
-              "${SHA}"
+              "${SHA}" \
+              "${MANIFEST}" \
+              "${MANIFEST_SIGNATURE}"
           fi
 
           echo "Draft ready: $(gh release view "${TAG}" --json url --jq '.url')"

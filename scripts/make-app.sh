@@ -154,8 +154,15 @@ fi
 ( cd "${BUILD_DIR}" && shasum -a 256 "$(basename "${DMG}")" \
     | awk '{print $1}' > "$(basename "${DMG}").sha256" )
 echo "  sha256: $(cat "${DMG}.sha256")"
+"${ROOT}/scripts/sign-update-manifest.py" \
+    --version "${VERSION}" \
+    --dmg "${DMG}" \
+    --output "${BUILD_DIR}/sleipnir-update-v1.json" \
+    --signature "${BUILD_DIR}/sleipnir-update-v1.json.sig"
 
 echo ""
 echo "=== Done ==="
 echo "  artifacts in: ${BUILD_DIR}/"
-ls -lh "${BUILD_DIR}"/*.dmg "${BUILD_DIR}"/*.dmg.sha256 2>/dev/null || true
+ls -lh "${BUILD_DIR}"/*.dmg "${BUILD_DIR}"/*.dmg.sha256 \
+    "${BUILD_DIR}/sleipnir-update-v1.json" \
+    "${BUILD_DIR}/sleipnir-update-v1.json.sig" 2>/dev/null || true
