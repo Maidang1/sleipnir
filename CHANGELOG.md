@@ -1,16 +1,14 @@
 # Changelog
 
-## Unreleased
-
-### Improvements
-- Replace the silent shell updater with a bundled Rust supervisor using durable transaction state, same-volume atomic bundle swaps, a 60-second startup health check, and automatic rollback.
-- Require an Ed25519-signed update manifest before macOS auto-update downloads are trusted; non-writable installations fall back to the verified DMG without elevation.
-- Share update state across windows and report candidate health only after the first window opens successfully.
-
-## Unreleased
+## 0.4.0
 
 ### Features
+- macOS updates now use a bundled Rust supervisor with durable transaction state, same-volume atomic bundle swaps, a 60-second startup health check, and automatic rollback.
 - macOS Finder Services: right-click a folder or file → **Services → New Sleipnir Tab Here** / **New Sleipnir Window Here**. A file opens at its parent directory.
+
+### Improvements
+- Require an Ed25519-signed update manifest before macOS auto-update downloads are trusted; non-writable installations fall back to the verified DMG without elevation.
+- Share update state across windows and report candidate health only after the first window opens successfully.
 
 ### Changes
 - Tab chips for known coding agents draw Streamline Core Line icons instead of letter monograms (`claude`, `codex`, `pi`, …). `agent_icons: false` still hides them.
