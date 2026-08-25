@@ -104,15 +104,17 @@ if [[ -n "${SIGN_IDENTITY}" ]]; then
         --entitlements "${ROOT}/resources/sleipnir.entitlements" \
         --deep --force --options runtime \
         "${APP}"
-elif [[ "${MAKE_DMG}" == "true" ]]; then
-    # dmg distribution ideally needs a valid identity; fall back to ad-hoc if possible
-    echo "  WARNING: no --sign identity and --dmg requested. Applying ad-hoc sign."
+else
+    echo "  WARNING: no --sign identity. Applying ad-hoc sign."
     codesign -s - --deep --force "${APP}"
 fi
 
 # ── Verify ────────────────────────────────────────────────────────────────────
-codesign --verify --deep --strict "${APP}" 2>&1 | head -5 || true
-spctl --assess --type execute --verbose=4 "${APP}/Contents/MacOS/${APP_NAME}" 2>&1 || true
+if ! codesign --verify --deep --strict "${APP}" 2>&1 | head -5; then
+    echo "ERROR: app bundle signature verification failed" >&2
+    exit 1
+fi
+spctl --assess --type execute --verbose=4 "${APP}" 2>&1 || true
 
 # ── Package .dmg ──────────────────────────────────────────────────────────────
 # Stage only the .app so the disk image contains nothing else.
