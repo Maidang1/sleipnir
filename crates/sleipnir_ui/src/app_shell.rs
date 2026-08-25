@@ -475,6 +475,7 @@ impl AppShell {
             cx.global::<UpdateModel>().state,
             UpdateUiState::Updated { .. }
                 | UpdateUiState::RolledBack { .. }
+                | UpdateUiState::ManualInstallRequired { .. }
                 | UpdateUiState::RecoveryRequired { .. }
         );
         let mut shell = Self {
@@ -3056,6 +3057,23 @@ impl AppShell {
                         cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
                         this.close_update(cx);
                     }).into_any_element()],
+                ),
+                UpdateUiState::ManualInstallRequired { artifact, message } => (
+                    "Install update manually".into(),
+                    format!("{message} Verified disk image: {}", artifact.display()).into(),
+                    vec![
+                        self.update_button("upd-manual-open", "Open Disk Image", tokens, false, cx, {
+                            let artifact = artifact.clone();
+                            move |_, _, _| {
+                                let _ = std::process::Command::new("/usr/bin/open").arg(&artifact).spawn();
+                            }
+                        }).into_any_element(),
+                        self.update_button("upd-ack-manual", "Close", tokens, true, cx, |this, _, cx| {
+                            let _ = updater::install::acknowledge_active_outcome();
+                            cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
+                            this.close_update(cx);
+                        }).into_any_element(),
+                    ],
                 ),
                 UpdateUiState::RecoveryRequired { message } => (
                     "Update needs manual recovery".into(),

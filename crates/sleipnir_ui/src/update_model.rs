@@ -29,6 +29,10 @@ pub enum UpdateUiState {
         to: String,
         reason: String,
     },
+    ManualInstallRequired {
+        artifact: std::path::PathBuf,
+        message: String,
+    },
     RecoveryRequired {
         message: String,
     },
@@ -69,6 +73,14 @@ fn outcome_state() -> UpdateUiState {
                 .os_error
                 .unwrap_or_else(|| "The new version did not become healthy.".into()),
         },
+        updater::transaction::Phase::ManualInstallRequired => {
+            UpdateUiState::ManualInstallRequired {
+                artifact: transaction.artifact_path,
+                message: transaction.os_error.unwrap_or_else(|| {
+                    "Automatic replacement is unavailable. Use the verified disk image to install manually.".into()
+                }),
+            }
+        }
         updater::transaction::Phase::RecoveryRequired => UpdateUiState::RecoveryRequired {
             message: transaction.os_error.unwrap_or_else(|| {
                 "The update needs manual recovery. No retained application bundle was deleted."

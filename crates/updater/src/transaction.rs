@@ -193,7 +193,7 @@ impl Transaction {
                 )
                 | (
                     Swapping,
-                    LaunchingCandidate | RollingBack | RecoveryRequired
+                    LaunchingCandidate | RollingBack | ManualInstallRequired | RecoveryRequired
                 )
                 | (
                     LaunchingCandidate,

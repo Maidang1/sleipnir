@@ -88,6 +88,7 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
         {
             // The old process is already gone, but the swap did not occur. Bring
             // the untouched old bundle back so the user is not left without UI.
+            let _ = self.fs.transition(tx, Phase::ManualInstallRequired);
             let _ = self.launcher.launch(&tx.installed_bundle_path);
             return SupervisorResult::Stopped(UpdateErrorCode::AtomicSwapFailed);
         }
