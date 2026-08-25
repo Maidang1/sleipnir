@@ -569,10 +569,12 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn shell_quote_escapes_single_quotes() {
-        let q = shell_quote(Path::new("/tmp/it's here/Sleipnir.app"));
-        assert_eq!(q, "'/tmp/it'\\''s here/Sleipnir.app'");
+    fn production_install_path_uses_rust_supervisor_not_shell_script() {
+        let src = include_str!("updater.rs");
+        assert!(!src.contains("fn write_helper_script("));
+        assert!(!src.contains("/bin/sh"));
+        assert!(src.contains("launch_supervisor"));
+        assert!(src.contains("wait_for_supervisor_ready"));
     }
 }

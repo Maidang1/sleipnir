@@ -10,10 +10,14 @@ struct FakeFs {
     swaps: usize,
     marker: Option<HealthMarker>,
     swap_fails_at: Option<usize>,
+    observed_helper_ready: bool,
 }
 
 impl FileSystem for FakeFs {
     fn transition(&mut self, tx: &mut Transaction, next: Phase) -> Result<(), TransactionError> {
+        if next == Phase::WaitingForOldExit {
+            self.observed_helper_ready = tx.helper_pid.is_some();
+        }
         tx.transition(next)
     }
     fn swap(&mut self, _: &Path, _: &Path) -> Result<(), String> {
@@ -101,6 +105,7 @@ fn harness(tx: &Transaction) -> Supervisor<FakeFs, FakeProcesses, FakeLauncherSe
             swaps: 0,
             marker: Some(marker(tx, 99)),
             swap_fails_at: None,
+            observed_helper_ready: false,
         },
         processes: FakeProcesses {
             watch_registered: Ok(()),
@@ -120,6 +125,7 @@ fn healthy_candidate_commits_after_stability_window() {
     assert_eq!(supervisor.run(&mut tx), SupervisorResult::Committed);
     assert_eq!(tx.phase, Phase::Committed);
     assert_eq!(supervisor.fs.swaps, 1);
+    assert!(supervisor.fs.observed_helper_ready);
     assert_eq!(supervisor.clock.0, 5);
 }
 
