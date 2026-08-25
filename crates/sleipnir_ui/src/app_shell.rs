@@ -286,6 +286,8 @@ pub struct AvailableUpdate {
     pub notes: String,
     artifact_url: String,
     sha256_url: String,
+    expected_sha256: Option<String>,
+    expected_size: Option<u64>,
 }
 
 /// Auto-update lifecycle, surfaced through the notification bar.
@@ -2823,6 +2825,8 @@ impl AppShell {
                             notes: info.notes,
                             artifact_url: info.artifact_url,
                             sha256_url: info.sha256_url,
+                            expected_sha256: info.expected_sha256,
+                            expected_size: info.expected_size,
                         });
                     }
                     Ok(updater::UpdateStatus::UpToDate) => {
@@ -2863,6 +2867,8 @@ impl AppShell {
             notes: update.notes.clone(),
             artifact_url: update.artifact_url.clone(),
             sha256_url: update.sha256_url.clone(),
+            expected_sha256: update.expected_sha256.clone(),
+            expected_size: update.expected_size,
         };
         let dest = std::env::temp_dir().join(format!("sleipnir-update-{}", std::process::id()));
 

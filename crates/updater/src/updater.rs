@@ -9,7 +9,6 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -22,6 +21,25 @@ pub const RELEASES_PAGE: &str = "https://github.com/Maidang1/sleipnir/releases/l
 
 const USER_AGENT: &str = "sleipnir-updater";
 
+/// Ed25519 release-signing public key. The matching private key is stored only
+/// in the GitHub Actions `SLEIPNIR_UPDATE_SIGNING_KEY` secret.
+const UPDATE_PUBLIC_KEY: [u8; 32] = [
+    0x6e, 0xfa, 0xce, 0x05, 0x7e, 0x12, 0xe6, 0xfe, 0x60, 0xe1, 0x44, 0x72, 0x62, 0x8b, 0x37, 0x5b,
+    0x65, 0x0d, 0x61, 0xb7, 0xb5, 0x3d, 0xf6, 0xd7, 0xb9, 0x21, 0x75, 0x8c, 0x44, 0x6b, 0x18, 0x44,
+];
+
+fn download_small(url: &str, limit: u64) -> Result<Vec<u8>> {
+    ureq::get(url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .with_context(|| format!("download {url}"))?
+        .body_mut()
+        .with_config()
+        .limit(limit)
+        .read_to_vec()
+        .with_context(|| format!("read {url}"))
+}
+
 /// A newer release that can be installed.
 #[derive(Clone, Debug)]
 pub struct ReleaseInfo {
@@ -33,8 +51,12 @@ pub struct ReleaseInfo {
     pub notes: String,
     /// Direct download URL for the macOS `.dmg` artifact.
     pub artifact_url: String,
-    /// Direct download URL for the `.dmg.sha256` sidecar.
+    /// Direct download URL for the `.dmg.sha256` sidecar (legacy bootstrap only).
     pub sha256_url: String,
+    /// Signed manifest digest, when available.
+    pub expected_sha256: Option<String>,
+    /// Signed manifest byte count, when available.
+    pub expected_size: Option<u64>,
 }
 
 /// Result of a version check.
@@ -135,6 +157,8 @@ pub fn parse_release(release: &Value) -> Result<ReleaseInfo> {
         notes,
         artifact_url,
         sha256_url,
+        expected_sha256: None,
+        expected_size: None,
     })
 }
 
@@ -171,13 +195,56 @@ pub fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
         .call()
         .context("request latest release")?;
     let release: Value = resp.body_mut().read_json().context("decode release JSON")?;
-
-    let info = parse_release(&release)?;
-    if is_newer(current_version, &info.version) {
-        Ok(UpdateStatus::Available(info))
-    } else {
-        Ok(UpdateStatus::UpToDate)
+    let tag = release
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("release JSON missing `tag_name`"))?;
+    let latest = parse_tag(tag)?;
+    if !is_newer(current_version, &latest) {
+        return Ok(UpdateStatus::UpToDate);
     }
+
+    let assets = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("release JSON missing `assets` array"))?;
+    let asset_url = |name: &str| {
+        assets.iter().find_map(|asset| {
+            (asset.get("name").and_then(Value::as_str) == Some(name))
+                .then(|| asset.get("browser_download_url").and_then(Value::as_str))
+                .flatten()
+        })
+    };
+    let manifest_url = asset_url("sleipnir-update-v1.json")
+        .ok_or_else(|| anyhow!("release is missing signed update manifest"))?;
+    let signature_url = asset_url("sleipnir-update-v1.json.sig")
+        .ok_or_else(|| anyhow!("release is missing update manifest signature"))?;
+    let manifest_bytes = download_small(manifest_url, 64 * 1024)?;
+    let signature = download_small(signature_url, 1024)?;
+    let manifest =
+        crate::manifest::verify_and_parse(&manifest_bytes, &signature, &UPDATE_PUBLIC_KEY)
+            .map_err(|err| anyhow!("verify update manifest: {err}"))?;
+    if manifest.version != latest || manifest.tag != tag {
+        bail!("signed manifest does not match latest release tag");
+    }
+    crate::release::validate_upgrade(current_version, &manifest)
+        .map_err(|err| anyhow!("release version rejected: {err:?}"))?;
+    let urls = crate::release::release_urls(&manifest)
+        .map_err(|err| anyhow!("release identity rejected: {err:?}"))?;
+    let notes = release
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok(UpdateStatus::Available(ReleaseInfo {
+        version: manifest.version,
+        tag: manifest.tag,
+        notes,
+        artifact_url: urls.artifact,
+        sha256_url: String::new(),
+        expected_sha256: Some(manifest.sha256),
+        expected_size: Some(manifest.size),
+    }))
 }
 
 /// Download the release `.dmg`, verify its SHA-256, and return the local path.
@@ -188,50 +255,37 @@ pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBu
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("create staging dir {}", dest_dir.display()))?;
 
-    // Expected digest from the sidecar.
-    let sidecar = ureq::get(&info.sha256_url)
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .context("download sha256 sidecar")?
-        .body_mut()
-        .read_to_string()
-        .context("read sha256 sidecar body")?;
-    let expected = parse_sha256_sidecar(&sidecar)?;
-
-    // Disk-image payload.
-    let bytes = ureq::get(&info.artifact_url)
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .context("download release dmg")?
-        .body_mut()
-        .with_config()
-        .limit(MAX_ARTIFACT_BYTES)
-        .read_to_vec()
-        .context("read release dmg body")?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let actual = hex_lower(&hasher.finalize());
-    if actual != expected {
-        bail!("SHA-256 mismatch (expected {expected}, got {actual})");
+    let expected = match &info.expected_sha256 {
+        Some(digest) => digest.clone(),
+        None => {
+            let sidecar = ureq::get(&info.sha256_url)
+                .header("User-Agent", USER_AGENT)
+                .call()
+                .context("download sha256 sidecar")?
+                .body_mut()
+                .read_to_string()
+                .context("read sha256 sidecar body")?;
+            parse_sha256_sidecar(&sidecar)?
+        }
+    };
+    let expected_size = info.expected_size.unwrap_or(MAX_ARTIFACT_BYTES);
+    if expected_size > MAX_ARTIFACT_BYTES {
+        bail!("release artifact exceeds maximum size");
     }
-
+    let mut response = ureq::get(&info.artifact_url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .context("download release dmg")?;
     let (_, extension) = platform_asset_markers();
     let file_name = format!("Sleipnir-{}-downloaded{}", info.version, extension);
-    let artifact_path = dest_dir.join(file_name);
-    std::fs::write(&artifact_path, &bytes)
-        .with_context(|| format!("write {}", artifact_path.display()))?;
-    Ok(artifact_path)
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            use std::fmt::Write;
-            write!(s, "{b:02x}").unwrap();
-            s
-        })
+    crate::download::download_verified(
+        response.body_mut().as_reader(),
+        expected_size,
+        &expected,
+        dest_dir,
+        &file_name,
+    )
+    .map_err(|err| anyhow!("download release dmg: {err}"))
 }
 
 /// Whether this platform can swap the running install in place.
