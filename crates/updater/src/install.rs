@@ -76,6 +76,9 @@ pub fn create_transaction(
     new_version: &str,
     old_pid: u32,
 ) -> Result<(PathBuf, Transaction), String> {
+    if read_active_pointer(root)?.is_some() {
+        return Err("another update transaction is already active".into());
+    }
     let transaction_id = uuid::Uuid::new_v4().to_string();
     let mut nonce = [0_u8; 32];
     rand::rng().fill_bytes(&mut nonce);
@@ -262,5 +265,16 @@ mod tests {
                 "/Applications/.sleipnir-update-11111111-1111-4111-8111-111111111111/candidate.app"
             )
         );
+    }
+
+    #[test]
+    fn create_transaction_refuses_a_second_active_update() {
+        let root = tempdir().unwrap();
+        let installed = root.path().join("Sleipnir.app");
+        let artifact = root.path().join("update.dmg");
+        create_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap();
+        let error = create_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42)
+            .unwrap_err();
+        assert!(error.contains("already active"));
     }
 }
