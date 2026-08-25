@@ -203,6 +203,19 @@ fn health_timeout_terminates_candidate_and_rolls_back() {
 }
 
 #[test]
+fn ambiguous_candidate_liveness_never_swaps_a_running_bundle() {
+    let mut tx = transaction();
+    let mut supervisor = harness(&tx);
+    supervisor.processes.alive = VecDeque::from([Err("permission denied".into())]);
+    supervisor.processes.terminate = Err("cannot confirm termination".into());
+    assert_eq!(
+        supervisor.run(&mut tx),
+        SupervisorResult::RecoveryRequired(UpdateErrorCode::CandidateTerminationFailed)
+    );
+    assert_eq!(supervisor.fs.swaps, 1);
+}
+
+#[test]
 fn candidate_that_cannot_stop_is_left_for_recovery() {
     let mut tx = transaction();
     let mut supervisor = harness(&tx);

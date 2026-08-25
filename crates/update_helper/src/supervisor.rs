@@ -110,7 +110,14 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
         for _ in 0..60 {
             match self.processes.is_alive(candidate_pid) {
                 Ok(true) => {}
-                _ => return self.rollback(tx, None, UpdateErrorCode::CandidateExitedEarly),
+                Ok(false) => return self.rollback(tx, None, UpdateErrorCode::CandidateExitedEarly),
+                Err(_) => {
+                    return self.rollback(
+                        tx,
+                        Some(candidate_pid),
+                        UpdateErrorCode::CandidateExitedEarly,
+                    );
+                }
             }
             match self.fs.health_marker() {
                 Ok(Some(marker)) if marker.matches(tx, candidate_pid) => {
