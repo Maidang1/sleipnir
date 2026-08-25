@@ -68,8 +68,16 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
         }
         match self.processes.wait_for_registered_exit(60) {
             Ok(true) => {}
-            Ok(false) => return SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout),
-            Err(_) => return SupervisorResult::Stopped(UpdateErrorCode::OldProcessWatchFailed),
+            Ok(false) => {
+                let _ = self.fs.transition(tx, Phase::Prepared);
+                let _ = self.launcher.launch(&tx.installed_bundle_path);
+                return SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout);
+            }
+            Err(_) => {
+                let _ = self.fs.transition(tx, Phase::Prepared);
+                let _ = self.launcher.launch(&tx.installed_bundle_path);
+                return SupervisorResult::Stopped(UpdateErrorCode::OldProcessWatchFailed);
+            }
         }
         if self.fs.transition(tx, Phase::Swapping).is_err() {
             return SupervisorResult::Stopped(UpdateErrorCode::InvalidStateTransition);

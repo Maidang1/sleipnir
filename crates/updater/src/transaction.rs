@@ -181,7 +181,7 @@ impl Transaction {
                 )
                 | (
                     WaitingForOldExit,
-                    Swapping | Cancelled | ManualInstallRequired | RecoveryRequired
+                    Prepared | Swapping | Cancelled | ManualInstallRequired | RecoveryRequired
                 )
                 | (
                     Swapping,
