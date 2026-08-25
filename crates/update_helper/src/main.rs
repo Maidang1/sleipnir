@@ -1,19 +1,33 @@
+#[cfg(target_os = "macos")]
 mod launch;
+#[cfg(target_os = "macos")]
 mod log;
+#[cfg(target_os = "macos")]
 mod process;
+#[cfg(any(target_os = "macos", test))]
 mod supervisor;
+#[cfg(target_os = "macos")]
 mod swap;
 
+#[cfg(target_os = "macos")]
 use std::fs::OpenOptions;
+#[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd as _;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::OpenOptionsExt as _;
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::time::Duration;
+#[cfg(target_os = "macos")]
 use supervisor::{AppLauncher, Clock, FileSystem, ProcessWatcher, Supervisor};
+#[cfg(target_os = "macos")]
 use updater::transaction::{self, HealthMarker, Phase, Transaction, TransactionError};
 
+#[cfg(target_os = "macos")]
 struct TransactionLock(std::fs::File);
 
+#[cfg(target_os = "macos")]
 impl TransactionLock {
     fn acquire(transaction_path: &Path) -> Result<Self, String> {
         let root = updater::install::updates_root()?;
@@ -39,6 +53,7 @@ impl TransactionLock {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for TransactionLock {
     fn drop(&mut self) {
         // SAFETY: unlocks the descriptor retained by this guard.
@@ -46,11 +61,13 @@ impl Drop for TransactionLock {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct RealFileSystem {
     transaction_path: PathBuf,
     health_path: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl FileSystem for RealFileSystem {
     fn persist(&mut self, tx: &Transaction) -> Result<(), TransactionError> {
         transaction::save_atomic(&self.transaction_path, tx)
@@ -84,10 +101,12 @@ impl FileSystem for RealFileSystem {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct RealProcesses {
     old_watch: Option<process::ExitWatch>,
 }
+#[cfg(target_os = "macos")]
 impl ProcessWatcher for RealProcesses {
     fn register_exit_watch(&mut self, pid: u32) -> Result<(), String> {
         self.old_watch = Some(process::register_exit_watch(pid)?);
@@ -107,20 +126,25 @@ impl ProcessWatcher for RealProcesses {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct WorkspaceLauncher;
+#[cfg(target_os = "macos")]
 impl AppLauncher for WorkspaceLauncher {
     fn launch(&mut self, bundle: &Path) -> Result<u32, String> {
         launch::launch_application(bundle)
     }
 }
 
+#[cfg(target_os = "macos")]
 struct RealClock;
+#[cfg(target_os = "macos")]
 impl Clock for RealClock {
     fn sleep_one_second(&mut self) {
         std::thread::sleep(Duration::from_secs(1));
     }
 }
 
+#[cfg(target_os = "macos")]
 fn parse_transaction_arg() -> Result<PathBuf, String> {
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() != Some("supervise".as_ref())
@@ -138,6 +162,7 @@ fn parse_transaction_arg() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(target_os = "macos")]
 fn run() -> Result<(), String> {
     let transaction_path = parse_transaction_arg()?;
     let _lock = TransactionLock::acquire(&transaction_path)?;
@@ -181,9 +206,16 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn main() {
     if let Err(error) = run() {
         eprintln!("sleipnir update helper failed: {error}");
         std::process::exit(1);
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("sleipnir-update-helper is supported only on macOS");
+    std::process::exit(2);
 }
