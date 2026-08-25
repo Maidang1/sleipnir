@@ -365,7 +365,7 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
         &root,
         app_bundle,
         dmg_path,
-        env!("CARGO_PKG_VERSION"),
+        &inner_bundle_version(app_bundle)?,
         &inner_bundle_version(&new_app)?,
         std::process::id(),
     )
