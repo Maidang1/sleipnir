@@ -88,6 +88,31 @@ pub struct Transaction {
     pub os_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HealthMarker {
+    pub schema_version: u32,
+    pub transaction_id: String,
+    pub nonce: String,
+    pub version: String,
+    pub pid: u32,
+    pub executable: PathBuf,
+}
+
+impl HealthMarker {
+    pub fn matches(&self, transaction: &Transaction, candidate_pid: u32) -> bool {
+        self.schema_version == TRANSACTION_SCHEMA_VERSION
+            && self.transaction_id == transaction.transaction_id
+            && self.nonce == transaction.nonce
+            && self.version == transaction.new_version
+            && self.pid == candidate_pid
+            && transaction.candidate_pid == Some(candidate_pid)
+            && self.executable
+                == transaction
+                    .installed_bundle_path
+                    .join("Contents/MacOS/sleipnir")
+    }
+}
+
 impl Transaction {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -144,8 +169,8 @@ impl Transaction {
                 | (Prepared, WaitingForOldExit | Cancelled | ManualInstallRequired)
                 | (WaitingForOldExit, Swapping | Cancelled | ManualInstallRequired)
                 | (Swapping, LaunchingCandidate | RollingBack | RecoveryRequired)
-                | (LaunchingCandidate, AwaitingHealth | RollingBack)
-                | (AwaitingHealth, Committed | RollingBack)
+                | (LaunchingCandidate, AwaitingHealth | RollingBack | RecoveryRequired)
+                | (AwaitingHealth, Committed | RollingBack | RecoveryRequired)
                 | (RollingBack, RolledBack | RecoveryRequired)
         );
         if !legal {
@@ -270,5 +295,21 @@ mod tests {
         let path = dir.path().join("transaction.json");
         std::fs::write(&path, b"{").unwrap();
         assert_eq!(load(&path).unwrap_err().code, UpdateErrorCode::InvalidTransaction);
+    }
+
+    #[test]
+    fn health_marker_matches_transaction_pid_version_and_path() {
+        let mut tx = transaction();
+        tx.candidate_pid = Some(99);
+        let marker = HealthMarker {
+            schema_version: 1,
+            transaction_id: tx.transaction_id.clone(),
+            nonce: tx.nonce.clone(),
+            version: tx.new_version.clone(),
+            pid: 99,
+            executable: tx.installed_bundle_path.join("Contents/MacOS/sleipnir"),
+        };
+        assert!(marker.matches(&tx, 99));
+        assert!(!marker.matches(&tx, 100));
     }
 }

@@ -8,6 +8,7 @@ members = [
     "crates/parse_bench",
     "crates/release_channel",
     "crates/updater",
+    "crates/update_helper",
     "crates/run_ledger",
     "crates/diff_core",
     "crates/syntax",
