@@ -38,7 +38,10 @@ impl std::fmt::Display for ManifestError {
 impl std::error::Error for ManifestError {}
 
 fn manifest_error(code: ManifestErrorCode, message: impl Into<String>) -> ManifestError {
-    ManifestError { code, message: message.into() }
+    ManifestError {
+        code,
+        message: message.into(),
+    }
 }
 
 pub fn verify_and_parse(
@@ -46,18 +49,33 @@ pub fn verify_and_parse(
     signature_bytes: &[u8],
     public_key: &[u8; 32],
 ) -> Result<UpdateManifest, ManifestError> {
-    let signature = Signature::from_slice(signature_bytes)
-        .map_err(|_| manifest_error(ManifestErrorCode::SignatureInvalid, "invalid manifest signature"))?;
-    let key = VerifyingKey::from_bytes(public_key)
-        .map_err(|_| manifest_error(ManifestErrorCode::SignatureInvalid, "invalid update public key"))?;
-    key.verify(bytes, &signature)
-        .map_err(|_| manifest_error(ManifestErrorCode::SignatureInvalid, "manifest signature verification failed"))?;
+    let signature = Signature::from_slice(signature_bytes).map_err(|_| {
+        manifest_error(
+            ManifestErrorCode::SignatureInvalid,
+            "invalid manifest signature",
+        )
+    })?;
+    let key = VerifyingKey::from_bytes(public_key).map_err(|_| {
+        manifest_error(
+            ManifestErrorCode::SignatureInvalid,
+            "invalid update public key",
+        )
+    })?;
+    key.verify(bytes, &signature).map_err(|_| {
+        manifest_error(
+            ManifestErrorCode::SignatureInvalid,
+            "manifest signature verification failed",
+        )
+    })?;
     let manifest: UpdateManifest = serde_json::from_slice(bytes)
         .map_err(|err| manifest_error(ManifestErrorCode::InvalidFields, err.to_string()))?;
     if manifest.schema_version != MANIFEST_SCHEMA_VERSION
         || manifest.minimum_updater_schema > MANIFEST_SCHEMA_VERSION
     {
-        return Err(manifest_error(ManifestErrorCode::SchemaUnsupported, "unsupported manifest schema"));
+        return Err(manifest_error(
+            ManifestErrorCode::SchemaUnsupported,
+            "unsupported manifest schema",
+        ));
     }
     let expected_artifact = format!("Sleipnir-{}-macos.dmg", manifest.version);
     if manifest.tag != format!("v{}", manifest.version)
@@ -67,7 +85,10 @@ pub fn verify_and_parse(
         || manifest.sha256.len() != 64
         || !manifest.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(manifest_error(ManifestErrorCode::InvalidFields, "invalid manifest fields"));
+        return Err(manifest_error(
+            ManifestErrorCode::InvalidFields,
+            "invalid manifest fields",
+        ));
     }
     Ok(manifest)
 }
@@ -119,10 +140,15 @@ mod tests {
     #[test]
     fn rejects_unsupported_schema_after_signature_verification() {
         let signing = SigningKey::from_bytes(&[7; 32]);
-        let bytes = fixture_manifest().into_iter().map(|byte| if byte == b'1' { b'9' } else { byte }).collect::<Vec<_>>();
+        let bytes = fixture_manifest()
+            .into_iter()
+            .map(|byte| if byte == b'1' { b'9' } else { byte })
+            .collect::<Vec<_>>();
         let signature = signing.sign(&bytes).to_bytes();
         assert_eq!(
-            verify_and_parse(&bytes, &signature, &signing.verifying_key().to_bytes()).unwrap_err().code,
+            verify_and_parse(&bytes, &signature, &signing.verifying_key().to_bytes())
+                .unwrap_err()
+                .code,
             ManifestErrorCode::SchemaUnsupported
         );
     }
@@ -136,7 +162,9 @@ mod tests {
         let bytes = serde_json::to_vec(&value).unwrap();
         let signature = signing.sign(&bytes).to_bytes();
         assert_eq!(
-            verify_and_parse(&bytes, &signature, &signing.verifying_key().to_bytes()).unwrap_err().code,
+            verify_and_parse(&bytes, &signature, &signing.verifying_key().to_bytes())
+                .unwrap_err()
+                .code,
             ManifestErrorCode::InvalidFields
         );
     }

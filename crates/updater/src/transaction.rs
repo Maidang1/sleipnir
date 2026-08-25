@@ -67,7 +67,10 @@ impl std::fmt::Display for TransactionError {
 impl std::error::Error for TransactionError {}
 
 fn error(code: UpdateErrorCode, message: impl Into<String>) -> TransactionError {
-    TransactionError { code, message: message.into() }
+    TransactionError {
+        code,
+        message: message.into(),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -147,7 +150,10 @@ impl Transaction {
 
     pub fn validate(&self) -> Result<(), TransactionError> {
         if self.schema_version != TRANSACTION_SCHEMA_VERSION {
-            return Err(error(UpdateErrorCode::UnsupportedTransactionSchema, "unsupported transaction schema"));
+            return Err(error(
+                UpdateErrorCode::UnsupportedTransactionSchema,
+                "unsupported transaction schema",
+            ));
         }
         if self.transaction_id.is_empty()
             || self.nonce.len() != 64
@@ -156,7 +162,10 @@ impl Transaction {
             || !self.adjacent_candidate_path.is_absolute()
             || !self.artifact_path.is_absolute()
         {
-            return Err(error(UpdateErrorCode::InvalidTransaction, "invalid update transaction"));
+            return Err(error(
+                UpdateErrorCode::InvalidTransaction,
+                "invalid update transaction",
+            ));
         }
         Ok(())
     }
@@ -166,10 +175,22 @@ impl Transaction {
         let legal = matches!(
             (self.phase, next),
             (Downloaded, Prepared)
-                | (Prepared, WaitingForOldExit | Cancelled | ManualInstallRequired)
-                | (WaitingForOldExit, Swapping | Cancelled | ManualInstallRequired)
-                | (Swapping, LaunchingCandidate | RollingBack | RecoveryRequired)
-                | (LaunchingCandidate, AwaitingHealth | RollingBack | RecoveryRequired)
+                | (
+                    Prepared,
+                    WaitingForOldExit | Cancelled | ManualInstallRequired
+                )
+                | (
+                    WaitingForOldExit,
+                    Swapping | Cancelled | ManualInstallRequired
+                )
+                | (
+                    Swapping,
+                    LaunchingCandidate | RollingBack | RecoveryRequired
+                )
+                | (
+                    LaunchingCandidate,
+                    AwaitingHealth | RollingBack | RecoveryRequired
+                )
                 | (AwaitingHealth, Committed | RollingBack | RecoveryRequired)
                 | (RollingBack, RolledBack | RecoveryRequired)
         );
@@ -186,15 +207,28 @@ impl Transaction {
 
 pub fn save_atomic(path: &Path, transaction: &Transaction) -> Result<(), TransactionError> {
     transaction.validate()?;
-    let parent = path.parent().ok_or_else(|| error(UpdateErrorCode::InvalidTransaction, "transaction path has no parent"))?;
-    std::fs::create_dir_all(parent).map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
+    let parent = path.parent().ok_or_else(|| {
+        error(
+            UpdateErrorCode::InvalidTransaction,
+            "transaction path has no parent",
+        )
+    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
     let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(transaction).map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)
+    let bytes = serde_json::to_vec_pretty(transaction)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    file.write_all(&bytes).and_then(|_| file.sync_all())
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    std::fs::rename(&tmp, path).map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
     if let Ok(directory) = std::fs::File::open(parent) {
         let _ = directory.sync_all();
     }
@@ -202,7 +236,8 @@ pub fn save_atomic(path: &Path, transaction: &Transaction) -> Result<(), Transac
 }
 
 pub fn load(path: &Path) -> Result<Transaction, TransactionError> {
-    let bytes = std::fs::read(path).map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
+    let bytes = std::fs::read(path)
+        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
     let transaction: Transaction = serde_json::from_slice(&bytes)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
     transaction.validate()?;
@@ -222,7 +257,8 @@ mod tests {
             "0.3.2".into(),
             42,
             "/Applications/Sleipnir.app".into(),
-            "/Applications/.sleipnir-update-11111111-1111-4111-8111-111111111111/candidate.app".into(),
+            "/Applications/.sleipnir-update-11111111-1111-4111-8111-111111111111/candidate.app"
+                .into(),
             "/tmp/Sleipnir-0.3.2.dmg".into(),
         )
         .unwrap()
@@ -256,9 +292,15 @@ mod tests {
     fn nonce_must_be_256_bit_hex() {
         let mut tx = transaction();
         tx.nonce = "short".into();
-        assert_eq!(tx.validate().unwrap_err().code, UpdateErrorCode::InvalidTransaction);
+        assert_eq!(
+            tx.validate().unwrap_err().code,
+            UpdateErrorCode::InvalidTransaction
+        );
         tx.nonce = "z".repeat(64);
-        assert_eq!(tx.validate().unwrap_err().code, UpdateErrorCode::InvalidTransaction);
+        assert_eq!(
+            tx.validate().unwrap_err().code,
+            UpdateErrorCode::InvalidTransaction
+        );
     }
 
     #[test]
@@ -286,7 +328,10 @@ mod tests {
         let mut value = serde_json::to_value(transaction()).unwrap();
         value["schema_version"] = 99.into();
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert_eq!(load(&path).unwrap_err().code, UpdateErrorCode::UnsupportedTransactionSchema);
+        assert_eq!(
+            load(&path).unwrap_err().code,
+            UpdateErrorCode::UnsupportedTransactionSchema
+        );
     }
 
     #[test]
@@ -294,7 +339,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("transaction.json");
         std::fs::write(&path, b"{").unwrap();
-        assert_eq!(load(&path).unwrap_err().code, UpdateErrorCode::InvalidTransaction);
+        assert_eq!(
+            load(&path).unwrap_err().code,
+            UpdateErrorCode::InvalidTransaction
+        );
     }
 
     #[test]

@@ -70,20 +70,37 @@ mod tests {
 
     #[test]
     fn prepared_and_waiting_transactions_never_modify_old_install() {
-        assert_eq!(decide(&evidence(Phase::Prepared, Some("0.3.1"), None)), RecoveryAction::RetainPrepared);
-        assert_eq!(decide(&evidence(Phase::WaitingForOldExit, Some("0.3.1"), None)), RecoveryAction::RetainPrepared);
+        assert_eq!(
+            decide(&evidence(Phase::Prepared, Some("0.3.1"), None)),
+            RecoveryAction::RetainPrepared
+        );
+        assert_eq!(
+            decide(&evidence(Phase::WaitingForOldExit, Some("0.3.1"), None)),
+            RecoveryAction::RetainPrepared
+        );
     }
 
     #[test]
     fn uncommitted_swapped_candidate_is_rolled_back() {
-        for phase in [Phase::Swapping, Phase::LaunchingCandidate, Phase::AwaitingHealth, Phase::RollingBack] {
-            assert_eq!(decide(&evidence(phase, Some("0.3.2"), Some("0.3.1"))), RecoveryAction::RestoreOldBySwap);
+        for phase in [
+            Phase::Swapping,
+            Phase::LaunchingCandidate,
+            Phase::AwaitingHealth,
+            Phase::RollingBack,
+        ] {
+            assert_eq!(
+                decide(&evidence(phase, Some("0.3.2"), Some("0.3.1"))),
+                RecoveryAction::RestoreOldBySwap
+            );
         }
     }
 
     #[test]
     fn committed_candidate_is_kept_and_cleaned() {
-        assert_eq!(decide(&evidence(Phase::Committed, Some("0.3.2"), Some("0.3.1"))), RecoveryAction::FinishCommittedCleanup);
+        assert_eq!(
+            decide(&evidence(Phase::Committed, Some("0.3.2"), Some("0.3.1"))),
+            RecoveryAction::FinishCommittedCleanup
+        );
     }
 
     #[test]
@@ -95,7 +112,17 @@ mod tests {
 
     #[test]
     fn contradictory_or_missing_bundles_require_human_recovery() {
-        assert_eq!(decide(&evidence(Phase::AwaitingHealth, Some("0.3.1"), Some("0.3.2"))), RecoveryAction::RecoveryRequired);
-        assert_eq!(decide(&evidence(Phase::Committed, None, None)), RecoveryAction::RecoveryRequired);
+        assert_eq!(
+            decide(&evidence(
+                Phase::AwaitingHealth,
+                Some("0.3.1"),
+                Some("0.3.2")
+            )),
+            RecoveryAction::RecoveryRequired
+        );
+        assert_eq!(
+            decide(&evidence(Phase::Committed, None, None)),
+            RecoveryAction::RecoveryRequired
+        );
     }
 }

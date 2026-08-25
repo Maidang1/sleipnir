@@ -53,15 +53,17 @@ echo "  release=${RELEASE}  sign=${SIGN_IDENTITY:-'(ad-hoc)'}  notarize=${NOTARI
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 if [[ "${RELEASE}" == "true" ]]; then
-    cargo build --release -p sleipnir 2>&1 | tail -5
+    cargo build --release -p sleipnir -p sleipnir-update-helper 2>&1 | tail -5
     BIN="${ROOT}/target/release/sleipnir"
+    UPDATE_HELPER="${ROOT}/target/release/sleipnir-update-helper"
 else
-    cargo build -p sleipnir 2>&1 | tail -5
+    cargo build -p sleipnir -p sleipnir-update-helper 2>&1 | tail -5
     BIN="${ROOT}/target/debug/sleipnir"
+    UPDATE_HELPER="${ROOT}/target/debug/sleipnir-update-helper"
 fi
 
-if [[ ! -x "${BIN}" ]]; then
-    echo "ERROR: binary not found at ${BIN}" >&2
+if [[ ! -x "${BIN}" || ! -x "${UPDATE_HELPER}" ]]; then
+    echo "ERROR: application or update helper binary is missing" >&2
     exit 1
 fi
 
@@ -72,8 +74,10 @@ APP="${BUILD_DIR}/${APP_BUNDLE}"
 mkdir -p "${APP}/Contents/MacOS"
 mkdir -p "${APP}/Contents/Resources"
 
-# Copy binary (must match CFBundleExecutable in Info.plist)
+# Copy application and transactional update supervisor.
 cp "${BIN}" "${APP}/Contents/MacOS/sleipnir"
+cp "${UPDATE_HELPER}" "${APP}/Contents/MacOS/sleipnir-update-helper"
+chmod 755 "${APP}/Contents/MacOS/sleipnir" "${APP}/Contents/MacOS/sleipnir-update-helper"
 
 # Copy Info.plist (patch version)
 plist="${ROOT}/resources/Info.plist"

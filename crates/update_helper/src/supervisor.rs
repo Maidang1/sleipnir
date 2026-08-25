@@ -8,7 +8,8 @@ pub trait FileSystem {
 }
 
 pub trait ProcessWatcher {
-    fn wait_for_exit(&mut self, pid: u32, timeout_secs: u64) -> Result<bool, String>;
+    fn register_exit_watch(&mut self, pid: u32) -> Result<(), String>;
+    fn wait_for_registered_exit(&mut self, timeout_secs: u64) -> Result<bool, String>;
     fn is_alive(&mut self, pid: u32) -> Result<bool, String>;
     fn terminate_and_wait(&mut self, pid: u32, timeout_secs: u64) -> Result<bool, String>;
 }
@@ -41,12 +42,16 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
         if !matches!(tx.phase, Phase::Prepared | Phase::WaitingForOldExit) {
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::RecoveryStateInconsistent);
         }
-        if tx.phase == Phase::Prepared
-            && self.fs.transition(tx, Phase::WaitingForOldExit).is_err()
-        {
-            return SupervisorResult::Stopped(UpdateErrorCode::InvalidStateTransition);
+        if tx.phase == Phase::Prepared {
+            if self.processes.register_exit_watch(tx.old_pid).is_err() {
+                return SupervisorResult::Stopped(UpdateErrorCode::OldProcessWatchFailed);
+            }
+            tx.helper_pid = Some(std::process::id());
+            if self.fs.transition(tx, Phase::WaitingForOldExit).is_err() {
+                return SupervisorResult::Stopped(UpdateErrorCode::InvalidStateTransition);
+            }
         }
-        match self.processes.wait_for_exit(tx.old_pid, 60) {
+        match self.processes.wait_for_registered_exit(60) {
             Ok(true) => {}
             Ok(false) => return SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout),
             Err(_) => return SupervisorResult::Stopped(UpdateErrorCode::OldProcessWatchFailed),
@@ -54,7 +59,11 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
         if self.fs.transition(tx, Phase::Swapping).is_err() {
             return SupervisorResult::Stopped(UpdateErrorCode::InvalidStateTransition);
         }
-        if self.fs.swap(&tx.installed_bundle_path, &tx.adjacent_candidate_path).is_err() {
+        if self
+            .fs
+            .swap(&tx.installed_bundle_path, &tx.adjacent_candidate_path)
+            .is_err()
+        {
             return SupervisorResult::Stopped(UpdateErrorCode::AtomicSwapFailed);
         }
         if self.fs.transition(tx, Phase::LaunchingCandidate).is_err() {
@@ -66,7 +75,11 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
         };
         tx.candidate_pid = Some(candidate_pid);
         if self.fs.transition(tx, Phase::AwaitingHealth).is_err() {
-            return self.rollback(tx, Some(candidate_pid), UpdateErrorCode::InvalidStateTransition);
+            return self.rollback(
+                tx,
+                Some(candidate_pid),
+                UpdateErrorCode::InvalidStateTransition,
+            );
         }
         for _ in 0..60 {
             match self.processes.is_alive(candidate_pid) {
@@ -82,14 +95,20 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
                         }
                     }
                     if self.fs.transition(tx, Phase::Committed).is_err() {
-                        return SupervisorResult::RecoveryRequired(UpdateErrorCode::RecoveryStateInconsistent);
+                        return SupervisorResult::RecoveryRequired(
+                            UpdateErrorCode::RecoveryStateInconsistent,
+                        );
                     }
                     return SupervisorResult::Committed;
                 }
                 _ => self.clock.sleep_one_second(),
             }
         }
-        self.rollback(tx, Some(candidate_pid), UpdateErrorCode::HealthConfirmationTimeout)
+        self.rollback(
+            tx,
+            Some(candidate_pid),
+            UpdateErrorCode::HealthConfirmationTimeout,
+        )
     }
 
     fn rollback(
@@ -101,14 +120,23 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
         if let Some(pid) = candidate_pid {
             if self.processes.terminate_and_wait(pid, 10) != Ok(true) {
                 let _ = self.fs.transition(tx, Phase::RecoveryRequired);
-                return SupervisorResult::RecoveryRequired(UpdateErrorCode::CandidateTerminationFailed);
+                return SupervisorResult::RecoveryRequired(
+                    UpdateErrorCode::CandidateTerminationFailed,
+                );
             }
         }
         if self.fs.transition(tx, Phase::RollingBack).is_err()
-            || self.fs.swap(&tx.installed_bundle_path, &tx.adjacent_candidate_path).is_err()
+            || self
+                .fs
+                .swap(&tx.installed_bundle_path, &tx.adjacent_candidate_path)
+                .is_err()
         {
             let _ = self.fs.transition(tx, Phase::RecoveryRequired);
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::RollbackFailed);
+        }
+        if self.launcher.launch(&tx.installed_bundle_path).is_err() {
+            let _ = self.fs.transition(tx, Phase::RecoveryRequired);
+            return SupervisorResult::RecoveryRequired(UpdateErrorCode::CandidateLaunchFailed);
         }
         if self.fs.transition(tx, Phase::RolledBack).is_err() {
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::RecoveryStateInconsistent);

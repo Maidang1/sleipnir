@@ -18,40 +18,68 @@ impl FileSystem for FakeFs {
     }
     fn swap(&mut self, _: &Path, _: &Path) -> Result<(), String> {
         self.swaps += 1;
-        if self.swap_fails_at == Some(self.swaps) { Err("swap failed".into()) } else { Ok(()) }
+        if self.swap_fails_at == Some(self.swaps) {
+            Err("swap failed".into())
+        } else {
+            Ok(())
+        }
     }
-    fn health_marker(&mut self) -> Result<Option<HealthMarker>, String> { Ok(self.marker.clone()) }
+    fn health_marker(&mut self) -> Result<Option<HealthMarker>, String> {
+        Ok(self.marker.clone())
+    }
 }
 
 struct FakeProcesses {
+    watch_registered: Result<(), String>,
     old_exited: Result<bool, String>,
     alive: VecDeque<Result<bool, String>>,
     terminate: Result<bool, String>,
 }
 
 impl ProcessWatcher for FakeProcesses {
-    fn wait_for_exit(&mut self, _: u32, _: u64) -> Result<bool, String> { self.old_exited.clone() }
-    fn is_alive(&mut self, _: u32) -> Result<bool, String> { self.alive.pop_front().unwrap_or(Ok(true)) }
-    fn terminate_and_wait(&mut self, _: u32, _: u64) -> Result<bool, String> { self.terminate.clone() }
+    fn register_exit_watch(&mut self, _: u32) -> Result<(), String> {
+        self.watch_registered.clone()
+    }
+    fn wait_for_registered_exit(&mut self, _: u64) -> Result<bool, String> {
+        self.old_exited.clone()
+    }
+    fn is_alive(&mut self, _: u32) -> Result<bool, String> {
+        self.alive.pop_front().unwrap_or(Ok(true))
+    }
+    fn terminate_and_wait(&mut self, _: u32, _: u64) -> Result<bool, String> {
+        self.terminate.clone()
+    }
 }
 
-struct FakeLauncher(Result<u32, String>);
-impl AppLauncher for FakeLauncher {
-    fn launch(&mut self, _: &Path) -> Result<u32, String> { self.0.clone() }
+struct FakeLauncherSequence(VecDeque<Result<u32, String>>);
+impl AppLauncher for FakeLauncherSequence {
+    fn launch(&mut self, _: &Path) -> Result<u32, String> {
+        self.0
+            .pop_front()
+            .unwrap_or_else(|| Err("no launch result".into()))
+    }
 }
 
 #[derive(Default)]
 struct FakeClock(u64);
-impl Clock for FakeClock { fn sleep_one_second(&mut self) { self.0 += 1; } }
+impl Clock for FakeClock {
+    fn sleep_one_second(&mut self) {
+        self.0 += 1;
+    }
+}
 
 fn transaction() -> Transaction {
     let mut tx = Transaction::new(
-        "11111111-1111-4111-8111-111111111111".into(), "ab".repeat(32),
-        "0.3.1".into(), "0.3.2".into(), 42,
+        "11111111-1111-4111-8111-111111111111".into(),
+        "ab".repeat(32),
+        "0.3.1".into(),
+        "0.3.2".into(),
+        42,
         "/Applications/Sleipnir.app".into(),
         "/Applications/.sleipnir-update-11111111-1111-4111-8111-111111111111/candidate.app".into(),
         "/tmp/artifact.dmg".into(),
-    ).unwrap();
+    )
+    .unwrap();
     tx.transition(Phase::Prepared).unwrap();
     tx
 }
@@ -67,11 +95,20 @@ fn marker(tx: &Transaction, pid: u32) -> HealthMarker {
     }
 }
 
-fn harness(tx: &Transaction) -> Supervisor<FakeFs, FakeProcesses, FakeLauncher, FakeClock> {
+fn harness(tx: &Transaction) -> Supervisor<FakeFs, FakeProcesses, FakeLauncherSequence, FakeClock> {
     Supervisor {
-        fs: FakeFs { swaps: 0, marker: Some(marker(tx, 99)), swap_fails_at: None },
-        processes: FakeProcesses { old_exited: Ok(true), alive: VecDeque::new(), terminate: Ok(true) },
-        launcher: FakeLauncher(Ok(99)),
+        fs: FakeFs {
+            swaps: 0,
+            marker: Some(marker(tx, 99)),
+            swap_fails_at: None,
+        },
+        processes: FakeProcesses {
+            watch_registered: Ok(()),
+            old_exited: Ok(true),
+            alive: VecDeque::new(),
+            terminate: Ok(true),
+        },
+        launcher: FakeLauncherSequence(VecDeque::from([Ok(99), Ok(42)])),
         clock: FakeClock::default(),
     }
 }
@@ -91,7 +128,10 @@ fn old_process_timeout_never_swaps() {
     let mut tx = transaction();
     let mut supervisor = harness(&tx);
     supervisor.processes.old_exited = Ok(false);
-    assert_eq!(supervisor.run(&mut tx), SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout));
+    assert_eq!(
+        supervisor.run(&mut tx),
+        SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout)
+    );
     assert_eq!(supervisor.fs.swaps, 0);
 }
 
@@ -99,8 +139,12 @@ fn old_process_timeout_never_swaps() {
 fn launch_failure_rolls_back() {
     let mut tx = transaction();
     let mut supervisor = harness(&tx);
-    supervisor.launcher = FakeLauncher(Err("launch failed".into()));
-    assert_eq!(supervisor.run(&mut tx), SupervisorResult::RolledBack(UpdateErrorCode::CandidateLaunchFailed));
+    supervisor.launcher =
+        FakeLauncherSequence(VecDeque::from([Err("launch failed".into()), Ok(42)]));
+    assert_eq!(
+        supervisor.run(&mut tx),
+        SupervisorResult::RolledBack(UpdateErrorCode::CandidateLaunchFailed)
+    );
     assert_eq!(tx.phase, Phase::RolledBack);
     assert_eq!(supervisor.fs.swaps, 2);
 }
@@ -110,7 +154,10 @@ fn health_timeout_terminates_candidate_and_rolls_back() {
     let mut tx = transaction();
     let mut supervisor = harness(&tx);
     supervisor.fs.marker = None;
-    assert_eq!(supervisor.run(&mut tx), SupervisorResult::RolledBack(UpdateErrorCode::HealthConfirmationTimeout));
+    assert_eq!(
+        supervisor.run(&mut tx),
+        SupervisorResult::RolledBack(UpdateErrorCode::HealthConfirmationTimeout)
+    );
     assert_eq!(supervisor.clock.0, 60);
     assert_eq!(supervisor.fs.swaps, 2);
 }
@@ -121,7 +168,10 @@ fn candidate_that_cannot_stop_is_left_for_recovery() {
     let mut supervisor = harness(&tx);
     supervisor.fs.marker = None;
     supervisor.processes.terminate = Ok(false);
-    assert_eq!(supervisor.run(&mut tx), SupervisorResult::RecoveryRequired(UpdateErrorCode::CandidateTerminationFailed));
+    assert_eq!(
+        supervisor.run(&mut tx),
+        SupervisorResult::RecoveryRequired(UpdateErrorCode::CandidateTerminationFailed)
+    );
     assert_eq!(supervisor.fs.swaps, 1);
     assert_eq!(tx.phase, Phase::RecoveryRequired);
 }
@@ -130,8 +180,12 @@ fn candidate_that_cannot_stop_is_left_for_recovery() {
 fn rollback_swap_failure_preserves_recovery_state() {
     let mut tx = transaction();
     let mut supervisor = harness(&tx);
-    supervisor.launcher = FakeLauncher(Err("launch failed".into()));
+    supervisor.launcher =
+        FakeLauncherSequence(VecDeque::from([Err("launch failed".into()), Ok(42)]));
     supervisor.fs.swap_fails_at = Some(2);
-    assert_eq!(supervisor.run(&mut tx), SupervisorResult::RecoveryRequired(UpdateErrorCode::RollbackFailed));
+    assert_eq!(
+        supervisor.run(&mut tx),
+        SupervisorResult::RecoveryRequired(UpdateErrorCode::RollbackFailed)
+    );
     assert_eq!(tx.phase, Phase::RecoveryRequired);
 }

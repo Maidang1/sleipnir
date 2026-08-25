@@ -36,7 +36,10 @@ pub fn release_urls(manifest: &UpdateManifest) -> Result<ReleaseUrls, VersionPol
     {
         return Err(VersionPolicyError::InvalidReleaseIdentity);
     }
-    let base = format!("https://github.com/{REPO}/releases/download/{}", manifest.tag);
+    let base = format!(
+        "https://github.com/{REPO}/releases/download/{}",
+        manifest.tag
+    );
     let manifest_url = format!("{base}/sleipnir-update-v1.json");
     Ok(ReleaseUrls {
         artifact: format!("{base}/{}", manifest.artifact),
@@ -70,15 +73,27 @@ mod tests {
 
     #[test]
     fn rejects_same_version_and_downgrade() {
-        assert_eq!(validate_upgrade("0.3.2", &manifest("0.3.2")).unwrap_err(), VersionPolicyError::NotNewer);
-        assert_eq!(validate_upgrade("0.3.3", &manifest("0.3.2")).unwrap_err(), VersionPolicyError::NotNewer);
+        assert_eq!(
+            validate_upgrade("0.3.2", &manifest("0.3.2")).unwrap_err(),
+            VersionPolicyError::NotNewer
+        );
+        assert_eq!(
+            validate_upgrade("0.3.3", &manifest("0.3.2")).unwrap_err(),
+            VersionPolicyError::NotNewer
+        );
     }
 
     #[test]
     fn constructs_only_fixed_repository_urls() {
         let urls = release_urls(&manifest("0.3.2")).unwrap();
-        assert_eq!(urls.artifact, "https://github.com/Maidang1/sleipnir/releases/download/v0.3.2/Sleipnir-0.3.2-macos.dmg");
-        assert_eq!(urls.manifest, "https://github.com/Maidang1/sleipnir/releases/download/v0.3.2/sleipnir-update-v1.json");
+        assert_eq!(
+            urls.artifact,
+            "https://github.com/Maidang1/sleipnir/releases/download/v0.3.2/Sleipnir-0.3.2-macos.dmg"
+        );
+        assert_eq!(
+            urls.manifest,
+            "https://github.com/Maidang1/sleipnir/releases/download/v0.3.2/sleipnir-update-v1.json"
+        );
         assert_eq!(urls.signature, format!("{}.sig", urls.manifest));
     }
 }

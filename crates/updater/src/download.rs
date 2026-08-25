@@ -17,12 +17,17 @@ pub struct DownloadError {
 }
 
 impl std::fmt::Display for DownloadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 impl std::error::Error for DownloadError {}
 
 fn download_error(code: DownloadErrorCode, message: impl Into<String>) -> DownloadError {
-    DownloadError { code, message: message.into() }
+    DownloadError {
+        code,
+        message: message.into(),
+    }
 }
 
 pub fn download_verified(
@@ -33,38 +38,61 @@ pub fn download_verified(
     file_name: &str,
 ) -> Result<PathBuf, DownloadError> {
     if file_name.is_empty() || Path::new(file_name).components().count() != 1 {
-        return Err(download_error(DownloadErrorCode::InvalidDestination, "invalid artifact filename"));
+        return Err(download_error(
+            DownloadErrorCode::InvalidDestination,
+            "invalid artifact filename",
+        ));
     }
-    std::fs::create_dir_all(destination_dir).map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+    std::fs::create_dir_all(destination_dir)
+        .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
     let final_path = destination_dir.join(file_name);
     let part_path = destination_dir.join(format!("{file_name}.part"));
     let result = (|| {
-        let mut file = std::fs::File::create(&part_path).map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+        let mut file = std::fs::File::create(&part_path)
+            .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
         let mut hasher = Sha256::new();
         let mut total = 0_u64;
         let mut buffer = [0_u8; 64 * 1024];
         loop {
-            let read = reader.read(&mut buffer).map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
-            if read == 0 { break; }
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+            if read == 0 {
+                break;
+            }
             total += read as u64;
             if total > expected_size {
-                return Err(download_error(DownloadErrorCode::SizeMismatch, "artifact exceeds declared size"));
+                return Err(download_error(
+                    DownloadErrorCode::SizeMismatch,
+                    "artifact exceeds declared size",
+                ));
             }
             hasher.update(&buffer[..read]);
-            file.write_all(&buffer[..read]).map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+            file.write_all(&buffer[..read])
+                .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
         }
         if total != expected_size {
-            return Err(download_error(DownloadErrorCode::SizeMismatch, "artifact size differs from manifest"));
+            return Err(download_error(
+                DownloadErrorCode::SizeMismatch,
+                "artifact size differs from manifest",
+            ));
         }
         let actual = format!("{:x}", hasher.finalize());
         if actual != expected_sha256.to_ascii_lowercase() {
-            return Err(download_error(DownloadErrorCode::HashMismatch, "artifact SHA-256 differs from manifest"));
+            return Err(download_error(
+                DownloadErrorCode::HashMismatch,
+                "artifact SHA-256 differs from manifest",
+            ));
         }
-        file.sync_all().map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
-        std::fs::rename(&part_path, &final_path).map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+        file.sync_all()
+            .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+        std::fs::rename(&part_path, &final_path)
+            .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
         Ok(final_path)
     })();
-    if result.is_err() { let _ = std::fs::remove_file(&part_path); }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part_path);
+    }
     result
 }
 
@@ -98,9 +126,24 @@ mod tests {
     #[test]
     fn rejects_truncated_oversized_and_hash_mismatch_without_partial_file() {
         for (bytes, expected_size, expected_hash, code) in [
-            (&b"short"[..], 6, digest(b"short"), DownloadErrorCode::SizeMismatch),
-            (&b"too-long"[..], 3, digest(b"too-long"), DownloadErrorCode::SizeMismatch),
-            (&b"wrong"[..], 5, digest(b"right"), DownloadErrorCode::HashMismatch),
+            (
+                &b"short"[..],
+                6,
+                digest(b"short"),
+                DownloadErrorCode::SizeMismatch,
+            ),
+            (
+                &b"too-long"[..],
+                3,
+                digest(b"too-long"),
+                DownloadErrorCode::SizeMismatch,
+            ),
+            (
+                &b"wrong"[..],
+                5,
+                digest(b"right"),
+                DownloadErrorCode::HashMismatch,
+            ),
         ] {
             let dir = tempdir().unwrap();
             let error = download_verified(

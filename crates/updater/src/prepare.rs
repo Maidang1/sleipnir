@@ -72,23 +72,47 @@ mod tests {
 
     #[test]
     fn accepts_matching_safe_bundle() {
-        assert_eq!(classify_preflight(&bundle(), "0.3.2"), PreflightDecision::Ready);
+        assert_eq!(
+            classify_preflight(&bundle(), "0.3.2"),
+            PreflightDecision::Ready
+        );
     }
 
     #[test]
     fn rejects_identity_layout_version_and_signature() {
         let mutations: Vec<(fn(&mut BundleFacts), PreflightError)> = vec![
-            (|f| f.bundle_id = "evil.app".into(), PreflightError::BundleIdentifierMismatch),
-            (|f| f.version = "0.3.1".into(), PreflightError::BundleVersionMismatch),
-            (|f| f.executable_exists = false, PreflightError::BundleLayoutInvalid),
-            (|f| f.helper_exists = false, PreflightError::BundleLayoutInvalid),
-            (|f| f.signature_valid = false, PreflightError::BundleSignatureInvalid),
-            (|f| f.critical_paths_inside_bundle = false, PreflightError::BundleLayoutInvalid),
+            (
+                |f| f.bundle_id = "evil.app".into(),
+                PreflightError::BundleIdentifierMismatch,
+            ),
+            (
+                |f| f.version = "0.3.1".into(),
+                PreflightError::BundleVersionMismatch,
+            ),
+            (
+                |f| f.executable_exists = false,
+                PreflightError::BundleLayoutInvalid,
+            ),
+            (
+                |f| f.helper_exists = false,
+                PreflightError::BundleLayoutInvalid,
+            ),
+            (
+                |f| f.signature_valid = false,
+                PreflightError::BundleSignatureInvalid,
+            ),
+            (
+                |f| f.critical_paths_inside_bundle = false,
+                PreflightError::BundleLayoutInvalid,
+            ),
         ];
         for (mutate, expected) in mutations {
             let mut facts = bundle();
             mutate(&mut facts);
-            assert_eq!(classify_preflight(&facts, "0.3.2"), PreflightDecision::Reject(expected));
+            assert_eq!(
+                classify_preflight(&facts, "0.3.2"),
+                PreflightDecision::Reject(expected)
+            );
         }
     }
 
@@ -101,13 +125,22 @@ mod tests {
         ] {
             let mut facts = bundle();
             mutate(&mut facts);
-            assert_eq!(classify_preflight(&facts, "0.3.2"), PreflightDecision::ManualInstallRequired);
+            assert_eq!(
+                classify_preflight(&facts, "0.3.2"),
+                PreflightDecision::ManualInstallRequired
+            );
         }
     }
 
     #[test]
     fn critical_path_must_remain_inside_bundle() {
-        assert!(path_is_within(Path::new("/tmp/Sleipnir.app"), Path::new("/tmp/Sleipnir.app/Contents/MacOS/sleipnir")));
-        assert!(!path_is_within(Path::new("/tmp/Sleipnir.app"), Path::new("/tmp/evil")));
+        assert!(path_is_within(
+            Path::new("/tmp/Sleipnir.app"),
+            Path::new("/tmp/Sleipnir.app/Contents/MacOS/sleipnir")
+        ));
+        assert!(!path_is_within(
+            Path::new("/tmp/Sleipnir.app"),
+            Path::new("/tmp/evil")
+        ));
     }
 }

@@ -16,11 +16,25 @@ unsafe extern "C" {
 }
 
 pub fn swap_paths(first: &Path, second: &Path) -> Result<(), String> {
-    let first = CString::new(first.as_os_str().as_bytes()).map_err(|_| "first path contains NUL".to_string())?;
-    let second = CString::new(second.as_os_str().as_bytes()).map_err(|_| "second path contains NUL".to_string())?;
+    let first = CString::new(first.as_os_str().as_bytes())
+        .map_err(|_| "first path contains NUL".to_string())?;
+    let second = CString::new(second.as_os_str().as_bytes())
+        .map_err(|_| "second path contains NUL".to_string())?;
     // SAFETY: both C strings are NUL terminated and remain alive for the call.
-    let result = unsafe { renameatx_np(AT_FDCWD, first.as_ptr(), AT_FDCWD, second.as_ptr(), RENAME_SWAP) };
-    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error().to_string()) }
+    let result = unsafe {
+        renameatx_np(
+            AT_FDCWD,
+            first.as_ptr(),
+            AT_FDCWD,
+            second.as_ptr(),
+            RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().to_string())
+    }
 }
 
 #[cfg(test)]
