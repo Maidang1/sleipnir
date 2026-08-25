@@ -16,6 +16,7 @@ mod run_ledger_panel;
 mod session;
 mod tab_convert;
 mod term_element;
+mod update_model;
 
 pub use assets::AgentAssets;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
@@ -27,8 +28,7 @@ pub use app_shell::{
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
     ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight, ToggleBroadcast,
     ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    ToggleQuickSelect, ToggleRunLedger, UpdateUiState, open_sleipnir_window,
-    try_open_sleipnir_window,
+    ToggleQuickSelect, ToggleRunLedger, open_sleipnir_window, try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
@@ -44,6 +44,7 @@ pub use pane_tree::{
 pub use run_ledger_global::RunLedgerGlobal;
 pub use session::{SessionFile, SessionNode, SessionTab, load_session, save_session, session_path};
 pub use term_element::TermElement;
+pub use update_model::{AvailableUpdate, UpdateModel, UpdateUiState};
 
 use collections::HashMap;
 use gpui::Pixels;

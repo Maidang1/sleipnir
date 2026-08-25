@@ -58,10 +58,14 @@ impl ProcessWatcher for FakeProcesses {
     }
 }
 
-struct FakeLauncherSequence(VecDeque<Result<u32, String>>);
+struct FakeLauncherSequence {
+    results: VecDeque<Result<u32, String>>,
+    launches: usize,
+}
 impl AppLauncher for FakeLauncherSequence {
     fn launch(&mut self, _: &Path) -> Result<u32, String> {
-        self.0
+        self.launches += 1;
+        self.results
             .pop_front()
             .unwrap_or_else(|| Err("no launch result".into()))
     }
@@ -116,7 +120,10 @@ fn harness(tx: &Transaction) -> Supervisor<FakeFs, FakeProcesses, FakeLauncherSe
             alive: VecDeque::new(),
             terminate: Ok(true),
         },
-        launcher: FakeLauncherSequence(VecDeque::from([Ok(99), Ok(42)])),
+        launcher: FakeLauncherSequence {
+            results: VecDeque::from([Ok(99), Ok(42)]),
+            launches: 0,
+        },
         clock: FakeClock::default(),
     }
 }
@@ -146,11 +153,25 @@ fn old_process_timeout_never_swaps() {
 }
 
 #[test]
+fn swap_failure_relaunches_untouched_old_application() {
+    let mut tx = transaction();
+    let mut supervisor = harness(&tx);
+    supervisor.fs.swap_fails_at = Some(1);
+    assert_eq!(
+        supervisor.run(&mut tx),
+        SupervisorResult::Stopped(UpdateErrorCode::AtomicSwapFailed)
+    );
+    assert_eq!(supervisor.launcher.launches, 1);
+}
+
+#[test]
 fn launch_failure_rolls_back() {
     let mut tx = transaction();
     let mut supervisor = harness(&tx);
-    supervisor.launcher =
-        FakeLauncherSequence(VecDeque::from([Err("launch failed".into()), Ok(42)]));
+    supervisor.launcher = FakeLauncherSequence {
+        results: VecDeque::from([Err("launch failed".into()), Ok(42)]),
+        launches: 0,
+    };
     assert_eq!(
         supervisor.run(&mut tx),
         SupervisorResult::RolledBack(UpdateErrorCode::CandidateLaunchFailed)
@@ -190,8 +211,10 @@ fn candidate_that_cannot_stop_is_left_for_recovery() {
 fn rollback_swap_failure_preserves_recovery_state() {
     let mut tx = transaction();
     let mut supervisor = harness(&tx);
-    supervisor.launcher =
-        FakeLauncherSequence(VecDeque::from([Err("launch failed".into()), Ok(42)]));
+    supervisor.launcher = FakeLauncherSequence {
+        results: VecDeque::from([Err("launch failed".into()), Ok(42)]),
+        launches: 0,
+    };
     supervisor.fs.swap_fails_at = Some(2);
     assert_eq!(
         supervisor.run(&mut tx),

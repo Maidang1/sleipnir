@@ -15,7 +15,6 @@ use sleipnir_settings::{
 };
 use std::path::PathBuf;
 
-use crate::TermView;
 use crate::chrome::{ChromeGeometry, ChromeTokens, active_after_close};
 use crate::command_palette::{
     CommandId, CommandItem, commands as palette_commands, filter_commands,
@@ -30,6 +29,7 @@ use crate::session::{
     sanitize_session, save_session, session_path,
 };
 use crate::tab_convert::{TabView, extract_pane, merge_tab};
+use crate::{AvailableUpdate, TermView, UpdateModel, UpdateUiState};
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
 fn appearance_of(a: gpui::WindowAppearance) -> Appearance {
@@ -278,38 +278,6 @@ struct DividerRect {
     hit: Bounds<Pixels>,
 }
 
-/// Summary of an available release, kept UI-side (decoupled from `updater`).
-#[derive(Clone, Debug)]
-pub struct AvailableUpdate {
-    pub version: String,
-    pub tag: String,
-    pub notes: String,
-    artifact_url: String,
-    sha256_url: String,
-    expected_sha256: Option<String>,
-    expected_size: Option<u64>,
-}
-
-/// Auto-update lifecycle, surfaced through the notification bar.
-#[derive(Clone, Debug, Default)]
-pub enum UpdateUiState {
-    /// No update activity to show.
-    #[default]
-    Idle,
-    /// A background/manual check is running.
-    Checking,
-    /// Running build is current (only shown after a manual check).
-    UpToDate,
-    /// A newer release is available to download.
-    Available(AvailableUpdate),
-    /// Downloading + verifying the release artifact.
-    Downloading(AvailableUpdate),
-    /// Verified and staged; a restart will apply it.
-    ReadyToRestart(AvailableUpdate),
-    /// Something went wrong (message shown to the user).
-    Failed(String),
-}
-
 /// Window root: unified chrome band + active terminal.
 pub struct AppShell {
     pub(crate) tabs: Vec<Tab>,
@@ -338,12 +306,8 @@ pub struct AppShell {
     settings_section: SettingsSection,
     /// Type-to-filter query for the theme picker (empty = all).
     theme_query: String,
-    /// Auto-update lifecycle state (drives the update dialog).
-    update_state: UpdateUiState,
-    /// Whether the update dialog is visible.
+    /// Whether the process-wide update dialog is visible in this window.
     update_open: bool,
-    /// Verified update dmg path, ready to install on restart.
-    staged_dmg: Option<std::path::PathBuf>,
     /// Command palette open state (M9).
     palette_open: bool,
     palette_query: String,
@@ -506,6 +470,7 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
 
 impl AppShell {
     fn construct(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        UpdateModel::init(cx);
         let mut shell = Self {
             tabs: Vec::new(),
             active: 0,
@@ -522,9 +487,7 @@ impl AppShell {
             settings_open: false,
             settings_section: SettingsSection::Theme,
             theme_query: String::new(),
-            update_state: UpdateUiState::Idle,
             update_open: false,
-            staged_dmg: None,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -2801,12 +2764,12 @@ impl AppShell {
     /// Query GitHub for a newer release; result is shown in the update dialog.
     fn spawn_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
-            self.update_state,
+            cx.global::<UpdateModel>().state,
             UpdateUiState::Checking | UpdateUiState::Downloading(_)
         ) {
             return;
         }
-        self.update_state = UpdateUiState::Checking;
+        cx.global_mut::<UpdateModel>().state = UpdateUiState::Checking;
         cx.notify();
 
         let current = release_channel::AppVersion::global(cx).to_string();
@@ -2819,22 +2782,23 @@ impl AppShell {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(updater::UpdateStatus::Available(info)) => {
-                        this.update_state = UpdateUiState::Available(AvailableUpdate {
-                            version: info.version.to_string(),
-                            tag: info.tag,
-                            notes: info.notes,
-                            artifact_url: info.artifact_url,
-                            sha256_url: info.sha256_url,
-                            expected_sha256: info.expected_sha256,
-                            expected_size: info.expected_size,
-                        });
+                        cx.global_mut::<UpdateModel>().state =
+                            UpdateUiState::Available(AvailableUpdate {
+                                version: info.version.to_string(),
+                                tag: info.tag,
+                                notes: info.notes,
+                                artifact_url: info.artifact_url,
+                                sha256_url: info.sha256_url,
+                                expected_sha256: info.expected_sha256,
+                                expected_size: info.expected_size,
+                            });
                     }
                     Ok(updater::UpdateStatus::UpToDate) => {
-                        this.update_state = UpdateUiState::UpToDate;
+                        cx.global_mut::<UpdateModel>().state = UpdateUiState::UpToDate;
                     }
                     Err(err) => {
                         log::warn!("update check failed: {err:#}");
-                        this.update_state =
+                        cx.global_mut::<UpdateModel>().state =
                             UpdateUiState::Failed(format!("Update check failed: {err}"));
                     }
                 }
@@ -2847,18 +2811,18 @@ impl AppShell {
 
     /// Download + verify the available release, then stage it for restart.
     fn start_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let update = match &self.update_state {
+        let update = match &cx.global::<UpdateModel>().state {
             UpdateUiState::Available(u) => u.clone(),
             _ => return,
         };
-        self.update_state = UpdateUiState::Downloading(update.clone());
+        cx.global_mut::<UpdateModel>().state = UpdateUiState::Downloading(update.clone());
         cx.notify();
 
         let info = updater::ReleaseInfo {
             version: match updater::parse_tag(&update.tag) {
                 Ok(v) => v,
                 Err(err) => {
-                    self.update_state = UpdateUiState::Failed(format!("{err}"));
+                    cx.global_mut::<UpdateModel>().state = UpdateUiState::Failed(format!("{err}"));
                     cx.notify();
                     return;
                 }
@@ -2881,12 +2845,13 @@ impl AppShell {
                     Ok(dmg_path) => {
                         // Remember where the verified dmg landed so a restart
                         // can install it.
-                        this.staged_dmg = Some(dmg_path);
-                        this.update_state = UpdateUiState::ReadyToRestart(update.clone());
+                        cx.global_mut::<UpdateModel>().staged_dmg = Some(dmg_path);
+                        cx.global_mut::<UpdateModel>().state =
+                            UpdateUiState::ReadyToRestart(update.clone());
                     }
                     Err(err) => {
                         log::warn!("update download failed: {err:#}");
-                        this.update_state =
+                        cx.global_mut::<UpdateModel>().state =
                             UpdateUiState::Failed(format!("Download failed: {err}"));
                     }
                 }
@@ -2900,15 +2865,26 @@ impl AppShell {
     /// Hand the staged update to the transactional supervisor and quit only
     /// after it has durably registered its old-process exit watch.
     fn install_and_restart(&mut self, cx: &mut Context<Self>) {
-        let Some(dmg) = self.staged_dmg.clone() else {
+        let Some(dmg) = cx.global::<UpdateModel>().staged_dmg.clone() else {
             return;
+        };
+        let ready_update = match &cx.global::<UpdateModel>().state {
+            UpdateUiState::ReadyToRestart(update) => Some(update.clone()),
+            _ => None,
         };
         match updater::current_app_bundle_path() {
             Some(app) => match updater::install_and_relaunch(&dmg, &app) {
-                Ok(()) => cx.quit(),
+                Ok(()) => {
+                    if let Some(update) = ready_update {
+                        cx.global_mut::<UpdateModel>().state =
+                            UpdateUiState::WaitingForHelper(update);
+                    }
+                    cx.quit();
+                }
                 Err(err) => {
                     log::warn!("install failed: {err:#}");
-                    self.update_state = UpdateUiState::Failed(format!("Install failed: {err}"));
+                    cx.global_mut::<UpdateModel>().state =
+                        UpdateUiState::Failed(format!("Install failed: {err}"));
                     cx.open_url(updater::RELEASES_PAGE);
                     cx.notify();
                 }
@@ -2959,7 +2935,7 @@ impl AppShell {
 
         // Headline + detail + action buttons per state.
         let (headline, detail, buttons): (SharedString, SharedString, Vec<gpui::AnyElement>) =
-            match &self.update_state {
+            match &cx.global::<UpdateModel>().state {
                 UpdateUiState::Idle | UpdateUiState::Checking => (
                     "Checking for updates…".into(),
                     format!("Current version {current}").into(),
@@ -3051,6 +3027,11 @@ impl AppShell {
                         )
                         .into_any_element(),
                     ],
+                ),
+                UpdateUiState::WaitingForHelper(u) => (
+                    "Restarting…".into(),
+                    format!("Sleipnir {} will open after the update is verified.", u.version).into(),
+                    Vec::new(),
                 ),
                 UpdateUiState::Failed(msg) => (
                     "Update failed".into(),
