@@ -2871,36 +2871,43 @@ impl AppShell {
 
     /// Hand the staged update to the transactional supervisor and quit only
     /// after it has durably registered its old-process exit watch.
-    fn install_and_restart(&mut self, cx: &mut Context<Self>) {
+    fn install_and_restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dmg) = cx.global::<UpdateModel>().staged_dmg.clone() else {
             return;
         };
-        let ready_update = match &cx.global::<UpdateModel>().state {
-            UpdateUiState::ReadyToRestart(update) => Some(update.clone()),
-            _ => None,
+        let update = match &cx.global::<UpdateModel>().state {
+            UpdateUiState::ReadyToRestart(update) => update.clone(),
+            _ => return,
         };
-        match updater::current_app_bundle_path() {
-            Some(app) => match updater::install_and_relaunch(&dmg, &app) {
-                Ok(()) => {
-                    if let Some(update) = ready_update {
-                        cx.global_mut::<UpdateModel>().state =
-                            UpdateUiState::WaitingForHelper(update);
-                    }
-                    cx.quit();
-                }
+        let Some(app) = updater::current_app_bundle_path() else {
+            cx.global_mut::<UpdateModel>().state = UpdateUiState::ManualInstallRequired {
+                artifact: dmg,
+                message: "This build is not running from an application bundle.".into(),
+            };
+            cx.notify();
+            return;
+        };
+        cx.global_mut::<UpdateModel>().state = UpdateUiState::WaitingForHelper(update);
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let install_dmg = dmg.clone();
+            let result = cx
+                .background_spawn(async move { updater::install_and_relaunch(&install_dmg, &app) })
+                .await;
+            this.update(cx, |_this, cx| match result {
+                Ok(()) => cx.quit(),
                 Err(err) => {
                     log::warn!("install failed: {err:#}");
-                    cx.global_mut::<UpdateModel>().state =
-                        UpdateUiState::Failed(format!("Install failed: {err}"));
-                    cx.open_url(updater::RELEASES_PAGE);
+                    cx.global_mut::<UpdateModel>().state = UpdateUiState::ManualInstallRequired {
+                        artifact: dmg,
+                        message: format!("Automatic install failed: {err}"),
+                    };
                     cx.notify();
                 }
-            },
-            None => {
-                // Dev build or non-bundle launch: manual install.
-                cx.open_url(updater::RELEASES_PAGE);
-            }
-        }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A pill button for the update dialog.
@@ -3030,7 +3037,7 @@ impl AppShell {
                             tokens,
                             true,
                             cx,
-                            |this, _, cx| this.install_and_restart(cx),
+                            |this, window, cx| this.install_and_restart(window, cx),
                         )
                         .into_any_element(),
                     ],
