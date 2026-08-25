@@ -151,6 +151,37 @@ pub fn wait_for_supervisor_ready(
     Ok(false)
 }
 
+pub fn pending_transaction() -> Result<Option<(PathBuf, Transaction)>, String> {
+    let root = updates_root()?;
+    let Some(path) = read_active_pointer(&root)? else {
+        return Ok(None);
+    };
+    let transaction = crate::transaction::load(&path).map_err(|e| e.to_string())?;
+    Ok(Some((path, transaction)))
+}
+
+pub fn acknowledge_active_outcome() -> Result<(), String> {
+    let root = updates_root()?;
+    let Some(path) = read_active_pointer(&root)? else {
+        return Ok(());
+    };
+    let transaction = crate::transaction::load(&path).map_err(|e| e.to_string())?;
+    if !matches!(
+        transaction.phase,
+        Phase::Committed
+            | Phase::RolledBack
+            | Phase::ManualInstallRequired
+            | Phase::RecoveryRequired
+    ) {
+        return Err("active update has not reached a final outcome".into());
+    }
+    match std::fs::remove_file(root.join("active.json")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub fn write_health_marker(
     transaction_path: &Path,
     version: &str,

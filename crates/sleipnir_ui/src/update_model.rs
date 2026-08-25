@@ -21,6 +21,17 @@ pub enum UpdateUiState {
     Downloading(AvailableUpdate),
     ReadyToRestart(AvailableUpdate),
     WaitingForHelper(AvailableUpdate),
+    Updated {
+        version: String,
+    },
+    RolledBack {
+        from: String,
+        to: String,
+        reason: String,
+    },
+    RecoveryRequired {
+        message: String,
+    },
     Failed(String),
 }
 
@@ -35,8 +46,36 @@ impl Global for UpdateModel {}
 impl UpdateModel {
     pub fn init(cx: &mut App) {
         if !cx.has_global::<Self>() {
-            cx.set_global(Self::default());
+            cx.set_global(Self {
+                state: outcome_state(),
+                staged_dmg: None,
+            });
         }
+    }
+}
+
+fn outcome_state() -> UpdateUiState {
+    let Ok(Some((_, transaction))) = updater::install::pending_transaction() else {
+        return UpdateUiState::Idle;
+    };
+    match transaction.phase {
+        updater::transaction::Phase::Committed => UpdateUiState::Updated {
+            version: transaction.new_version,
+        },
+        updater::transaction::Phase::RolledBack => UpdateUiState::RolledBack {
+            from: transaction.new_version,
+            to: transaction.old_version,
+            reason: transaction
+                .os_error
+                .unwrap_or_else(|| "The new version did not become healthy.".into()),
+        },
+        updater::transaction::Phase::RecoveryRequired => UpdateUiState::RecoveryRequired {
+            message: transaction.os_error.unwrap_or_else(|| {
+                "The update needs manual recovery. No retained application bundle was deleted."
+                    .into()
+            }),
+        },
+        _ => UpdateUiState::Idle,
     }
 }
 

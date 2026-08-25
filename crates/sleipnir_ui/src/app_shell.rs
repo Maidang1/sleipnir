@@ -471,6 +471,12 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
 impl AppShell {
     fn construct(window: &mut Window, cx: &mut Context<Self>) -> Self {
         UpdateModel::init(cx);
+        let has_update_outcome = matches!(
+            cx.global::<UpdateModel>().state,
+            UpdateUiState::Updated { .. }
+                | UpdateUiState::RolledBack { .. }
+                | UpdateUiState::RecoveryRequired { .. }
+        );
         let mut shell = Self {
             tabs: Vec::new(),
             active: 0,
@@ -487,7 +493,7 @@ impl AppShell {
             settings_open: false,
             settings_section: SettingsSection::Theme,
             theme_query: String::new(),
-            update_open: false,
+            update_open: has_update_outcome,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -3032,6 +3038,36 @@ impl AppShell {
                     "Restarting…".into(),
                     format!("Sleipnir {} will open after the update is verified.", u.version).into(),
                     Vec::new(),
+                ),
+                UpdateUiState::Updated { version } => (
+                    "Update complete".into(),
+                    format!("Sleipnir was updated to {version}.").into(),
+                    vec![self.update_button("upd-ack-success", "Close", tokens, true, cx, |this, _, cx| {
+                        let _ = updater::install::acknowledge_active_outcome();
+                        cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
+                        this.close_update(cx);
+                    }).into_any_element()],
+                ),
+                UpdateUiState::RolledBack { from, to, reason } => (
+                    "Update couldn’t be completed".into(),
+                    format!("Sleipnir {from} failed to start ({reason}), so version {to} was restored.").into(),
+                    vec![self.update_button("upd-ack-rollback", "Close", tokens, true, cx, |this, _, cx| {
+                        let _ = updater::install::acknowledge_active_outcome();
+                        cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
+                        this.close_update(cx);
+                    }).into_any_element()],
+                ),
+                UpdateUiState::RecoveryRequired { message } => (
+                    "Update needs manual recovery".into(),
+                    message.clone().into(),
+                    vec![
+                        self.update_button("upd-recovery-releases", "Open Releases", tokens, false, cx, |_, _, cx| cx.open_url(updater::RELEASES_PAGE)).into_any_element(),
+                        self.update_button("upd-ack-recovery", "Close", tokens, true, cx, |this, _, cx| {
+                            let _ = updater::install::acknowledge_active_outcome();
+                            cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
+                            this.close_update(cx);
+                        }).into_any_element(),
+                    ],
                 ),
                 UpdateUiState::Failed(msg) => (
                     "Update failed".into(),
