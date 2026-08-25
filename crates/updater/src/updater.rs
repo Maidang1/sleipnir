@@ -10,11 +10,9 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-#[cfg(target_os = "macos")]
-use std::io::Write as _;
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 
 /// GitHub `owner/repo` slug used for the releases API and download URLs.
 pub const REPO: &str = "Maidang1/sleipnir";
@@ -360,18 +358,54 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
         );
     }
 
-    let pid = std::process::id();
-    let helper = write_helper_script(
-        pid,
-        &new_app,
+    // Materialize the candidate beside the installed app so RENAME_SWAP is
+    // same-volume and atomic. Failure here leaves the running app untouched.
+    let root = crate::install::updates_root().map_err(anyhow::Error::msg)?;
+    let (transaction_path, transaction) = crate::install::create_transaction(
+        &root,
         app_bundle,
-        dmg_path.parent().unwrap_or(Path::new("/tmp")),
-    )?;
+        dmg_path,
+        env!("CARGO_PKG_VERSION"),
+        &inner_bundle_version(&new_app)?,
+        std::process::id(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let candidate = &transaction.adjacent_candidate_path;
+    let candidate_parent = candidate
+        .parent()
+        .ok_or_else(|| anyhow!("candidate path has no parent"))?;
+    std::fs::create_dir_all(candidate_parent)
+        .with_context(|| format!("create adjacent staging {}", candidate_parent.display()))?;
+    let _ = std::fs::remove_dir_all(candidate);
+    let status = std::process::Command::new("/usr/bin/ditto")
+        .arg(&new_app)
+        .arg(candidate)
+        .status()
+        .context("copy candidate beside installed app")?;
+    if !status.success() {
+        bail!(
+            "cannot stage update beside {}; install manually",
+            app_bundle.display()
+        );
+    }
 
-    std::process::Command::new("/bin/sh")
-        .arg(&helper)
-        .spawn()
-        .context("spawn update helper")?;
+    let packaged_helper = candidate.join("Contents/MacOS/sleipnir-update-helper");
+    if !packaged_helper.is_file() {
+        bail!("candidate bundle is missing sleipnir-update-helper");
+    }
+    let transaction_dir = transaction_path.parent().expect("transaction has parent");
+    let helper = transaction_dir.join("update-helper");
+    std::fs::copy(&packaged_helper, &helper).context("copy update supervisor")?;
+    let mut permissions = std::fs::metadata(&helper)?.permissions();
+    use std::os::unix::fs::PermissionsExt as _;
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&helper, permissions)?;
+    crate::install::launch_supervisor(&helper, &transaction_path).map_err(anyhow::Error::msg)?;
+    if !crate::install::wait_for_supervisor_ready(&transaction_path, Duration::from_secs(5))
+        .map_err(anyhow::Error::msg)?
+    {
+        bail!("update supervisor did not become ready");
+    }
     Ok(())
 }
 
@@ -387,72 +421,23 @@ fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
     bail!("no .app bundle found in {}", dir.display())
 }
 
-/// Write a detached shell script that performs the swap-and-relaunch.
 #[cfg(target_os = "macos")]
-fn write_helper_script(
-    pid: u32,
-    new_app: &Path,
-    old_app: &Path,
-    tmp_dir: &Path,
-) -> Result<PathBuf> {
-    let script_path = tmp_dir.join("sleipnir-update-helper.sh");
-    let new_app = shell_quote(new_app);
-    let old_app = shell_quote(old_app);
-    let releases = RELEASES_PAGE;
-
-    let body = format!(
-        r#"#!/bin/sh
-# Sleipnir auto-update helper — waits for the app to quit, then swaps bundles.
-set -u
-
-# Wait (bounded) for the parent process to exit.
-i=0
-while kill -0 {pid} 2>/dev/null; do
-  sleep 0.2
-  i=$((i+1))
-  if [ "$i" -gt 300 ]; then
-    break
-  fi
-done
-
-NEW={new_app}
-OLD={old_app}
-BACKUP="$OLD.bak"
-
-# Safe swap: backup old, move new into place, remove backup on success.
-if mv "$OLD" "$BACKUP" 2>/dev/null; then
-  if mv "$NEW" "$OLD" 2>/dev/null; then
-    # Clear quarantine so Gatekeeper does not block the freshly-moved bundle.
-    xattr -cr "$OLD" 2>/dev/null || true
-    rm -rf "$BACKUP" 2>/dev/null || true
-    open "$OLD"
-  else
-    # mv failed: restore backup
-    mv "$BACKUP" "$OLD" 2>/dev/null || true
-    open "{releases}"
-  fi
-else
-  # Permission or IO failure — fall back to a manual install.
-  open "{releases}"
-fi
-"#
-    );
-
-    let mut file = std::fs::File::create(&script_path)
-        .with_context(|| format!("create helper script {}", script_path.display()))?;
-    file.write_all(body.as_bytes())
-        .context("write helper script")?;
-    let mut perms = file.metadata()?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&script_path, perms).context("chmod helper script")?;
-    Ok(script_path)
-}
-
-/// Single-quote a path for safe embedding in a POSIX shell script.
-#[cfg(target_os = "macos")]
-fn shell_quote(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    format!("'{}'", s.replace('\'', "'\\''"))
+fn inner_bundle_version(app: &Path) -> Result<String> {
+    let output = std::process::Command::new("/usr/bin/defaults")
+        .arg("read")
+        .arg(app.join("Contents/Info"))
+        .arg("CFBundleShortVersionString")
+        .output()
+        .context("read candidate bundle version")?;
+    if !output.status.success() {
+        bail!("candidate bundle version is unreadable");
+    }
+    let version = String::from_utf8(output.stdout)
+        .context("candidate bundle version is not UTF-8")?
+        .trim()
+        .to_string();
+    parse_tag(&version)?;
+    Ok(version)
 }
 
 #[cfg(test)]
@@ -572,8 +557,10 @@ mod tests {
     #[test]
     fn production_install_path_uses_rust_supervisor_not_shell_script() {
         let src = include_str!("updater.rs");
-        assert!(!src.contains("fn write_helper_script("));
-        assert!(!src.contains("/bin/sh"));
+        let forbidden_shell_helper = ["fn write_", "helper_script("].concat();
+        assert!(!src.contains(&forbidden_shell_helper));
+        let forbidden_shell = ["/bin/", "sh"].concat();
+        assert!(!src.contains(&forbidden_shell));
         assert!(src.contains("launch_supervisor"));
         assert!(src.contains("wait_for_supervisor_ready"));
     }
