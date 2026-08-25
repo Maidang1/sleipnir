@@ -286,16 +286,16 @@ mod tests {
     use tempfile::tempdir;
 
     fn transaction() -> Transaction {
+        let root = std::env::current_dir().unwrap();
         Transaction::new(
             "11111111-1111-4111-8111-111111111111".into(),
             "ab".repeat(32),
             "0.3.1".into(),
             "0.3.2".into(),
             42,
-            "/Applications/Sleipnir.app".into(),
-            "/Applications/.sleipnir-update-11111111-1111-4111-8111-111111111111/candidate.app"
-                .into(),
-            "/tmp/Sleipnir-0.3.2.dmg".into(),
+            root.join("Sleipnir.app"),
+            root.join(".sleipnir-update-11111111-1111-4111-8111-111111111111/candidate.app"),
+            root.join("Sleipnir-0.3.2.dmg"),
         )
         .unwrap()
     }
