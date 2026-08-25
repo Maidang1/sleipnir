@@ -2897,7 +2897,8 @@ impl AppShell {
         .detach();
     }
 
-    /// Install the staged update and relaunch, or fall back to the releases page.
+    /// Hand the staged update to the transactional supervisor and quit only
+    /// after it has durably registered its old-process exit watch.
     fn install_and_restart(&mut self, cx: &mut Context<Self>) {
         let Some(dmg) = self.staged_dmg.clone() else {
             return;
@@ -3007,7 +3008,7 @@ impl AppShell {
                         .into_any_element(),
                         self.update_button(
                             "upd-install",
-                            "Download & Install",
+                            "Download Update",
                             tokens,
                             true,
                             cx,
@@ -3024,7 +3025,7 @@ impl AppShell {
                 UpdateUiState::ReadyToRestart(u) => (
                     "Ready to install".into(),
                     format!(
-                        "Sleipnir {} is verified. Restart to finish updating.",
+                        "Sleipnir {} is downloaded and verified. Restarting will close running terminal processes.",
                         u.version
                     )
                     .into(),
