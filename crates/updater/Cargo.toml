@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/updater.rs"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -22,3 +22,4 @@ ureq.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
