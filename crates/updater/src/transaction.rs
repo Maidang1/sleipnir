@@ -177,11 +177,11 @@ impl Transaction {
             (Downloaded, Prepared)
                 | (
                     Prepared,
-                    WaitingForOldExit | Cancelled | ManualInstallRequired
+                    WaitingForOldExit | Cancelled | ManualInstallRequired | RecoveryRequired
                 )
                 | (
                     WaitingForOldExit,
-                    Swapping | Cancelled | ManualInstallRequired
+                    Swapping | Cancelled | ManualInstallRequired | RecoveryRequired
                 )
                 | (
                     Swapping,
@@ -202,6 +202,11 @@ impl Transaction {
         }
         self.phase = next;
         Ok(())
+    }
+
+    pub fn fail(&mut self, code: UpdateErrorCode, message: impl Into<String>) {
+        self.error_code = Some(code);
+        self.os_error = Some(message.into());
     }
 }
 

@@ -2,6 +2,7 @@ use std::path::Path;
 use updater::transaction::{HealthMarker, Phase, Transaction, TransactionError, UpdateErrorCode};
 
 pub trait FileSystem {
+    fn persist(&mut self, tx: &Transaction) -> Result<(), TransactionError>;
     fn transition(&mut self, tx: &mut Transaction, next: Phase) -> Result<(), TransactionError>;
     fn swap(&mut self, installed: &Path, adjacent: &Path) -> Result<(), String>;
     fn health_marker(&mut self) -> Result<Option<HealthMarker>, String>;
@@ -39,6 +40,20 @@ pub struct Supervisor<F, P, L, C> {
 
 impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P, L, C> {
     pub fn run(&mut self, tx: &mut Transaction) -> SupervisorResult {
+        let result = self.run_inner(tx);
+        match result {
+            SupervisorResult::Committed => {}
+            SupervisorResult::RolledBack(code)
+            | SupervisorResult::Stopped(code)
+            | SupervisorResult::RecoveryRequired(code) => {
+                tx.fail(code, format!("{code:?}"));
+                let _ = self.fs.persist(tx);
+            }
+        }
+        result
+    }
+
+    fn run_inner(&mut self, tx: &mut Transaction) -> SupervisorResult {
         if !matches!(tx.phase, Phase::Prepared | Phase::WaitingForOldExit) {
             return SupervisorResult::RecoveryRequired(UpdateErrorCode::RecoveryStateInconsistent);
         }

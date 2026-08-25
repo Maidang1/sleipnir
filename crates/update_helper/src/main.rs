@@ -15,6 +15,10 @@ struct RealFileSystem {
 }
 
 impl FileSystem for RealFileSystem {
+    fn persist(&mut self, tx: &Transaction) -> Result<(), TransactionError> {
+        transaction::save_atomic(&self.transaction_path, tx)
+    }
+
     fn transition(&mut self, tx: &mut Transaction, next: Phase) -> Result<(), TransactionError> {
         tx.transition(next)?;
         transaction::save_atomic(&self.transaction_path, tx)

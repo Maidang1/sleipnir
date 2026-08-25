@@ -14,6 +14,9 @@ struct FakeFs {
 }
 
 impl FileSystem for FakeFs {
+    fn persist(&mut self, _: &Transaction) -> Result<(), TransactionError> {
+        Ok(())
+    }
     fn transition(&mut self, tx: &mut Transaction, next: Phase) -> Result<(), TransactionError> {
         if next == Phase::WaitingForOldExit {
             self.observed_helper_ready = tx.helper_pid.is_some();
@@ -139,6 +142,7 @@ fn old_process_timeout_never_swaps() {
         SupervisorResult::Stopped(UpdateErrorCode::OldProcessExitTimeout)
     );
     assert_eq!(supervisor.fs.swaps, 0);
+    assert_eq!(tx.error_code, Some(UpdateErrorCode::OldProcessExitTimeout));
 }
 
 #[test]
