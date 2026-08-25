@@ -63,7 +63,8 @@ MANIFEST_SIGNATURE="${MANIFEST}.sig"
     --version "${VERSION}" \
     --dmg "${DMG}" \
     --output "${MANIFEST}" \
-    --signature "${MANIFEST_SIGNATURE}"
+    --signature "${MANIFEST_SIGNATURE}" \
+    --public-key "${ROOT}/resources/update-signing-public.pem"
 test -s "${MANIFEST}" && test -s "${MANIFEST_SIGNATURE}"
 
 # ── Create / update GitHub Release ───────────────────────────────────────────

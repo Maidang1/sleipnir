@@ -17,6 +17,7 @@ def main() -> int:
     parser.add_argument("--dmg", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--signature", type=Path, required=True)
+    parser.add_argument("--public-key", type=Path)
     args = parser.parse_args()
 
     payload = {
@@ -47,6 +48,11 @@ def main() -> int:
             ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key_path), "-in", str(args.output), "-out", str(args.signature)],
             check=True,
         )
+        if args.public_key:
+            subprocess.run(
+                ["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(args.public_key), "-in", str(args.output), "-sigfile", str(args.signature)],
+                check=True,
+            )
     finally:
         key_path.unlink(missing_ok=True)
     return 0

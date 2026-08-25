@@ -2,10 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::transaction::{HealthMarker, Phase, Transaction, TransactionError, save_atomic};
+#[cfg(target_os = "macos")]
 use rand::RngCore as _;
 use std::fs::OpenOptions;
 use std::io::Write as _;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -41,7 +44,9 @@ pub fn write_active_pointer(root: &Path, transaction_path: &Path) -> Result<(), 
     let tmp = root.join(format!("active-{}.json.tmp", std::process::id()));
     let path = root.join("active.json");
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
+    options.write(true).create_new(true);
+    #[cfg(target_os = "macos")]
+    options.mode(0o600);
     let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
@@ -86,6 +91,7 @@ pub fn updates_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "macOS application support directory is unavailable".to_string())
 }
 
+#[cfg(target_os = "macos")]
 pub fn create_transaction(
     root: &Path,
     installed_app: &Path,
@@ -133,17 +139,15 @@ pub fn create_transaction(
     Ok((path, transaction))
 }
 
+#[cfg(target_os = "macos")]
 pub fn launch_supervisor(helper: &Path, transaction_path: &Path) -> Result<(), String> {
     let log_path = transaction_path
         .parent()
         .ok_or_else(|| "transaction path has no parent".to_string())?
         .join("update.log");
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&log_path)
-        .map_err(|e| e.to_string())?;
+    let mut log_options = OpenOptions::new();
+    log_options.create(true).append(true).mode(0o600);
+    let stdout = log_options.open(&log_path).map_err(|e| e.to_string())?;
     let stderr = stdout.try_clone().map_err(|e| e.to_string())?;
     Command::new(helper)
         .arg("supervise")
@@ -181,6 +185,14 @@ pub fn pending_transaction() -> Result<Option<(PathBuf, Transaction)>, String> {
     Ok(Some((path, transaction)))
 }
 
+pub fn clear_active_pointer(root: &Path) -> Result<(), String> {
+    match std::fs::remove_file(root.join("active.json")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub fn acknowledge_active_outcome() -> Result<(), String> {
     let root = updates_root()?;
     let Some(path) = read_active_pointer(&root)? else {
@@ -196,11 +208,7 @@ pub fn acknowledge_active_outcome() -> Result<(), String> {
     ) {
         return Err("active update has not reached a final outcome".into());
     }
-    match std::fs::remove_file(root.join("active.json")) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
+    clear_active_pointer(&root)
 }
 
 pub fn write_health_marker(
@@ -286,6 +294,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn create_transaction_refuses_a_second_active_update() {
         let root = tempdir().unwrap();
         let installed = root.path().join("Sleipnir.app");

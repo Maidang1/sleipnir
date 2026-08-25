@@ -15,7 +15,8 @@ export SLEIPNIR_UPDATE_SIGNING_KEY
   --version 9.8.7 \
   --dmg "${TMP}/Sleipnir-9.8.7-macos.dmg" \
   --output "${TMP}/sleipnir-update-v1.json" \
-  --signature "${TMP}/sleipnir-update-v1.json.sig"
+  --signature "${TMP}/sleipnir-update-v1.json.sig" \
+  --public-key "${TMP}/public.pem"
 
 openssl pkeyutl -verify -rawin -pubin \
   -inkey "${TMP}/public.pem" \

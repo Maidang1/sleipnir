@@ -423,6 +423,9 @@ jobs:
           # Stapling rewrites the dmg, so the sha256 must be computed afterwards.
           xcrun stapler staple "${{ env.dmg }}"
 
+      - name: Verify transactional updater
+        run: scripts/test-macos-update.sh
+
       - name: SHA-256 sidecar and signed update manifest
         env:
           SLEIPNIR_UPDATE_SIGNING_KEY: ${{ secrets.SLEIPNIR_UPDATE_SIGNING_KEY }}
@@ -440,7 +443,8 @@ jobs:
             --version "${VER}" \
             --dmg "build/Sleipnir-${VER}-macos.dmg" \
             --output build/sleipnir-update-v1.json \
-            --signature build/sleipnir-update-v1.json.sig
+            --signature build/sleipnir-update-v1.json.sig \
+            --public-key resources/update-signing-public.pem
           test -s build/sleipnir-update-v1.json.sig
           echo "  sha256: $(cat build/Sleipnir-${VER}-macos.dmg.sha256)"
 

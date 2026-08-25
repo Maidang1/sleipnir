@@ -3,9 +3,10 @@
 //! Queries GitHub Releases for the latest version, downloads the macOS `.dmg`
 //! artifact, verifies its SHA-256 against the published `.sha256` sidecar, then
 //! atomically replaces the running `.app` bundle via a detached helper script
-//! and relaunches.
+//! and relaunches through a bundled transactional Rust supervisor.
 //!
-//! No Sparkle, no OpenSSL — reqwest(rustls) + sha2 + a shell helper.
+//! No Sparkle or OpenSSL runtime dependency: network verification uses rustls,
+//! Ed25519, and SHA-256.
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
@@ -424,43 +425,49 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
         std::process::id(),
     )
     .map_err(anyhow::Error::msg)?;
-    let candidate = &transaction.adjacent_candidate_path;
-    let candidate_parent = candidate
-        .parent()
-        .ok_or_else(|| anyhow!("candidate path has no parent"))?;
-    std::fs::create_dir_all(candidate_parent)
-        .with_context(|| format!("create adjacent staging {}", candidate_parent.display()))?;
-    let _ = std::fs::remove_dir_all(candidate);
-    let status = std::process::Command::new("/usr/bin/ditto")
-        .arg(&new_app)
-        .arg(candidate)
-        .status()
-        .context("copy candidate beside installed app")?;
-    if !status.success() {
-        bail!(
-            "cannot stage update beside {}; install manually",
-            app_bundle.display()
-        );
-    }
+    let result = (|| -> Result<()> {
+        let candidate = &transaction.adjacent_candidate_path;
+        let candidate_parent = candidate
+            .parent()
+            .ok_or_else(|| anyhow!("candidate path has no parent"))?;
+        std::fs::create_dir_all(candidate_parent)
+            .with_context(|| format!("create adjacent staging {}", candidate_parent.display()))?;
+        let _ = std::fs::remove_dir_all(candidate);
+        let status = std::process::Command::new("/usr/bin/ditto")
+            .arg(&new_app)
+            .arg(candidate)
+            .status()
+            .context("copy candidate beside installed app")?;
+        if !status.success() {
+            bail!(
+                "cannot stage update beside {}; install manually",
+                app_bundle.display()
+            );
+        }
 
-    let packaged_helper = candidate.join("Contents/MacOS/sleipnir-update-helper");
-    if !packaged_helper.is_file() {
-        bail!("candidate bundle is missing sleipnir-update-helper");
+        validate_candidate_bundle(candidate, &transaction.new_version)?;
+        let packaged_helper = candidate.join("Contents/MacOS/sleipnir-update-helper");
+        let transaction_dir = transaction_path.parent().expect("transaction has parent");
+        let helper = transaction_dir.join("update-helper");
+        std::fs::copy(&packaged_helper, &helper).context("copy update supervisor")?;
+        let mut permissions = std::fs::metadata(&helper)?.permissions();
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&helper, permissions)?;
+        crate::install::launch_supervisor(&helper, &transaction_path)
+            .map_err(anyhow::Error::msg)?;
+        if !crate::install::wait_for_supervisor_ready(&transaction_path, Duration::from_secs(5))
+            .map_err(anyhow::Error::msg)?
+        {
+            bail!("update supervisor did not become ready");
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = crate::install::clear_active_pointer(&root);
+        let _ = std::fs::remove_dir_all(&transaction.adjacent_candidate_path);
     }
-    let transaction_dir = transaction_path.parent().expect("transaction has parent");
-    let helper = transaction_dir.join("update-helper");
-    std::fs::copy(&packaged_helper, &helper).context("copy update supervisor")?;
-    let mut permissions = std::fs::metadata(&helper)?.permissions();
-    use std::os::unix::fs::PermissionsExt as _;
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&helper, permissions)?;
-    crate::install::launch_supervisor(&helper, &transaction_path).map_err(anyhow::Error::msg)?;
-    if !crate::install::wait_for_supervisor_ready(&transaction_path, Duration::from_secs(5))
-        .map_err(anyhow::Error::msg)?
-    {
-        bail!("update supervisor did not become ready");
-    }
-    Ok(())
+    result
 }
 
 /// Find the single `.app` bundle directly under `dir`.
@@ -473,6 +480,38 @@ fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
         }
     }
     bail!("no .app bundle found in {}", dir.display())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_candidate_bundle(app: &Path, expected_version: &str) -> Result<()> {
+    let executable = app.join("Contents/MacOS/sleipnir");
+    let helper = app.join("Contents/MacOS/sleipnir-update-helper");
+    if !executable.is_file() || !helper.is_file() {
+        bail!("candidate bundle is missing a required executable");
+    }
+    let bundle_id = std::process::Command::new("/usr/bin/defaults")
+        .arg("read")
+        .arg(app.join("Contents/Info"))
+        .arg("CFBundleIdentifier")
+        .output()
+        .context("read candidate bundle identifier")?;
+    if !bundle_id.status.success()
+        || String::from_utf8_lossy(&bundle_id.stdout).trim() != "com.maidang1.sleipnir"
+    {
+        bail!("candidate bundle identifier does not match Sleipnir");
+    }
+    if inner_bundle_version(app)? != expected_version {
+        bail!("candidate bundle version changed during preparation");
+    }
+    let status = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app)
+        .status()
+        .context("verify candidate bundle signature")?;
+    if !status.success() {
+        bail!("candidate bundle signature is invalid");
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

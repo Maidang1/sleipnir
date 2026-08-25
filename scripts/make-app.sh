@@ -160,7 +160,8 @@ echo "  sha256: $(cat "${DMG}.sha256")"
     --version "${VERSION}" \
     --dmg "${DMG}" \
     --output "${BUILD_DIR}/sleipnir-update-v1.json" \
-    --signature "${BUILD_DIR}/sleipnir-update-v1.json.sig"
+    --signature "${BUILD_DIR}/sleipnir-update-v1.json.sig" \
+    --public-key "${ROOT}/resources/update-signing-public.pem"
 
 echo ""
 echo "=== Done ==="
