@@ -275,8 +275,8 @@ Sleipnir 可以从 [GitHub Releases](https://github.com/Maidang1/sleipnir/releas
 - 发现新版本后，选 **Download & Install** 会拉 `Sleipnir-<ver>-macos.dmg`，
   对照发布的 `.dmg.sha256` 校验再暂存。CI 构建是 ad-hoc 签名（没有 Apple
   Developer 证书），完整性靠这次 SHA-256 检查，对不上就拒绝下载。
-- macOS 的 **Restart & Update** 会原地替换正在跑的 `.app` 再启动。如果包所在位置
-  写不进去，会退回去打开 Releases 页面。
+- macOS 的 **Restart & Update** 会把已验证的应用交给内置 Rust 更新监督进程：原子替换 `.app`，等待新版本在 60 秒内成功打开首个窗口；启动失败时自动恢复并重新打开旧版本。如果安装目录不可写，则保留已验证的 DMG 并提示手动安装，不请求管理员权限。
+- 自动安装仅接受通过 Ed25519 签名清单和 SHA-256 校验的发布产物。
 - Windows 和 Linux 不会原地替换正在运行的程序。「检查更新」会打开 GitHub Releases，
   用户再手动安装对应的 `.exe`、`.deb` 或 tarball。
 

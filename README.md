@@ -297,7 +297,8 @@ Sleipnir can update itself from [GitHub Releases](https://github.com/Maidang1/sl
   `.dmg.sha256` sidecar before staging. Because CI builds are ad-hoc signed (no Apple
   Developer certificate), this SHA-256 check is the integrity guarantee — the download is
   rejected on any mismatch.
-- **Restart & Update** on macOS swaps the running `.app` in place and relaunches.
+- **Restart & Update** on macOS hands the verified app to a bundled Rust supervisor. It atomically swaps the app, waits up to 60 seconds for the new version to open its first window, and automatically restores the previous version if startup fails. Installations that are not writable fall back to the verified DMG without requesting administrator access.
+- Release artifacts are accepted for automatic installation only when their Ed25519-signed update manifest and SHA-256 digest verify.
   If the bundle is not writable, it falls back to opening Releases.
 - Windows and Linux do not replace the running application in place. **Check for
   Updates** opens GitHub Releases so you can install the appropriate `.exe`, `.deb`,

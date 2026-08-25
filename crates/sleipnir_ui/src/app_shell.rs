@@ -2779,7 +2779,7 @@ impl AppShell {
             let result = cx
                 .background_spawn(async move { updater::fetch_latest(&current) })
                 .await;
-            this.update(cx, |this, cx| {
+            this.update(cx, |_this, cx| {
                 match result {
                     Ok(updater::UpdateStatus::Available(info)) => {
                         cx.global_mut::<UpdateModel>().state =
@@ -2840,7 +2840,7 @@ impl AppShell {
             let result = cx
                 .background_spawn(async move { updater::download_and_verify(&info, &dest) })
                 .await;
-            this.update(cx, |this, cx| {
+            this.update(cx, |_this, cx| {
                 match result {
                     Ok(dmg_path) => {
                         // Remember where the verified dmg landed so a restart

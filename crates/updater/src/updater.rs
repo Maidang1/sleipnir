@@ -576,6 +576,8 @@ mod tests {
         assert_eq!(info.notes, "notes here");
         assert_eq!(info.artifact_url, "https://x/zip");
         assert_eq!(info.sha256_url, "https://x/sha");
+        assert_eq!(info.expected_sha256, None);
+        assert_eq!(info.expected_size, None);
     }
 
     #[test]
