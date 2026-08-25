@@ -243,7 +243,9 @@ mod tests {
             "gh auth login --token …"
         );
         assert_eq!(
-            redact_command("curl -H \"Authorization: Bearer eyJhbGciOiJIUzI1NiJ9\" https://api.example.com"),
+            redact_command(
+                "curl -H \"Authorization: Bearer eyJhbGciOiJIUzI1NiJ9\" https://api.example.com"
+            ),
             "curl -H \"Authorization: …\" https://api.example.com"
         );
     }
@@ -270,8 +272,16 @@ mod tests {
 
     #[test]
     fn ordinary_commands_are_untouched() {
-        for cmd in ["cargo build --release", "npm test", "git commit -m \"fix: thing\""] {
-            assert_eq!(redact_command(cmd), cmd, "must not mangle ordinary commands");
+        for cmd in [
+            "cargo build --release",
+            "npm test",
+            "git commit -m \"fix: thing\"",
+        ] {
+            assert_eq!(
+                redact_command(cmd),
+                cmd,
+                "must not mangle ordinary commands"
+            );
         }
     }
 

@@ -37,7 +37,11 @@ fn strip_zsh_extended(line: &str) -> &str {
 }
 
 /// Case-insensitive subsequence match. Empty query returns the first `limit` items.
-pub fn filter_history<'a>(hits: &'a [HistoryHit], query: &str, limit: usize) -> Vec<&'a HistoryHit> {
+pub fn filter_history<'a>(
+    hits: &'a [HistoryHit],
+    query: &str,
+    limit: usize,
+) -> Vec<&'a HistoryHit> {
     let q = query.trim().to_lowercase();
     hits.iter()
         .filter(|h| q.is_empty() || subsequence(&h.command.to_lowercase(), &q))

@@ -131,7 +131,11 @@ impl RunEvent {
     }
 
     pub fn finished(pane: PaneKey, exit_code: Option<i32>, at_ms: u64) -> Self {
-        Self::Finished { pane, exit_code, at_ms }
+        Self::Finished {
+            pane,
+            exit_code,
+            at_ms,
+        }
     }
 }
 

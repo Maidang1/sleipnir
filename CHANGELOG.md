@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Features
+- macOS Finder Services: right-click a folder or file → **Services → New Sleipnir Tab Here** / **New Sleipnir Window Here**. A file opens at its parent directory.
+
+### Changes
+- Tab chips for known coding agents draw Streamline Core Line icons instead of letter monograms (`claude`, `codex`, `pi`, …). `agent_icons: false` still hides them.
+- Removed the macOS menu-bar Attention item (`show_tray_icon`). The Dock badge of failed Attention count remains.
+
 ## 0.3.1
 
 ### Fixes

@@ -5,14 +5,15 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, canvas,
-    deferred, div, point, prelude::FluentBuilder as _, px, relative, size,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    actions, canvas, deferred, div, point, prelude::FluentBuilder as _, px, relative, size,
 };
 use run_ledger::{PaneKey, RunEvent};
 use sleipnir_settings::{
     Appearance, ConfirmClose, TerminalPalette, TerminalSettings, ThemeName, ThemeSetting,
     palette_for_theme,
 };
+use std::path::PathBuf;
 
 use crate::TermView;
 use crate::chrome::{ChromeGeometry, ChromeTokens, active_after_close};
@@ -432,54 +433,58 @@ fn log_window_open_error(err: &impl std::fmt::Display) {
     log::error!("failed to open window: {err:#}");
 }
 
-/// Open a new independent Sleipnir window (startup + ⌘N).
-pub fn open_sleipnir_window(cx: &mut App) {
+fn terminal_window_options(cx: &App) -> WindowOptions {
     let geo = ChromeGeometry::standard();
     let bounds = Bounds::centered(None, size(px(1024.0), px(680.0)), cx);
-    if let Err(err) = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Sleipnir".into()),
-                appears_transparent: true,
-                traffic_light_position: traffic_light_position_for(
-                    cfg!(target_os = "macos"),
-                    geo.traffic_light_position,
-                ),
-            }),
-            app_owns_titlebar_drag: true,
-            window_background: WindowBackgroundAppearance::Opaque,
-            window_min_size: Some(size(px(360.0), px(240.0))),
-            ..Default::default()
-        },
-        |window, cx| cx.new(|cx| AppShell::new(window, cx)),
-    ) {
-        log_window_open_error(&err);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Sleipnir".into()),
+            appears_transparent: true,
+            traffic_light_position: traffic_light_position_for(
+                cfg!(target_os = "macos"),
+                geo.traffic_light_position,
+            ),
+        }),
+        app_owns_titlebar_drag: true,
+        window_background: WindowBackgroundAppearance::Opaque,
+        window_min_size: Some(size(px(360.0), px(240.0))),
+        ..Default::default()
     }
+}
+
+fn open_shell_window(
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<AppShell>,
+    cx: &mut App,
+) -> Option<WindowHandle<AppShell>> {
+    match cx.open_window(terminal_window_options(cx), build) {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            log_window_open_error(&err);
+            None
+        }
+    }
+}
+
+/// Open a new independent Sleipnir window (startup + ⌘N).
+pub fn open_sleipnir_window(cx: &mut App) {
+    open_shell_window(|window, cx| cx.new(|cx| AppShell::new(window, cx)), cx);
+}
+
+/// Open a window whose first tab starts in `cwd`. Does not restore a session.
+#[cfg(target_os = "macos")]
+pub fn open_sleipnir_window_at_cwd(cwd: PathBuf, cx: &mut App) -> Option<WindowHandle<AppShell>> {
+    open_shell_window(
+        |window, cx| cx.new(|cx| AppShell::new_at_cwd(cwd, window, cx)),
+        cx,
+    )
 }
 
 /// Open a new window and move `tab` into it (detach tab to a new window).
 /// The tab's panes keep their live PTYs; observers are re-wired to the new
 /// window's `AppShell`.
 fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
-    let geo = ChromeGeometry::standard();
-    let bounds = Bounds::centered(None, size(px(1024.0), px(680.0)), cx);
-    if let Err(err) = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Sleipnir".into()),
-                appears_transparent: true,
-                traffic_light_position: traffic_light_position_for(
-                    cfg!(target_os = "macos"),
-                    geo.traffic_light_position,
-                ),
-            }),
-            app_owns_titlebar_drag: true,
-            window_background: WindowBackgroundAppearance::Opaque,
-            window_min_size: Some(size(px(360.0), px(240.0))),
-            ..Default::default()
-        },
+    open_shell_window(
         move |window, cx| {
             cx.new(|cx| {
                 let mut shell = AppShell::new(window, cx);
@@ -487,13 +492,12 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
                 shell
             })
         },
-    ) {
-        log_window_open_error(&err);
-    }
+        cx,
+    );
 }
 
 impl AppShell {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn construct(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut shell = Self {
             tabs: Vec::new(),
             active: 0,
@@ -563,7 +567,11 @@ impl AppShell {
             RunLedgerGlobal::flush_now_in(cx);
             async {}
         }));
+        shell
+    }
 
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut shell = Self::construct(window, cx);
         let restore = TerminalSettings::get_global(cx).restore_session;
         let restored = if restore {
             shell.try_restore_session(window, cx)
@@ -575,6 +583,14 @@ impl AppShell {
         } else {
             shell.sync_ledger_focus(window, cx);
         }
+        shell
+    }
+
+    /// Fresh window with one tab at `cwd`. Used by Finder "New Window Here".
+    #[cfg(target_os = "macos")]
+    pub fn new_at_cwd(cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut shell = Self::construct(window, cx);
+        shell.add_tab_at(Some(cwd), window, cx);
         shell
     }
 
@@ -1172,13 +1188,22 @@ impl AppShell {
     }
 
     pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self
+            .active_working_directory(cx)
+            .map(|cwd| crate::chrome::workspace::spawn_cwd(&cwd));
+        self.add_tab_at(cwd, window, cx);
+    }
+
+    pub(crate) fn add_tab_at(
+        &mut self,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_id;
         self.next_id += 1;
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let cwd = self
-            .active_working_directory(cx)
-            .map(|cwd| crate::chrome::workspace::spawn_cwd(&cwd));
         let view = self.spawn_term_view_with_cwd(cwd, window, cx);
         self.tabs.push(Tab {
             id,

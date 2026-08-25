@@ -36,8 +36,9 @@ prompt.
 ## Features
 
 - **GPU rendering** - smooth scrollback and redraw via GPUI (Metal on macOS, Direct3D 11 on Windows, Vulkan on Linux); Wayland and X11 are supported, with an ease-in-out cursor blink on every platform.
-- **Tabs, splits & panes** - a top strip that groups by git workspace with no group header, showing the last two cwd components (`myself/harbor`) per tab. Right-click rename overrides. Split right/down, jump tabs, move focus, drag tabs to reorder inside a group or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a letter mark (`claude` → `C`, `codex` → `X`, …); a plain shell has no placeholder. A tab with failed Attention washes faint red (no running/success dots). Mark Tab as Seen clears Attention without deleting Run records.
+- **Tabs, splits & panes** - a top strip that groups by git workspace with no group header, showing the last two cwd components (`myself/harbor`) per tab. Right-click rename overrides. Split right/down, jump tabs, move focus, drag tabs to reorder inside a group or drop onto the terminal to detach into a new window; drag a background tab onto the visible panes to merge it as a split; drag a pane grip onto the tab list to extract it as a tab; pane zoom and unfocused dim. Known coding agents show a Streamline icon (robot for `claude`, cloud-code for `codex`, spark for `gemini`, π for `pi`, …); a plain shell has no placeholder. A tab with failed Attention washes faint red (no running/success dots). Mark Tab as Seen clears Attention without deleting Run records.
 - **Multi-window** - `⌘N` on macOS or `Ctrl+Shift+N` on Windows/Linux opens an independent window with its own tabs and shells.
+- **Finder Services** (macOS) — right-click a folder or file in Finder → Services → **New Sleipnir Tab Here** / **New Sleipnir Window Here**. A file uses its parent directory.
 - **Font zoom** - `⌘+` on macOS or `Ctrl+Shift++` on Windows/Linux (plus the matching `-` / `0` shortcuts) resizes the grid for the current window without persisting it.
 - **Adaptive themes** — Catppuccin flavors plus Tokyo Night, Nord, Gruvbox, Solarized,
   GitHub Dark/Light, Dracula, One Dark; `auto` follows the system light/dark appearance.
@@ -57,7 +58,7 @@ prompt.
 - **Close confirm** — prompt when a non-shell job is running (`confirm_close`: dirty/always/never).
 - **Shell collaboration** - OSC 133 prompt jump; new tabs inherit the workspace git root (splits inherit the active pane cwd); optional desktop notification when a long command finishes while unfocused. Search shell history from **Shell** on macOS or **File** on Windows/Linux (`⌘⇧;` / `Ctrl+Shift+;`). Send Selection / Send Git Diff pastes into the focused pane from the same platform menu; `pipe_selection_command` runs the selection through an external command.
 - **Quick Terminal / Quick Select** — open a spare window fast; link-oriented mode.
-- **Attention** — failed runs wash the tab on every platform. On macOS, the optional menu-bar item (`show_tray_icon`, default on) and Dock badge also show the failed Attention count.
+- **Attention** — failed runs wash the tab on every platform. On macOS, the Dock badge also shows the failed Attention count.
 
 ## Install
 
@@ -215,9 +216,8 @@ next to it. Default font is **Menlo** on macOS, **Cascadia Mono** on Windows, an
 | `run_ledger_retention_days` | How long to keep persisted runs (default `7`) |
 | `run_ledger_max_runs` | Cap on persisted runs; oldest dropped first (default `500`) |
 | `run_ledger_redact` | Redact command lines at capture (default `true`; heuristic, not a guarantee) |
-| `agent_icons` | Letter monograms for known coding-agent processes (default `true`) |
+| `agent_icons` | Streamline icons for known coding-agent processes (default `true`) |
 | `control_surface` | Bind the local control socket (default `false`). Also on with `SLEIPNIR_CONTROL=1` |
-| `show_tray_icon` | Menu-bar Attention item (default `true`). Dock badge is independent |
 | `pipe_selection_command` | External command that receives the current selection; empty disables |
 | `keybinding_preset` | `default` / `tmux` (`ctrl-b` then `c` / `%` / `"` / arrows / `z`) |
 | `show_tombstone` | Chrome restore banner from prior-launch Run metadata (default `true`) |

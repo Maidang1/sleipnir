@@ -187,12 +187,10 @@ pub struct TerminalSettings {
     pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
     pub run_ledger_redact: bool,
-    /// Draw agent monograms on tab chips.
+    /// Draw Streamline icons on tab chips for known coding-agent processes.
     pub agent_icons: bool,
     /// Default-off external control surface (ADR-0011).
     pub control_surface: bool,
-    /// Menu-bar attention item. Default true.
-    pub show_tray_icon: bool,
     /// User command to receive the current selection. Empty = disabled.
     pub pipe_selection_command: Option<String>,
     /// Built-in keymap overlay.
@@ -301,7 +299,6 @@ impl Default for TerminalSettings {
             run_ledger_redact: true,
             agent_icons: true,
             control_surface: false,
-            show_tray_icon: true,
             pipe_selection_command: None,
             keybinding_preset: KeybindingPreset::Default,
             show_tombstone: true,
@@ -525,13 +522,11 @@ struct SettingsFile {
     run_ledger_max_runs: Option<usize>,
     #[serde(default)]
     run_ledger_redact: Option<bool>,
-    /// Draw agent monograms on tabs. Default true.
+    /// Draw Streamline icons on tabs for known coding-agent processes. Default true.
     #[serde(default)]
     agent_icons: Option<bool>,
     #[serde(default)]
     control_surface: Option<bool>,
-    #[serde(default)]
-    show_tray_icon: Option<bool>,
     #[serde(default)]
     pipe_selection_command: Option<String>,
     #[serde(default)]
@@ -678,9 +673,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.control_surface {
         settings.control_surface = v;
     }
-    if let Some(v) = file.show_tray_icon {
-        settings.show_tray_icon = v;
-    }
     if file.pipe_selection_command.is_some() {
         settings.pipe_selection_command =
             file.pipe_selection_command.filter(|s| !s.trim().is_empty());
@@ -791,7 +783,6 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         run_ledger_redact: Some(true),
         agent_icons: Some(true),
         control_surface: Some(false),
-        show_tray_icon: Some(true),
         pipe_selection_command: None,
         keybinding_preset: Some(KeybindingPreset::Default),
         show_tombstone: Some(true),

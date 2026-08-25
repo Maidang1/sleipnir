@@ -298,10 +298,7 @@ fn push_split(
                                 kind: LineKind::Removed,
                                 text: text.clone(),
                                 intra: intra.clone(),
-                                syntax: syntax_spans
-                                    .get(start + pair)
-                                    .cloned()
-                                    .unwrap_or_default(),
+                                syntax: syntax_spans.get(start + pair).cloned().unwrap_or_default(),
                             }),
                             _ => None,
                         }
@@ -392,10 +389,7 @@ fn push_gap(
     }
 }
 
-fn upgrade_row_spans(
-    upgrade: &FileUpgrade,
-    row: &DiffRow,
-) -> Vec<(Range<usize>, syntax::Token)> {
+fn upgrade_row_spans(upgrade: &FileUpgrade, row: &DiffRow) -> Vec<(Range<usize>, syntax::Token)> {
     let (table, no, text) = match row {
         DiffRow::Context { new_no, text, .. } | DiffRow::Added { new_no, text, .. } => {
             (&upgrade.new_spans, *new_no, text)
@@ -478,7 +472,7 @@ pub fn file_index_at(file_rows: &[usize], cursor: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diff_core::{parse_patch, DiffRow};
+    use diff_core::{DiffRow, parse_patch};
 
     #[test]
     fn empty_diff_is_empty() {
@@ -499,7 +493,13 @@ Binary files a/logo.png and b/logo.png differ
         let (rows, files, hunks, tree) = build_rows(&parse_patch(patch), ViewMode::Unified);
         assert_eq!(files, vec![0]);
         assert!(hunks.is_empty());
-        assert!(matches!(rows[0], DisplayRow::FileHeader { status: FileStatus::Binary, .. }));
+        assert!(matches!(
+            rows[0],
+            DisplayRow::FileHeader {
+                status: FileStatus::Binary,
+                ..
+            }
+        ));
         assert!(matches!(rows[1], DisplayRow::Binary));
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].path, "logo.png");
@@ -656,9 +656,7 @@ diff --git a/a.rs b/a.rs
             .flat_map(|h| &h.rows)
             .filter(|r| matches!(r, DiffRow::Removed { .. }))
             .count() as u32;
-        let parsed = PatchDiff {
-            files: vec![file],
-        };
+        let parsed = PatchDiff { files: vec![file] };
         let upgrade = FileUpgrade {
             new_lines: new.lines().map(str::to_string).collect(),
             old_spans: Vec::new(),
@@ -675,13 +673,20 @@ diff --git a/a.rs b/a.rs
         );
         upgrades.get_mut(&0).unwrap().expanded.insert(0);
         let (rows, _, _, _) = build_rows_with(&parsed, ViewMode::Unified, &upgrades);
-        assert!(!rows.iter().any(|r| matches!(r, DisplayRow::Gap { hidden: 6, .. })));
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Gap { hidden: 6, .. }))
+        );
         let texts: Vec<&str> = rows
             .iter()
             .filter_map(|r| match r {
-                DisplayRow::Line { text, kind: LineKind::Context, old_no: Some(1), .. } => {
-                    Some(text.as_str())
-                }
+                DisplayRow::Line {
+                    text,
+                    kind: LineKind::Context,
+                    old_no: Some(1),
+                    ..
+                } => Some(text.as_str()),
                 _ => None,
             })
             .collect();
@@ -711,7 +716,9 @@ diff --git a/src/lib.rs b/src/lib.rs
         let (text, syntax) = added.expect("added line");
         assert_eq!(text, "fn new() {}");
         assert!(
-            syntax.iter().any(|(r, t)| *t == syntax::Token::Keyword && &text[r.clone()] == "fn"),
+            syntax
+                .iter()
+                .any(|(r, t)| *t == syntax::Token::Keyword && &text[r.clone()] == "fn"),
             "{syntax:?}"
         );
     }

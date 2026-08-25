@@ -83,7 +83,11 @@ impl PaneNode {
 
     pub fn pane_key_for_view(&self, view: &Entity<TermView>) -> Option<PaneKey> {
         match self {
-            PaneNode::Leaf { pane_key, view: leaf, .. } if leaf == view => Some(*pane_key),
+            PaneNode::Leaf {
+                pane_key,
+                view: leaf,
+                ..
+            } if leaf == view => Some(*pane_key),
             PaneNode::Split { first, second, .. } => first
                 .pane_key_for_view(view)
                 .or_else(|| second.pane_key_for_view(view)),
@@ -103,7 +107,9 @@ impl PaneNode {
 
     pub fn pane_key_for_id(&self, id: PaneId) -> Option<PaneKey> {
         match self {
-            PaneNode::Leaf { id: leaf, pane_key, .. } if *leaf == id => Some(*pane_key),
+            PaneNode::Leaf {
+                id: leaf, pane_key, ..
+            } if *leaf == id => Some(*pane_key),
             PaneNode::Split { first, second, .. } => first
                 .pane_key_for_id(id)
                 .or_else(|| second.pane_key_for_id(id)),
@@ -423,7 +429,10 @@ mod tests {
     #[test]
     fn neighbor_right_and_left() {
         // A | B  (A left, B right)
-        let rects = [rect(1, 0.0, 0.0, 100.0, 100.0), rect(2, 100.0, 0.0, 100.0, 100.0)];
+        let rects = [
+            rect(1, 0.0, 0.0, 100.0, 100.0),
+            rect(2, 100.0, 0.0, 100.0, 100.0),
+        ];
         assert_eq!(neighbor(&rects, 1, Direction::Right), Some(2));
         assert_eq!(neighbor(&rects, 2, Direction::Left), Some(1));
         assert_eq!(neighbor(&rects, 1, Direction::Left), None);
@@ -441,7 +450,10 @@ mod tests {
         // From A moving right, the vertically-nearer of B1/B2 wins; A's center
         // is at y=100 which is the boundary, both equidistant -> deterministic
         // pick of the first minimum.
-        assert!(matches!(neighbor(&rects, 1, Direction::Right), Some(2) | Some(3)));
+        assert!(matches!(
+            neighbor(&rects, 1, Direction::Right),
+            Some(2) | Some(3)
+        ));
         // From B2 moving up -> B1.
         assert_eq!(neighbor(&rects, 3, Direction::Up), Some(2));
     }

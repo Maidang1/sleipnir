@@ -12,13 +12,15 @@ fn main() {
 
 #[cfg(unix)]
 fn unix_main() {
-    use sleipnir_ctl::{socket_path, ControlRequest, ControlResponse};
+    use sleipnir_ctl::{ControlRequest, ControlResponse, socket_path};
     use std::io::{BufRead, Write};
     use std::os::unix::net::UnixStream;
 
     let mut args = std::env::args().skip(1);
     let Some(op) = args.next() else {
-        eprintln!("usage: sleipnir-ctl ls | capture <pane> | send <pane> <text> | wait <pane> free|failed|attention");
+        eprintln!(
+            "usage: sleipnir-ctl ls | capture <pane> | send <pane> <text> | wait <pane> free|failed|attention"
+        );
         std::process::exit(2);
     };
     let req = match op.as_str() {

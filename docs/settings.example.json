@@ -12,7 +12,6 @@
   "run_ledger_redact": true,
   "agent_icons": true,
   "control_surface": false,
-  "show_tray_icon": true,
   "pipe_selection_command": "",
   "keybinding_preset": "default",
   "show_tombstone": true,

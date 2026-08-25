@@ -2,8 +2,8 @@
 
 use gpui::{App, BorrowAppContext, Global, Task};
 use run_ledger::{
-    default_runs_path, load_runs, save_runs, Badge, LaunchId, Ledger, PaneKey, Retention, Run,
-    RunEvent,
+    Badge, LaunchId, Ledger, PaneKey, Retention, Run, RunEvent, default_runs_path, load_runs,
+    save_runs,
 };
 use sleipnir_settings::{RunLedgerMode, TerminalSettings};
 use std::path::PathBuf;
@@ -41,7 +41,13 @@ enum FlushOutcome {
 }
 
 impl LedgerCore {
-    fn new(path: PathBuf, mode: RunLedgerMode, retention: Retention, redact: bool, threshold: u64) -> Self {
+    fn new(
+        path: PathBuf,
+        mode: RunLedgerMode,
+        retention: Retention,
+        redact: bool,
+        threshold: u64,
+    ) -> Self {
         let mut core = Self {
             ledger: Ledger::new(LaunchId::new_v4()),
             mode,
@@ -62,7 +68,8 @@ impl LedgerCore {
     fn sync_ledger_settings(&mut self) {
         self.ledger.set_redact(self.redact);
         self.ledger.set_retention(self.retention);
-        self.ledger.set_success_threshold_secs(self.success_threshold_secs);
+        self.ledger
+            .set_success_threshold_secs(self.success_threshold_secs);
     }
 
     fn reset_ledger(&mut self) {
@@ -131,7 +138,10 @@ impl LedgerCore {
                 FlushOutcome::Wrote { first_announce }
             }
             Err(err) => {
-                log::warn!("run ledger write failed ({}); falling back to memory: {err}", self.path.display());
+                log::warn!(
+                    "run ledger write failed ({}); falling back to memory: {err}",
+                    self.path.display()
+                );
                 self.mode = RunLedgerMode::Memory;
                 FlushOutcome::Failed
             }
@@ -218,7 +228,10 @@ impl RunLedgerGlobal {
     }
 
     pub fn flush_now(&mut self) {
-        if let FlushOutcome::Wrote { first_announce: true } = self.core.flush() {
+        if let FlushOutcome::Wrote {
+            first_announce: true,
+        } = self.core.flush()
+        {
             log::info!("{FIRST_PERSIST_NOTICE}");
         }
     }
@@ -382,7 +395,11 @@ mod tests {
         core.apply(RunEvent::started(pane(), "cargo test", None, 0));
         assert_eq!(core.ledger.runs().count(), 1);
         assert!(matches!(core.flush(), FlushOutcome::Skipped));
-        assert_eq!(fs::read(&path).unwrap(), original, "Memory must not write disk");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original,
+            "Memory must not write disk"
+        );
     }
 
     #[test]
@@ -411,13 +428,7 @@ mod tests {
         let path = dir.path().join("runs.json");
         let p = pane();
         write_failed_run(&path, p, "false");
-        let mut core = LedgerCore::new(
-            path,
-            RunLedgerMode::Off,
-            Retention::default(),
-            true,
-            5,
-        );
+        let mut core = LedgerCore::new(path, RunLedgerMode::Off, Retention::default(), true, 5);
         assert_eq!(core.ledger.runs().count(), 0);
         core.set_mode(RunLedgerMode::Persist);
         assert_eq!(core.ledger.runs().count(), 1);

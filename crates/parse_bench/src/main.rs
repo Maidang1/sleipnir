@@ -46,8 +46,14 @@ fn main() {
         .get(2)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(65536);
-    let cols = args.get(3).and_then(|s| s.parse::<usize>().ok()).unwrap_or(120);
-    let rows = args.get(4).and_then(|s| s.parse::<usize>().ok()).unwrap_or(40);
+    let cols = args
+        .get(3)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(120);
+    let rows = args
+        .get(4)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(40);
 
     let bytes = fs::read(path).expect("failed to read corpus file");
 
@@ -67,8 +73,16 @@ fn main() {
     let mb = bytes.len() as f64 / 1_000_000.0;
     let mib = bytes.len() as f64 / (1024.0 * 1024.0);
     println!("file        {}", path);
-    println!("bytes       {} ({:.2} MB / {:.2} MiB)", bytes.len(), mb, mib);
-    println!("grid        {} cols x {} rows, scrollback = 10000", cols, rows);
+    println!(
+        "bytes       {} ({:.2} MB / {:.2} MiB)",
+        bytes.len(),
+        mb,
+        mib
+    );
+    println!(
+        "grid        {} cols x {} rows, scrollback = 10000",
+        cols, rows
+    );
     println!("chunk       {} bytes", chunk);
     println!("elapsed     {:.4} s", dur);
     println!("throughput  {:.2} MB/s  ({:.2} MiB/s)", mb / dur, mib / dur);

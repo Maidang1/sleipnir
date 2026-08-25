@@ -1,10 +1,10 @@
 //! Fetch a work-tree unified patch off the UI thread.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::chrome::git_status;
 use crate::chrome::workspace::git_root;
 use diff_core::PatchDiff;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Refuse to flatten a patch larger than this. File headers still show.
 pub const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
@@ -40,7 +40,14 @@ pub fn fetch_worktree_diff(cwd: &Path) -> FetchOutcome {
     let title = format!("{name} · {branch}");
 
     let output = Command::new("git")
-        .args(["-C", &root.to_string_lossy(), "diff", "--no-color", "--no-ext-diff", "HEAD"])
+        .args([
+            "-C",
+            &root.to_string_lossy(),
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "HEAD",
+        ])
         .env("GIT_TERMINAL_PROMPT", "0")
         .output();
 

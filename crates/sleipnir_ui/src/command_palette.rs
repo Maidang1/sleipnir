@@ -375,9 +375,7 @@ mod tests {
         let items = commands();
         let hits = filter_commands(&items, "split");
         assert!(hits.len() >= 2);
-        assert!(hits
-            .iter()
-            .any(|&i| items[i].id == CommandId::SplitRight));
+        assert!(hits.iter().any(|&i| items[i].id == CommandId::SplitRight));
     }
 
     #[test]
@@ -394,10 +392,7 @@ mod tests {
             .iter()
             .find(|i| i.id == CommandId::NewTab)
             .expect("new tab");
-        assert_eq!(
-            new_tab.shortcut.as_ref(),
-            display_shortcut("new_tab")
-        );
+        assert_eq!(new_tab.shortcut.as_ref(), display_shortcut("new_tab"));
     }
 
     #[test]
@@ -411,9 +406,7 @@ mod tests {
             Some(CommandId::ToggleRunLedger)
         );
         assert!(
-            commands()
-                .iter()
-                .any(|i| i.id == CommandId::ClearRunLedger),
+            commands().iter().any(|i| i.id == CommandId::ClearRunLedger),
             "Clear Run Ledger must appear in the palette"
         );
         assert_eq!(
@@ -421,9 +414,7 @@ mod tests {
             Some(CommandId::MarkTabSeen)
         );
         assert!(
-            commands()
-                .iter()
-                .any(|i| i.id == CommandId::MarkTabSeen),
+            commands().iter().any(|i| i.id == CommandId::MarkTabSeen),
             "Mark Tab as Seen must appear in the palette"
         );
         assert_eq!(

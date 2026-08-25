@@ -196,18 +196,20 @@ mod tests {
         let (runs, announced) = load_runs(&path);
         assert!(runs.is_empty());
         assert!(!announced);
-        assert!(bak_path(&path).exists(), "corrupt file must be renamed to .bak");
-        assert!(!path.exists(), "corrupt original should be gone after quarantine");
+        assert!(
+            bak_path(&path).exists(),
+            "corrupt file must be renamed to .bak"
+        );
+        assert!(
+            !path.exists(),
+            "corrupt original should be gone after quarantine"
+        );
     }
 
     #[test]
     fn unknown_version_is_treated_as_corrupt() {
         let (_dir, path) = runs_path();
-        fs::write(
-            &path,
-            r#"{"version":99,"announced":true,"runs":[]}"#,
-        )
-        .unwrap();
+        fs::write(&path, r#"{"version":99,"announced":true,"runs":[]}"#).unwrap();
         let (runs, announced) = load_runs(&path);
         assert!(runs.is_empty());
         assert!(!announced);
@@ -239,7 +241,10 @@ mod tests {
         save_runs(
             &path,
             &runs,
-            Retention { days: 7, max_runs: 500 },
+            Retention {
+                days: 7,
+                max_runs: 500,
+            },
             false,
         )
         .unwrap();

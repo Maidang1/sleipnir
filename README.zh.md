@@ -31,8 +31,9 @@ Sleipnir 是独立终端，通过 GPUI 在 GPU 上绘制，大量输出时滚动
 ## 功能
 
 - **GPU 绘制**，滚动和重绘走 GPUI（macOS 上用 Metal，Windows 上用 Direct3D 11，Linux 上用 Vulkan）；支持 Wayland 和 X11，所有平台都有缓入缓出的光标闪烁。
-- **标签、分屏与窗格**，顶部标签条按 git 工作区静默分组，不画分组标题，每个标签只显示窗格 cwd 的最后两级（`myself/harbor`）。右键重命名仍可覆盖。可以向右 / 向下分屏，跳转标签，移动焦点；组内拖动重排，拖到终端区域会拆成新窗口；把后台标签拖到当前窗格上会合并成分屏；把窗格把手拖到标签列表会抽成新标签。支持窗格放大，未聚焦窗格会变暗。识别到的编码 Agent 会显示字母标记（`claude` → `C`，`codex` → `X` 等）；普通 shell 没有占位符。有失败 Attention 的标签整块淡红，不画运行中 / 成功圆点。Mark Tab as Seen 只清 Attention，不删 Run 记录。
+- **标签、分屏与窗格**，顶部标签条按 git 工作区静默分组，不画分组标题，每个标签只显示窗格 cwd 的最后两级（`myself/harbor`）。右键重命名仍可覆盖。可以向右 / 向下分屏，跳转标签，移动焦点；组内拖动重排，拖到终端区域会拆成新窗口；把后台标签拖到当前窗格上会合并成分屏；把窗格把手拖到标签列表会抽成新标签。支持窗格放大，未聚焦窗格会变暗。识别到的编码 Agent 会显示 Streamline 图标（`claude` 机器人、`codex` 云+代码、`gemini` 四角火花、`pi` 的 π 等）；普通 shell 没有占位符。有失败 Attention 的标签整块淡红，不画运行中 / 成功圆点。Mark Tab as Seen 只清 Attention，不删 Run 记录。
 - **多窗口**，macOS 用 `⌘N`，Windows/Linux 用 `Ctrl+Shift+N` 打开独立窗口，标签和 shell 各自一套。
+- **Finder 服务**（仅 macOS），在 Finder 里对文件夹或文件右键 → 服务 → **New Sleipnir Tab Here** / **New Sleipnir Window Here**。选中文件时用它所在的目录。
 - **字体缩放**，macOS 用 `⌘+`，Windows/Linux 用 `Ctrl+Shift++`（以及对应的 `-` / `0`）调整当前窗口的格子大小，不写进设置。
 - **自适应主题**，Catppuccin 各口味，加上 Tokyo Night、Nord、Gruvbox、Solarized、GitHub Dark/Light、Dracula、One Dark；`auto` 跟随系统浅色 / 深色。额外调色板放配置目录的 `themes.json`（`"theme": "kanagawa"`，见 `docs/themes.example.json`）。
 - **智能粘贴**，粘贴图片会得到带引号的临时文件路径；文件管理器中选中的文件会粘成带引号路径；macOS 用 `⌃⌘V`、Windows/Linux 用 `Ctrl+Alt+V` 强制只粘贴文本。
@@ -48,7 +49,7 @@ Sleipnir 是独立终端，通过 GPUI 在 GPU 上绘制，大量输出时滚动
 - **关闭确认**，非 shell 任务在跑时会问（`confirm_close`：`dirty` / `always` / `never`）。
 - **和 shell 协作**，OSC 133 提示符跳转；新标签继承工作区的 git 根（分屏继承当前窗格的 cwd）；失焦时长时间命令结束可以发桌面通知。macOS 从 **Shell** 菜单、Windows/Linux 从 **File** 菜单搜索 shell 历史（`⌘⇧;` / `Ctrl+Shift+;`），并可把选区或 Git diff 发到当前窗格；`pipe_selection_command` 把选区交给外部命令。
 - **Quick Terminal / Quick Select**，快速开一个备用窗口；面向链接的选择模式。
-- **Attention**，失败运行会在所有平台把标签染成淡红。macOS 还会在可选菜单栏条目（`show_tray_icon`，默认开）和 Dock 角标显示失败 Attention 数量。
+- **Attention**，失败运行会在所有平台把标签染成淡红。macOS 还会在 Dock 角标显示失败 Attention 数量。
 
 ## 安装
 
@@ -198,9 +199,8 @@ Linux 是 **Ubuntu Mono**。
 | `run_ledger_retention_days` | 持久化记录保留天数（默认 `7`） |
 | `run_ledger_max_runs` | 持久化条数上限，先丢最旧的（默认 `500`） |
 | `run_ledger_redact` | 采集时脱敏命令行（默认 `true`；启发式，不是保证） |
-| `agent_icons` | 已知编码 Agent 的字母标记（默认 `true`） |
+| `agent_icons` | 已知编码 Agent 的 Streamline 图标（默认 `true`） |
 | `control_surface` | 绑定本地控制套接字（默认 `false`）。`SLEIPNIR_CONTROL=1` 也会打开 |
-| `show_tray_icon` | 菜单栏 Attention 条目（默认 `true`）。Dock 角标是另一回事 |
 | `pipe_selection_command` | 接收当前选区的外部命令；空字符串表示关掉 |
 | `keybinding_preset` | `default` / `tmux`（`ctrl-b` 再跟 `c` / `%` / `"` / 方向键 / `z`） |
 | `show_tombstone` | 用上次启动的 Run 元数据画恢复横幅（默认 `true`） |

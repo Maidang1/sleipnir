@@ -296,7 +296,10 @@ mod tests {
         );
         assert!(facts.cwd.is_none());
         assert_eq!(facts.foreground.as_deref(), Some("node"));
-        assert_eq!(facts.tree.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![10, 20]);
+        assert_eq!(
+            facts.tree.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            vec![10, 20]
+        );
         assert_eq!(facts.ports.len(), 1);
         assert_eq!(facts.ports[0].addr, "127.0.0.1:3000");
     }
@@ -349,10 +352,7 @@ mod tests {
             Some(10),
             &Fake {
                 procs: vec![proc(10, Some(1), "zsh"), proc(20, Some(10), "node")],
-                listens: vec![
-                    (20, "127.0.0.1:3000".into()),
-                    (99, "0.0.0.0:22".into()),
-                ],
+                listens: vec![(20, "127.0.0.1:3000".into()), (99, "0.0.0.0:22".into())],
             },
         );
         assert_eq!(facts.ports.len(), 1);
@@ -396,7 +396,10 @@ not-a-header
             localhost_copy("127.0.0.1:3000").as_deref(),
             Some("localhost:3000")
         );
-        assert_eq!(localhost_copy("[::1]:8080").as_deref(), Some("localhost:8080"));
+        assert_eq!(
+            localhost_copy("[::1]:8080").as_deref(),
+            Some("localhost:8080")
+        );
         assert_eq!(localhost_copy("10.0.0.4:80"), None);
     }
 }

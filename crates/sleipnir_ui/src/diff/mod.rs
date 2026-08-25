@@ -6,7 +6,7 @@ mod render;
 mod rows;
 pub(crate) mod upgrade;
 
-pub(crate) use fetch::{fetch_worktree_diff, FetchOutcome};
+pub(crate) use fetch::{FetchOutcome, fetch_worktree_diff};
 pub(crate) use rows::{
     Cell, DisplayRow, FileUpgrade, LineKind, TreeEntry, ViewMode, file_index_at,
 };

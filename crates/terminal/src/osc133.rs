@@ -339,9 +339,21 @@ mod tests {
     fn history_shrink_shifts_survivors_and_drops_cleared() {
         use Osc133Kind::*;
         let mut markers = vec![
-            Osc133Marker { kind: PromptStart, line: Some(2), column: Some(0) },
-            Osc133Marker { kind: CommandExecuted, line: Some(5), column: Some(3) },
-            Osc133Marker { kind: CommandFinished { status: Some(0) }, line: Some(12), column: Some(0) },
+            Osc133Marker {
+                kind: PromptStart,
+                line: Some(2),
+                column: Some(0),
+            },
+            Osc133Marker {
+                kind: CommandExecuted,
+                line: Some(5),
+                column: Some(3),
+            },
+            Osc133Marker {
+                kind: CommandFinished { status: Some(0) },
+                line: Some(12),
+                column: Some(0),
+            },
         ];
         // Scrollback shrank by 5 lines (e.g. `clear` sent ED 3). Lines below
         // 5 are gone; survivors shift down by 5.

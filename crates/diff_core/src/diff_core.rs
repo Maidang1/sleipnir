@@ -4,8 +4,8 @@
 //! computes word-level intra-line ranges on equal-length removed/added runs.
 //! Heuristics follow ellie/lgtm (MIT); reimplemented here.
 
-use imara_diff::intern::InternedInput;
 use imara_diff::Algorithm;
+use imara_diff::intern::InternedInput;
 use std::ops::Range;
 
 #[derive(Debug, Default, Clone)]
@@ -700,7 +700,10 @@ diff --git a/a.rs b/a.rs
         // No extra gap in the middle of a single hunk.
         let expanded = expand_gap_lines(&new_lines, &hunks, 0);
         let texts: Vec<&str> = expanded.iter().map(|(_, _, t)| t.as_str()).collect();
-        assert_eq!(texts, ["line 1", "line 2", "line 3", "line 4", "line 5", "line 6"]);
+        assert_eq!(
+            texts,
+            ["line 1", "line 2", "line 3", "line 4", "line 5", "line 6"]
+        );
         assert_eq!(expanded[0], (1, 1, "line 1".into()));
         assert_eq!(expanded[5], (6, 6, "line 6".into()));
         let tail = expand_gap_lines(&new_lines, &hunks, 1);
@@ -742,13 +745,18 @@ diff --git a/a.rs b/a.rs
         let hunks = diff_texts(old, new, 3);
         assert_eq!(hunks.len(), 1);
         let (old_lo, new_lo, count) = gap_span(&hunks, 0, 7);
-        assert_eq!(count, 0, "leading gap at file start: {old_lo}/{new_lo}/{count}");
-        assert!(expand_gap_lines(
-            &new.lines().map(str::to_string).collect::<Vec<_>>(),
-            &hunks,
-            0
-        )
-        .is_empty());
+        assert_eq!(
+            count, 0,
+            "leading gap at file start: {old_lo}/{new_lo}/{count}"
+        );
+        assert!(
+            expand_gap_lines(
+                &new.lines().map(str::to_string).collect::<Vec<_>>(),
+                &hunks,
+                0
+            )
+            .is_empty()
+        );
     }
 
     #[test]

@@ -25,8 +25,8 @@ the foreground.
    change. `cd` to another repo moves the tab. Drag-reorder only inside a group.
    Grouping is silent: no workspace header, no tab count.
 3. **Agent marks are ours.** Match `foreground_process_command_name()` against a
-   built-in catalog and draw a letter + fixed color. No vendor logos, no house
-   placeholder for a plain shell, no model calls
+   built-in catalog and draw a Streamline Core Line icon + fixed color. No vendor
+   logos, no house placeholder for a plain shell, no model calls
    ([ADR-0008](0008-no-builtin-ai.md)). `agent_icons: false` hides them.
 4. **Failed Attention is a wash**, not a run glyph. Running and Succeeded
    never draw on the chip.

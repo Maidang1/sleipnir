@@ -1,12 +1,14 @@
 //! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
 mod app_shell;
+mod assets;
 mod attention_chrome;
 mod blink;
 mod chrome;
 mod command_palette;
 mod control_surface;
 mod diff;
+mod finder_service;
 mod keymap;
 mod pane_tree;
 mod run_ledger_global;
@@ -15,6 +17,7 @@ mod session;
 mod tab_convert;
 mod term_element;
 
+pub use assets::AgentAssets;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 
 pub use app_shell::{
@@ -28,6 +31,7 @@ pub use app_shell::{
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
+pub use finder_service::install_finder_services;
 pub use keymap::{
     BindingContext, BuiltinAction, BuiltinBinding, builtin_bindings, display_shortcut,
     font_zoom_key_bindings, last_window_close_quits, tmux_preset_bindings,

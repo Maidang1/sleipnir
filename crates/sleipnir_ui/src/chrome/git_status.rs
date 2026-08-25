@@ -22,8 +22,6 @@ pub struct GitSnapshot {
     pub deleted: u32,
 }
 
-
-
 pub trait GitFs {
     fn exists(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
@@ -74,9 +72,9 @@ pub fn cached_git_snapshot(cwd: &Path) -> Option<GitSnapshot> {
     let cached = lock_cache()
         .as_ref()
         .and_then(|map| map.get(&root).cloned());
-    let need_refresh = cached
-        .as_ref()
-        .is_none_or(|entry| !entry.complete || now.saturating_duration_since(entry.at) >= CACHE_TTL);
+    let need_refresh = cached.as_ref().is_none_or(|entry| {
+        !entry.complete || now.saturating_duration_since(entry.at) >= CACHE_TTL
+    });
     if need_refresh {
         schedule_refresh(root.clone());
     }
@@ -84,16 +82,14 @@ pub fn cached_git_snapshot(cwd: &Path) -> Option<GitSnapshot> {
         return entry.snap;
     }
     let snap = branch_only(&root);
-    lock_cache()
-        .get_or_insert_with(HashMap::new)
-        .insert(
-            root,
-            CacheEntry {
-                at: now,
-                snap: snap.clone(),
-                complete: false,
-            },
-        );
+    lock_cache().get_or_insert_with(HashMap::new).insert(
+        root,
+        CacheEntry {
+            at: now,
+            snap: snap.clone(),
+            complete: false,
+        },
+    );
     snap
 }
 
@@ -113,16 +109,14 @@ fn schedule_refresh(root: PathBuf) {
         .name("sleipnir-git-numstat".into())
         .spawn(move || {
             let snap = git_snapshot_with_numstat(&root);
-            lock_cache()
-                .get_or_insert_with(HashMap::new)
-                .insert(
-                    root.clone(),
-                    CacheEntry {
-                        at: Instant::now(),
-                        snap,
-                        complete: true,
-                    },
-                );
+            lock_cache().get_or_insert_with(HashMap::new).insert(
+                root.clone(),
+                CacheEntry {
+                    at: Instant::now(),
+                    snap,
+                    complete: true,
+                },
+            );
             if let Some(set) = lock_inflight().as_mut() {
                 set.remove(&root);
             }
@@ -248,8 +242,6 @@ fn read_branch(gitdir: &Path, fs: &impl GitFs) -> Option<String> {
     Some(sha)
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,10 +275,7 @@ mod tests {
     #[test]
     fn detached_head_uses_short_sha() {
         let tmp = TempDir::new().unwrap();
-        write_repo(
-            tmp.path(),
-            "abcdef1234567890abcdef1234567890abcdef12\n",
-        );
+        write_repo(tmp.path(), "abcdef1234567890abcdef1234567890abcdef12\n");
         let snap = git_snapshot(tmp.path()).expect("repo");
         assert_eq!(snap.branch, "abcdef1");
         assert_eq!((snap.added, snap.deleted), (0, 0));

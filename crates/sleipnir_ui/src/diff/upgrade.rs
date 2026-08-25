@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::process::Command;
 
-use diff_core::{diff_texts, DiffRow, FileStatus, Hunk};
 use super::rows::FileUpgrade;
+use diff_core::{DiffRow, FileStatus, Hunk, diff_texts};
 
 /// Per-side blob cap. Larger or non-UTF-8 files stay patch-derived.
 pub const MAX_UPGRADE_BLOB_BYTES: usize = 1024 * 1024;
@@ -36,7 +36,12 @@ pub fn accept_blob(bytes: &[u8]) -> Option<String> {
 /// Contents of `path` at HEAD, or None if missing / binary / too large.
 pub fn file_at_head(root: &Path, path: &str) -> Option<String> {
     let output = Command::new("git")
-        .args(["-C", &root.to_string_lossy(), "show", &format!("HEAD:{path}")])
+        .args([
+            "-C",
+            &root.to_string_lossy(),
+            "show",
+            &format!("HEAD:{path}"),
+        ])
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .ok()?;
@@ -74,13 +79,14 @@ pub fn upgrade_file(root: &Path, job: &UpgradeJob) -> Option<UpgradedFile> {
     let old_text = normalize(old_text);
     let new_text = normalize(new_text);
     let hunks = diff_texts(&old_text, &new_text, UPGRADE_CONTEXT);
-    let (additions, deletions) = hunks.iter().flat_map(|h| &h.rows).fold((0, 0), |(a, d), row| {
-        match row {
+    let (additions, deletions) = hunks
+        .iter()
+        .flat_map(|h| &h.rows)
+        .fold((0, 0), |(a, d), row| match row {
             DiffRow::Added { .. } => (a + 1, d),
             DiffRow::Removed { .. } => (a, d + 1),
             DiffRow::Context { .. } => (a, d),
-        }
-    });
+        });
     let path = job.new_path.as_deref().or(job.old_path.as_deref())?;
     let lang = syntax::language_for_path(path);
     let spans = |text: &str| match lang {
@@ -168,7 +174,8 @@ mod tests {
         assert_eq!(text.file_ix, 0);
         assert_eq!(text.hunks.len(), 1);
         assert!(text.upgrade.new_lines.len() >= 20);
-        let (_, _, hidden) = diff_core::gap_span(&text.hunks, 0, text.upgrade.new_lines.len() as u32);
+        let (_, _, hidden) =
+            diff_core::gap_span(&text.hunks, 0, text.upgrade.new_lines.len() as u32);
         assert!(hidden > 0, "mid-file edit must leave a leading gap");
 
         let binary = upgrade_file(

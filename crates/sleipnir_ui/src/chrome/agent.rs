@@ -1,4 +1,5 @@
-//! Agent identity from a foreground process name. Marks we own — not vendor logos.
+//! Agent identity from a foreground process name.
+//! Streamline Core Line marks we own — not vendor logos.
 
 use std::path::Path;
 
@@ -10,68 +11,69 @@ use crate::app_shell::Tab;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AgentKind {
     pub id: &'static str,
-    pub mark: &'static str,
+    /// GPUI asset path, e.g. `"icons/claude.svg"`.
+    pub icon: &'static str,
     pub color: Hsla,
 }
 
 const CLAUDE: AgentKind = AgentKind {
     id: "claude",
-    mark: "C",
+    icon: "icons/claude.svg",
     color: hsla(0.10, 0.85, 0.55, 1.0),
 };
 const CODEX: AgentKind = AgentKind {
     id: "codex",
-    mark: "X",
+    icon: "icons/codex.svg",
     color: hsla(0.38, 0.55, 0.48, 1.0),
 };
 const GEMINI: AgentKind = AgentKind {
     id: "gemini",
-    mark: "G",
+    icon: "icons/gemini.svg",
     color: hsla(0.58, 0.70, 0.52, 1.0),
 };
 const AIDER: AgentKind = AgentKind {
     id: "aider",
-    mark: "A",
+    icon: "icons/aider.svg",
     color: hsla(0.78, 0.45, 0.55, 1.0),
 };
 const OPENCODE: AgentKind = AgentKind {
     id: "opencode",
-    mark: "O",
+    icon: "icons/opencode.svg",
     color: hsla(0.48, 0.50, 0.45, 1.0),
 };
 const GOOSE: AgentKind = AgentKind {
     id: "goose",
-    mark: "G",
+    icon: "icons/goose.svg",
     color: hsla(0.08, 0.70, 0.50, 1.0),
 };
 const CRUSH: AgentKind = AgentKind {
     id: "crush",
-    mark: "K",
+    icon: "icons/crush.svg",
     color: hsla(0.92, 0.65, 0.52, 1.0),
 };
 const CURSOR: AgentKind = AgentKind {
     id: "cursor",
-    mark: "C",
+    icon: "icons/cursor.svg",
     color: hsla(0.55, 0.15, 0.70, 1.0),
 };
 const AMP: AgentKind = AgentKind {
     id: "amp",
-    mark: "A",
+    icon: "icons/amp.svg",
     color: hsla(0.02, 0.75, 0.52, 1.0),
 };
 const PI: AgentKind = AgentKind {
     id: "pi",
-    mark: "π",
+    icon: "icons/pi.svg",
     color: hsla(0.72, 0.55, 0.58, 1.0),
 };
 const COPILOT: AgentKind = AgentKind {
     id: "copilot",
-    mark: "P",
+    icon: "icons/copilot.svg",
     color: hsla(0.62, 0.40, 0.55, 1.0),
 };
 const GROK: AgentKind = AgentKind {
     id: "grok",
-    mark: "G",
+    icon: "icons/grok.svg",
     color: hsla(0.00, 0.00, 0.75, 1.0),
 };
 
@@ -152,15 +154,34 @@ mod tests {
     #[test]
     fn identifies_known_agents() {
         assert_eq!(identify("claude").map(|k| k.id), Some("claude"));
-        assert_eq!(identify("claude-code").map(|k| k.mark), Some("C"));
+        assert_eq!(
+            identify("claude-code").map(|k| k.icon),
+            Some("icons/claude.svg")
+        );
         assert_eq!(
             identify("/usr/local/bin/codex").map(|k| k.id),
             Some("codex")
         );
         assert_eq!(identify("GEMINI").map(|k| k.id), Some("gemini"));
         assert_eq!(identify("cursor-agent").map(|k| k.id), Some("cursor"));
-        assert_eq!(identify("pi").map(|k| k.mark), Some("π"));
+        assert_eq!(identify("pi").map(|k| k.icon), Some("icons/pi.svg"));
         assert_eq!(identify("grok").map(|k| k.id), Some("grok"));
+    }
+
+    #[test]
+    fn each_catalog_kind_has_its_own_icon() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, kind) in CATALOG {
+            assert!(
+                kind.icon.starts_with("icons/") && kind.icon.ends_with(".svg"),
+                "{} icon path {}",
+                kind.id,
+                kind.icon
+            );
+            assert_eq!(kind.icon, format!("icons/{}.svg", kind.id));
+            seen.insert(kind.id);
+        }
+        assert_eq!(seen.len(), 12);
     }
 
     #[test]

@@ -19,7 +19,10 @@ pub struct Retention {
 
 impl Default for Retention {
     fn default() -> Self {
-        Self { days: 7, max_runs: 500 }
+        Self {
+            days: 7,
+            max_runs: 500,
+        }
     }
 }
 
@@ -127,14 +130,18 @@ impl Ledger {
     }
 
     pub fn failed_attention_count(&self) -> usize {
-        self.attention().filter(|r| r.state == RunState::Failed).count()
+        self.attention()
+            .filter(|r| r.state == RunState::Failed)
+            .count()
     }
 
     /// 已结束且未看过（Failed 无阈值；Succeeded 需 ≥ 阈值；Unknown 同 Succeeded；
     /// Abandoned 不进 Attention —— 它是进程没了，不是「跑完了等你看」）。
     pub fn attention(&self) -> impl Iterator<Item = &Run> {
         let threshold = Duration::from_secs(self.success_threshold_secs);
-        self.runs.iter().filter(move |run| self.in_attention(run, threshold))
+        self.runs
+            .iter()
+            .filter(move |run| self.in_attention(run, threshold))
     }
 
     /// 给一组 PaneKey（一个 tab 的全部 pane）算徽标。
@@ -146,15 +153,25 @@ impl Ledger {
         let failed = self
             .runs
             .iter()
-            .filter(|r| in_panes(r) && self.in_attention(r, threshold) && r.state == RunState::Failed)
+            .filter(|r| {
+                in_panes(r) && self.in_attention(r, threshold) && r.state == RunState::Failed
+            })
             .count();
         if failed > 0 {
-            return Some(Badge { kind: BadgeKind::Failed, count: failed, elapsed_ms: 0 });
+            return Some(Badge {
+                kind: BadgeKind::Failed,
+                count: failed,
+                elapsed_ms: 0,
+            });
         }
 
         let mut running_count = 0;
         let mut oldest_started: Option<u64> = None;
-        for run in self.runs.iter().filter(|r| in_panes(r) && r.state == RunState::Running) {
+        for run in self
+            .runs
+            .iter()
+            .filter(|r| in_panes(r) && r.state == RunState::Running)
+        {
             running_count += 1;
             oldest_started = Some(match oldest_started {
                 Some(t) => t.min(run.started_at_mono_ms()),
@@ -180,7 +197,11 @@ impl Ledger {
             })
             .count();
         if succeeded > 0 {
-            return Some(Badge { kind: BadgeKind::Succeeded, count: succeeded, elapsed_ms: 0 });
+            return Some(Badge {
+                kind: BadgeKind::Succeeded,
+                count: succeeded,
+                elapsed_ms: 0,
+            });
         }
 
         None
@@ -229,13 +250,16 @@ impl Ledger {
                 } else {
                     command
                 };
-                let mut run = Run::start(
-                    self.launch_id, pane, command, cwd, at_ms, unix_ms, inferred,
-                );
+                let mut run =
+                    Run::start(self.launch_id, pane, command, cwd, at_ms, unix_ms, inferred);
                 run.anchor = anchor;
                 self.runs.push(run);
             }
-            RunEvent::Finished { pane, exit_code, at_ms } => {
+            RunEvent::Finished {
+                pane,
+                exit_code,
+                at_ms,
+            } => {
                 // An orphan Finished (no Started) is dropped: never invent half a Run.
                 let seen_now = self.window_active && self.focused_pane == Some(pane);
                 if let Some(run) = self.running_in_mut(pane) {
@@ -418,10 +442,20 @@ mod tests {
     #[test]
     fn prune_caps_total_runs() {
         let mut ledger = Ledger::with_clock(LaunchId::new_v4(), fixed_clock);
-        ledger.set_retention(Retention { days: 7, max_runs: 500 });
+        ledger.set_retention(Retention {
+            days: 7,
+            max_runs: 500,
+        });
         let today = fixed_clock();
         let runs: Vec<_> = (0..600)
-            .map(|i| disk_run(pane(), &format!("c{i}"), today + i as u64, RunState::Succeeded))
+            .map(|i| {
+                disk_run(
+                    pane(),
+                    &format!("c{i}"),
+                    today + i as u64,
+                    RunState::Succeeded,
+                )
+            })
             .collect();
         ledger.load_history(runs);
         ledger.prune();
@@ -559,10 +593,19 @@ mod tests {
             None,
             0,
             false,
-            Some(Anchor { line: 42, column: 3 }),
+            Some(Anchor {
+                line: 42,
+                column: 3,
+            }),
         ));
         let run = ledger.runs().next().unwrap();
-        assert_eq!(run.anchor, Some(Anchor { line: 42, column: 3 }));
+        assert_eq!(
+            run.anchor,
+            Some(Anchor {
+                line: 42,
+                column: 3
+            })
+        );
     }
 
     #[test]
@@ -570,7 +613,11 @@ mod tests {
         let p = pane();
         let run = disk_run(p, "long thing", fixed_clock(), RunState::Running);
         assert_eq!(run.state, RunState::Running);
-        assert_eq!(run.started_at_mono_ms(), 0, "serde skip leaves mono clock at 0");
+        assert_eq!(
+            run.started_at_mono_ms(),
+            0,
+            "serde skip leaves mono clock at 0"
+        );
         let mut ledger = Ledger::new(LaunchId::new_v4());
         ledger.load_history(vec![run]);
         let loaded = ledger.runs().next().unwrap();

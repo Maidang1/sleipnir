@@ -267,7 +267,8 @@ mod tests {
 
     #[test]
     fn save_and_load_tmp() {
-        let dir = std::env::temp_dir().join(format!("sleipnir-session-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sleipnir-session-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
@@ -345,6 +346,9 @@ mod tests {
             path.file_name().and_then(|s| s.to_str()),
             Some("session.json")
         );
-        assert_eq!(path.parent(), Some(sleipnir_settings::config_dir().as_path()));
+        assert_eq!(
+            path.parent(),
+            Some(sleipnir_settings::config_dir().as_path())
+        );
     }
 }

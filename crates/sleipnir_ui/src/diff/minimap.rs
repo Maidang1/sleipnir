@@ -78,12 +78,8 @@ pub fn minimap_rows(rows: &[DisplayRow]) -> Vec<MinimapRow> {
             DisplayRow::SplitLine { left, right } => {
                 let left_frac = left.as_ref().map(|c| line_frac(&c.text)).unwrap_or(0.0);
                 let right_frac = right.as_ref().map(|c| line_frac(&c.text)).unwrap_or(0.0);
-                let left_change = left
-                    .as_ref()
-                    .is_some_and(|c| c.kind == LineKind::Removed);
-                let right_change = right
-                    .as_ref()
-                    .is_some_and(|c| c.kind == LineKind::Added);
+                let left_change = left.as_ref().is_some_and(|c| c.kind == LineKind::Removed);
+                let right_change = right.as_ref().is_some_and(|c| c.kind == LineKind::Added);
                 MinimapRow {
                     kind: MinimapKind::SplitPair {
                         left_change,
@@ -315,10 +311,7 @@ mod tests {
         assert!(matches!(mini[5].kind, MinimapKind::Gap));
         let layout = minimap_runs(&mini, 200.0);
         assert!(
-            !layout
-                .runs
-                .iter()
-                .any(|r| r.start == 4 && r.frac > 0.0),
+            !layout.runs.iter().any(|r| r.start == 4 && r.frac > 0.0),
             "empty line must not paint a bar: {:?}",
             layout.runs
         );

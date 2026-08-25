@@ -157,5 +157,4 @@ mod tests {
         let groups = group_tabs([(0, harbor.clone()), (1, other.clone()), (2, harbor.clone())]);
         assert_eq!(groups, vec![(harbor, vec![0, 2]), (other, vec![1])]);
     }
-
 }

@@ -79,7 +79,7 @@ _Avoid_: Diff pane, review tab, source control panel.
 
 **Agent identity**:
 A known coding-agent process detected from the Pane's foreground command name.
-Rendered as a letter monogram Sleipnir owns. Distinct from Attention (who vs
+Rendered as a Streamline icon Sleipnir owns. Distinct from Attention (who vs
 what happened).
 _Avoid_: Agent (the process is workload; the user is the person), logo.
 
@@ -128,7 +128,7 @@ _Avoid_: Mark (a Mark is a raw OSC 133 marker), Bookmark.
 **Attention**:
 The set of finished Runs the user has not yet seen. "Seen" means the Pane was
 focused, or the Run was clicked in the Ledger panel, or Mark Tab as Seen ran.
-Attention drives the tab wash, platform status indicators, and notifications. Tab chrome only washes Failed; Running and Succeeded stay in
+Attention drives the tab wash, the macOS Dock badge of failed count, and notifications. Tab chrome only washes Failed; Running and Succeeded stay in
 the Ledger. It does not survive a restart (loaded history is marked seen).
 _Avoid_: Unread, Badge (a badge is one rendering of Attention; tab chrome no
 longer draws one), Alert.

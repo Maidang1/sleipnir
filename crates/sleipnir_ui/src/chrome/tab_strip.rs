@@ -3,7 +3,7 @@
 use gpui::{
     App, AppContext as _, Context, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _, px, svg,
 };
 use run_ledger::Badge;
 use sleipnir_settings::{TerminalPalette, TerminalSettings};
@@ -298,15 +298,12 @@ fn truncated_label(text: impl Into<gpui::SharedString>) -> impl IntoElement {
 }
 
 fn render_agent_mark(kind: AgentKind) -> impl IntoElement {
-    div()
+    svg()
+        .path(kind.icon)
         .flex_shrink_0()
-        .w(px(16.0))
-        .flex()
-        .justify_center()
-        .text_xs()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .w(px(12.0))
+        .h(px(12.0))
         .text_color(kind.color)
-        .child(kind.mark)
 }
 
 pub(crate) fn tab_badge_for(tab: &crate::app_shell::Tab, cx: &App) -> Option<Badge> {

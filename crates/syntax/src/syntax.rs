@@ -207,7 +207,10 @@ mod tests {
         let lang = language_for_path("x.py").unwrap();
         let lines = highlight_lines(lang, "def add(a):\n    return a\n");
         assert!(lines[0].iter().any(|&(_, t)| t == Token::Keyword));
-        assert_eq!(highlight_lines(lang, ""), vec![Vec::<(Range<usize>, Token)>::new()]);
+        assert_eq!(
+            highlight_lines(lang, ""),
+            vec![Vec::<(Range<usize>, Token)>::new()]
+        );
     }
 
     #[test]

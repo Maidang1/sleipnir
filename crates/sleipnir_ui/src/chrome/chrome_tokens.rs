@@ -73,10 +73,7 @@ impl ChromeTokens {
                 .blend(tokens.content_bg.opacity(0.15))
                 .alpha(1.0);
             tokens.hover = tokens.surface;
-            tokens.border = tokens
-                .border
-                .blend(tokens.surface.opacity(0.3))
-                .alpha(1.0);
+            tokens.border = tokens.border.blend(tokens.surface.opacity(0.3)).alpha(1.0);
         }
 
         tokens

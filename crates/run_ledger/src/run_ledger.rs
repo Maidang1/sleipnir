@@ -10,4 +10,4 @@ pub mod store;
 pub use ledger::{Badge, BadgeKind, Ledger, Retention};
 pub use redact::redact_command;
 pub use run::{Anchor, LaunchId, PaneKey, Run, RunEvent, RunId, RunState};
-pub use store::{default_runs_path, load_runs, save_runs, RunsFile, RUNS_VERSION};
+pub use store::{RUNS_VERSION, RunsFile, default_runs_path, load_runs, save_runs};

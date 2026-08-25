@@ -2,21 +2,20 @@
 
 mod app_menus;
 
-use app_menus::{Hide, HideOthers, ShowAll, app_menus, Quit};
+use app_menus::{Hide, HideOthers, Quit, ShowAll, app_menus};
 use gpui::{App, KeyBinding};
 use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    BindingContext, BuiltinAction, builtin_bindings, last_window_close_quits, open_sleipnir_window,
-    tmux_preset_bindings,
-    ActivateTab, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, Find,
-    FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, NewTab, NewWindow, NextTab,
-    OpenQuickTerminal, OpenSettings, PrevTab, ReloadSettings, ResetFontSize, SplitDown,
-    SplitRight, ToggleBroadcast, ToggleCommandPalette, TogglePaneZoom, ToggleQuickSelect,
-    MarkTabSeen, PipeSelection, SendGitDiff, SendSelection, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
-    ToggleRunLedger,
+    ActivateTab, BindingContext, BuiltinAction, CheckForUpdates, ClearRunLedger, CloseTab,
+    CycleTheme, DecreaseFontSize, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen,
+    NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab,
+    ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
+    ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
+    TogglePaneZoom, ToggleQuickSelect, ToggleRunLedger, builtin_bindings, install_finder_services,
+    last_window_close_quits, open_sleipnir_window, tmux_preset_bindings,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -27,7 +26,7 @@ use terminal::{
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let app = application();
+    let app = application().with_assets(sleipnir_ui::AgentAssets);
     // Last-window close does not quit on macOS. Dock / Cmd-Tab reactivation
     // fires `applicationShouldHandleReopen` with no visible windows; without
     // this callback the click is a no-op and the process stays headless.
@@ -86,6 +85,10 @@ fn main() {
         // After keybindings so menu items pick up key equivalents from the keymap.
         cx.set_menus(app_menus());
 
+        // Finder Services ("New Sleipnir Tab/Window Here") must be bound before
+        // didFinishLaunching returns so a cold-start invocation is not dropped.
+        install_finder_services(cx);
+
         open_sleipnir_window(cx);
         cx.activate(true);
     });
@@ -136,9 +139,7 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::FocusPaneUp => KeyBinding::new(key, FocusPaneUp, context),
         BuiltinAction::FocusPaneDown => KeyBinding::new(key, FocusPaneDown, context),
         BuiltinAction::CheckForUpdates => KeyBinding::new(key, CheckForUpdates, context),
-        BuiltinAction::ToggleCommandPalette => {
-            KeyBinding::new(key, ToggleCommandPalette, context)
-        }
+        BuiltinAction::ToggleCommandPalette => KeyBinding::new(key, ToggleCommandPalette, context),
         BuiltinAction::Find => KeyBinding::new(key, Find, context),
         BuiltinAction::FindNext => KeyBinding::new(key, FindNext, context),
         BuiltinAction::FindPrev => KeyBinding::new(key, FindPrev, context),
@@ -155,9 +156,7 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::DecreaseFontSize => KeyBinding::new(key, DecreaseFontSize, context),
         BuiltinAction::ResetFontSize => KeyBinding::new(key, ResetFontSize, context),
         BuiltinAction::ActivateTab(n) => KeyBinding::new(key, ActivateTab(n), context),
-        BuiltinAction::SendKeystroke(ks) => {
-            KeyBinding::new(key, SendKeystroke(ks.into()), context)
-        }
+        BuiltinAction::SendKeystroke(ks) => KeyBinding::new(key, SendKeystroke(ks.into()), context),
         BuiltinAction::SendText(text) => KeyBinding::new(key, SendText(text.into()), context),
     }
 }
@@ -237,9 +236,7 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "show_character_palette" => KeyBinding::new(&spec.key, ShowCharacterPalette, Some(ctx)),
             "clear_run_ledger" => KeyBinding::new(&spec.key, ClearRunLedger, Some(ctx)),
             "toggle_run_ledger" => KeyBinding::new(&spec.key, ToggleRunLedger, Some(ctx)),
-            "mark_tab_seen" | "mark_as_seen" => {
-                KeyBinding::new(&spec.key, MarkTabSeen, Some(ctx))
-            }
+            "mark_tab_seen" | "mark_as_seen" => KeyBinding::new(&spec.key, MarkTabSeen, Some(ctx)),
             "toggle_pane_facts" | "pane_facts" => {
                 KeyBinding::new(&spec.key, TogglePaneFacts, Some(ctx))
             }

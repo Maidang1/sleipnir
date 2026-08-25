@@ -186,7 +186,9 @@ impl ConvertTree for PaneNode {
 fn pane_contains(node: &PaneNode, id: PaneId) -> bool {
     match node {
         PaneNode::Leaf { id: leaf, .. } => *leaf == id,
-        PaneNode::Split { first, second, .. } => pane_contains(first, id) || pane_contains(second, id),
+        PaneNode::Split { first, second, .. } => {
+            pane_contains(first, id) || pane_contains(second, id)
+        }
     }
 }
 

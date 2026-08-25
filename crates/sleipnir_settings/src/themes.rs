@@ -825,12 +825,27 @@ mod tests {
         };
         let p = custom.to_palette();
         assert_eq!(p.name, ThemeName::Custom);
-        assert_eq!(p.background.to_rgb(), parse_hex_color("#0d1117").unwrap().to_rgb());
-        assert_eq!(p.foreground.to_rgb(), parse_hex_color("#e6edf3").unwrap().to_rgb());
+        assert_eq!(
+            p.background.to_rgb(),
+            parse_hex_color("#0d1117").unwrap().to_rgb()
+        );
+        assert_eq!(
+            p.foreground.to_rgb(),
+            parse_hex_color("#e6edf3").unwrap().to_rgb()
+        );
         // Red, green, blue overwrote ansi[0..3]; the rest inherit Mocha.
-        assert_eq!(p.ansi[0].to_rgb(), parse_hex_color("#ff0000").unwrap().to_rgb());
-        assert_eq!(p.ansi[1].to_rgb(), parse_hex_color("#00ff00").unwrap().to_rgb());
-        assert_eq!(p.ansi[2].to_rgb(), parse_hex_color("#0000ff").unwrap().to_rgb());
+        assert_eq!(
+            p.ansi[0].to_rgb(),
+            parse_hex_color("#ff0000").unwrap().to_rgb()
+        );
+        assert_eq!(
+            p.ansi[1].to_rgb(),
+            parse_hex_color("#00ff00").unwrap().to_rgb()
+        );
+        assert_eq!(
+            p.ansi[2].to_rgb(),
+            parse_hex_color("#0000ff").unwrap().to_rgb()
+        );
         assert_eq!(p.ansi[3].to_rgb(), mocha().ansi[3].to_rgb());
         assert_eq!(p.dim[0].to_rgb(), p.ansi[0].to_rgb());
     }

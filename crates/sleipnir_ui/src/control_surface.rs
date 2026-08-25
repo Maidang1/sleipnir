@@ -6,18 +6,18 @@ use sleipnir_settings::TerminalSettings;
 use std::sync::mpsc;
 
 #[cfg(unix)]
+use crate::TermView;
+#[cfg(unix)]
 use crate::app_shell::AppShell;
 #[cfg(unix)]
 use crate::run_ledger_global::RunLedgerGlobal;
-#[cfg(unix)]
-use crate::TermView;
 #[cfg(unix)]
 use gpui::AsyncApp;
 #[cfg(unix)]
 use run_ledger::PaneKey;
 #[cfg(unix)]
 use sleipnir_ctl::{
-    socket_path, wait_matches, ControlRequest, ControlResponse, PaneSnap, WaitUntil,
+    ControlRequest, ControlResponse, PaneSnap, WaitUntil, socket_path, wait_matches,
 };
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
@@ -183,7 +183,13 @@ fn handle_connection(mut stream: UnixStream, jobs: async_channel::Sender<Job>) {
             _ => 30,
         };
         let (reply_tx, reply_rx) = mpsc::channel();
-        if jobs.send_blocking(Job { req, reply: reply_tx }).is_err() {
+        if jobs
+            .send_blocking(Job {
+                req,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
             break;
         }
         let resp = reply_rx
@@ -289,7 +295,10 @@ fn wait_status(pane: PaneKey, until: WaitUntil, cx: &mut App) -> Result<bool, St
     let busy = view.read(cx).looks_busy(cx);
     let (failed, attention) = if cx.has_global::<RunLedgerGlobal>() {
         let g = cx.global::<RunLedgerGlobal>();
-        (g.pane_has_failed_attention(pane), g.pane_has_attention(pane))
+        (
+            g.pane_has_failed_attention(pane),
+            g.pane_has_attention(pane),
+        )
     } else {
         (false, false)
     };
