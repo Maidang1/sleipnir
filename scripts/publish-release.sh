@@ -124,6 +124,7 @@ echo ""
 echo "=== Published ==="
 gh release view "${TAG}" --json url --jq '.url'
 echo "  artifacts:"
-gh release download "${TAG}" --dir /tmp/sleipnir-release-${VERSION} 2>/dev/null || true
-ls -lh /tmp/sleipnir-release-${VERSION}/ 2>/dev/null || true
-rm -rf /tmp/sleipnir-release-${VERSION}
+RELEASE_DOWNLOAD_DIR="/tmp/sleipnir-release-${VERSION}"
+gh release download "${TAG}" --dir "${RELEASE_DOWNLOAD_DIR}" 2>/dev/null || true
+ls -lh "${RELEASE_DOWNLOAD_DIR}/" 2>/dev/null || true
+rm -rf "${RELEASE_DOWNLOAD_DIR}"

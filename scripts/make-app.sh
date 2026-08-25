@@ -68,7 +68,7 @@ if [[ ! -x "${BIN}" || ! -x "${UPDATE_HELPER}" ]]; then
 fi
 
 # ── Assemble .app bundle ──────────────────────────────────────────────────────
-rm -rf "${BUILD_DIR}/${APP_BUNDLE}"
+rm -rf "${BUILD_DIR:?}/${APP_BUNDLE}"
 APP="${BUILD_DIR}/${APP_BUNDLE}"
 
 mkdir -p "${APP}/Contents/MacOS"

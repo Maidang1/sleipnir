@@ -8,7 +8,8 @@ trap 'rm -rf "${TMP}"' EXIT
 printf 'test dmg bytes' > "${TMP}/Sleipnir-9.8.7-macos.dmg"
 openssl genpkey -algorithm Ed25519 -out "${TMP}/private.pem" >/dev/null 2>&1
 openssl pkey -in "${TMP}/private.pem" -pubout -out "${TMP}/public.pem" >/dev/null 2>&1
-export SLEIPNIR_UPDATE_SIGNING_KEY="$(base64 < "${TMP}/private.pem" | tr -d '\n')"
+SLEIPNIR_UPDATE_SIGNING_KEY="$(base64 < "${TMP}/private.pem" | tr -d '\n')"
+export SLEIPNIR_UPDATE_SIGNING_KEY
 
 "${ROOT}/scripts/sign-update-manifest.py" \
   --version 9.8.7 \
