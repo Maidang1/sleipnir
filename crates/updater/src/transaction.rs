@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const TRANSACTION_SCHEMA_VERSION: u32 = 1;
 
@@ -87,6 +90,8 @@ pub struct Transaction {
     pub installed_bundle_path: PathBuf,
     pub adjacent_candidate_path: PathBuf,
     pub artifact_path: PathBuf,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
     pub error_code: Option<UpdateErrorCode>,
     pub os_error: Option<String>,
 }
@@ -128,6 +133,7 @@ impl Transaction {
         adjacent_candidate_path: PathBuf,
         artifact_path: PathBuf,
     ) -> Result<Self, TransactionError> {
+        let now = unix_time_ms();
         let value = Self {
             schema_version: TRANSACTION_SCHEMA_VERSION,
             transaction_id,
@@ -141,6 +147,8 @@ impl Transaction {
             installed_bundle_path,
             adjacent_candidate_path,
             artifact_path,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
             error_code: None,
             os_error: None,
         };
@@ -155,7 +163,7 @@ impl Transaction {
                 "unsupported transaction schema",
             ));
         }
-        if self.transaction_id.is_empty()
+        if uuid::Uuid::parse_str(&self.transaction_id).is_err()
             || self.nonce.len() != 64
             || !self.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
             || !self.installed_bundle_path.is_absolute()
@@ -201,13 +209,22 @@ impl Transaction {
             ));
         }
         self.phase = next;
+        self.updated_at_unix_ms = unix_time_ms();
         Ok(())
     }
 
     pub fn fail(&mut self, code: UpdateErrorCode, message: impl Into<String>) {
         self.error_code = Some(code);
         self.os_error = Some(message.into());
+        self.updated_at_unix_ms = unix_time_ms();
     }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 pub fn save_atomic(path: &Path, transaction: &Transaction) -> Result<(), TransactionError> {
@@ -220,13 +237,17 @@ pub fn save_atomic(path: &Path, transaction: &Transaction) -> Result<(), Transac
     })?;
     std::fs::create_dir_all(parent)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(transaction)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(&tmp)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
     file.write_all(&bytes)
