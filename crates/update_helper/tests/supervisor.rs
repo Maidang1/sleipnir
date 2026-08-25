@@ -171,6 +171,7 @@ fn swap_failure_relaunches_untouched_old_application() {
         SupervisorResult::Stopped(UpdateErrorCode::AtomicSwapFailed)
     );
     assert_eq!(supervisor.launcher.launches, 1);
+    assert_eq!(tx.phase, Phase::Swapping);
 }
 
 #[test]

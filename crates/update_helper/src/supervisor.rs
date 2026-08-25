@@ -78,7 +78,10 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
                 return SupervisorResult::Stopped(UpdateErrorCode::OldProcessWatchFailed);
             }
         }
+        // Persisting `Swapping` before the syscall makes crash recovery
+        // conservative: either path may be active when the helper restarts.
         if self.fs.transition(tx, Phase::Swapping).is_err() {
+            let _ = self.launcher.launch(&tx.installed_bundle_path);
             return SupervisorResult::Stopped(UpdateErrorCode::InvalidStateTransition);
         }
         if self
@@ -86,9 +89,9 @@ impl<F: FileSystem, P: ProcessWatcher, L: AppLauncher, C: Clock> Supervisor<F, P
             .swap(&tx.installed_bundle_path, &tx.adjacent_candidate_path)
             .is_err()
         {
-            // The old process is already gone, but the swap did not occur. Bring
-            // the untouched old bundle back so the user is not left without UI.
-            let _ = self.fs.transition(tx, Phase::ManualInstallRequired);
+            // A failed atomic swap leaves the old app installed. Keep the
+            // transaction in `Swapping`; recovery inspects both bundle versions
+            // rather than trusting a guessed terminal state.
             let _ = self.launcher.launch(&tx.installed_bundle_path);
             return SupervisorResult::Stopped(UpdateErrorCode::AtomicSwapFailed);
         }

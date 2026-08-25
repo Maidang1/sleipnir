@@ -60,7 +60,7 @@ jobs:
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Test
-        run: cargo test -p terminal -p sleipnir_ui -p sleipnir_settings -p updater -p sleipnir -p run_ledger -p sleipnir_ctl
+        run: cargo test -p terminal -p sleipnir_ui -p sleipnir_settings -p updater -p sleipnir-update-helper -p sleipnir -p run_ledger -p sleipnir_ctl
 
       - name: Release build
         run: cargo build --release -p sleipnir
