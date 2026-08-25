@@ -73,7 +73,7 @@ percent-encoding = "2.3.2"
 rand = "0.9"
 regex = "1.5"
 schemars = { version = "1.0", features = ["indexmap2"] }
-semver = "1.0"
+semver = { version = "1.0", features = ["serde"] }
 sha2 = "0.10"
 serde = { version = "1.0.221", features = ["derive", "rc"] }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
