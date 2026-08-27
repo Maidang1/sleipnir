@@ -36,6 +36,9 @@ impl AppShell {
     }
 
     fn clear_find_matches(&mut self, cx: &mut Context<Self>) {
+        // Invalidate searches that are still running so they cannot repopulate
+        // matches after the query is cleared or the find bar is closed.
+        self.find_gen = self.find_gen.wrapping_add(1);
         if let Some(view) = self.active_view(cx) {
             if let Some(term) = view.read(cx).terminal_entity().cloned() {
                 term.update(cx, |t, _| t.matches.clear());
@@ -82,21 +85,27 @@ impl AppShell {
         let Some(term) = view.read(cx).terminal_entity().cloned() else {
             return;
         };
+        self.find_gen = self.find_gen.wrapping_add(1);
+        let generation = self.find_gen;
         let task = term.update(cx, |t, cx| t.find_matches(search, cx));
         cx.spawn(async move |this, cx| {
             let matches = task.await;
             this.update(cx, |this, cx| {
-                let count = matches.len();
-                if let Some(view) = this.active_view(cx) {
-                    if let Some(term) = view.read(cx).terminal_entity().cloned() {
-                        term.update(cx, |t, _| {
-                            t.matches = matches;
-                            if count > 0 {
-                                t.activate_match(0);
-                            }
-                        });
-                    }
+                // Search completion is asynchronous. Only the newest request
+                // for the pane that is still active may update UI state.
+                if this.find_gen != generation
+                    || !this.mode.find_open
+                    || this.active_view(cx).as_ref() != Some(&view)
+                {
+                    return;
                 }
+                let count = matches.len();
+                term.update(cx, |t, _| {
+                    t.matches = matches;
+                    if count > 0 {
+                        t.activate_match(0);
+                    }
+                });
                 this.find_match_count = count;
                 this.find_active_index = 0;
                 cx.notify();

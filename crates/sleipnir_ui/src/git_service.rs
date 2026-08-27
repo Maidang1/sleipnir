@@ -2,14 +2,91 @@
 //! a background executor when called from GPUI.
 
 use diff_core::PatchDiff;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::chrome::git_status;
 use crate::chrome::workspace::git_root;
 
 /// Hard cap on the `git diff` output we are willing to hold in memory.
 pub const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
+
+/// Hard cap on stderr captured from a failed Git process.
+const MAX_GIT_ERROR_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+enum BoundedCommandError {
+    Spawn(io::Error),
+    Read(io::Error),
+    Wait(io::Error),
+    TooLarge,
+}
+
+#[derive(Debug)]
+struct BoundedCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run a command while retaining at most `stdout_limit + 1` stdout bytes and
+/// `stderr_limit` stderr bytes. Stderr is drained concurrently so its pipe
+/// cannot fill; stdout stops at the first byte over the limit and the child is
+/// terminated immediately.
+fn run_bounded(
+    command: &mut Command,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Result<BoundedCommandOutput, BoundedCommandError> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(BoundedCommandError::Spawn)?;
+    let stdout = child.stdout.take().expect("stdout was configured as piped");
+    let stderr = child.stderr.take().expect("stderr was configured as piped");
+
+    let stderr_reader = std::thread::spawn(move || retain_up_to_and_drain(stderr, stderr_limit));
+    let stdout = match read_up_to(stdout, stdout_limit + 1) {
+        Ok(stdout) => stdout,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_reader.join();
+            return Err(BoundedCommandError::Read(err));
+        }
+    };
+    if stdout.len() > stdout_limit {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stderr_reader.join();
+        return Err(BoundedCommandError::TooLarge);
+    }
+
+    let status = child.wait().map_err(BoundedCommandError::Wait)?;
+    let stderr = stderr_reader
+        .join()
+        .expect("stderr reader thread panicked")
+        .map_err(BoundedCommandError::Read)?;
+    Ok(BoundedCommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_up_to(mut reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    reader.by_ref().take(limit as u64).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn retain_up_to_and_drain(mut reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
+    let bytes = read_up_to(&mut reader, limit)?;
+    io::copy(&mut reader, &mut io::sink())?;
+    Ok(bytes)
+}
 
 /// A work-tree patch as raw text, with the label the UI shows for it.
 #[derive(Debug)]
@@ -54,24 +131,42 @@ pub fn fetch_patch_text(cwd: &Path) -> PatchOutcome<PatchText> {
         .unwrap_or_else(|| root.display().to_string());
     let title = format!("{name} · {branch}");
 
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &root.to_string_lossy(),
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "HEAD",
-        ])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output();
+    let output = run_bounded(
+        Command::new("git")
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "HEAD",
+            ])
+            .env("GIT_TERMINAL_PROMPT", "0"),
+        MAX_PATCH_BYTES,
+        MAX_GIT_ERROR_BYTES,
+    );
 
     let output = match output {
         Ok(out) => out,
-        Err(err) => {
+        Err(BoundedCommandError::TooLarge) => {
+            return PatchOutcome::Failed {
+                title,
+                message: format!(
+                    "diff is larger than {} MB; too large to open",
+                    MAX_PATCH_BYTES / (1024 * 1024)
+                ),
+            };
+        }
+        Err(BoundedCommandError::Spawn(err)) => {
             return PatchOutcome::Failed {
                 title,
                 message: format!("failed to run git: {err}"),
+            };
+        }
+        Err(BoundedCommandError::Read(err)) | Err(BoundedCommandError::Wait(err)) => {
+            return PatchOutcome::Failed {
+                title,
+                message: format!("failed to read git output: {err}"),
             };
         }
     };
@@ -82,16 +177,6 @@ pub fn fetch_patch_text(cwd: &Path) -> PatchOutcome<PatchText> {
             message => message.to_string(),
         };
         return PatchOutcome::Failed { title, message };
-    }
-    if output.stdout.len() > MAX_PATCH_BYTES {
-        return PatchOutcome::Failed {
-            title,
-            message: format!(
-                "diff is {:.1} MB; too large to open (limit {} MB)",
-                output.stdout.len() as f64 / (1024.0 * 1024.0),
-                MAX_PATCH_BYTES / (1024 * 1024)
-            ),
-        };
     }
 
     let patch = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -208,6 +293,34 @@ mod tests {
             PatchOutcome::Clean { .. }
         ));
         assert!(matches!(fetch_patch_text(root), PatchOutcome::Clean { .. }));
+    }
+
+    #[test]
+    fn oversized_patch_is_rejected_by_bounded_reader() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        if !git(root, &["init", "-q", "-b", "main"]) {
+            return;
+        }
+        let original = "original line\n".repeat(90_000);
+        let changed = "replacement line\n".repeat(90_000);
+        fs::write(root.join("large.txt"), original).unwrap();
+        assert!(git(root, &["add", "large.txt"]));
+        assert!(git(root, &["commit", "-qm", "init"]));
+        fs::write(root.join("large.txt"), changed).unwrap();
+
+        match fetch_patch_text(root) {
+            PatchOutcome::Failed { message, .. } => {
+                assert!(message.contains("too large to open"), "{message}");
+            }
+            other => panic!("expected oversized diff failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bounded_reader_keeps_only_the_requested_bytes() {
+        let bytes = read_up_to(std::io::Cursor::new(vec![b'x'; 1024]), 17).unwrap();
+        assert_eq!(bytes, vec![b'x'; 17]);
     }
 
     #[test]

@@ -292,6 +292,8 @@ pub struct AppShell {
     palette_selected: usize,
     palette_items: Vec<CommandItem>,
     find_query: String,
+    /// Monotonic request id used to discard stale asynchronous search results.
+    find_gen: u64,
     find_match_count: usize,
     find_active_index: usize,
     /// Regex mode: treat the query as a raw regex instead of a literal (⌥⌘R).
@@ -475,6 +477,7 @@ impl AppShell {
             palette_selected: 0,
             palette_items: palette_commands(),
             find_query: String::new(),
+            find_gen: 0,
             find_match_count: 0,
             find_active_index: 0,
             find_regex: false,
