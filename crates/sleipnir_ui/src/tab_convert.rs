@@ -1,9 +1,12 @@
 //! Same-window tab ↔ pane layout transforms.
 //!
-//! Pure over an abstract tree so tests do not need GPUI or a PTY. The live
-//! `PaneNode` implements the same trait; `AppShell` calls these functions.
+//! Generic over the tree type so tests can drive them with an identity tree
+//! instead of a live `TermView`/PTY. `Tab<PaneNode>` is the production tab that
+//! `AppShell` owns; the transforms mutate it in place, with no intermediate copy
+//! of the tab list.
 
 use crate::pane_tree::{PaneId, PaneNode, SplitAxis};
+use gpui::SharedString;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConvertError {
@@ -15,14 +18,20 @@ pub enum ConvertError {
     LastPane,
 }
 
-/// A tab as the convert routines see it.
+/// One tab: an id plus a pane layout. `T` is the tree type, defaulting to the
+/// live `PaneNode`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct TabView<T> {
-    pub id: u64,
-    pub tree: T,
-    pub active_pane: PaneId,
-    pub custom_title: Option<String>,
-    pub zoomed_pane: Option<PaneId>,
+pub(crate) struct Tab<T = PaneNode> {
+    pub(crate) id: u64,
+    /// Recursive pane layout; a fresh tab is a single leaf.
+    pub(crate) tree: T,
+    /// The pane that currently holds focus within this tab.
+    pub(crate) active_pane: PaneId,
+    /// User-assigned title (via right-click rename). When set, it overrides the
+    /// active pane's title on the tab chip.
+    pub(crate) custom_title: Option<SharedString>,
+    /// When set, only this pane is shown full-content (M13 pane zoom).
+    pub(crate) zoomed_pane: Option<PaneId>,
 }
 
 /// Tree surgery needed to merge or extract without creating new sessions.
@@ -195,7 +204,7 @@ fn pane_contains(node: &PaneNode, id: PaneId) -> bool {
 /// Fold `source` into `dest` as a sibling subtree. `dest` stays; `source` is removed.
 /// Returns the destination's index after the edit.
 pub fn merge_tab<T: ConvertTree>(
-    tabs: &mut Vec<TabView<T>>,
+    tabs: &mut Vec<Tab<T>>,
     source_id: u64,
     dest_id: u64,
 ) -> Result<usize, ConvertError> {
@@ -229,7 +238,7 @@ pub fn merge_tab<T: ConvertTree>(
 /// Pull `pane_id` out of its tab and insert it as a new tab at `insert_at`.
 /// Returns the new tab's index. Refuses the last pane of a tab.
 pub fn extract_pane<T: ConvertTree>(
-    tabs: &mut Vec<TabView<T>>,
+    tabs: &mut Vec<Tab<T>>,
     pane_id: PaneId,
     insert_at: usize,
     new_tab_id: u64,
@@ -238,20 +247,21 @@ pub fn extract_pane<T: ConvertTree>(
         .iter()
         .position(|t| t.tree.contains_leaf(pane_id))
         .ok_or(ConvertError::MissingPane)?;
-    if tabs[source_idx].tree.leaf_count() <= 1 {
+    let source = &mut tabs[source_idx];
+    if source.tree.leaf_count() <= 1 {
         return Err(ConvertError::LastPane);
     }
-    let taken = tabs[source_idx].tree.extract_leaf(pane_id)?;
-    if tabs[source_idx].active_pane == pane_id {
-        tabs[source_idx].active_pane = tabs[source_idx].tree.first_leaf_id();
+    let taken = source.tree.extract_leaf(pane_id)?;
+    if source.active_pane == pane_id {
+        source.active_pane = source.tree.first_leaf_id();
     }
-    if tabs[source_idx].zoomed_pane == Some(pane_id) {
-        tabs[source_idx].zoomed_pane = None;
+    if source.zoomed_pane == Some(pane_id) {
+        source.zoomed_pane = None;
     }
     let insert_at = insert_at.min(tabs.len());
     tabs.insert(
         insert_at,
-        TabView {
+        Tab {
             id: new_tab_id,
             tree: taken,
             active_pane: pane_id,
@@ -266,9 +276,9 @@ pub fn extract_pane<T: ConvertTree>(
 mod tests {
     use super::*;
 
-    fn tab(id: u64, tree: LayoutTree) -> TabView<LayoutTree> {
+    fn tab(id: u64, tree: LayoutTree) -> Tab<LayoutTree> {
         let active = tree.first_leaf_id();
-        TabView {
+        Tab {
             id,
             tree,
             active_pane: active,

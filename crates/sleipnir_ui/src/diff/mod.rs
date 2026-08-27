@@ -1,16 +1,15 @@
 //! Git diff inspector: parse + flatten + overlay. Not a Pane.
 
-mod fetch;
 mod minimap;
 mod render;
 mod rows;
 pub(crate) mod upgrade;
 
-pub(crate) use fetch::{FetchOutcome, fetch_worktree_diff};
 pub(crate) use rows::{
     Cell, DisplayRow, FileUpgrade, LineKind, TreeEntry, ViewMode, file_index_at,
 };
 
+use crate::git_service::ReadyPatch;
 use gpui::{ListAlignment, ListOffset, ListState, Pixels, px};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -52,7 +51,7 @@ pub(crate) struct DiffSession {
 }
 
 impl DiffSession {
-    pub fn from_ready(ready: fetch::ReadyDiff, mode: ViewMode) -> Self {
+    pub fn from_ready(ready: ReadyPatch, mode: ViewMode) -> Self {
         let (rows, file_rows, hunk_rows, tree) = rows::build_rows(&ready.parsed, mode);
         let row_count = rows.len();
         Self {

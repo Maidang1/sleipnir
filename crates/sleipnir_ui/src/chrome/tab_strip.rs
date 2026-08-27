@@ -120,7 +120,7 @@ impl AppShell {
             .map(|tab| tab_git_facts(tab, cx))
             .unwrap_or((None, 0, 0));
         let in_git = branch.is_some();
-        let open = self.diff_open;
+        let open = self.mode.is(crate::ui_mode::OverlayKind::Diff);
         // Hide entirely (no layout space) when not in a git repo and diff is closed.
         let show = in_git || open;
         div().id("diff-chrome-button").when(show, |el| {

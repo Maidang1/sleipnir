@@ -1,5 +1,9 @@
 //! Single-window multi-tab shell for sleipnir (HIG-aligned chrome).
 
+/// Maps `CommandId` to canonical shell actions. A child module so it can reach
+/// `AppShell`'s private methods without widening them to the whole crate.
+mod command_dispatch;
+
 use gpui::{
     App, AppContext as _, BorrowAppContext, Bounds, ClickEvent, Context, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton,
@@ -28,7 +32,9 @@ use crate::session::{
     SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, restore_pane_key,
     sanitize_session, save_session, session_path,
 };
-use crate::tab_convert::{TabView, extract_pane, merge_tab};
+pub(crate) use crate::tab_convert::Tab;
+use crate::tab_convert::{extract_pane, merge_tab};
+use crate::ui_mode::{OverlayKind, PANE_FACTS_MAX_AGE, PaneFactsState, UiMode};
 use crate::{AvailableUpdate, TermView, UpdateModel, UpdateUiState};
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
@@ -125,19 +131,6 @@ actions!(
 #[derive(Clone, Debug, Default, PartialEq, gpui::Action)]
 #[action(namespace = sleipnir, no_json)]
 pub struct ActivateTab(pub usize);
-
-pub(crate) struct Tab {
-    pub(crate) id: u64,
-    /// Recursive pane layout; a fresh tab is a single leaf.
-    pub(crate) tree: PaneNode,
-    /// The pane that currently holds focus within this tab.
-    active_pane: PaneId,
-    /// User-assigned title (via right-click rename). When set, it overrides the
-    /// active pane's title on the tab chip.
-    custom_title: Option<SharedString>,
-    /// When set, only this pane is shown full-content (M13 pane zoom).
-    zoomed_pane: Option<PaneId>,
-}
 
 /// Ghost chip rendered under the pointer while dragging a tab to reorder it.
 pub(crate) struct TabDragPreview {
@@ -300,21 +293,17 @@ pub struct AppShell {
     drag: Option<DragState>,
     /// In-progress inline tab rename, if any.
     pub(crate) rename: Option<RenameState>,
-    /// Whether the settings overlay is visible.
-    pub(crate) settings_open: bool,
+    /// Which modal overlay is showing, plus the transient find / quick-select
+    /// modes. Replaces the old one-bool-per-overlay matrix, so illegal
+    /// combinations are unrepresentable.
+    pub(crate) mode: UiMode,
     /// Active section tab inside the settings panel.
     settings_section: SettingsSection,
     /// Type-to-filter query for the theme picker (empty = all).
     theme_query: String,
-    /// Whether the process-wide update dialog is visible in this window.
-    update_open: bool,
-    /// Command palette open state (M9).
-    palette_open: bool,
     palette_query: String,
     palette_selected: usize,
     palette_items: Vec<CommandItem>,
-    /// Find-in-scrollback bar (M10).
-    find_open: bool,
     find_query: String,
     find_match_count: usize,
     find_active_index: usize,
@@ -330,19 +319,13 @@ pub struct AppShell {
     pub(crate) bell_flash_tabs: std::collections::HashSet<u64>,
     /// Fan-out keystrokes to all panes in the active tab (M13).
     broadcast: bool,
-    /// Quick Select overlay active (M15).
-    quick_select_open: bool,
-    /// Focused-pane facts overlay (cwd / tree / ports).
-    facts_open: bool,
-    facts: Option<crate::chrome::pane_facts::PaneFacts>,
-    facts_at: Option<std::time::Instant>,
-    ledger_open: bool,
+    /// Focused-pane facts: async collection state machine. Carries its own
+    /// snapshot timestamp and in-flight flag.
+    facts: PaneFactsState,
     tombstone_gate: crate::chrome::tombstone::TombstoneGate,
-    history_open: bool,
     history_query: String,
     history_selected: usize,
     /// Git diff inspector (ADR-0012). Not a Pane.
-    pub(crate) diff_open: bool,
     pub(crate) diff_view: Option<crate::diff::DiffView>,
     diff_gen: u64,
     /// Debounced session save task.
@@ -491,15 +474,19 @@ impl AppShell {
             content_bounds: None,
             drag: None,
             rename: None,
-            settings_open: false,
+            mode: UiMode {
+                overlay: if has_update_outcome {
+                    OverlayKind::Update
+                } else {
+                    OverlayKind::None
+                },
+                ..UiMode::default()
+            },
             settings_section: SettingsSection::Theme,
             theme_query: String::new(),
-            update_open: has_update_outcome,
-            palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
             palette_items: palette_commands(),
-            find_open: false,
             find_query: String::new(),
             find_match_count: 0,
             find_active_index: 0,
@@ -509,18 +496,12 @@ impl AppShell {
             close_confirm: None,
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
-            quick_select_open: false,
-            facts_open: false,
-            ledger_open: false,
             tombstone_gate: crate::chrome::tombstone::TombstoneGate::default(),
-            history_open: false,
             history_query: String::new(),
             history_selected: 0,
-            diff_open: false,
             diff_view: None,
             diff_gen: 0,
-            facts: None,
-            facts_at: None,
+            facts: PaneFactsState::default(),
             _session_save_task: None,
             _quit_subscription: None,
         };
@@ -572,7 +553,7 @@ impl AppShell {
         shell
     }
 
-    fn sync_window_title(&self, window: &mut Window, cx: &App) {
+    pub(crate) fn sync_window_title(&self, window: &mut Window, cx: &App) {
         let title = self
             .tabs
             .get(self.active)
@@ -816,7 +797,7 @@ impl AppShell {
         }
     }
 
-    fn sync_ledger_focus(&self, window: &Window, cx: &mut App) {
+    pub(crate) fn sync_ledger_focus(&self, window: &Window, cx: &mut App) {
         if !cx.has_global::<RunLedgerGlobal>() {
             return;
         }
@@ -832,7 +813,7 @@ impl AppShell {
         });
     }
 
-    fn apply_font_override_to_all_panes(&self, cx: &mut Context<Self>) {
+    pub(crate) fn apply_font_override_to_all_panes(&self, cx: &mut Context<Self>) {
         let size = self.font_size_override;
         for tab in &self.tabs {
             let mut leaves = Vec::new();
@@ -857,6 +838,24 @@ impl AppShell {
     fn reset_font_size(&mut self, cx: &mut Context<Self>) {
         self.font_size_override = None;
         self.apply_font_override_to_all_panes(cx);
+        cx.notify();
+    }
+
+    /// Re-read settings from disk, dropping any in-session font override.
+    fn reload_settings(&mut self, cx: &mut Context<Self>) {
+        self.font_size_override = None;
+        self.apply_font_override_to_all_panes(cx);
+        TerminalSettings::reload(cx);
+        crate::run_ledger_global::RunLedgerGlobal::reload_settings_in(cx);
+        crate::control_surface::reload(cx);
+        crate::attention_chrome::refresh(cx);
+        cx.notify();
+    }
+
+    /// Advance to the next built-in theme.
+    fn cycle_theme(&mut self, cx: &mut Context<Self>) {
+        let next = TerminalSettings::get_global(cx).theme.next();
+        TerminalSettings::set_theme(next, cx);
         cx.notify();
     }
 
@@ -899,14 +898,18 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.toggle_pane_zoom(window, cx);
+    }
+
+    /// Zoom the active pane to fill the tab, or restore the split layout.
+    fn toggle_pane_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
-        if tab.zoomed_pane.is_some() {
-            tab.zoomed_pane = None;
-        } else {
-            tab.zoomed_pane = Some(tab.active_pane);
-        }
+        tab.zoomed_pane = match tab.zoomed_pane {
+            Some(_) => None,
+            None => Some(tab.active_pane),
+        };
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -917,6 +920,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.toggle_broadcast(cx);
+    }
+
+    /// Fan out keystrokes to every pane in the active tab.
+    fn toggle_broadcast(&mut self, cx: &mut Context<Self>) {
         self.broadcast = !self.broadcast;
         cx.notify();
     }
@@ -957,7 +965,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.quick_select_open = !self.quick_select_open;
+        self.toggle_quick_select(cx);
+    }
+
+    fn toggle_quick_select(&mut self, cx: &mut Context<Self>) {
+        self.mode.toggle_quick_select();
         cx.notify();
     }
 
@@ -978,6 +990,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.export_scrollback(cx);
+    }
+
+    /// Dump the active pane's scrollback to a temp file and open it.
+    fn export_scrollback(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active_view(cx) else {
             return;
         };
@@ -1129,7 +1146,7 @@ impl AppShell {
 
     /// Mark layout dirty and write session after a short debounce so rapid
     /// tab switches don't thrash the disk.
-    fn schedule_session_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_session_save(&mut self, cx: &mut Context<Self>) {
         // Cancel any pending save timer and start a fresh debounce.
         // Dropping the previous task cancels the prior write, so only the most
         // recent structural change is persisted.
@@ -1191,12 +1208,7 @@ impl AppShell {
             zoomed_pane: None,
         });
         self.active = self.tabs.len() - 1;
-        self.focus_active(window, cx);
-        self.sync_ledger_focus(window, cx);
-        self.sync_window_title(window, cx);
-        self.tab_scroll_handle.scroll_to_item(self.active);
-        self.schedule_session_save(cx);
-        cx.notify();
+        self.commit_workspace(window, cx);
     }
 
     /// Begin an inline rename for the given tab, seeding the editable buffer
@@ -1304,12 +1316,7 @@ impl AppShell {
             Some(new_active) => {
                 self.tabs.remove(index);
                 self.active = new_active;
-                self.focus_active(window, cx);
-                self.sync_ledger_focus(window, cx);
-                self.sync_window_title(window, cx);
-                self.tab_scroll_handle.scroll_to_item(self.active);
-                self.schedule_session_save(cx);
-                cx.notify();
+                self.commit_workspace(window, cx);
             }
         }
     }
@@ -1325,12 +1332,7 @@ impl AppShell {
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active = index;
-            self.focus_active(window, cx);
-            self.sync_ledger_focus(window, cx);
-            self.sync_window_title(window, cx);
-            self.tab_scroll_handle.scroll_to_item(self.active);
-            self.schedule_session_save(cx);
-            cx.notify();
+            self.commit_workspace(window, cx);
         }
     }
 
@@ -1365,11 +1367,7 @@ impl AppShell {
                 .position(|t| t.id == active_id)
                 .unwrap_or(0);
         }
-        self.focus_active(window, cx);
-        self.sync_window_title(window, cx);
-        self.tab_scroll_handle.scroll_to_item(self.active);
-        self.schedule_session_save(cx);
-        cx.notify();
+        self.commit_workspace(window, cx);
     }
 
     /// Move a tab out of this window into a fresh window (drag tab to the
@@ -1391,11 +1389,7 @@ impl AppShell {
         };
         let tab = self.tabs.remove(idx);
         self.active = new_active;
-        self.focus_active(window, cx);
-        self.sync_window_title(window, cx);
-        self.tab_scroll_handle.scroll_to_item(self.active);
-        self.schedule_session_save(cx);
-        cx.notify();
+        self.commit_workspace(window, cx);
         open_sleipnir_window_with_tab(tab, cx);
     }
 
@@ -1417,32 +1411,6 @@ impl AppShell {
         }
     }
 
-    fn take_tab_views(&mut self) -> Vec<TabView<PaneNode>> {
-        std::mem::take(&mut self.tabs)
-            .into_iter()
-            .map(|tab| TabView {
-                id: tab.id,
-                tree: tab.tree,
-                active_pane: tab.active_pane,
-                custom_title: tab.custom_title.map(|s| s.to_string()),
-                zoomed_pane: tab.zoomed_pane,
-            })
-            .collect()
-    }
-
-    fn restore_tab_views(&mut self, views: Vec<TabView<PaneNode>>) {
-        self.tabs = views
-            .into_iter()
-            .map(|view| Tab {
-                id: view.id,
-                tree: view.tree,
-                active_pane: view.active_pane,
-                custom_title: view.custom_title.map(Into::into),
-                zoomed_pane: view.zoomed_pane,
-            })
-            .collect();
-    }
-
     fn merge_tab_into_visible(
         &mut self,
         source_id: u64,
@@ -1452,23 +1420,12 @@ impl AppShell {
         let Some(dest_id) = self.tabs.get(self.active).map(|t| t.id) else {
             return;
         };
-        let mut views = self.take_tab_views();
-        match merge_tab(&mut views, source_id, dest_id) {
-            Ok(dest_idx) => {
-                self.restore_tab_views(views);
-                if self.tabs.is_empty() {
-                    return;
-                }
-                self.active = dest_idx.min(self.tabs.len() - 1);
-                self.focus_active(window, cx);
-                self.sync_ledger_focus(window, cx);
-                self.sync_window_title(window, cx);
-                self.tab_scroll_handle.scroll_to_item(self.active);
-                self.schedule_session_save(cx);
-                cx.notify();
-            }
-            Err(_) => self.restore_tab_views(views),
-        }
+        let Ok(dest_idx) = merge_tab(&mut self.tabs, source_id, dest_id) else {
+            return;
+        };
+        // A successful merge always leaves the destination tab behind.
+        self.active = dest_idx.min(self.tabs.len() - 1);
+        self.commit_workspace(window, cx);
     }
 
     /// Drop a pane onto the tab list at `insert_at` (clamped).
@@ -1480,24 +1437,13 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let new_id = self.next_id;
-        let mut views = self.take_tab_views();
-        match extract_pane(&mut views, pane_id, insert_at, new_id) {
-            Ok(idx) => {
-                self.next_id += 1;
-                self.restore_tab_views(views);
-                if self.tabs.is_empty() {
-                    return;
-                }
-                self.active = idx.min(self.tabs.len() - 1);
-                self.focus_active(window, cx);
-                self.sync_ledger_focus(window, cx);
-                self.sync_window_title(window, cx);
-                self.tab_scroll_handle.scroll_to_item(self.active);
-                self.schedule_session_save(cx);
-                cx.notify();
-            }
-            Err(_) => self.restore_tab_views(views),
-        }
+        let Ok(idx) = extract_pane(&mut self.tabs, pane_id, insert_at, new_id) else {
+            return;
+        };
+        self.next_id += 1;
+        // A successful extract only ever adds a tab.
+        self.active = idx.min(self.tabs.len() - 1);
+        self.commit_workspace(window, cx);
     }
 
     /// Replace this window's placeholder tab with a detached `tab` and re-wire
@@ -1519,13 +1465,10 @@ impl AppShell {
         for view in &views {
             self.wire_term_view(view, window, cx);
         }
-        self.focus_active(window, cx);
-        self.sync_window_title(window, cx);
-        self.schedule_session_save(cx);
-        cx.notify();
+        self.commit_workspace(window, cx);
     }
 
-    fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
             return;
         }
@@ -1533,7 +1476,7 @@ impl AppShell {
         self.activate(next, window, cx);
     }
 
-    fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
             return;
         }
@@ -1545,7 +1488,7 @@ impl AppShell {
         self.activate(prev, window, cx);
     }
 
-    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.active_view(cx) {
             let handle = view.focus_handle(cx);
             window.focus(&handle, cx);
@@ -1567,10 +1510,7 @@ impl AppShell {
                 tab.active_pane = new_id;
             }
         }
-        self.focus_active(window, cx);
-        self.sync_ledger_focus(window, cx);
-        self.schedule_session_save(cx);
-        cx.notify();
+        self.commit_workspace(window, cx);
     }
 
     /// Move focus to the neighboring pane in `direction`, if one exists.
@@ -1582,10 +1522,7 @@ impl AppShell {
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.active_pane = next;
             }
-            self.focus_active(window, cx);
-            self.sync_ledger_focus(window, cx);
-            self.schedule_session_save(cx);
-            cx.notify();
+            self.commit_workspace(window, cx);
         }
     }
 
@@ -1624,11 +1561,7 @@ impl AppShell {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.active_pane = tab.tree.first_leaf_id();
                 }
-                self.sync_window_title(window, cx);
-                self.focus_active(window, cx);
-                self.sync_ledger_focus(window, cx);
-                self.schedule_session_save(cx);
-                cx.notify();
+                self.commit_workspace(window, cx);
             }
         }
     }
@@ -1786,10 +1719,15 @@ impl AppShell {
     fn on_toggle_run_ledger(
         &mut self,
         _: &ToggleRunLedger,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ledger_open = !self.ledger_open;
+        self.dispatch_command(CommandId::ToggleRunLedger, window, cx);
+    }
+
+    /// Toggle the Run Ledger panel.
+    fn toggle_run_ledger(&mut self, cx: &mut Context<Self>) {
+        self.mode.toggle(OverlayKind::RunLedger);
         cx.notify();
     }
 
@@ -1820,20 +1758,19 @@ impl AppShell {
     }
 
     pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.diff_open {
+        if self.mode.is(OverlayKind::Diff) {
             self.close_diff(window, cx);
             return;
         }
-        self.diff_open = true;
+        self.mode.open(OverlayKind::Diff);
         self.refresh_diff(false, window, cx);
         cx.notify();
     }
 
     pub(crate) fn close_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.diff_open {
+        if !self.mode.close(OverlayKind::Diff) {
             return;
         }
-        self.diff_open = false;
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -1851,7 +1788,7 @@ impl AppShell {
         if !force {
             if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_ref() {
                 if session.still_fresh(&root) {
-                    self.diff_open = true;
+                    self.mode.open(OverlayKind::Diff);
                     cx.notify();
                     return;
                 }
@@ -1872,17 +1809,17 @@ impl AppShell {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
         self.diff_view = Some(crate::diff::DiffView::Loading { title, generation });
-        self.diff_open = true;
+        self.mode.open(OverlayKind::Diff);
         cx.spawn(async move |this, cx| {
             let outcome = cx
-                .background_spawn(async move { crate::diff::fetch_worktree_diff(&cwd) })
+                .background_spawn(async move { crate::git_service::fetch_worktree_patch(&cwd) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.diff_gen != generation {
                     return;
                 }
                 this.diff_view = Some(match outcome {
-                    crate::diff::FetchOutcome::Ready(ready) => {
+                    crate::git_service::PatchOutcome::Ready(ready) => {
                         let root = ready.root.clone();
                         let jobs: Vec<crate::diff::upgrade::UpgradeJob> = ready
                             .parsed
@@ -1906,11 +1843,13 @@ impl AppShell {
                         }
                         crate::diff::DiffView::Ready(session)
                     }
-                    crate::diff::FetchOutcome::Clean { title } => crate::diff::DiffView::Message {
-                        title,
-                        body: "Working tree clean".into(),
-                    },
-                    crate::diff::FetchOutcome::Failed { title, message } => {
+                    crate::git_service::PatchOutcome::Clean { title } => {
+                        crate::diff::DiffView::Message {
+                            title,
+                            body: "Working tree clean".into(),
+                        }
+                    }
+                    crate::git_service::PatchOutcome::Failed { title, message } => {
                         crate::diff::DiffView::Message {
                             title,
                             body: message,
@@ -2011,7 +1950,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.diff_open {
+        if !self.mode.is(OverlayKind::Diff) {
             return false;
         }
         let key = event.keystroke.key.as_str();
@@ -2085,11 +2024,15 @@ impl AppShell {
     fn on_toggle_history_search(
         &mut self,
         _: &ToggleHistorySearch,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.history_open = !self.history_open;
-        if !self.history_open {
+        self.dispatch_command(CommandId::ToggleHistorySearch, window, cx);
+    }
+
+    /// Toggle the history overlay, resetting the query when it closes.
+    fn toggle_history_search(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.toggle(OverlayKind::History) {
             self.history_query.clear();
             self.history_selected = 0;
         }
@@ -2133,24 +2076,41 @@ impl AppShell {
         let _ = std::process::Command::new(program).args(args).spawn();
     }
 
+    /// Paste the work-tree patch into the focused PTY.
+    ///
+    /// `git diff` can take seconds on a large repository, so it runs on the
+    /// background executor. This path only needs the raw text, so it uses the
+    /// cheap `fetch_patch_text` layer rather than paying for a full patch parse.
     fn send_git_diff_to_pty(&mut self, cx: &mut Context<Self>) {
-        let cwd = self.active_working_directory(cx);
-        let output = std::process::Command::new("git")
-            .args(["diff", "HEAD"])
-            .current_dir(cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()))
-            .output();
-        let Ok(out) = output else {
-            return;
-        };
-        let diff = String::from_utf8_lossy(&out.stdout);
-        let Some(payload) = crate::chrome::send_context::git_diff_payload(&diff) else {
-            return;
-        };
+        let cwd = self
+            .active_working_directory(cx)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let Some(view) = self.active_view(cx) else {
             return;
         };
-        view.update(cx, |v, cx| v.input_bytes(payload.into_bytes(), cx));
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move { crate::git_service::fetch_patch_text(&cwd) })
+                .await;
+            let crate::git_service::PatchOutcome::Ready(text) = outcome else {
+                return;
+            };
+            let Some(payload) = crate::chrome::send_context::git_diff_payload(&text.patch) else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                // Focus may have moved while git was running; pasting a patch
+                // into whichever pane is focused now would be wrong.
+                if this.active_view(cx).as_ref() != Some(&view) {
+                    return;
+                }
+                view.update(cx, |v, cx| v.input_bytes(payload.into_bytes(), cx));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn jump_to_ledger_row(
@@ -2200,7 +2160,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ledger_open = true;
+        self.mode.open(OverlayKind::RunLedger);
         let run_id = if cx.has_global::<RunLedgerGlobal>() {
             let snapshot = cx.global::<RunLedgerGlobal>().snapshot();
             run_id_for_gutter(&snapshot, pane, line)
@@ -2257,37 +2217,80 @@ impl AppShell {
     }
 
     fn toggle_pane_facts(&mut self, cx: &mut Context<Self>) {
-        self.facts_open = !self.facts_open;
-        if self.facts_open {
+        if self.mode.toggle(OverlayKind::PaneFacts) {
             self.refresh_pane_facts(cx);
         } else {
-            self.facts = None;
-            self.facts_at = None;
+            self.discard_pane_facts();
         }
         cx.notify();
     }
 
-    fn refresh_pane_facts(&mut self, cx: &App) {
+    /// Close the facts panel and drop its cached snapshot. Any in-flight
+    /// collection lands as stale, because it checks both the overlay and the
+    /// pane it was started for before storing anything.
+    fn close_pane_facts(&mut self, cx: &mut Context<Self>) {
+        self.mode.close(OverlayKind::PaneFacts);
+        self.discard_pane_facts();
+        cx.notify();
+    }
+
+    fn discard_pane_facts(&mut self) {
+        self.facts = PaneFactsState::Idle;
+    }
+
+    /// Kick off an off-thread facts collection for the focused pane.
+    ///
+    /// `sysinfo` process-tree walks and `lsof` are far too slow to run on the
+    /// UI thread, so the collection happens on the background executor and the
+    /// result lands back through `PaneFactsState`. Results tagged with a stale
+    /// pane, or arriving after the panel closed, are dropped.
+    fn refresh_pane_facts(&mut self, cx: &mut Context<Self>) {
+        let Some(pane) = self.active_pane_key() else {
+            self.facts = PaneFactsState::Idle;
+            return;
+        };
         let view = self.active_view(cx);
         let cwd = view.as_ref().and_then(|v| v.read(cx).working_directory(cx));
         let foreground = view
             .as_ref()
             .and_then(|v| v.read(cx).foreground_process_command_name(cx));
         let root = view.as_ref().and_then(|v| v.read(cx).shell_pid(cx));
-        self.facts = Some(crate::chrome::pane_facts::collect_live_facts(
-            cwd, foreground, root,
-        ));
-        self.facts_at = Some(std::time::Instant::now());
+
+        self.facts.begin_collection(pane);
+
+        cx.spawn(async move |this, cx| {
+            let facts = cx
+                .background_spawn(async move {
+                    crate::chrome::pane_facts::collect_live_facts(cwd, foreground, root)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // Focus may have moved, or the panel closed, while we were off
+                // thread. Either way this snapshot is no longer what is shown.
+                if !this.mode.is(OverlayKind::PaneFacts) || this.active_pane_key() != Some(pane) {
+                    return;
+                }
+                this.facts.finish_collection(pane, facts);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    fn refresh_pane_facts_if_stale(&mut self, cx: &App) {
-        if !self.facts_open {
+    fn refresh_pane_facts_if_stale(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.is(OverlayKind::PaneFacts) {
             return;
         }
-        let stale = self.facts_at.is_none_or(|at| {
-            std::time::Instant::now().duration_since(at) >= std::time::Duration::from_secs(1)
-        });
-        if stale {
+        let Some(pane) = self.active_pane_key() else {
+            return;
+        };
+        // Render calls this every frame; never stack a second collection for a
+        // pane that already has one in flight.
+        if self.facts.is_collecting_for(pane) {
+            return;
+        }
+        if self.facts.needs_refresh_for(pane, PANE_FACTS_MAX_AGE) {
             self.refresh_pane_facts(cx);
         }
     }
@@ -2397,7 +2400,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.palette_open {
+        if self.mode.is(OverlayKind::Palette) {
             self.close_palette(window, cx);
         } else {
             self.open_palette(cx);
@@ -2405,17 +2408,14 @@ impl AppShell {
     }
 
     fn open_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = true;
+        self.mode.open(OverlayKind::Palette);
         self.palette_query.clear();
         self.palette_selected = 0;
-        self.settings_open = false;
-        self.find_open = false;
         cx.notify();
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette_open {
-            self.palette_open = false;
+        if self.mode.close(OverlayKind::Palette) {
             self.palette_query.clear();
             self.palette_selected = 0;
             self.focus_active(window, cx);
@@ -2427,81 +2427,11 @@ impl AppShell {
         filter_commands(&self.palette_items, &self.palette_query)
     }
 
+    /// Palette entry point: close the palette, then run the command through
+    /// the single canonical dispatcher in `command_dispatch`.
     fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         self.close_palette(window, cx);
-        match id {
-            CommandId::NewTab => self.add_tab(window, cx),
-            CommandId::ClosePane => self.request_close_active_pane(window, cx),
-            CommandId::NextTab => self.next_tab(window, cx),
-            CommandId::PrevTab => self.prev_tab(window, cx),
-            CommandId::SplitRight => self.split_active(SplitAxis::Horizontal, window, cx),
-            CommandId::SplitDown => self.split_active(SplitAxis::Vertical, window, cx),
-            CommandId::OpenSettings => {
-                self.settings_open = true;
-                self.settings_section = SettingsSection::Theme;
-                cx.notify();
-            }
-            CommandId::ReloadSettings => {
-                self.font_size_override = None;
-                self.apply_font_override_to_all_panes(cx);
-                TerminalSettings::reload(cx);
-                RunLedgerGlobal::reload_settings_in(cx);
-                crate::control_surface::reload(cx);
-                crate::attention_chrome::refresh(cx);
-                cx.notify();
-            }
-            CommandId::CycleTheme => {
-                let next = TerminalSettings::get_global(cx).theme.next();
-                TerminalSettings::set_theme(next, cx);
-                cx.notify();
-            }
-            CommandId::CheckForUpdates => {
-                if !updater::in_place_update_supported() {
-                    cx.open_url(updater::RELEASES_PAGE);
-                    return;
-                }
-                self.update_open = true;
-                self.spawn_update_check(window, cx);
-            }
-            CommandId::Find => self.open_find(cx),
-            CommandId::ToggleCommandPalette => self.open_palette(cx),
-            CommandId::IncreaseFontSize => {
-                use crate::FONT_SIZE_STEP;
-                self.step_font_size(FONT_SIZE_STEP, cx);
-            }
-            CommandId::DecreaseFontSize => {
-                use crate::FONT_SIZE_STEP;
-                self.step_font_size(-FONT_SIZE_STEP, cx);
-            }
-            CommandId::ResetFontSize => self.reset_font_size(cx),
-            CommandId::NewWindow => open_sleipnir_window(cx),
-            CommandId::TogglePaneZoom => self.on_toggle_pane_zoom(&TogglePaneZoom, window, cx),
-            CommandId::ToggleBroadcast => self.on_toggle_broadcast(&ToggleBroadcast, window, cx),
-            CommandId::JumpPrevPrompt => self.on_jump_prev_prompt(&JumpPrevPrompt, window, cx),
-            CommandId::JumpNextPrompt => self.on_jump_next_prompt(&JumpNextPrompt, window, cx),
-            CommandId::ToggleQuickSelect => {
-                self.on_toggle_quick_select(&ToggleQuickSelect, window, cx)
-            }
-            CommandId::OpenQuickTerminal => {
-                self.on_open_quick_terminal(&OpenQuickTerminal, window, cx)
-            }
-            CommandId::ExportScrollback => self.on_export_scrollback(&ExportScrollback, window, cx),
-            CommandId::ClearRunLedger => self.request_clear_run_ledger(cx),
-            CommandId::ToggleRunLedger => self.ledger_open = !self.ledger_open,
-            CommandId::MarkTabSeen => self.mark_active_tab_seen(cx),
-            CommandId::SendSelection => self.send_selection_to_pty(cx),
-            CommandId::PipeSelection => self.pipe_selection(cx),
-            CommandId::SendGitDiff => self.send_git_diff_to_pty(cx),
-            CommandId::ToggleHistorySearch => {
-                self.history_open = !self.history_open;
-                if !self.history_open {
-                    self.history_query.clear();
-                    self.history_selected = 0;
-                }
-            }
-            CommandId::TogglePaneFacts => self.toggle_pane_facts(cx),
-            CommandId::ToggleDiff => self.toggle_diff(window, cx),
-        }
+        self.dispatch_command(id, window, cx);
     }
 
     fn palette_key_down(
@@ -2510,7 +2440,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.palette_open {
+        if !self.mode.is(OverlayKind::Palette) {
             return false;
         }
         let key = event.keystroke.key.as_str();
@@ -2572,10 +2502,8 @@ impl AppShell {
         self.open_find(cx);
     }
 
-    fn open_find(&mut self, cx: &mut Context<Self>) {
-        self.find_open = true;
-        self.palette_open = false;
-        self.settings_open = false;
+    pub(crate) fn open_find(&mut self, cx: &mut Context<Self>) {
+        self.mode.open_find();
         cx.notify();
         // Re-run search if query already present.
         if !self.find_query.is_empty() {
@@ -2584,8 +2512,8 @@ impl AppShell {
     }
 
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_open {
-            self.find_open = false;
+        if self.mode.find_open {
+            self.mode.close_find();
             self.clear_find_matches(cx);
             self.focus_active(window, cx);
             cx.notify();
@@ -2673,7 +2601,7 @@ impl AppShell {
 
     fn step_find(&mut self, delta: i32, cx: &mut Context<Self>) {
         if self.find_match_count == 0 {
-            if self.find_open && !self.find_query.is_empty() {
+            if self.mode.find_open && !self.find_query.is_empty() {
                 self.run_find(cx);
             }
             return;
@@ -2695,7 +2623,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.find_open {
+        if !self.mode.find_open {
             return false;
         }
         let key = event.keystroke.key.as_str();
@@ -2754,22 +2682,29 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.begin_update_check(window, cx);
+    }
+
+    /// Single entry point for "check for updates", shared by the menu action and
+    /// the command palette. On platforms without in-place update support this
+    /// opens the releases page instead of the dialog.
+    fn begin_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !updater::in_place_update_supported() {
             cx.open_url(updater::RELEASES_PAGE);
             return;
         }
         // Open the update dialog and start a check.
-        self.update_open = true;
+        self.mode.open(OverlayKind::Update);
         self.spawn_update_check(window, cx);
     }
 
     fn close_update(&mut self, cx: &mut Context<Self>) {
-        self.update_open = false;
+        self.mode.close(OverlayKind::Update);
         cx.notify();
     }
 
     /// Query GitHub for a newer release; result is shown in the update dialog.
-    fn spawn_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn spawn_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
             cx.global::<UpdateModel>().state,
             UpdateUiState::Checking | UpdateUiState::Downloading(_)
@@ -3188,8 +3123,7 @@ impl AppShell {
     }
 
     pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_open = !self.settings_open;
-        if self.settings_open {
+        if self.mode.toggle(OverlayKind::Settings) {
             // Always land on Theme when reopening; future sections can restore.
             self.settings_section = SettingsSection::Theme;
         } else {
@@ -3199,9 +3133,17 @@ impl AppShell {
         cx.notify();
     }
 
+    /// Open Settings on the Theme section. Unlike `toggle_settings` this never
+    /// closes it, because picking "Settings" from the palette should always land
+    /// there.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.mode.open(OverlayKind::Settings);
+        self.settings_section = SettingsSection::Theme;
+        cx.notify();
+    }
+
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_open {
-            self.settings_open = false;
+        if self.mode.close(OverlayKind::Settings) {
             self.theme_query.clear();
             self.focus_active(window, cx);
             cx.notify();
@@ -4808,7 +4750,7 @@ mod tests {
 
     #[test]
     fn safe_window_close_finishes_runtime_before_removal() {
-        let src = include_str!("app_shell.rs");
+        let src = include_str!("mod.rs");
         let needle = ["fn finish_window_", "close("].concat();
         let method = src
             .split(&needle)
@@ -4833,28 +4775,6 @@ mod tests {
         let position = point(px(12.0), px(12.0));
         assert_eq!(traffic_light_position_for(true, position), Some(position));
         assert_eq!(traffic_light_position_for(false, position), None);
-    }
-
-    #[test]
-    fn unsupported_update_entries_return_after_opening_releases() {
-        let src = include_str!("app_shell.rs");
-        let palette_entry = src
-            .split("CommandId::CheckForUpdates =>")
-            .nth(1)
-            .expect("command-palette update entry");
-        let action_entry = src
-            .split("fn on_check_for_updates")
-            .nth(1)
-            .expect("action update entry");
-        for entry in [palette_entry, action_entry] {
-            let gate = entry
-                .split("if !updater::in_place_update_supported()")
-                .nth(1)
-                .expect("in-place capability gate");
-            let body = gate.split('}').next().expect("gate body");
-            assert!(body.contains("cx.open_url(updater::RELEASES_PAGE)"));
-            assert!(body.contains("return;"));
-        }
     }
 
     #[test]
@@ -4988,7 +4908,7 @@ impl Render for AppShell {
                     }
                     return;
                 }
-                if this.update_open {
+                if this.mode.is(OverlayKind::Update) {
                     if event.keystroke.key.as_str() == "escape" {
                         this.close_update(cx);
                         cx.stop_propagation();
@@ -4998,27 +4918,25 @@ impl Render for AppShell {
                     }
                     return;
                 }
-                if this.facts_open && event.keystroke.key.as_str() == "escape" {
-                    this.facts_open = false;
-                    this.facts = None;
-                    this.facts_at = None;
-                    cx.notify();
+                if this.mode.is(OverlayKind::PaneFacts) && event.keystroke.key.as_str() == "escape"
+                {
+                    this.close_pane_facts(cx);
                     cx.stop_propagation();
                     return;
                 }
-                if this.palette_open {
+                if this.mode.is(OverlayKind::Palette) {
                     if this.palette_key_down(event, window, cx) {
                         cx.stop_propagation();
                     }
                     return;
                 }
-                if this.find_open {
+                if this.mode.find_open {
                     if this.find_key_down(event, window, cx) {
                         cx.stop_propagation();
                     }
                     return;
                 }
-                if this.settings_open {
+                if this.mode.is(OverlayKind::Settings) {
                     // Type-to-filter the theme picker when that section is
                     // active; escape clears the filter before closing.
                     if this.settings_section == SettingsSection::Theme {
@@ -5063,7 +4981,7 @@ impl Render for AppShell {
                     }
                     return;
                 }
-                if this.diff_open {
+                if this.mode.is(OverlayKind::Diff) {
                     if this.handle_diff_key(event, window, cx) {
                         cx.stop_propagation();
                         return;
@@ -5161,7 +5079,7 @@ impl Render for AppShell {
                     .flex()
                     .flex_col()
                     .child(chrome_band)
-                    .when(self.find_open, |el| {
+                    .when(self.mode.find_open, |el| {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
                     .child(self.render_content(&tokens, window, cx))
@@ -5188,7 +5106,7 @@ impl Render for AppShell {
                         ),
                 )
             })
-            .when(self.quick_select_open, |el| {
+            .when(self.mode.quick_select_open, |el| {
                 el.child(
                     div()
                         .id("quick-select-banner")
@@ -5215,28 +5133,28 @@ impl Render for AppShell {
                         ),
                 )
             })
-            .when(self.settings_open, |el| {
+            .when(self.mode.is(OverlayKind::Settings), |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))
             })
-            .when(self.update_open, |el| {
+            .when(self.mode.is(OverlayKind::Update), |el| {
                 el.child(self.render_update_overlay(&tokens, cx))
             })
-            .when(self.palette_open, |el| {
+            .when(self.mode.is(OverlayKind::Palette), |el| {
                 el.child(self.render_command_palette(&tokens, cx))
             })
             .when(self.close_confirm.is_some(), |el| {
                 el.child(self.render_close_confirm(&tokens, cx))
             })
-            .when(self.facts_open, |el| {
+            .when(self.mode.is(OverlayKind::PaneFacts), |el| {
                 el.child(self.render_pane_facts(&tokens, cx))
             })
-            .when(self.ledger_open, |el| {
+            .when(self.mode.is(OverlayKind::RunLedger), |el| {
                 el.child(self.render_run_ledger(&tokens, window, cx))
             })
-            .when(self.history_open, |el| {
+            .when(self.mode.is(OverlayKind::History), |el| {
                 el.child(self.render_history_search(&tokens, cx))
             })
-            .when(self.diff_open, |el| {
+            .when(self.mode.is(OverlayKind::Diff), |el| {
                 el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
             })
             .when_some(self.active_tombstone(cx), |el, stone| {
@@ -5248,7 +5166,11 @@ impl Render for AppShell {
 impl AppShell {
     fn render_pane_facts(&self, tokens: &ChromeTokens, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::chrome::pane_facts::localhost_copy;
-        let facts = self.facts.clone().unwrap_or_default();
+        let facts = self
+            .active_pane_key()
+            .and_then(|pane| self.facts.facts_for(pane))
+            .cloned()
+            .unwrap_or_default();
 
         let mut body = div()
             .id("pane-facts-body")
@@ -5360,10 +5282,7 @@ impl AppShell {
                                 .cursor_pointer()
                                 .child("Esc")
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.facts_open = false;
-                                    this.facts = None;
-                                    this.facts_at = None;
-                                    cx.notify();
+                                    this.close_pane_facts(cx);
                                 })),
                         ),
                 )
@@ -5533,7 +5452,7 @@ impl AppShell {
                         if let Some(view) = this.active_view(cx) {
                             view.update(cx, |v, cx| v.input_bytes(cmd.clone().into_bytes(), cx));
                         }
-                        this.history_open = false;
+                        this.mode.close(OverlayKind::History);
                         this.history_query.clear();
                         cx.notify();
                     })),

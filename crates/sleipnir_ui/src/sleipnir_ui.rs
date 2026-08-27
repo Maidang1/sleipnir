@@ -9,6 +9,7 @@ mod command_palette;
 mod control_surface;
 mod diff;
 mod finder_service;
+mod git_service;
 mod keymap;
 mod pane_tree;
 mod run_ledger_global;
@@ -16,7 +17,9 @@ mod run_ledger_panel;
 mod session;
 mod tab_convert;
 mod term_element;
+mod ui_mode;
 mod update_model;
+mod workspace_commit;
 
 pub use assets::AgentAssets;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
@@ -1593,7 +1596,7 @@ mod tests {
     /// stop mouse_down on the panel; this dialog originally omitted that.
     #[test]
     fn close_confirm_panel_stops_backdrop_clicks() {
-        let src = include_str!("app_shell.rs");
+        let src = include_str!("app_shell/mod.rs");
         let panel = src
             .find(r#".id("close-confirm-panel")"#)
             .expect("close-confirm-panel");
@@ -1629,7 +1632,7 @@ mod tests {
 
     #[test]
     fn modal_overlays_occlude_so_terminal_does_not_scroll() {
-        let src = include_str!("app_shell.rs");
+        let src = include_str!("app_shell/mod.rs");
         for id in [
             "settings-overlay",
             "update-overlay",
@@ -1661,7 +1664,7 @@ mod tests {
             src.contains("toggle_diff"),
             "Diff chrome button must open the inspector"
         );
-        let band = include_str!("app_shell.rs");
+        let band = include_str!("app_shell/mod.rs");
         assert!(
             band.contains("render_desktop_titlebar_end"),
             "chrome band must host non-macOS desktop caption buttons"
@@ -1673,7 +1676,7 @@ mod tests {
     /// and `app_owns_titlebar_drag` then leaves no native fallback.
     #[test]
     fn chrome_trailing_drag_is_a_direct_band_child() {
-        let src = include_str!("app_shell.rs");
+        let src = include_str!("app_shell/mod.rs");
         assert!(
             !src.contains(r#".id("chrome-trailing")"#),
             "do not wrap chrome-drag-trailing in a height-less row"
