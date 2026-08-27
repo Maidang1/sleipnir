@@ -1599,10 +1599,10 @@ mod tests {
         let src = include_str!("app_shell/panels.rs");
         let panel = src
             .find(r#".id("close-confirm-panel")"#)
-            .expect("close-confirm-panel");
+            .expect("close-confirm-panel is rendered in panels.rs");
         let backdrop = src
             .find(r#".id("close-confirm-backdrop")"#)
-            .expect("close-confirm-backdrop");
+            .expect("close-confirm-backdrop is rendered in panels.rs");
         assert!(
             panel < backdrop,
             "panel markup should precede backdrop markup"
@@ -1618,33 +1618,39 @@ mod tests {
     /// true for *every* hitbox under the pointer. Only `.occlude()`
     /// (`HitboxBehavior::BlockMouse`) drops the terminal from that list.
     /// `stop_propagation` on mouse_down does not.
-    fn overlay_builder_prefix<'a>(src: &'a str, id: &str) -> &'a str {
+    fn overlay_builder_prefix<'a>(src: &'a str, id: &str) -> Option<&'a str> {
         let needle = format!(r#".id("{id}")"#);
-        let start = src
-            .find(&needle)
-            .unwrap_or_else(|| panic!("{id} missing from its render module"));
+        let start = src.find(&needle)?;
         let after = &src[start..];
         let child = after
             .find(".child(")
             .unwrap_or_else(|| panic!("{id} has no .child("));
-        &after[..child]
+        Some(&after[..child])
     }
 
     #[test]
     fn modal_overlays_occlude_so_terminal_does_not_scroll() {
-        // Each overlay is checked in the module that renders it.
-        let shell = include_str!("app_shell/mod.rs");
-        let settings = include_str!("app_shell/settings.rs");
-        let panels = include_str!("app_shell/panels.rs");
-        let diff = include_str!("diff/render.rs");
-        for (src, id) in [
-            (shell, "update-overlay"),
-            (shell, "palette-overlay"),
-            (panels, "close-confirm-overlay"),
-            (settings, "settings-overlay"),
-            (diff, "diff-overlay"),
+        // Search every module that renders overlays rather than pinning each id
+        // to a file: moving a renderer between modules is not a regression, but
+        // dropping `.occlude()` is.
+        const RENDER_MODULES: &[&str] = &[
+            include_str!("app_shell/mod.rs"),
+            include_str!("app_shell/settings.rs"),
+            include_str!("app_shell/panels.rs"),
+            include_str!("app_shell/update.rs"),
+            include_str!("diff/render.rs"),
+        ];
+        for id in [
+            "settings-overlay",
+            "update-overlay",
+            "palette-overlay",
+            "close-confirm-overlay",
+            "diff-overlay",
         ] {
-            let prefix = overlay_builder_prefix(src, id);
+            let prefix = RENDER_MODULES
+                .iter()
+                .find_map(|src| overlay_builder_prefix(src, id))
+                .unwrap_or_else(|| panic!("{id} is not rendered by any known module"));
             assert!(
                 prefix.contains(".occlude()"),
                 "{id} must .occlude() so wheel events do not reach TermElement under the overlay"
