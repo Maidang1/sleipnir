@@ -5,16 +5,16 @@
 //! state without widening it to the crate.
 
 use gpui::{
-    App, BorrowAppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, deferred, div, px,
+    App, AppContext as _, BorrowAppContext as _, ClickEvent, Context, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px,
 };
 use sleipnir_settings::TerminalSettings;
 
-use super::{AppShell, ConfirmKind};
+use super::{AppShell, ConfirmKind, TogglePaneFacts};
 use crate::chrome::ChromeTokens;
 use crate::run_ledger_global::RunLedgerGlobal;
-use crate::ui_mode::OverlayKind;
+use crate::ui_mode::{OverlayKind, PANE_FACTS_MAX_AGE, PaneFactsState};
 
 impl AppShell {
     pub(super) fn render_pane_facts(
@@ -461,6 +461,94 @@ impl AppShell {
                 )
                 .child(panel),
         )
+    }
+
+    pub(super) fn on_toggle_pane_facts(
+        &mut self,
+        _: &TogglePaneFacts,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_pane_facts(cx);
+    }
+
+    pub(super) fn toggle_pane_facts(&mut self, cx: &mut Context<Self>) {
+        if self.mode.toggle(OverlayKind::PaneFacts) {
+            self.refresh_pane_facts(cx);
+        } else {
+            self.discard_pane_facts();
+        }
+        cx.notify();
+    }
+
+    /// Close the facts panel and drop its cached snapshot. Any in-flight
+    /// collection lands as stale, because it checks both the overlay and the
+    /// pane it was started for before storing anything.
+    pub(super) fn close_pane_facts(&mut self, cx: &mut Context<Self>) {
+        self.mode.close(OverlayKind::PaneFacts);
+        self.discard_pane_facts();
+        cx.notify();
+    }
+
+    fn discard_pane_facts(&mut self) {
+        self.facts = PaneFactsState::Idle;
+    }
+
+    /// Kick off an off-thread facts collection for the focused pane.
+    ///
+    /// `sysinfo` process-tree walks and `lsof` are far too slow to run on the
+    /// UI thread, so the collection happens on the background executor and the
+    /// result lands back through `PaneFactsState`. Results tagged with a stale
+    /// pane, or arriving after the panel closed, are dropped.
+    fn refresh_pane_facts(&mut self, cx: &mut Context<Self>) {
+        let Some(pane) = self.active_pane_key() else {
+            self.facts = PaneFactsState::Idle;
+            return;
+        };
+        let view = self.active_view(cx);
+        let cwd = view.as_ref().and_then(|v| v.read(cx).working_directory(cx));
+        let foreground = view
+            .as_ref()
+            .and_then(|v| v.read(cx).foreground_process_command_name(cx));
+        let root = view.as_ref().and_then(|v| v.read(cx).shell_pid(cx));
+
+        self.facts.begin_collection(pane);
+
+        cx.spawn(async move |this, cx| {
+            let facts = cx
+                .background_spawn(async move {
+                    crate::chrome::pane_facts::collect_live_facts(cwd, foreground, root)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // Focus may have moved, or the panel closed, while we were off
+                // thread. Either way this snapshot is no longer what is shown.
+                if !this.mode.is(OverlayKind::PaneFacts) || this.active_pane_key() != Some(pane) {
+                    return;
+                }
+                this.facts.finish_collection(pane, facts);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_pane_facts_if_stale(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.is(OverlayKind::PaneFacts) {
+            return;
+        }
+        let Some(pane) = self.active_pane_key() else {
+            return;
+        };
+        // Render calls this every frame; never stack a second collection for a
+        // pane that already has one in flight.
+        if self.facts.is_collecting_for(pane) {
+            return;
+        }
+        if self.facts.needs_refresh_for(pane, PANE_FACTS_MAX_AGE) {
+            self.refresh_pane_facts(cx);
+        }
     }
 }
 
