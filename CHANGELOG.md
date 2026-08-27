@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1
+
+### Improvements
+- Hide the top tab title when only one tab is open and use a more compact title/tab bar.
+- Simplify terminal chrome and settings internals while keeping multi-tab navigation intact.
+
+### Fixes
+- Ignore OSC 9/777 desktop-notification requests so shell exit hooks no longer show unexpected system notifications.
+- Guard asynchronous search state and bound git command output handling.
+- Persist Run Ledger updates atomically without relying on `fs2`.
+
 ## 0.4.0
 
 ### Features
