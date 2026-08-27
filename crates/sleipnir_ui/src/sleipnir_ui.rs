@@ -1682,6 +1682,7 @@ mod tests {
     #[test]
     fn chrome_trailing_drag_is_a_direct_band_child() {
         let src = include_str!("app_shell/mod.rs");
+        let layout = include_str!("app_shell/layout.rs");
         assert!(
             !src.contains(r#".id("chrome-trailing")"#),
             "do not wrap chrome-drag-trailing in a height-less row"
@@ -1692,7 +1693,7 @@ mod tests {
             "chrome-band must parent trailing_drag directly so h_full() resolves against the band height"
         );
         assert!(
-            src.contains("WindowControlArea::Drag"),
+            src.contains("WindowControlArea::Drag") || layout.contains("WindowControlArea::Drag"),
             "desktop drag requires WindowControlArea::Drag"
         );
         assert!(
