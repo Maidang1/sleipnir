@@ -1596,13 +1596,17 @@ mod tests {
     /// stop mouse_down on the panel; this dialog originally omitted that.
     #[test]
     fn close_confirm_panel_stops_backdrop_clicks() {
-        let src = include_str!("app_shell/panels.rs");
+        let sources = all_ui_sources();
+        let src = sources
+            .iter()
+            .find(|src| src.contains(r#".id("close-confirm-panel")"#))
+            .expect("close-confirm-panel is rendered somewhere");
         let panel = src
             .find(r#".id("close-confirm-panel")"#)
-            .expect("close-confirm-panel is rendered in panels.rs");
+            .expect("close-confirm-panel");
         let backdrop = src
             .find(r#".id("close-confirm-backdrop")"#)
-            .expect("close-confirm-backdrop is rendered in panels.rs");
+            .expect("close-confirm-backdrop");
         assert!(
             panel < backdrop,
             "panel markup should precede backdrop markup"
@@ -1628,18 +1632,32 @@ mod tests {
         Some(&after[..child])
     }
 
+    /// Every `.rs` under `src/` except this file, so extracting a renderer into
+    /// a new module never silently drops it from the scans below. This file is
+    /// skipped because the assertions themselves contain the markup they look
+    /// for, which would otherwise satisfy every check trivially.
+    fn all_ui_sources() -> Vec<String> {
+        fn walk(dir: &std::path::Path, skip: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read src dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, skip, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") && path != skip {
+                    out.push(std::fs::read_to_string(&path).expect("read source"));
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let this = src.join("sleipnir_ui.rs");
+        let mut out = Vec::new();
+        walk(&src, &this, &mut out);
+        assert!(!out.is_empty(), "no sources found under {}", src.display());
+        out
+    }
+
     #[test]
     fn modal_overlays_occlude_so_terminal_does_not_scroll() {
-        // Search every module that renders overlays rather than pinning each id
-        // to a file: moving a renderer between modules is not a regression, but
-        // dropping `.occlude()` is.
-        const RENDER_MODULES: &[&str] = &[
-            include_str!("app_shell/mod.rs"),
-            include_str!("app_shell/settings.rs"),
-            include_str!("app_shell/panels.rs"),
-            include_str!("app_shell/update.rs"),
-            include_str!("diff/render.rs"),
-        ];
+        let sources = all_ui_sources();
         for id in [
             "settings-overlay",
             "update-overlay",
@@ -1647,10 +1665,10 @@ mod tests {
             "close-confirm-overlay",
             "diff-overlay",
         ] {
-            let prefix = RENDER_MODULES
+            let prefix = sources
                 .iter()
                 .find_map(|src| overlay_builder_prefix(src, id))
-                .unwrap_or_else(|| panic!("{id} is not rendered by any known module"));
+                .unwrap_or_else(|| panic!("{id} is not rendered anywhere in this crate"));
             assert!(
                 prefix.contains(".occlude()"),
                 "{id} must .occlude() so wheel events do not reach TermElement under the overlay"
@@ -1669,9 +1687,10 @@ mod tests {
             src.contains("toggle_diff"),
             "Diff chrome button must open the inspector"
         );
-        let band = include_str!("app_shell/mod.rs");
         assert!(
-            band.contains("render_desktop_titlebar_end"),
+            all_ui_sources()
+                .iter()
+                .any(|src| src.contains("render_desktop_titlebar_end")),
             "chrome band must host non-macOS desktop caption buttons"
         );
     }
@@ -1681,23 +1700,34 @@ mod tests {
     /// and `app_owns_titlebar_drag` then leaves no native fallback.
     #[test]
     fn chrome_trailing_drag_is_a_direct_band_child() {
-        let src = include_str!("app_shell/mod.rs");
-        let layout = include_str!("app_shell/layout.rs");
+        let sources = all_ui_sources();
+        let band_module = sources
+            .iter()
+            .find(|src| src.contains(r#".id("chrome-band")"#))
+            .expect("chrome-band");
         assert!(
-            !src.contains(r#".id("chrome-trailing")"#),
+            sources
+                .iter()
+                .all(|src| !src.contains(r#".id("chrome-trailing")"#)),
             "do not wrap chrome-drag-trailing in a height-less row"
         );
-        let band = src.find(r#".id("chrome-band")"#).expect("chrome-band");
+        let band = band_module
+            .find(r#".id("chrome-band")"#)
+            .expect("chrome-band");
         assert!(
-            src[band..].contains(".child(trailing_drag)"),
+            band_module[band..].contains(".child(trailing_drag)"),
             "chrome-band must parent trailing_drag directly so h_full() resolves against the band height"
         );
         assert!(
-            src.contains("WindowControlArea::Drag") || layout.contains("WindowControlArea::Drag"),
+            sources
+                .iter()
+                .any(|src| src.contains("WindowControlArea::Drag")),
             "desktop drag requires WindowControlArea::Drag"
         );
         assert!(
-            src.contains("render_desktop_titlebar_end"),
+            sources
+                .iter()
+                .any(|src| src.contains("render_desktop_titlebar_end")),
             "desktop caption buttons must ship on the chrome band"
         );
     }
