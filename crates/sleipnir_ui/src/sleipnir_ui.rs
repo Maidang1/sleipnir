@@ -1596,7 +1596,7 @@ mod tests {
     /// stop mouse_down on the panel; this dialog originally omitted that.
     #[test]
     fn close_confirm_panel_stops_backdrop_clicks() {
-        let src = include_str!("app_shell/mod.rs");
+        let src = include_str!("app_shell/panels.rs");
         let panel = src
             .find(r#".id("close-confirm-panel")"#)
             .expect("close-confirm-panel");
@@ -1622,7 +1622,7 @@ mod tests {
         let needle = format!(r#".id("{id}")"#);
         let start = src
             .find(&needle)
-            .unwrap_or_else(|| panic!("{id} missing from app_shell.rs"));
+            .unwrap_or_else(|| panic!("{id} missing from its render module"));
         let after = &src[start..];
         let child = after
             .find(".child(")
@@ -1632,12 +1632,17 @@ mod tests {
 
     #[test]
     fn modal_overlays_occlude_so_terminal_does_not_scroll() {
-        let src = include_str!("app_shell/mod.rs");
-        for id in [
-            "settings-overlay",
-            "update-overlay",
-            "palette-overlay",
-            "close-confirm-overlay",
+        // Each overlay is checked in the module that renders it.
+        let shell = include_str!("app_shell/mod.rs");
+        let settings = include_str!("app_shell/settings.rs");
+        let panels = include_str!("app_shell/panels.rs");
+        let diff = include_str!("diff/render.rs");
+        for (src, id) in [
+            (shell, "update-overlay"),
+            (shell, "palette-overlay"),
+            (panels, "close-confirm-overlay"),
+            (settings, "settings-overlay"),
+            (diff, "diff-overlay"),
         ] {
             let prefix = overlay_builder_prefix(src, id);
             assert!(
@@ -1645,12 +1650,6 @@ mod tests {
                 "{id} must .occlude() so wheel events do not reach TermElement under the overlay"
             );
         }
-        let diff_src = include_str!("diff/render.rs");
-        let prefix = overlay_builder_prefix(diff_src, "diff-overlay");
-        assert!(
-            prefix.contains(".occlude()"),
-            "diff-overlay must .occlude() so wheel events do not reach TermElement under the overlay"
-        );
     }
 
     #[test]
