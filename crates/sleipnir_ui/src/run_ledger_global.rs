@@ -128,12 +128,13 @@ impl LedgerCore {
         if self.mode != RunLedgerMode::Persist || !self.dirty {
             return FlushOutcome::Skipped;
         }
+        // A successful write always persists `announced: true`, so the notice is
+        // owed exactly once: on the first write this process observes.
         let first_announce = !self.announced;
-        let announced = true;
         let runs: Vec<Run> = self.ledger.runs().cloned().collect();
-        match save_runs(&self.path, &runs, self.retention, announced) {
+        match save_runs(&self.path, &runs, self.retention) {
             Ok(()) => {
-                self.announced = announced;
+                self.announced = true;
                 self.dirty = false;
                 FlushOutcome::Wrote { first_announce }
             }

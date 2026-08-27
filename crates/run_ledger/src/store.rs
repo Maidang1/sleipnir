@@ -4,8 +4,9 @@ use crate::ledger::Retention;
 use crate::run::{Run, RunId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,14 +23,16 @@ pub struct RunsFile {
     pub runs: Vec<Run>,
 }
 
-/// 与 `session.json` 同目录。
+/// Alongside `session.json`.
 pub fn default_runs_path(config_dir: &Path) -> PathBuf {
     config_dir.join("runs.json")
 }
 
-/// 读入；文件缺失 → (empty, announced=false)；损坏或版本不认 → 重命名为 `.bak` 后返回空。
-/// **绝不返回 Err**：启动路径不允许被台账阻塞（spec §5）。
-/// 返回 `(runs, announced)`。
+/// Load the ledger. Missing file → `(empty, announced=false)`; corrupt or
+/// unrecognized version → quarantined as `.bak`, then empty.
+///
+/// **Never returns `Err`**: the startup path must not be blocked by the ledger
+/// (spec §5). Returns `(runs, announced)`.
 pub fn load_runs(path: &Path) -> (Vec<Run>, bool) {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -49,21 +52,36 @@ pub fn load_runs(path: &Path) -> (Vec<Run>, bool) {
     }
 }
 
-/// 写盘：先重读磁盘按 `RunId` 求并集（多实例并发，spec §4）→ 按 `started_at_unix_ms`
-/// 排序 → 应用 `Retention` → 写临时文件 → `set_permissions(0o600)`（unix）→ `rename`。
-/// `announced` 字段会被保留到磁盘。
-pub fn save_runs(
-    path: &Path,
-    runs: &[Run],
-    retention: Retention,
-    announced: bool,
-) -> io::Result<()> {
+/// Write under a cross-process lock, merging by `RunId` while the lock is held.
+///
+/// The lock makes the read/modify/write cycle atomic across application
+/// instances, so a concurrent save cannot drop a run. Writing `announced: true`
+/// is inherent to persisting: reaching this function *is* the first persist that
+/// the notice describes.
+pub fn save_runs(path: &Path, runs: &[Run], retention: Retention) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
 
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(sibling_path(path, ".lock"))?;
+    lock.lock()?;
+    let result = save_runs_locked(path, runs, retention);
+    // Report an unlock failure only when the write itself succeeded, so the
+    // original error is never masked.
+    match (result, lock.unlock()) {
+        (Ok(()), Err(err)) => Err(err),
+        (result, _) => result,
+    }
+}
+
+fn save_runs_locked(path: &Path, runs: &[Run], retention: Retention) -> io::Result<()> {
     let (disk_runs, _) = load_runs(path);
     let mut merged = merge_by_id(disk_runs, runs);
     merged.sort_by_key(|run| run.started_at_unix_ms);
@@ -71,21 +89,40 @@ pub fn save_runs(
 
     let file = RunsFile {
         version: RUNS_VERSION,
-        announced,
+        announced: true,
         runs: merged,
     };
     let json = serde_json::to_vec_pretty(&file)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
-    let tmp = tmp_path(path);
-    fs::write(&tmp, json)?;
+    // A single staging name is safe: the lock guarantees we are the only writer,
+    // so the only file that can be here is a leftover from a crashed run.
+    let tmp = sibling_path(path, ".tmp");
+    let staged = stage_then_publish(&tmp, path, &json);
+    if staged.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    staged
+}
+
+/// Durably write `json` to `tmp`, then atomically move it onto `path`.
+fn stage_then_publish(tmp: &Path, path: &Path, json: &[u8]) -> io::Result<()> {
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(tmp)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+        output.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    output.write_all(json)?;
+    output.sync_all()?;
+    drop(output);
+    // `rename` replaces the destination on both POSIX and Windows.
+    fs::rename(tmp, path)?;
+    sync_parent(path)
 }
 
 fn parse_runs_file(bytes: &[u8]) -> Option<RunsFile> {
@@ -124,10 +161,23 @@ fn bak_path(path: &Path) -> PathBuf {
     PathBuf::from(raw)
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
     let mut raw = path.as_os_str().to_owned();
-    raw.push(".tmp");
+    raw.push(suffix);
     PathBuf::from(raw)
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -169,7 +219,7 @@ mod tests {
         let now = now_ms();
         let a = make_run("cargo test", now - 10);
         let b = make_run("npm test", now);
-        save_runs(&path, &[a.clone(), b.clone()], Retention::default(), true).unwrap();
+        save_runs(&path, &[a.clone(), b.clone()], Retention::default()).unwrap();
         let (loaded, announced) = load_runs(&path);
         assert!(announced);
         assert_eq!(loaded.len(), 2);
@@ -222,13 +272,50 @@ mod tests {
         let now = now_ms();
         let a = make_run("first", now - 50);
         let b = make_run("second", now - 10);
-        save_runs(&path, std::slice::from_ref(&a), Retention::default(), false).unwrap();
-        save_runs(&path, std::slice::from_ref(&b), Retention::default(), false).unwrap();
+        save_runs(&path, std::slice::from_ref(&a), Retention::default()).unwrap();
+        save_runs(&path, std::slice::from_ref(&b), Retention::default()).unwrap();
         let (loaded, _) = load_runs(&path);
         let cmds: Vec<_> = loaded.iter().map(|r| r.command.as_str()).collect();
         assert_eq!(cmds, ["first", "second"], "union by id, oldest first");
         assert_eq!(loaded[0].id, a.id);
         assert_eq!(loaded[1].id, b.id);
+    }
+
+    #[test]
+    fn concurrent_saves_preserve_every_run() {
+        use std::sync::{Arc, Barrier};
+
+        let (_dir, path) = runs_path();
+        let now = now_ms();
+        let workers = 12;
+        let barrier = Arc::new(Barrier::new(workers));
+        let mut threads = Vec::new();
+        for i in 0..workers {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                let run = make_run(&format!("worker-{i}"), now + i as u64);
+                barrier.wait();
+                save_runs(&path, &[run], Retention::default()).unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let (loaded, announced) = load_runs(&path);
+        assert!(
+            announced,
+            "any successful persist marks the notice as shown"
+        );
+        assert_eq!(loaded.len(), workers);
+        for i in 0..workers {
+            assert!(
+                loaded
+                    .iter()
+                    .any(|run| run.command == format!("worker-{i}"))
+            );
+        }
     }
 
     #[test]
@@ -245,7 +332,6 @@ mod tests {
                 days: 7,
                 max_runs: 500,
             },
-            false,
         )
         .unwrap();
         let (loaded, _) = load_runs(&path);
@@ -260,7 +346,7 @@ mod tests {
         let (_dir, path) = runs_path();
         let mut run = make_run("secret-ish", now_ms());
         run.seen = true;
-        save_runs(&path, &[run], Retention::default(), false).unwrap();
+        save_runs(&path, &[run], Retention::default()).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(
             !text.contains("seen"),
@@ -281,13 +367,7 @@ mod tests {
     fn unix_permissions_are_0600() {
         use std::os::unix::fs::PermissionsExt;
         let (_dir, path) = runs_path();
-        save_runs(
-            &path,
-            &[make_run("chmod", now_ms())],
-            Retention::default(),
-            false,
-        )
-        .unwrap();
+        save_runs(&path, &[make_run("chmod", now_ms())], Retention::default()).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
