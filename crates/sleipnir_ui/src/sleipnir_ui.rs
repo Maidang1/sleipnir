@@ -380,9 +380,9 @@ impl TermView {
                 Event::Open(target) => {
                     open_navigation_target(target, cx);
                 }
-                Event::Notify(message) => {
-                    notify_message("Sleipnir", message);
-                }
+                // Ignore OSC 9 / OSC 777 desktop notification requests from
+                // shell hooks and terminal applications.
+                Event::Notify(_) => {}
                 Event::RunStarted {
                     command,
                     cwd,
@@ -1677,15 +1677,15 @@ mod tests {
     }
 
     #[test]
-    fn chrome_exposes_a_diff_button() {
+    fn chrome_hides_action_buttons() {
         let src = include_str!("chrome/tab_strip.rs");
         assert!(
-            src.contains(r#".id("diff-chrome-button")"#),
-            "tab strip must ship a clickable Diff control"
+            !src.contains(r#".id("diff-chrome-button")"#),
+            "Diff should be keyboard-only in the chrome"
         );
         assert!(
-            src.contains("toggle_diff"),
-            "Diff chrome button must open the inspector"
+            !src.contains(r#".id("strip-new-tab")"#),
+            "new tab should be keyboard-only in the chrome"
         );
         assert!(
             all_ui_sources()

@@ -38,15 +38,15 @@ impl ChromeGeometry {
     /// Chrome insets for the platform and current fullscreen state.
     pub fn for_window(desktop_controls: bool, fullscreen: bool) -> Self {
         Self {
-            height: px(40.0),
-            traffic_light_position: point(px(12.0), px(12.0)),
+            height: px(32.0),
+            traffic_light_position: point(px(12.0), px(8.0)),
             leading_pad: if fullscreen {
                 Self::fullscreen_leading_pad()
             } else {
                 leading_pad_for(desktop_controls)
             },
-            tab_height: px(28.0),
-            tab_radius: px(6.0),
+            tab_height: px(24.0),
+            tab_radius: px(5.0),
             tab_min_width: px(80.0),
             tab_max_width: px(220.0),
             tab_gap: px(2.0),
@@ -100,8 +100,8 @@ mod tests {
     #[test]
     fn standard_geometry_is_coupled() {
         let g = ChromeGeometry::standard();
-        assert_eq!(g.height, px(40.0));
-        assert_eq!(g.traffic_light_position, point(px(12.0), px(12.0)));
+        assert_eq!(g.height, px(32.0));
+        assert_eq!(g.traffic_light_position, point(px(12.0), px(8.0)));
         assert_eq!(g.close_hit, px(24.0));
         assert_eq!(g.new_tab_hit, px(28.0));
         let pad = traffic_light_leading_pad();

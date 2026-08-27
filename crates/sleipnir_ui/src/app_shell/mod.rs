@@ -228,15 +228,22 @@ enum SettingsSection {
     Theme,
     /// Session restore, ligatures, and other app/terminal toggles.
     General,
+    /// Read-only reference for the shortcuts shipped on the current platform.
+    Shortcuts,
 }
 
 impl SettingsSection {
-    const ALL: &'static [SettingsSection] = &[SettingsSection::Theme, SettingsSection::General];
+    const ALL: &'static [SettingsSection] = &[
+        SettingsSection::Theme,
+        SettingsSection::General,
+        SettingsSection::Shortcuts,
+    ];
 
     fn id(self) -> &'static str {
         match self {
             SettingsSection::Theme => "theme",
             SettingsSection::General => "general",
+            SettingsSection::Shortcuts => "shortcuts",
         }
     }
 
@@ -244,6 +251,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Theme => "theme",
             SettingsSection::General => "general",
+            SettingsSection::Shortcuts => "shortcuts",
         }
     }
 }
@@ -311,7 +319,6 @@ pub struct AppShell {
     /// Focused-pane facts: async collection state machine. Carries its own
     /// snapshot timestamp and in-flight flag.
     facts: PaneFactsState,
-    tombstone_gate: crate::chrome::tombstone::TombstoneGate,
     history_query: String,
     history_selected: usize,
     /// Git diff inspector (ADR-0012). Not a Pane.
@@ -486,7 +493,6 @@ impl AppShell {
             close_confirm: None,
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
-            tombstone_gate: crate::chrome::tombstone::TombstoneGate::default(),
             history_query: String::new(),
             history_selected: 0,
             diff_view: None,
@@ -675,12 +681,7 @@ impl AppShell {
                             this.jump_to_gutter(pane, *line, window, cx);
                         }
                     }
-                    crate::TermViewEvent::UserTyped => {
-                        if let Some(pane) = this.pane_key_for_view(view) {
-                            this.tombstone_gate.dismiss(pane);
-                            cx.notify();
-                        }
-                    }
+                    crate::TermViewEvent::UserTyped => {}
                 }
             },
         )
@@ -1724,6 +1725,7 @@ impl Render for AppShell {
         let leading = geo.leading_pad;
         let chrome_h = geo.height;
         let banner_top = chrome_h;
+        let show_tab_strip = self.tabs.len() > 1;
 
         div()
             .size_full()
@@ -1904,7 +1906,8 @@ impl Render for AppShell {
                     .h_full()
                     .flex_1()
                     .min_w(geo.trailing_pad);
-                let tab_scroll = self.render_tab_strip(&tokens, &geo, window, cx);
+                let tab_scroll =
+                    show_tab_strip.then(|| self.render_tab_strip(&tokens, &geo, window, cx));
                 let chrome_band = div()
                     .id("chrome-band")
                     .h(chrome_h)
@@ -1914,13 +1917,7 @@ impl Render for AppShell {
                     .items_center()
                     .bg(tokens.content_bg)
                     .child(leading_drag)
-                    .child(tab_scroll)
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .px_2()
-                            .child(self.render_diff_chrome_button(&tokens, &palette, cx)),
-                    )
+                    .children(tab_scroll)
                     .child(trailing_drag)
                     .when(!fullscreen, |el| {
                         el.child(self.render_desktop_titlebar_end(&tokens, window, cx))
@@ -2007,9 +2004,6 @@ impl Render for AppShell {
             })
             .when(self.mode.is(OverlayKind::Diff), |el| {
                 el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
-            })
-            .when_some(self.active_tombstone(cx), |el, stone| {
-                el.child(self.render_tombstone(&tokens, stone))
             })
     }
 }

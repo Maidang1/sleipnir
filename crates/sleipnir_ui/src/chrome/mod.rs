@@ -11,7 +11,6 @@ pub(crate) mod history_search;
 pub(crate) mod pane_facts;
 pub(crate) mod send_context;
 mod tab_strip;
-pub(crate) mod tombstone;
 pub(crate) mod workspace;
 
 pub use chrome_tokens::{ChromeTokens, contrast_ratio};

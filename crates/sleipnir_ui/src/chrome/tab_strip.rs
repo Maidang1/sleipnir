@@ -10,7 +10,6 @@ use sleipnir_settings::{TerminalPalette, TerminalSettings};
 
 use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview};
 use crate::chrome::agent::{self, AgentKind};
-use crate::chrome::git_status::cached_git_snapshot;
 use crate::chrome::workspace::{WorkspaceKey, group_tabs};
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::run_ledger_global::RunLedgerGlobal;
@@ -68,29 +67,6 @@ impl AppShell {
             }
         }
 
-        let plus = div()
-            .id("strip-new-tab")
-            .h(geo.tab_height)
-            .min_w(geo.new_tab_hit)
-            .px(geo.tab_px)
-            .rounded(geo.tab_radius)
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .text_color(tokens.fg_muted)
-            .text_sm()
-            .cursor_pointer()
-            .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
-            .child("+")
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.add_tab(window, cx);
-            }))
-            .on_drop::<PaneDrag>(cx.listener(|this, dragged: &PaneDrag, window, cx| {
-                let insert_at = this.tabs.len();
-                this.extract_pane_to_tab(dragged.pane_id, insert_at, window, cx);
-            }));
-
         div()
             .id("tab-scroller")
             .flex()
@@ -103,63 +79,6 @@ impl AppShell {
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll_handle)
             .children(chips)
-            .child(plus)
-    }
-
-    /// Chrome control that opens the diff inspector.
-    /// Only visible when the active tab is inside a git work tree.
-    pub(crate) fn render_diff_chrome_button(
-        &self,
-        tokens: &ChromeTokens,
-        palette: &TerminalPalette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let (branch, added, deleted) = self
-            .tabs
-            .get(self.active)
-            .map(|tab| tab_git_facts(tab, cx))
-            .unwrap_or((None, 0, 0));
-        let in_git = branch.is_some();
-        let open = self.mode.is(crate::ui_mode::OverlayKind::Diff);
-        // Hide entirely (no layout space) when not in a git repo and diff is closed.
-        let show = in_git || open;
-        div().id("diff-chrome-button").when(show, |el| {
-            el.flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .flex_shrink_0()
-                .px_2()
-                .py_0p5()
-                .rounded(px(4.0))
-                .text_xs()
-                .cursor_pointer()
-                .when(open, |el| {
-                    el.bg(tokens.accent.opacity(0.2)).text_color(tokens.fg)
-                })
-                .when(!open, |el| {
-                    el.text_color(tokens.fg_muted)
-                        .hover(|style| style.bg(tokens.hover).text_color(tokens.fg))
-                })
-                .child(gpui::SharedString::from("Diff"))
-                .when(added > 0, |el| {
-                    el.child(
-                        div()
-                            .text_color(palette.ansi[2])
-                            .child(gpui::SharedString::from(format!("+{added}"))),
-                    )
-                })
-                .when(deleted > 0, |el| {
-                    el.child(
-                        div()
-                            .text_color(palette.ansi[1])
-                            .child(gpui::SharedString::from(format!("−{deleted}"))),
-                    )
-                })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toggle_diff(window, cx);
-                }))
-        })
     }
 }
 
@@ -276,15 +195,6 @@ pub(crate) fn render_tab_chip(
     .when_some(agent, |el, kind| el.child(render_agent_mark(kind)))
     .child(body)
     .into_any_element()
-}
-
-pub(crate) fn tab_git_facts(tab: &Tab, cx: &App) -> (Option<String>, u32, u32) {
-    match tab.workspace_cwd(cx) {
-        Some(cwd) => cached_git_snapshot(&cwd)
-            .map(|snap| (Some(snap.branch), snap.added, snap.deleted))
-            .unwrap_or((None, 0, 0)),
-        None => (None, 0, 0),
-    }
 }
 
 fn truncated_label(text: impl Into<gpui::SharedString>) -> impl IntoElement {

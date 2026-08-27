@@ -140,6 +140,9 @@ impl AppShell {
             SettingsSection::General => self
                 .render_settings_general_section(tokens, cx)
                 .into_any_element(),
+            SettingsSection::Shortcuts => self
+                .render_settings_shortcuts_section(tokens)
+                .into_any_element(),
         };
 
         // ── Footer ─────────────────────────────────────────────────────────
@@ -454,6 +457,77 @@ impl AppShell {
                             ),
                     ),
             )
+    }
+
+    /// Read-only shortcut reference generated from the same command catalog
+    /// used by the command palette, so labels stay in sync with the bindings.
+    fn render_settings_shortcuts_section(&self, tokens: &ChromeTokens) -> impl IntoElement {
+        let mut list = div()
+            .id("settings-shortcuts")
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(tokens.fg_muted)
+                    .child("Built-in shortcuts for this platform. Custom bindings in settings.json take precedence."),
+            );
+
+        let mut rows = div()
+            .rounded(px(10.0))
+            .bg(tokens.hover)
+            .border_1()
+            .border_color(tokens.border)
+            .overflow_hidden();
+        let commands: Vec<_> = crate::command_palette::commands()
+            .into_iter()
+            .filter(|command| !command.shortcut.is_empty())
+            .collect();
+        let command_count = commands.len();
+
+        for (index, command) in commands.into_iter().enumerate() {
+            rows = rows.child(
+                div()
+                    .id(("shortcut-row", index))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.0))
+                    .w_full()
+                    .px(px(14.0))
+                    .py(px(9.0))
+                    .when(index + 1 < command_count, |el| {
+                        el.border_b_1().border_color(tokens.border)
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(12.0))
+                            .text_color(tokens.fg)
+                            .child(command.title),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(7.0))
+                            .py(px(2.0))
+                            .rounded(px(5.0))
+                            .bg(tokens.surface)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(tokens.fg_muted)
+                            .child(command.shortcut),
+                    ),
+            );
+        }
+
+        list = list.child(rows);
+        list
     }
 
     fn settings_toggle_row(

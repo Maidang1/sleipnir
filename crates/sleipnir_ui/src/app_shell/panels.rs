@@ -4,17 +4,15 @@
 //! A child module of `app_shell` so these can read the shell's private panel
 //! state without widening it to the crate.
 
-use gpui::{
-    App, AppContext as _, BorrowAppContext as _, ClickEvent, Context, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px,
-};
-use sleipnir_settings::TerminalSettings;
-
 use super::{AppShell, ConfirmKind, TogglePaneFacts};
 use crate::chrome::ChromeTokens;
 use crate::run_ledger_global::RunLedgerGlobal;
 use crate::ui_mode::{OverlayKind, PANE_FACTS_MAX_AGE, PaneFactsState};
+use gpui::{
+    AppContext as _, BorrowAppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, deferred, div, px,
+};
 
 impl AppShell {
     pub(super) fn render_pane_facts(
@@ -145,39 +143,6 @@ impl AppShell {
                 )
                 .child(body),
         )
-    }
-
-    pub(super) fn active_tombstone(&self, cx: &App) -> Option<crate::chrome::tombstone::Tombstone> {
-        if !TerminalSettings::get_global(cx).show_tombstone {
-            return None;
-        }
-        let tab = self.tabs.get(self.active)?;
-        let pane = tab.tree.pane_key_for_id(tab.active_pane)?;
-        let ledger = cx.try_global::<RunLedgerGlobal>()?;
-        self.tombstone_gate
-            .banner(&ledger.snapshot(), pane, ledger.launch_id())
-    }
-
-    pub(super) fn render_tombstone(
-        &self,
-        tokens: &ChromeTokens,
-        stone: crate::chrome::tombstone::Tombstone,
-    ) -> impl IntoElement {
-        div()
-            .id("tombstone-banner")
-            .absolute()
-            .top(px(4.0))
-            .left_4()
-            .right_4()
-            .px_3()
-            .py_1()
-            .rounded(px(6.0))
-            .bg(tokens.surface)
-            .border_1()
-            .border_color(tokens.border)
-            .text_xs()
-            .text_color(tokens.fg_muted)
-            .child(stone.summary)
     }
 
     pub(super) fn render_run_ledger(
