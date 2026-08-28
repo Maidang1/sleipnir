@@ -15,6 +15,12 @@ pub struct ChromeTokens {
     pub fg_muted: Hsla,
     pub fg_disabled: Hsla,
     pub accent: Hsla,
+    /// Palette green. Widget `ok` resolves here, never a hardcoded hex.
+    pub ok: Hsla,
+    /// Palette yellow. Widget `warn` resolves here.
+    pub warn: Hsla,
+    /// Palette red. Widget `err` resolves here.
+    pub err: Hsla,
 }
 
 impl ChromeTokens {
@@ -60,6 +66,9 @@ impl ChromeTokens {
             fg_muted,
             fg_disabled: fg_muted.blend(surface.opacity(0.4)).alpha(1.0),
             accent: p.ansi[4].alpha(1.0),
+            ok: p.ansi[2].alpha(1.0),
+            warn: p.ansi[3].alpha(1.0),
+            err: p.ansi[1].alpha(1.0),
         };
 
         if !window_active {

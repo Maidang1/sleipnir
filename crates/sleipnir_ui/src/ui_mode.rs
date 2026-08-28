@@ -25,6 +25,8 @@ pub(crate) enum OverlayKind {
     RunLedger,
     History,
     Diff,
+    PluginMonitor,
+    PluginConsent,
 }
 
 #[derive(Default)]
@@ -238,6 +240,15 @@ mod tests {
         assert!(!mode.toggle(OverlayKind::RunLedger));
         assert_eq!(mode.overlay, OverlayKind::None);
         assert!(!mode.close(OverlayKind::Diff));
+    }
+
+    #[test]
+    fn plugin_consent_replaces_the_monitor() {
+        let mut mode = UiMode::default();
+        mode.open(OverlayKind::PluginMonitor);
+        mode.open(OverlayKind::PluginConsent);
+        assert!(mode.is(OverlayKind::PluginConsent));
+        assert!(!mode.is(OverlayKind::PluginMonitor));
     }
 
     #[test]

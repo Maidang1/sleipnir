@@ -14,8 +14,9 @@ use sleipnir_ui::{
     NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab,
     ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
     ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
-    TogglePaneZoom, ToggleQuickSelect, ToggleRunLedger, builtin_bindings, install_finder_services,
-    last_window_close_quits, open_sleipnir_window, tmux_preset_bindings, try_open_sleipnir_window,
+    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger, builtin_bindings,
+    install_finder_services, last_window_close_quits, open_sleipnir_window, tmux_preset_bindings,
+    try_open_sleipnir_window,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -183,6 +184,7 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::ToggleQuickSelect => KeyBinding::new(key, ToggleQuickSelect, context),
         BuiltinAction::OpenQuickTerminal => KeyBinding::new(key, OpenQuickTerminal, context),
         BuiltinAction::ToggleRunLedger => KeyBinding::new(key, ToggleRunLedger, context),
+        BuiltinAction::TogglePluginMonitor => KeyBinding::new(key, TogglePluginMonitor, context),
         BuiltinAction::ToggleHistorySearch => KeyBinding::new(key, ToggleHistorySearch, context),
         BuiltinAction::ToggleDiff => KeyBinding::new(key, ToggleDiff, context),
         BuiltinAction::IncreaseFontSize => KeyBinding::new(key, IncreaseFontSize, context),
@@ -269,6 +271,9 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "show_character_palette" => KeyBinding::new(&spec.key, ShowCharacterPalette, Some(ctx)),
             "clear_run_ledger" => KeyBinding::new(&spec.key, ClearRunLedger, Some(ctx)),
             "toggle_run_ledger" => KeyBinding::new(&spec.key, ToggleRunLedger, Some(ctx)),
+            "toggle_plugin_monitor" | "plugin_monitor" => {
+                KeyBinding::new(&spec.key, TogglePluginMonitor, Some(ctx))
+            }
             "mark_tab_seen" | "mark_as_seen" => KeyBinding::new(&spec.key, MarkTabSeen, Some(ctx)),
             "toggle_pane_facts" | "pane_facts" => {
                 KeyBinding::new(&spec.key, TogglePaneFacts, Some(ctx))

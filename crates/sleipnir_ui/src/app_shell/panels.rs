@@ -1,5 +1,5 @@
-//! Side panels and dialogs: pane facts, run ledger, history search, and the
-//! shared confirm dialog.
+//! Side panels and dialogs: pane facts, run ledger, history search, plugin
+//! monitor / consent, and the shared confirm dialog.
 //!
 //! A child module of `app_shell` so these can read the shell's private panel
 //! state without widening it to the crate.
@@ -11,7 +11,7 @@ use crate::ui_mode::{OverlayKind, PANE_FACTS_MAX_AGE, PaneFactsState};
 use gpui::{
     AppContext as _, BorrowAppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, deferred, div, px,
+    Styled as _, Window, deferred, div, prelude::FluentBuilder as _, px,
 };
 
 impl AppShell {
@@ -231,6 +231,360 @@ impl AppShell {
                 )
                 .child(body),
         )
+    }
+
+    pub(super) fn render_plugin_monitor(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::plugin_monitor_panel::{
+            format_activity, format_pid, format_uptime, live_plugin_count, rows_from_snapshots,
+            running_indicator_label, state_label, tier_badge,
+        };
+        let snapshots = crate::plugin_runtime::snapshots(cx);
+        let names = crate::plugin_runtime::catalog_names(cx);
+        let tiers = crate::plugin_runtime::grant_tiers();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let running = live_plugin_count(&snapshots);
+        let mut rows = rows_from_snapshots(&snapshots, &names, &tiers, now);
+        let drops = self.plugin_calls.dropped_counts();
+        for row in &mut rows {
+            row.host_calls_dropped = drops.get(&row.plugin_id).copied().unwrap_or(0);
+        }
+
+        let mut body = div()
+            .id("plugin-monitor-body")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .pb_3()
+            .overflow_y_scroll();
+
+        if rows.is_empty() {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.fg_muted)
+                    .child("No plugins running."),
+            );
+        }
+
+        for (i, row) in rows.iter().enumerate() {
+            let uptime = format_uptime(now.saturating_sub(row.started_at_ms));
+            let activity = format_activity(now.saturating_sub(row.last_activity_ms));
+            let plugin_id = row.plugin_id.clone();
+            let stderr: String = row.stderr.join("\n");
+            let mut card = div()
+                .id(("plugin-row", i))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded(px(6.0))
+                .bg(tokens.content_bg)
+                .border_1()
+                .border_color(tokens.border)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(tokens.fg)
+                                .child(row.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.fg_muted)
+                                .child(tier_badge(row.tier)),
+                        ),
+                )
+                .child(div().text_xs().text_color(tokens.fg_muted).child(format!(
+                    "{} · {} · up {} · {} · in-flight {} · restarts {}",
+                    state_label(row.state),
+                    format_pid(row.pid),
+                    uptime,
+                    activity,
+                    row.in_flight,
+                    row.restart_count
+                )))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.fg_disabled)
+                        .child(format!(
+                            "dropped {} · events dropped {} · malformed {} · host calls dropped {}",
+                            row.inbound_dropped,
+                            row.events_dropped,
+                            row.malformed_lines,
+                            row.host_calls_dropped
+                        )),
+                );
+            if !stderr.is_empty() {
+                card = card.child(div().text_xs().text_color(tokens.fg_muted).child(stderr));
+            }
+            card = card.child(
+                div()
+                    .id(("plugin-kill", i))
+                    .px_2()
+                    .py_1()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tokens.hover))
+                    .text_xs()
+                    .text_color(tokens.accent)
+                    .child("Kill")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.kill_plugin(plugin_id.clone(), cx);
+                    })),
+            );
+            body = body.child(card);
+        }
+
+        deferred(
+            div()
+                .id("plugin-monitor-overlay")
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(340.0))
+                .flex()
+                .flex_col()
+                .bg(tokens.surface)
+                .border_l_1()
+                .border_color(tokens.border)
+                .occlude()
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(tokens.fg)
+                                .child("Plugin Monitor"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.fg_muted)
+                                // Only meaningful once something is running: the
+                                // panel title plus the empty-state line already
+                                // say "no plugins", so a "0 plugins" counter here
+                                // is the same fact a third time.
+                                .when(running > 0, |el| {
+                                    el.child(running_indicator_label(running))
+                                }),
+                        ),
+                )
+                .child(body),
+        )
+    }
+
+    pub(super) fn render_plugin_consent(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::plugin_monitor_panel::{
+            approve_label, capability_label, consent_copy, deny_label, tier_badge,
+        };
+        let prompt = self.plugin_consent.as_ref().map(|p| p.prompt.clone());
+        let (title, lead, warning, caps, tier) = match prompt.as_ref() {
+            Some(prompt) => {
+                let copy = consent_copy(prompt);
+                (
+                    copy.title.to_string(),
+                    copy.lead,
+                    copy.is_security_warning,
+                    prompt.missing.clone(),
+                    prompt.tier,
+                )
+            }
+            None => (
+                "Plugin permission".into(),
+                String::new(),
+                false,
+                Vec::new(),
+                plugin_grants::Tier::Local,
+            ),
+        };
+
+        let title_color = if warning { tokens.accent } else { tokens.fg };
+        let mut cap_list = div().flex().flex_col().gap_1();
+        for cap in &caps {
+            cap_list = cap_list.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(tokens.fg)
+                    .child(format!("· {}", capability_label(*cap))),
+            );
+        }
+
+        let panel = div()
+            .id("plugin-consent-panel")
+            .w(px(420.0))
+            .rounded(px(10.0))
+            .bg(tokens.content_bg)
+            .border_1()
+            .border_color(if warning {
+                tokens.accent
+            } else {
+                tokens.border
+            })
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px_4()
+                    .pt_4()
+                    .pb_2()
+                    .text_size(px(15.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(title_color)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .pb_2()
+                    .text_size(px(12.0))
+                    .text_color(tokens.fg_muted)
+                    .child(tier_badge(tier)),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .pb_3()
+                    .text_size(px(13.0))
+                    .text_color(if warning { tokens.fg } else { tokens.fg_muted })
+                    .when(warning, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .child(lead),
+            )
+            .child(div().px_4().pb_3().child(cap_list))
+            .child(
+                div()
+                    .px_4()
+                    .pb_4()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        // Approve is secondary: the safe default is Deny.
+                        div()
+                            .id("plugin-consent-approve")
+                            .px_3()
+                            .py_1p5()
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .hover(|el| el.bg(tokens.hover))
+                            .text_size(px(13.0))
+                            .text_color(tokens.fg)
+                            .child(approve_label())
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.approve_plugin_consent(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("plugin-consent-deny")
+                            .px_3()
+                            .py_1p5()
+                            .rounded(px(6.0))
+                            .bg(tokens.accent)
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(tokens.content_bg)
+                            .child(deny_label())
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.deny_plugin_consent(cx);
+                            })),
+                    ),
+            );
+
+        deferred(
+            div()
+                .id("plugin-consent-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("plugin-consent-backdrop")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .bg(tokens.content_bg.opacity(0.72))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.deny_plugin_consent(cx);
+                            }),
+                        ),
+                )
+                .child(panel),
+        )
+    }
+
+    pub(super) fn render_plugin_status_chip(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::plugin_monitor_panel::{live_plugin_count, running_indicator_label};
+        let snapshots = crate::plugin_runtime::snapshots(cx);
+        let n = live_plugin_count(&snapshots);
+        let open = self.mode.is(OverlayKind::PluginMonitor);
+        // Zero running plugins renders nothing: ADR-0016 §7 requires the
+        // indicator to be unsuppressible *by a plugin*, and a plugin cannot
+        // reach zero on its own behalf — the host owns this count. Showing
+        // "0 plugins" permanently spends chrome on the state that carries no
+        // information. The Monitor stays reachable from the palette.
+        div()
+            .id("plugin-status-chip")
+            .flex_shrink_0()
+            .when(n > 0, |el| {
+                el.px_2()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_xs()
+                    .when(open, |el| el.text_color(tokens.fg).bg(tokens.hover))
+                    .when(!open, |el| el.text_color(tokens.fg_muted))
+                    .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
+                    .child(running_indicator_label(n))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.toggle_plugin_monitor(cx);
+                    }))
+            })
     }
 
     pub(super) fn render_history_search(

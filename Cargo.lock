@@ -4577,6 +4577,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "plugin_grants"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "plugin_protocol",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "plugin_host"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "log",
+ "plugin_protocol",
+ "run_ledger",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "plugin_protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5819,6 +5855,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sleipnir-plugin"
+version = "0.1.0"
+dependencies = [
+ "plugin_protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "sleipnir-update-helper"
 version = "0.1.0"
 dependencies = [
@@ -5853,6 +5897,7 @@ dependencies = [
  "dirs",
  "gpui",
  "log",
+ "plugin_host",
  "schemars",
  "serde",
  "serde_json",
@@ -5870,12 +5915,16 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "objc",
+ "plugin_grants",
+ "plugin_host",
+ "plugin_protocol",
  "release_channel",
  "run_ledger",
  "serde",
  "serde_json",
  "sleipnir_ctl",
  "sleipnir_settings",
+ "sleipnir_widget",
  "syntax",
  "sysinfo 0.37.2",
  "tempfile",
@@ -5883,6 +5932,14 @@ dependencies = [
  "updater",
  "util",
  "uuid",
+]
+
+[[package]]
+name = "sleipnir_widget"
+version = "0.1.0"
+dependencies = [
+ "plugin_protocol",
+ "syntax",
 ]
 
 [[package]]

@@ -139,6 +139,7 @@ impl AppShell {
             }
         }
         let closed_keys = self.tabs[index].tree.all_pane_keys();
+        self.plugin_panels.remove_all(closed_keys.iter().copied());
         for pane in closed_keys {
             self.apply_pane_closed(pane, cx);
         }
@@ -272,6 +273,15 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let new_id = self.next_id;
+        let extractable = self
+            .tabs
+            .iter()
+            .any(|tab| tab.tree.is_terminal_leaf(pane_id));
+        if !extractable {
+            // A Panel extracted into its own tab would be a workspace with no
+            // shell. Panels stay attached to the tab that hosts them.
+            return;
+        }
         let Ok(idx) = extract_pane(&mut self.tabs, pane_id, insert_at, new_id) else {
             return;
         };
@@ -324,9 +334,12 @@ impl AppShell {
     }
 
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.active_view(cx) {
+        if let Some(view) = self.active_terminal(cx) {
             let handle = view.focus_handle(cx);
             window.focus(&handle, cx);
+        } else {
+            // Panel (or empty): keep keys on the shell, never a leftover PTY.
+            window.focus(&self.focus_handle, cx);
         }
     }
 }

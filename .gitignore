@@ -23,3 +23,6 @@ docs/upstream-last-diff.txt
 
 # superpowers brainstorm scratch
 .superpowers/
+
+# local agent inspection cache
+.agent-cache/

@@ -5,16 +5,14 @@ use sleipnir_ctl::enabled;
 use sleipnir_settings::TerminalSettings;
 use std::sync::mpsc;
 
-#[cfg(unix)]
 use crate::TermView;
-#[cfg(unix)]
 use crate::app_shell::AppShell;
+use run_ledger::PaneKey;
+
 #[cfg(unix)]
 use crate::run_ledger_global::RunLedgerGlobal;
 #[cfg(unix)]
 use gpui::AsyncApp;
-#[cfg(unix)]
-use run_ledger::PaneKey;
 #[cfg(unix)]
 use sleipnir_ctl::{
     ControlRequest, ControlResponse, PaneSnap, WaitUntil, socket_path, wait_matches,
@@ -323,14 +321,16 @@ fn list_panes(cx: &mut App) -> Vec<PaneSnap> {
 
 #[cfg(unix)]
 fn view_for_pane(cx: &mut App, pane: PaneKey) -> Option<gpui::Entity<TermView>> {
-    collect_live_panes(cx)
+    live_terminal_panes(cx)
         .into_iter()
         .find(|(key, _)| *key == pane)
         .map(|(_, view)| view)
 }
 
-#[cfg(unix)]
-fn collect_live_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
+/// Terminal (PTY) panes across every window. Plugin Panel leaves are already
+/// excluded by [`AppShell::all_live_panes`]. Host calls and `sleipnir-ctl ls`
+/// share this walk so they cannot drift into two enumerations.
+pub(crate) fn live_terminal_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
     let mut out = Vec::new();
     for handle in cx.windows() {
         let Some(handle) = handle.downcast::<AppShell>() else {
@@ -342,4 +342,9 @@ fn collect_live_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
         out.extend(panes);
     }
     out
+}
+
+#[cfg(unix)]
+fn collect_live_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
+    live_terminal_panes(cx)
 }

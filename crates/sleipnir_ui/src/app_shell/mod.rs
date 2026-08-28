@@ -122,6 +122,8 @@ actions!(
         ToggleHistorySearch,
         /// Toggle the git diff inspector overlay.
         ToggleDiff,
+        /// Toggle the Plugin Monitor overlay (ADR-0016 §7).
+        TogglePluginMonitor,
     ]
 );
 
@@ -200,6 +202,12 @@ impl Tab {
 
     /// The active pane's own title (ignores any custom override).
     pub(crate) fn pane_title(&self, cx: &App) -> SharedString {
+        let mut all = Vec::new();
+        self.tree.walk_leaves(&mut all);
+        let active = all.iter().find(|(id, _, _)| *id == self.active_pane);
+        if let Some((_, _, crate::LeafContent::Panel { plugin_id })) = active {
+            return plugin_id.clone().into();
+        }
         let mut leaves = Vec::new();
         self.tree.leaves(&mut leaves);
         let view = leaves
@@ -299,6 +307,7 @@ pub struct AppShell {
     palette_query: String,
     palette_selected: usize,
     palette_items: Vec<CommandItem>,
+    plugin_commands: Vec<plugin_host::LoadedPluginCommand>,
     find_query: String,
     /// Monotonic request id used to discard stale asynchronous search results.
     find_gen: u64,
@@ -312,6 +321,9 @@ pub struct AppShell {
     pub(crate) font_size_override: Option<Pixels>,
     /// Close-confirm dialog pending (M12).
     close_confirm: Option<CloseConfirmState>,
+    /// Consent prompt pending. Copied off `plugin_grants::check`; the overlay
+    /// never borrows the grants file. Approve writes a grant; Deny writes nothing.
+    plugin_consent: Option<PluginConsentPending>,
     /// Tab ids currently flashing for visual bell (M12).
     pub(crate) bell_flash_tabs: std::collections::HashSet<u64>,
     /// Fan-out keystrokes to all panes in the active tab (M13).
@@ -328,6 +340,15 @@ pub struct AppShell {
     _session_save_task: Option<Task<()>>,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
+    /// Last-seen pane facts for plugin events. Polled, never per-frame.
+    plugin_watch: crate::plugin_event_watch::PluginEventWatch,
+    /// Host-owned plugin Panel surfaces (ADR-0017). Keyed by pane_key.
+    plugin_panels: crate::plugin_panel::PanelRegistry,
+    /// Per-plugin HostCall rate limiter (ADR-0016 §3). UI-side so a resident
+    /// plugin cannot spam Notify / OpenPane; drops are shown on the Monitor.
+    plugin_calls: crate::plugin_host_calls::HostCallLimiter,
+    /// Chrome contributions (ADR-0017 status mount).
+    plugin_chrome: crate::plugin_chrome::ChromeRegistry,
 }
 
 /// What the shared confirm dialog is asking about.
@@ -344,6 +365,15 @@ struct CloseConfirmState {
     /// Human-readable what will happen.
     message: SharedString,
     kind: ConfirmKind,
+}
+
+/// Enough to finish an invoke after the user approves. The dialog itself
+/// renders [`crate::plugin_monitor_panel::ConsentPrompt`] only.
+struct PluginConsentPending {
+    prompt: crate::plugin_monitor_panel::ConsentPrompt,
+    plugin: plugin_host::LoadedPluginCommand,
+    hash: String,
+    request: Vec<plugin_protocol::v2::Capability>,
 }
 
 impl Focusable for AppShell {
@@ -457,6 +487,10 @@ impl AppShell {
                 | UpdateUiState::ManualInstallRequired { .. }
                 | UpdateUiState::RecoveryRequired { .. }
         );
+        crate::plugin_runtime::PluginRuntime::init(cx);
+        let plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
+        let mut palette_items = palette_commands();
+        palette_items.extend(crate::command_palette::plugin_items(&plugin_commands));
         let mut shell = Self {
             tabs: Vec::new(),
             active: 0,
@@ -482,7 +516,8 @@ impl AppShell {
             theme_query: String::new(),
             palette_query: String::new(),
             palette_selected: 0,
-            palette_items: palette_commands(),
+            palette_items,
+            plugin_commands,
             find_query: String::new(),
             find_gen: 0,
             find_match_count: 0,
@@ -491,6 +526,7 @@ impl AppShell {
             find_match_case: false,
             font_size_override: None,
             close_confirm: None,
+            plugin_consent: None,
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
             history_query: String::new(),
@@ -500,6 +536,10 @@ impl AppShell {
             facts: PaneFactsState::default(),
             _session_save_task: None,
             _quit_subscription: None,
+            plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
+            plugin_panels: crate::plugin_panel::PanelRegistry::new(),
+            plugin_calls: crate::plugin_host_calls::HostCallLimiter::new(),
+            plugin_chrome: crate::plugin_chrome::ChromeRegistry::new(),
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -566,9 +606,19 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TermView> {
+        self.spawn_term_view(cwd, None, window, cx)
+    }
+
+    fn spawn_term_view(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
+        command: Option<(String, Vec<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TermView> {
         let override_size = self.font_size_override;
         let view = cx.new(|cx| {
-            let mut v = TermView::new_local_with_cwd(cwd, window, cx);
+            let mut v = TermView::new_local_with(cwd, command, window, cx);
             if override_size.is_some() {
                 v.set_font_size_override(override_size, cx);
             }
@@ -759,7 +809,7 @@ impl AppShell {
         if !cx.has_global::<RunLedgerGlobal>() {
             return;
         }
-        cx.update_global(|g: &mut RunLedgerGlobal, cx| {
+        let host_event = cx.update_global(|g: &mut RunLedgerGlobal, cx| {
             let at_ms = g.now_ms();
             match &mut event {
                 RunEvent::Started { at_ms: slot, .. }
@@ -768,9 +818,356 @@ impl AppShell {
                     *slot = at_ms;
                 }
             }
+            let kind = event.clone();
             g.apply(event, cx);
+            run_event_to_host(&kind, &g.snapshot())
         });
+        if let Some(ev) = host_event {
+            crate::plugin_runtime::broadcast_event(ev, cx);
+        }
         crate::attention_chrome::refresh(cx);
+    }
+
+    fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
+        use crate::plugin_event_watch::PaneUiFacts;
+        if !self
+            .plugin_watch
+            .due(std::time::Instant::now(), std::time::Duration::from_secs(1))
+        {
+            return;
+        }
+        let focus = self.active_pane_key();
+        let mut facts = Vec::new();
+        let mut port_jobs = Vec::new();
+        for tab in &self.tabs {
+            let mut leaves = Vec::new();
+            tab.tree.leaves_with_keys(&mut leaves);
+            for (pane, view) in leaves {
+                let cwd = view
+                    .read(cx)
+                    .working_directory(cx)
+                    .map(|p| p.to_string_lossy().into_owned());
+                let fg = view.read(cx).foreground_process_command_name(cx);
+                let agent = fg
+                    .as_deref()
+                    .and_then(crate::chrome::agent::identify)
+                    .map(|kind| kind.id.to_string());
+                port_jobs.push((pane, view.read(cx).shell_pid(cx)));
+                facts.push(PaneUiFacts { pane, cwd, agent });
+            }
+        }
+        for ev in self.plugin_watch.ingest_ui(focus, &facts) {
+            crate::plugin_runtime::broadcast_event(ev, cx);
+        }
+        if self.plugin_watch.ports_inflight {
+            return;
+        }
+        self.plugin_watch.ports_inflight = true;
+        cx.spawn(async move |this, cx| {
+            let mut found = Vec::new();
+            for (pane, pid) in port_jobs {
+                let facts = cx
+                    .background_spawn(async move {
+                        crate::chrome::pane_facts::collect_live_facts(None, None, pid)
+                    })
+                    .await;
+                found.push((pane, facts.ports));
+            }
+            this.update(cx, |this, cx| {
+                this.plugin_watch.ports_inflight = false;
+                for (pane, ports) in found {
+                    for ev in this.plugin_watch.ingest_ports(pane, &ports) {
+                        crate::plugin_runtime::broadcast_event(ev, cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn poll_plugin_inbound(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use plugin_host::resident::{ConnectionState, Inbound};
+        use plugin_protocol::v2::RenderTarget;
+        let inbound = crate::plugin_runtime::drain_all_inbound(cx);
+        for (plugin_id, msg) in inbound {
+            match msg {
+                Inbound::Render {
+                    target: RenderTarget::Panel { pane },
+                    tree,
+                    ..
+                } => self.apply_panel_render(&plugin_id, pane, tree, window, cx),
+                Inbound::Render {
+                    target: RenderTarget::Status,
+                    tree,
+                    ..
+                } => self.apply_chrome_status(&plugin_id, tree, cx),
+                Inbound::Render { .. } => {}
+                Inbound::Call { id, call } => {
+                    self.handle_host_call(&plugin_id, id, call, window, cx)
+                }
+            }
+        }
+        let snapshots = crate::plugin_runtime::snapshots(cx);
+        let mut live = std::collections::BTreeSet::new();
+        for snap in snapshots {
+            if snap.state == ConnectionState::Live {
+                live.insert(snap.plugin_id);
+            } else {
+                self.plugin_panels.mark_plugin_stale(&snap.plugin_id);
+            }
+        }
+        self.plugin_panels.mark_missing_stale(&live);
+        if self.plugin_chrome.sync_live(&live) {
+            self.rebuild_palette_items();
+        }
+    }
+
+    fn apply_panel_render(
+        &mut self,
+        plugin_id: &str,
+        pane: PaneKey,
+        tree: plugin_protocol::v2::Widget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::plugin_panel::{ApplyPanel, render_panel_granted};
+        use plugin_protocol::v2::Capability;
+        // Same source as the event bus: Hello.granted, not "the plugin asked".
+        let granted = crate::plugin_runtime::has_grant(plugin_id, Capability::RenderPanel, cx);
+        let granted = render_panel_granted(if granted {
+            &[Capability::RenderPanel]
+        } else {
+            &[]
+        });
+        let mut terminals = std::collections::BTreeSet::new();
+        for tab in &self.tabs {
+            let mut out = Vec::new();
+            tab.tree.leaves_with_keys(&mut out);
+            for (key, _) in out {
+                terminals.insert(key);
+            }
+        }
+        match self
+            .plugin_panels
+            .apply_render(plugin_id, pane, tree, granted, &terminals)
+        {
+            ApplyPanel::Create { pane_key } => {
+                if !self.insert_panel_leaf(pane_key, plugin_id, window, cx) {
+                    self.plugin_panels.remove(pane_key);
+                }
+            }
+            ApplyPanel::Replace { .. } => cx.notify(),
+            ApplyPanel::DeniedGrant => {
+                log::warn!("plugin {plugin_id} RenderPanel denied (no grant)");
+            }
+            ApplyPanel::DeniedTerminal => {
+                log::warn!("plugin {plugin_id} tried to draw into a terminal pane");
+            }
+            ApplyPanel::DeniedOccupied => {
+                log::warn!("plugin {plugin_id} tried to take another plugin's panel");
+            }
+        }
+    }
+
+    fn apply_chrome_status(
+        &mut self,
+        plugin_id: &str,
+        tree: plugin_protocol::v2::Widget,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::plugin_chrome::{ApplyChrome, render_status_granted};
+        use plugin_protocol::v2::Capability;
+        let granted = crate::plugin_runtime::has_grant(plugin_id, Capability::RenderStatus, cx);
+        let granted = render_status_granted(if granted {
+            &[Capability::RenderStatus]
+        } else {
+            &[]
+        });
+        let hint = self.active_pane_key();
+        match self
+            .plugin_chrome
+            .apply_status(plugin_id, tree, granted, hint)
+        {
+            ApplyChrome::Applied => {
+                self.rebuild_palette_items();
+                cx.notify();
+            }
+            ApplyChrome::DeniedGrant => {
+                log::warn!("plugin {plugin_id} RenderStatus denied (no grant)");
+            }
+        }
+    }
+
+    fn insert_panel_leaf(
+        &mut self,
+        pane_key: PaneKey,
+        plugin_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let target = tab.active_pane;
+        let new_id = self.next_pane_id;
+        self.next_pane_id += 1;
+        let content = crate::LeafContent::Panel {
+            plugin_id: plugin_id.to_string(),
+        };
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        if !tab
+            .tree
+            .split_content(target, SplitAxis::Horizontal, new_id, pane_key, content)
+        {
+            return false;
+        }
+        tab.active_pane = new_id;
+        self.commit_workspace(window, cx);
+        true
+    }
+
+    fn handle_host_call(
+        &mut self,
+        plugin_id: &str,
+        id: plugin_protocol::v2::MessageId,
+        call: plugin_protocol::v2::HostCall,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::plugin_host_calls::{
+            CallPlan, cap_screen, error_result, filter_listed_panes, plan_call, read_screen_access,
+        };
+        use plugin_protocol::v2::{Capability, HostCallResult, PaneInfo};
+        let granted: Vec<Capability> = [
+            Capability::HostCallNotify,
+            Capability::HostCallReadScreen,
+            Capability::HostCallListPanes,
+            Capability::HostCallOpenPane,
+        ]
+        .into_iter()
+        .filter(|cap| crate::plugin_runtime::has_grant(plugin_id, *cap, cx))
+        .collect();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let plan = plan_call(plugin_id, &call, &granted, &mut self.plugin_calls, now_ms);
+        let result = match plan {
+            CallPlan::Reply(result) => result,
+            CallPlan::Notify { title, body } => {
+                crate::notify_message(&title, &body);
+                HostCallResult::Ok
+            }
+            CallPlan::ListPanes => {
+                let live = crate::control_surface::live_terminal_panes(cx);
+                let mut terminals = std::collections::BTreeSet::new();
+                let mut infos = Vec::new();
+                for (pane, view) in &live {
+                    terminals.insert(*pane);
+                    infos.push(PaneInfo {
+                        pane: *pane,
+                        cwd: view
+                            .read(cx)
+                            .working_directory(cx)
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        title: Some(view.read(cx).title().to_string()),
+                        busy: view.read(cx).looks_busy(cx),
+                    });
+                }
+                HostCallResult::Panes {
+                    panes: filter_listed_panes(infos, &terminals),
+                }
+            }
+            CallPlan::ReadScreen { pane } => {
+                let live = crate::control_surface::live_terminal_panes(cx);
+                let mut terminals = std::collections::BTreeSet::new();
+                for (key, _) in &live {
+                    terminals.insert(*key);
+                }
+                let (_, panels) = self.terminal_and_panel_keys();
+                match read_screen_access(pane, &terminals, &panels) {
+                    Err(message) => error_result(message),
+                    Ok(()) => match live.into_iter().find(|(key, _)| *key == pane) {
+                        Some((_, view)) => HostCallResult::Screen {
+                            text: cap_screen(view.read(cx).visible_screen_text(cx)),
+                        },
+                        None => error_result(format!("pane {pane} not found")),
+                    },
+                }
+            }
+            CallPlan::OpenPane { cwd, command } => self.execute_open_pane(cwd, command, window, cx),
+        };
+        if !crate::plugin_runtime::reply_host_call(plugin_id, id, result, cx) {
+            log::debug!("plugin {plugin_id} Call {id} reply dropped (session gone)");
+        }
+    }
+
+    fn terminal_and_panel_keys(
+        &self,
+    ) -> (
+        std::collections::BTreeSet<PaneKey>,
+        std::collections::BTreeSet<PaneKey>,
+    ) {
+        let mut terminals = std::collections::BTreeSet::new();
+        let mut panels = std::collections::BTreeSet::new();
+        for tab in &self.tabs {
+            let mut all = Vec::new();
+            tab.tree.walk_leaves(&mut all);
+            for (_, key, content) in all {
+                if content.is_terminal() {
+                    terminals.insert(key);
+                } else {
+                    panels.insert(key);
+                }
+            }
+        }
+        (terminals, panels)
+    }
+
+    fn execute_open_pane(
+        &mut self,
+        cwd: Option<String>,
+        command: Option<crate::plugin_host_calls::OpenCommand>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> plugin_protocol::v2::HostCallResult {
+        use crate::plugin_host_calls::error_result;
+        use crate::session::resolve_cwd;
+        use plugin_protocol::v2::HostCallResult;
+        let cwd = match cwd.as_deref() {
+            None => None,
+            Some(raw) => {
+                let resolved = resolve_cwd(Some(raw));
+                if resolved.is_none() {
+                    return error_result(format!("cwd not found: {raw}"));
+                }
+                resolved
+            }
+        };
+        let argv = command.map(|c| (c.program, c.args));
+        let pane_id = self.next_pane_id;
+        self.next_pane_id += 1;
+        let tab_id = self.next_id;
+        self.next_id += 1;
+        let view = self.spawn_term_view(cwd, argv, window, cx);
+        let pane_key = {
+            let tab = crate::tab_convert::Tab {
+                id: tab_id,
+                tree: crate::pane_tree::PaneNode::leaf(pane_id, view),
+                active_pane: pane_id,
+                custom_title: None,
+                zoomed_pane: None,
+            };
+            let key = tab.tree.pane_key_for_id(pane_id).expect("fresh leaf");
+            self.tabs.push(tab);
+            self.active = self.tabs.len() - 1;
+            key
+        };
+        self.commit_workspace(window, cx);
+        HostCallResult::Pane { pane: pane_key }
     }
 
     fn apply_pane_closed(&self, pane: PaneKey, cx: &mut App) {
@@ -832,11 +1229,50 @@ impl AppShell {
         cx.notify();
     }
 
+    fn refresh_plugin_commands(&mut self, cx: &mut Context<Self>) {
+        crate::plugin_runtime::PluginRuntime::reload(cx);
+        self.plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
+        self.rebuild_palette_items();
+        self.palette_selected = 0;
+    }
+
+    pub(crate) fn plugin_badges_for_tab(
+        &self,
+        tab_panes: &[crate::pane_tree::PaneKey],
+        tab_is_active: bool,
+    ) -> Vec<crate::plugin_chrome::PluginTabBadge> {
+        self.plugin_chrome.badges_for_tab(tab_panes, tab_is_active)
+    }
+
+    fn rebuild_palette_items(&mut self) {
+        self.palette_items = palette_commands();
+        self.palette_items
+            .extend(crate::command_palette::plugin_items(&self.plugin_commands));
+        self.palette_items
+            .extend(crate::command_palette::contribution_items(
+                self.plugin_chrome.palette_entries(),
+            ));
+    }
+
+    fn run_plugin_contribution(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.plugin_chrome.palette_entries().get(index).cloned() else {
+            return;
+        };
+        crate::plugin_runtime::push_action(
+            &entry.plugin_id,
+            entry.surface_id,
+            entry.action,
+            entry.arg,
+            cx,
+        );
+    }
+
     /// Re-read settings from disk, dropping any in-session font override.
     fn reload_settings(&mut self, cx: &mut Context<Self>) {
         self.font_size_override = None;
         self.apply_font_override_to_all_panes(cx);
         TerminalSettings::reload(cx);
+        self.refresh_plugin_commands(cx);
         crate::run_ledger_global::RunLedgerGlobal::reload_settings_in(cx);
         crate::control_surface::reload(cx);
         crate::attention_chrome::refresh(cx);
@@ -1010,6 +1446,12 @@ impl AppShell {
 
     /// The active pane's `TermView`, if any.
     fn active_view(&self, _cx: &App) -> Option<Entity<TermView>> {
+        self.active_terminal(_cx)
+            .or_else(|| self.first_terminal(_cx))
+    }
+
+    /// The focused leaf, only if it is a terminal. None when a Panel is focused.
+    fn active_terminal(&self, _cx: &App) -> Option<Entity<TermView>> {
         let tab = self.tabs.get(self.active)?;
         let mut leaves = Vec::new();
         tab.tree.leaves(&mut leaves);
@@ -1017,7 +1459,13 @@ impl AppShell {
             .iter()
             .find(|(id, _)| *id == tab.active_pane)
             .map(|(_, v)| (*v).clone())
-            .or_else(|| leaves.first().map(|(_, v)| (*v).clone()))
+    }
+
+    fn first_terminal(&self, _cx: &App) -> Option<Entity<TermView>> {
+        let tab = self.tabs.get(self.active)?;
+        let mut leaves = Vec::new();
+        tab.tree.leaves(&mut leaves);
+        leaves.first().map(|(_, v)| (*v).clone())
     }
 
     /// The active pane's working directory, when its PTY reports one. New tabs
@@ -1065,11 +1513,39 @@ impl AppShell {
     /// - multi-pane tab → drop the focused pane, focus a survivor
     /// - single-pane tab → close the tab (shell always keeps ≥1 tab open)
     fn close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
         let target = tab.active_pane;
         let closed_key = tab.tree.pane_key_for_id(target);
+        let closing_terminal = tab.tree.is_terminal_leaf(target);
+        let terminals_after = tab
+            .tree
+            .terminal_count()
+            .saturating_sub(usize::from(closing_terminal));
+        if crate::plugin_panel::tab_close_policy(terminals_after)
+            == crate::plugin_panel::TabClosePolicy::CloseTab
+        {
+            // Last shell is going away. Panels cannot keep the tab alive:
+            // a tab of only plugin UI would look like a workspace with no
+            // PTY (ADR-0001). Close the tab, dropping guest panels.
+            let mut all = Vec::new();
+            tab.tree.walk_leaves(&mut all);
+            let panel_keys: Vec<_> = all
+                .into_iter()
+                .filter(|(_, _, c)| c.is_panel())
+                .map(|(_, k, _)| k)
+                .collect();
+            self.plugin_panels.remove_all(panel_keys);
+            if let Some(key) = closed_key {
+                self.plugin_panels.remove(key);
+            }
+            self.close_active_tab(window, cx);
+            return;
+        }
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
         let outcome = tab.tree.close(target);
         match outcome {
             CloseOutcome::TreeEmpty => {
@@ -1086,6 +1562,7 @@ impl AppShell {
             }
             CloseOutcome::Closed => {
                 if let Some(pane) = closed_key {
+                    self.plugin_panels.remove(pane);
                     self.apply_pane_closed(pane, cx);
                 }
                 // Surviving subtree: focus its first leaf (the collapsed sibling
@@ -1263,6 +1740,52 @@ impl AppShell {
         cx.notify();
     }
 
+    fn on_toggle_plugin_monitor(
+        &mut self,
+        _: &TogglePluginMonitor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch_command(CommandId::TogglePluginMonitor, window, cx);
+    }
+
+    fn toggle_plugin_monitor(&mut self, cx: &mut Context<Self>) {
+        self.mode.toggle(OverlayKind::PluginMonitor);
+        cx.notify();
+    }
+
+    fn close_plugin_monitor(&mut self, cx: &mut Context<Self>) {
+        self.mode.close(OverlayKind::PluginMonitor);
+        cx.notify();
+    }
+
+    fn deny_plugin_consent(&mut self, cx: &mut Context<Self>) {
+        // Deny writes nothing: a dismissed prompt must not become a grant.
+        self.plugin_consent = None;
+        self.mode.close(OverlayKind::PluginConsent);
+        cx.notify();
+    }
+
+    fn approve_plugin_consent(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.plugin_consent.take() else {
+            return;
+        };
+        self.mode.close(OverlayKind::PluginConsent);
+        crate::plugin_runtime::save_grant(
+            &pending.plugin.plugin_id,
+            &pending.request,
+            &pending.hash,
+            pending.prompt.tier,
+        );
+        self.invoke_plugin_command(pending.plugin, cx);
+        cx.notify();
+    }
+
+    fn kill_plugin(&mut self, plugin_id: String, cx: &mut Context<Self>) {
+        crate::plugin_runtime::kill_plugin(&plugin_id, cx);
+        cx.notify();
+    }
+
     fn on_send_selection(
         &mut self,
         _: &SendSelection,
@@ -1297,6 +1820,82 @@ impl AppShell {
             self.history_selected = 0;
         }
         cx.notify();
+    }
+
+    fn run_plugin_command(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(plugin) = self.plugin_commands.get(index).cloned() else {
+            return;
+        };
+        self.start_plugin_command(plugin, cx);
+    }
+
+    fn start_plugin_command(
+        &mut self,
+        plugin: plugin_host::LoadedPluginCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let request = crate::plugin_runtime::requested_capabilities(&plugin);
+        let hash = crate::plugin_runtime::plugin_binary_hash(&plugin).unwrap_or_default();
+        let grants = crate::plugin_runtime::grants();
+        let record = grants.grants.get(&plugin.plugin_id);
+        match plugin_grants::check(&request, record, &hash) {
+            plugin_grants::Decision::Allowed => self.invoke_plugin_command(plugin, cx),
+            plugin_grants::Decision::NeedsConsent { reason, missing } => {
+                let previously: Vec<_> = record
+                    .map(|r| r.granted.iter().copied().collect())
+                    .unwrap_or_default();
+                let tier = record.map(|r| r.tier).unwrap_or(plugin_grants::Tier::Local);
+                self.plugin_consent = Some(PluginConsentPending {
+                    prompt: crate::plugin_monitor_panel::consent_prompt(
+                        &plugin.plugin_id,
+                        &plugin.plugin_name,
+                        tier,
+                        reason,
+                        &missing,
+                        &previously,
+                    ),
+                    plugin,
+                    hash,
+                    request,
+                });
+                self.mode.open(OverlayKind::PluginConsent);
+                cx.notify();
+            }
+            plugin_grants::Decision::Denied(message) => {
+                log::warn!("plugin {} denied: {message}", plugin.qualified_id());
+            }
+        }
+    }
+
+    fn invoke_plugin_command(
+        &mut self,
+        plugin: plugin_host::LoadedPluginCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        let context = crate::plugin_runtime::build_context(&plugin, &view, cx);
+        let allowed = crate::plugin_runtime::allowed_permissions(cx);
+        let qualified_id = plugin.qualified_id();
+        log::info!(
+            "plugin: invoking {qualified_id} (selection={} bytes, cwd={:?})",
+            context.selection.as_deref().map(str::len).unwrap_or(0),
+            context.cwd,
+        );
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { plugin_host::run_command(&plugin, &context, &allowed) },
+                )
+                .await;
+            this.update(cx, |_this, cx| match result {
+                Ok(output) => crate::plugin_runtime::apply_output(output, &view, cx),
+                Err(err) => log::warn!("plugin {qualified_id} failed: {err}"),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn send_selection_to_pty(&mut self, cx: &mut Context<Self>) {
@@ -1417,7 +2016,6 @@ impl AppShell {
         None
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn all_live_panes(&self) -> Vec<(PaneKey, Entity<TermView>)> {
         let mut out = Vec::new();
         for tab in &self.tabs {
@@ -1515,6 +2113,7 @@ impl AppShell {
         self.font_size_override = None;
         self.apply_font_override_to_all_panes(cx);
         TerminalSettings::reload(cx);
+        self.refresh_plugin_commands(cx);
         RunLedgerGlobal::reload_settings_in(cx);
         crate::control_surface::reload(cx);
         crate::attention_chrome::refresh(cx);
@@ -1545,10 +2144,43 @@ impl AppShell {
     // ── find in scrollback (M10) ────────────────────────────────────────────
 }
 
+fn run_event_to_host(
+    event: &RunEvent,
+    snapshot: &[run_ledger::Run],
+) -> Option<plugin_protocol::v2::HostEvent> {
+    use plugin_protocol::v2::HostEvent;
+    match event {
+        RunEvent::Started { pane, cwd, .. } => {
+            let run = snapshot
+                .iter()
+                .rev()
+                .find(|r| r.pane == *pane && r.state == run_ledger::RunState::Running)?;
+            Some(HostEvent::RunStarted {
+                run_id: run.id,
+                pane: run.pane,
+                command: run.command.clone(),
+                cwd: cwd.clone().or_else(|| run.cwd.clone()),
+            })
+        }
+        RunEvent::Finished { pane, .. } => {
+            let run = snapshot.iter().rev().find(|r| {
+                r.pane == *pane
+                    && r.state.is_finished()
+                    && r.state != run_ledger::RunState::Abandoned
+            })?;
+            Some(HostEvent::RunFinished {
+                run_id: run.id,
+                pane: run.pane,
+                exit_code: run.exit_code,
+                duration_ms: run.duration.as_millis() as u64,
+            })
+        }
+        RunEvent::PaneClosed { .. } => None,
+    }
+}
+
 fn tree_contains(tree: &PaneNode, id: PaneId) -> bool {
-    let mut leaves = Vec::new();
-    tree.leaves(&mut leaves);
-    leaves.iter().any(|(leaf, _)| *leaf == id)
+    tree.contains_leaf(id)
 }
 
 /// Whether a pane of the *active* tab is actually painted, given the tab's
@@ -1596,7 +2228,7 @@ fn rebase_detached_tab(max_pane_id: PaneId) -> AdoptedTabIds {
 mod tests {
     use super::{
         linux_window_open_diagnostic, pane_is_on_screen, rebase_detached_tab, reorder_insert_index,
-        traffic_light_position_for,
+        run_event_to_host, traffic_light_position_for,
     };
     use gpui::{point, px};
 
@@ -1684,16 +2316,45 @@ mod tests {
         assert_eq!(ids.next_id, 2);
         assert_eq!(ids.next_pane_id, 2);
     }
+
+    #[test]
+    fn run_started_host_event_uses_ledger_redacted_command() {
+        let mut ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        let pane = run_ledger::PaneKey::from_u128(1);
+        let event = run_ledger::RunEvent::started(
+            pane,
+            "AWS_SECRET_ACCESS_KEY=supersecret aws s3 ls",
+            None,
+            10,
+        );
+        ledger.apply(event.clone());
+        let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
+        let plugin_protocol::v2::HostEvent::RunStarted { command, .. } = host else {
+            panic!("expected RunStarted");
+        };
+        assert!(
+            !command.contains("supersecret"),
+            "plugins must never see the raw command line: {command}"
+        );
+    }
 }
 
 fn snapshot_tree(node: &PaneNode, cx: &App) -> SessionNode {
     match node {
-        PaneNode::Leaf { id, pane_key, view } => SessionNode::Leaf {
+        PaneNode::Leaf {
+            id,
+            pane_key,
+            content: crate::LeafContent::Terminal(view),
+        } => SessionNode::Leaf {
             id: *id,
             cwd: view
                 .read(cx)
                 .working_directory(cx)
                 .map(|p| p.to_string_lossy().into_owned()),
+            pane_key: Some(*pane_key),
+        },
+        PaneNode::Leaf { id, pane_key, .. } => SessionNode::Panel {
+            id: *id,
             pane_key: Some(*pane_key),
         },
         PaneNode::Split {
@@ -1717,6 +2378,13 @@ impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_ledger_focus(window, cx);
         self.refresh_pane_facts_if_stale(cx);
+        self.poll_plugin_events(cx);
+        self.poll_plugin_inbound(window, cx);
+        // Navigating away from the consent overlay is a deny: never grant
+        // because a different surface took the keyboard.
+        if !self.mode.is(OverlayKind::PluginConsent) {
+            self.plugin_consent = None;
+        }
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
@@ -1761,6 +2429,21 @@ impl Render for AppShell {
                     }
                     return;
                 }
+                if this.mode.is(OverlayKind::PluginConsent) {
+                    // Enter must not grant — Approve is an explicit click only.
+                    match event.keystroke.key.as_str() {
+                        "escape" | "enter" => {
+                            this.deny_plugin_consent(cx);
+                            cx.stop_propagation();
+                        }
+                        _ => {
+                            if !event.keystroke.modifiers.platform {
+                                cx.stop_propagation();
+                            }
+                        }
+                    }
+                    return;
+                }
                 if this.mode.is(OverlayKind::Update) {
                     if event.keystroke.key.as_str() == "escape" {
                         this.close_update(cx);
@@ -1774,6 +2457,13 @@ impl Render for AppShell {
                 if this.mode.is(OverlayKind::PaneFacts) && event.keystroke.key.as_str() == "escape"
                 {
                     this.close_pane_facts(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.mode.is(OverlayKind::PluginMonitor)
+                    && event.keystroke.key.as_str() == "escape"
+                {
+                    this.close_plugin_monitor(cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1889,6 +2579,7 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_export_scrollback))
             .on_action(cx.listener(Self::on_clear_run_ledger))
             .on_action(cx.listener(Self::on_toggle_run_ledger))
+            .on_action(cx.listener(Self::on_toggle_plugin_monitor))
             .on_action(cx.listener(Self::on_mark_tab_seen))
             .on_action(cx.listener(Self::on_toggle_pane_facts))
             .on_action(cx.listener(Self::on_send_selection))
@@ -1918,7 +2609,13 @@ impl Render for AppShell {
                     .bg(tokens.content_bg)
                     .child(leading_drag)
                     .children(tab_scroll)
+                    // The chip lives at the trailing end of the chrome band, not
+                    // beside the traffic lights: with a single tab `tab_scroll`
+                    // is `None`, so anything placed here collapses left into the
+                    // macOS window-control and drag region.
                     .child(trailing_drag)
+                    .child(self.render_plugin_status_chip(&tokens, cx))
+                    .child(self.render_plugin_chrome_status(&tokens, window, cx))
                     .when(!fullscreen, |el| {
                         el.child(self.render_desktop_titlebar_end(&tokens, window, cx))
                     });
@@ -1998,6 +2695,12 @@ impl Render for AppShell {
             })
             .when(self.mode.is(OverlayKind::RunLedger), |el| {
                 el.child(self.render_run_ledger(&tokens, window, cx))
+            })
+            .when(self.mode.is(OverlayKind::PluginMonitor), |el| {
+                el.child(self.render_plugin_monitor(&tokens, cx))
+            })
+            .when(self.mode.is(OverlayKind::PluginConsent), |el| {
+                el.child(self.render_plugin_consent(&tokens, cx))
             })
             .when(self.mode.is(OverlayKind::History), |el| {
                 el.child(self.render_history_search(&tokens, cx))

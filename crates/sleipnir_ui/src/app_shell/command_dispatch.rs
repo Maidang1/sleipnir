@@ -55,6 +55,9 @@ impl AppShell {
             CommandId::ToggleHistorySearch => self.toggle_history_search(cx),
             CommandId::TogglePaneFacts => self.toggle_pane_facts(cx),
             CommandId::ToggleDiff => self.toggle_diff(window, cx),
+            CommandId::TogglePluginMonitor => self.toggle_plugin_monitor(cx),
+            CommandId::Plugin(index) => self.run_plugin_command(index, cx),
+            CommandId::PluginContribution(index) => self.run_plugin_contribution(index, cx),
         }
     }
 }

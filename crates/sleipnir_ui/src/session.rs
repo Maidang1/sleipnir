@@ -52,6 +52,14 @@ pub enum SessionNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_key: Option<Uuid>,
     },
+    /// A plugin Panel. Persisted so restore cannot mistake it for a terminal
+    /// (which would spawn a shell where a plugin used to draw). Restore drops
+    /// these nodes — the plugin process does not survive a restart.
+    Panel {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_key: Option<Uuid>,
+    },
     Split {
         axis: SessionAxis,
         ratio: f32,
@@ -74,7 +82,7 @@ impl SessionNode {
     /// Maximum pane id in this subtree (used to advance id counters).
     pub fn max_pane_id(&self) -> u64 {
         match self {
-            SessionNode::Leaf { id, .. } => *id,
+            SessionNode::Leaf { id, .. } | SessionNode::Panel { id, .. } => *id,
             SessionNode::Split { first, second, .. } => {
                 first.max_pane_id().max(second.max_pane_id())
             }
@@ -84,7 +92,7 @@ impl SessionNode {
     /// Number of leaf panes.
     pub fn leaf_count(&self) -> usize {
         match self {
-            SessionNode::Leaf { .. } => 1,
+            SessionNode::Leaf { .. } | SessionNode::Panel { .. } => 1,
             SessionNode::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
         }
     }
@@ -92,7 +100,7 @@ impl SessionNode {
     /// First leaf id (fallback active pane).
     pub fn first_leaf_id(&self) -> u64 {
         match self {
-            SessionNode::Leaf { id, .. } => *id,
+            SessionNode::Leaf { id, .. } | SessionNode::Panel { id, .. } => *id,
             SessionNode::Split { first, .. } => first.first_leaf_id(),
         }
     }
@@ -100,7 +108,7 @@ impl SessionNode {
     /// Whether this subtree contains `id`.
     pub fn contains_pane(&self, id: u64) -> bool {
         match self {
-            SessionNode::Leaf { id: leaf, .. } => *leaf == id,
+            SessionNode::Leaf { id: leaf, .. } | SessionNode::Panel { id: leaf, .. } => *leaf == id,
             SessionNode::Split { first, second, .. } => {
                 first.contains_pane(id) || second.contains_pane(id)
             }
@@ -164,7 +172,7 @@ pub fn sanitize_session(mut session: SessionFile) -> Option<SessionFile> {
 
 fn sanitize_ratios(node: &mut SessionNode) {
     match node {
-        SessionNode::Leaf { .. } => {}
+        SessionNode::Leaf { .. } | SessionNode::Panel { .. } => {}
         SessionNode::Split {
             ratio,
             first,
@@ -337,6 +345,42 @@ mod tests {
         assert_ne!(minted_a, key);
         assert_ne!(minted_b, key);
         assert_ne!(minted_a, minted_b, "new panes must get distinct keys");
+    }
+
+    #[test]
+    fn panel_node_round_trips_and_is_not_a_leaf() {
+        let s = SessionFile {
+            version: SESSION_VERSION,
+            active_tab: 0,
+            tabs: vec![SessionTab {
+                custom_title: None,
+                active_pane: 1,
+                tree: SessionNode::Split {
+                    axis: SessionAxis::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(SessionNode::Leaf {
+                        id: 1,
+                        cwd: Some("/tmp".into()),
+                        pane_key: None,
+                    }),
+                    second: Box::new(SessionNode::Panel {
+                        id: 2,
+                        pane_key: Some(Uuid::from_u128(2)),
+                    }),
+                },
+            }],
+        };
+        let bytes = serde_json::to_vec_pretty(&s).unwrap();
+        let json = String::from_utf8(bytes.clone()).unwrap();
+        assert!(json.contains(r#""type": "panel""#));
+        let back: SessionFile = serde_json::from_slice(&bytes).unwrap();
+        match &back.tabs[0].tree {
+            SessionNode::Split { second, .. } => match second.as_ref() {
+                SessionNode::Panel { id, .. } => assert_eq!(*id, 2),
+                other => panic!("panel must deserialize as Panel, not {other:?}"),
+            },
+            other => panic!("expected split, got {other:?}"),
+        }
     }
 
     #[test]

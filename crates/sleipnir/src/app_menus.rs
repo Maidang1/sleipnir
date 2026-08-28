@@ -10,7 +10,7 @@ use sleipnir_ui::{
     JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings,
     PipeSelection, PrevTab, ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown,
     SplitRight, ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    ToggleQuickSelect, ToggleRunLedger,
+    TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -132,6 +132,7 @@ fn macos_menus() -> Vec<Menu> {
             MenuItem::action("Clear Run Ledger", ClearRunLedger),
             MenuItem::action("Mark Tab as Seen", MarkTabSeen),
             MenuItem::action("Run Ledger", ToggleRunLedger),
+            MenuItem::action("Plugin Monitor", TogglePluginMonitor),
             MenuItem::action("Send Selection to Pane", SendSelection),
             MenuItem::action("Pipe Selection to Command", PipeSelection),
             MenuItem::action("Send Git Diff to Pane", SendGitDiff),
@@ -166,6 +167,7 @@ fn desktop_menus() -> Vec<Menu> {
             MenuItem::action("Clear Run Ledger", ClearRunLedger),
             MenuItem::action("Mark Tab as Seen", MarkTabSeen),
             MenuItem::action("Run Ledger", ToggleRunLedger),
+            MenuItem::action("Plugin Monitor", TogglePluginMonitor),
             MenuItem::action("Send Selection to Pane", SendSelection),
             MenuItem::action("Pipe Selection to Command", PipeSelection),
             MenuItem::action("Send Git Diff to Pane", SendGitDiff),

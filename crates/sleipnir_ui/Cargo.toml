@@ -29,6 +29,10 @@ run_ledger.workspace = true
 diff_core.workspace = true
 syntax.workspace = true
 sleipnir_ctl.workspace = true
+plugin_host.workspace = true
+plugin_grants.workspace = true
+plugin_protocol.workspace = true
+sleipnir_widget.workspace = true
 sysinfo.workspace = true
 async-channel.workspace = true
 

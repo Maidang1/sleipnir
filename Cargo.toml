@@ -13,6 +13,11 @@ members = [
     "crates/diff_core",
     "crates/syntax",
     "crates/sleipnir_ctl",
+    "crates/plugin_host",
+    "crates/plugin_protocol",
+    "crates/plugin_grants",
+    "crates/sleipnir_plugin_sdk",
+    "crates/sleipnir_widget",
     # OS-branched entry; gpui / gpui_macos / gpui_windows / gpui_linux come from Zed via git.
     "crates/gpui_platform",
 ]
@@ -52,6 +57,11 @@ run_ledger = { path = "crates/run_ledger" }
 diff_core = { path = "crates/diff_core" }
 syntax = { path = "crates/syntax" }
 sleipnir_ctl = { path = "crates/sleipnir_ctl" }
+plugin_host = { path = "crates/plugin_host" }
+plugin_protocol = { path = "crates/plugin_protocol" }
+plugin_grants = { path = "crates/plugin_grants" }
+sleipnir-plugin = { path = "crates/sleipnir_plugin_sdk" }
+sleipnir_widget = { path = "crates/sleipnir_widget" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false, features = ["font-kit"] }
 
 # ---------------------------------------------------------------------------

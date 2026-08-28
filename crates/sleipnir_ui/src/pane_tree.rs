@@ -1,8 +1,16 @@
-//! Recursive pane tree for split terminals (ADR-0001).
+//! Recursive pane tree for split terminals (ADR-0001) and plugin panels
+//! (ADR-0017).
 //!
 //! A `Tab`'s content is a `PaneNode`: interior nodes are `Split`s (an axis + a
-//! ratio) and leaves are `Pane`s (one `TermView` = one PTY). A brand-new Tab is
-//! a single `Leaf`, so the no-split case is the degenerate tree.
+//! ratio) and leaves are either a terminal (`TermView` = one PTY) or a plugin
+//! Panel. A brand-new Tab is a single terminal `Leaf`, so the no-split case is
+//! the degenerate tree.
+//!
+//! Panel is the first widget mount point because it reuses this tree: splits,
+//! focus, zoom, tabs and session restore come free, and no Block coordinate
+//! math is involved. A Panel is **not** a PTY. Helpers that collect
+//! [`TermView`]s skip Panel leaves so broadcast, resize, the control surface
+//! and the run ledger keep meaning "the terminal panes".
 
 use gpui::{Bounds, Entity, Pixels};
 use uuid::Uuid;
@@ -32,13 +40,43 @@ pub enum Direction {
     Down,
 }
 
+/// What a leaf holds. Terminals are PTYs; Panels are plugin-drawn surfaces.
+/// Mixing them in one enum is the honest model — a Panel must never be handed
+/// to a `TermView` path.
+#[derive(Clone)]
+pub enum LeafContent {
+    Terminal(Entity<TermView>),
+    /// `plugin_id` is the host's name for the owner. The widget tree lives in
+    /// [`crate::plugin_panel::PanelRegistry`], keyed by the leaf's `pane_key`.
+    Panel {
+        plugin_id: String,
+    },
+}
+
+impl LeafContent {
+    pub fn as_terminal(&self) -> Option<&Entity<TermView>> {
+        match self {
+            Self::Terminal(view) => Some(view),
+            Self::Panel { .. } => None,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Terminal(_))
+    }
+
+    pub fn is_panel(&self) -> bool {
+        matches!(self, Self::Panel { .. })
+    }
+}
+
 /// A node in a tab's pane tree.
 #[derive(Clone)]
 pub enum PaneNode {
     Leaf {
         id: PaneId,
         pane_key: PaneKey,
-        view: Entity<TermView>,
+        content: LeafContent,
     },
     Split {
         axis: SplitAxis,
@@ -59,7 +97,21 @@ impl PaneNode {
     }
 
     pub fn leaf_with_key(id: PaneId, pane_key: PaneKey, view: Entity<TermView>) -> Self {
-        PaneNode::Leaf { id, pane_key, view }
+        PaneNode::Leaf {
+            id,
+            pane_key,
+            content: LeafContent::Terminal(view),
+        }
+    }
+
+    pub fn panel_leaf(id: PaneId, pane_key: PaneKey, plugin_id: impl Into<String>) -> Self {
+        PaneNode::Leaf {
+            id,
+            pane_key,
+            content: LeafContent::Panel {
+                plugin_id: plugin_id.into(),
+            },
+        }
     }
 
     /// Number of leaf panes in this subtree.
@@ -70,10 +122,17 @@ impl PaneNode {
         }
     }
 
-    /// Collect `(PaneId, &Entity<TermView>)` for every leaf, in tree order.
+    /// Collect `(PaneId, &Entity<TermView>)` for every **terminal** leaf, in
+    /// tree order. Panel leaves are skipped: callers of this helper mean PTY
+    /// panes (broadcast, resize, control surface, run ledger).
     pub fn leaves<'a>(&'a self, out: &mut Vec<(PaneId, &'a Entity<TermView>)>) {
         match self {
-            PaneNode::Leaf { id, view, .. } => out.push((*id, view)),
+            PaneNode::Leaf {
+                id,
+                content: LeafContent::Terminal(view),
+                ..
+            } => out.push((*id, view)),
+            PaneNode::Leaf { .. } => {}
             PaneNode::Split { first, second, .. } => {
                 first.leaves(out);
                 second.leaves(out);
@@ -81,11 +140,65 @@ impl PaneNode {
         }
     }
 
+    /// Every leaf, including Panels. Use when the operation is structural
+    /// (focus, zoom, close, layout) rather than PTY-specific.
+    pub fn walk_leaves<'a>(&'a self, out: &mut Vec<(PaneId, PaneKey, &'a LeafContent)>) {
+        match self {
+            PaneNode::Leaf {
+                id,
+                pane_key,
+                content,
+            } => out.push((*id, *pane_key, content)),
+            PaneNode::Split { first, second, .. } => {
+                first.walk_leaves(out);
+                second.walk_leaves(out);
+            }
+        }
+    }
+
+    pub fn terminal_count(&self) -> usize {
+        match self {
+            PaneNode::Leaf {
+                content: LeafContent::Terminal(_),
+                ..
+            } => 1,
+            PaneNode::Leaf { .. } => 0,
+            PaneNode::Split { first, second, .. } => {
+                first.terminal_count() + second.terminal_count()
+            }
+        }
+    }
+
+    pub fn is_terminal_leaf(&self, id: PaneId) -> bool {
+        match self {
+            PaneNode::Leaf {
+                id: leaf, content, ..
+            } => *leaf == id && content.is_terminal(),
+            PaneNode::Split { first, second, .. } => {
+                first.is_terminal_leaf(id) || second.is_terminal_leaf(id)
+            }
+        }
+    }
+
+    pub fn plugin_id_for(&self, id: PaneId) -> Option<&str> {
+        match self {
+            PaneNode::Leaf {
+                id: leaf,
+                content: LeafContent::Panel { plugin_id },
+                ..
+            } if *leaf == id => Some(plugin_id.as_str()),
+            PaneNode::Split { first, second, .. } => {
+                first.plugin_id_for(id).or_else(|| second.plugin_id_for(id))
+            }
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
     pub fn pane_key_for_view(&self, view: &Entity<TermView>) -> Option<PaneKey> {
         match self {
             PaneNode::Leaf {
                 pane_key,
-                view: leaf,
+                content: LeafContent::Terminal(leaf),
                 ..
             } if leaf == view => Some(*pane_key),
             PaneNode::Split { first, second, .. } => first
@@ -128,10 +241,15 @@ impl PaneNode {
         }
     }
 
-    /// Collect `(PaneKey, TermView)` for every leaf, in tree order.
+    /// Collect `(PaneKey, TermView)` for every **terminal** leaf, in tree order.
     pub fn leaves_with_keys(&self, out: &mut Vec<(PaneKey, Entity<TermView>)>) {
         match self {
-            PaneNode::Leaf { pane_key, view, .. } => out.push((*pane_key, view.clone())),
+            PaneNode::Leaf {
+                pane_key,
+                content: LeafContent::Terminal(view),
+                ..
+            } => out.push((*pane_key, view.clone())),
+            PaneNode::Leaf { .. } => {}
             PaneNode::Split { first, second, .. } => {
                 first.leaves_with_keys(out);
                 second.leaves_with_keys(out);
@@ -215,10 +333,18 @@ impl PaneNode {
         new_view: Entity<TermView>,
     ) -> bool {
         match self {
-            PaneNode::Leaf { id, pane_key, view } if *id == target => {
+            PaneNode::Leaf {
+                id,
+                pane_key,
+                content,
+            } if *id == target => {
                 // Rebuild this leaf as a split: first = old leaf, second = new.
                 // Keep the original pane_key so Run Ledger ownership stays put.
-                let old = PaneNode::leaf_with_key(*id, *pane_key, view.clone());
+                let old = PaneNode::Leaf {
+                    id: *id,
+                    pane_key: *pane_key,
+                    content: content.clone(),
+                };
                 *self = PaneNode::Split {
                     axis,
                     ratio: 0.5,
@@ -233,6 +359,50 @@ impl PaneNode {
                     first.split(target, axis, new_id, new_view)
                 } else {
                     second.split(target, axis, new_id, new_view)
+                }
+            }
+        }
+    }
+
+    /// Split `target` and install `content` as the new second child. Used to
+    /// mount a Panel without creating a PTY.
+    pub fn split_content(
+        &mut self,
+        target: PaneId,
+        axis: SplitAxis,
+        new_id: PaneId,
+        new_key: PaneKey,
+        content: LeafContent,
+    ) -> bool {
+        match self {
+            PaneNode::Leaf {
+                id,
+                pane_key,
+                content: existing,
+            } if *id == target => {
+                let old = PaneNode::Leaf {
+                    id: *id,
+                    pane_key: *pane_key,
+                    content: existing.clone(),
+                };
+                *self = PaneNode::Split {
+                    axis,
+                    ratio: 0.5,
+                    first: Box::new(old),
+                    second: Box::new(PaneNode::Leaf {
+                        id: new_id,
+                        pane_key: new_key,
+                        content,
+                    }),
+                };
+                true
+            }
+            PaneNode::Leaf { .. } => false,
+            PaneNode::Split { first, second, .. } => {
+                if first.contains(target) {
+                    first.split_content(target, axis, new_id, new_key, content)
+                } else {
+                    second.split_content(target, axis, new_id, new_key, content)
                 }
             }
         }
@@ -260,8 +430,8 @@ impl PaneNode {
         };
 
         if first_is_target || second_is_target {
-            // Take the split apart by value; keep the surviving child.
-            take_and_collapse(self, second_is_target);
+            // Keep the sibling: closing `first` keeps `second` and vice versa.
+            take_and_collapse(self, first_is_target);
             return CloseOutcome::Closed;
         }
 
@@ -437,6 +607,46 @@ mod tests {
         assert_eq!(neighbor(&rects, 2, Direction::Left), Some(1));
         assert_eq!(neighbor(&rects, 1, Direction::Left), None);
         assert_eq!(neighbor(&rects, 2, Direction::Right), None);
+    }
+
+    #[test]
+    fn leaves_skip_panel_leaves() {
+        let tree = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneNode::panel_leaf(1, Uuid::from_u128(1), "demo")),
+            second: Box::new(PaneNode::panel_leaf(2, Uuid::from_u128(2), "demo")),
+        };
+        let mut leaves = Vec::new();
+        tree.leaves(&mut leaves);
+        assert!(
+            leaves.is_empty(),
+            "terminal-only helpers must not see Panel leaves"
+        );
+        let mut all = Vec::new();
+        tree.walk_leaves(&mut all);
+        assert_eq!(all.len(), 2);
+        assert_eq!(tree.leaf_count(), 2);
+        assert_eq!(tree.terminal_count(), 0);
+        assert!(!tree.is_terminal_leaf(1));
+    }
+
+    #[test]
+    fn split_and_close_with_a_panel_do_not_panic() {
+        let mut tree = PaneNode::panel_leaf(1, Uuid::from_u128(1), "demo");
+        assert!(tree.split_content(
+            1,
+            SplitAxis::Horizontal,
+            2,
+            Uuid::from_u128(2),
+            LeafContent::Panel {
+                plugin_id: "demo".into(),
+            },
+        ));
+        assert_eq!(tree.leaf_count(), 2);
+        assert_eq!(tree.close(2), CloseOutcome::Closed);
+        assert_eq!(tree.leaf_count(), 1);
+        assert_eq!(tree.first_leaf_id(), 1);
     }
 
     #[test]

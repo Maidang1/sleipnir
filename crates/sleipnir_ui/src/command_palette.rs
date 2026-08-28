@@ -40,6 +40,13 @@ pub enum CommandId {
     SendGitDiff,
     ToggleHistorySearch,
     ToggleDiff,
+    TogglePluginMonitor,
+    /// Runtime-discovered external plugin command index.
+    Plugin(usize),
+    /// Dynamic chrome contribution (RenderStatus Btn). Index into
+    /// [`crate::plugin_chrome::ChromeRegistry::palette_entries`]. Never a
+    /// built-in id, even when the plugin's title copies one.
+    PluginContribution(usize),
 }
 
 impl CommandId {
@@ -77,6 +84,9 @@ impl CommandId {
             CommandId::SendGitDiff => "send_git_diff",
             CommandId::ToggleHistorySearch => "toggle_history_search",
             CommandId::ToggleDiff => "toggle_diff",
+            CommandId::TogglePluginMonitor => "toggle_plugin_monitor",
+            CommandId::Plugin(_) => "plugin",
+            CommandId::PluginContribution(_) => "plugin_contribution",
         }
     }
 
@@ -114,6 +124,8 @@ impl CommandId {
             "send_git_diff" => Some(CommandId::SendGitDiff),
             "toggle_history_search" | "history_search" => Some(CommandId::ToggleHistorySearch),
             "toggle_diff" => Some(CommandId::ToggleDiff),
+            "toggle_plugin_monitor" | "plugin_monitor" => Some(CommandId::TogglePluginMonitor),
+            _ if s.trim().starts_with("plugin.") => None,
             _ => None,
         }
     }
@@ -125,7 +137,7 @@ pub struct CommandItem {
     pub id: CommandId,
     pub title: SharedString,
     pub shortcut: SharedString,
-    pub keywords: &'static str,
+    pub keywords: SharedString,
 }
 
 /// Built-in command catalog.
@@ -136,195 +148,245 @@ pub fn commands() -> Vec<CommandItem> {
             id: CommandId::NewTab,
             title: "New Tab".into(),
             shortcut: display_shortcut("new_tab").into(),
-            keywords: "tab new open",
+            keywords: "tab new open".into(),
         },
         CommandItem {
             id: CommandId::ClosePane,
             title: "Close Pane / Tab".into(),
             shortcut: display_shortcut("close_tab").into(),
-            keywords: "close pane tab",
+            keywords: "close pane tab".into(),
         },
         CommandItem {
             id: CommandId::NextTab,
             title: "Next Tab".into(),
             shortcut: display_shortcut("next_tab").into(),
-            keywords: "tab next",
+            keywords: "tab next".into(),
         },
         CommandItem {
             id: CommandId::PrevTab,
             title: "Previous Tab".into(),
             shortcut: display_shortcut("prev_tab").into(),
-            keywords: "tab previous prev",
+            keywords: "tab previous prev".into(),
         },
         CommandItem {
             id: CommandId::SplitRight,
             title: "Split Pane Right".into(),
             shortcut: display_shortcut("split_right").into(),
-            keywords: "split right vertical",
+            keywords: "split right vertical".into(),
         },
         CommandItem {
             id: CommandId::SplitDown,
             title: "Split Pane Down".into(),
             shortcut: display_shortcut("split_down").into(),
-            keywords: "split down horizontal",
+            keywords: "split down horizontal".into(),
         },
         CommandItem {
             id: CommandId::Find,
             title: "Find in Scrollback".into(),
             shortcut: display_shortcut("find").into(),
-            keywords: "find search scrollback",
+            keywords: "find search scrollback".into(),
         },
         CommandItem {
             id: CommandId::OpenSettings,
             title: "Open Settings".into(),
             shortcut: display_shortcut("open_settings").into(),
-            keywords: "settings preferences theme",
+            keywords: "settings preferences theme".into(),
         },
         CommandItem {
             id: CommandId::ReloadSettings,
             title: "Reload Settings".into(),
             shortcut: display_shortcut("reload_settings").into(),
-            keywords: "reload settings config",
+            keywords: "reload settings config".into(),
         },
         CommandItem {
             id: CommandId::CycleTheme,
             title: "Cycle Theme".into(),
             shortcut: display_shortcut("cycle_theme").into(),
-            keywords: "theme cycle appearance",
+            keywords: "theme cycle appearance".into(),
         },
         CommandItem {
             id: CommandId::CheckForUpdates,
             title: "Check for Updates".into(),
             shortcut: display_shortcut("check_for_updates").into(),
-            keywords: "update upgrade release",
+            keywords: "update upgrade release".into(),
         },
         CommandItem {
             id: CommandId::ToggleCommandPalette,
             title: "Toggle Command Palette".into(),
             shortcut: display_shortcut("toggle_command_palette").into(),
-            keywords: "command palette actions",
+            keywords: "command palette actions".into(),
         },
         CommandItem {
             id: CommandId::NewWindow,
             title: "New Window".into(),
             shortcut: display_shortcut("new_window").into(),
-            keywords: "window new open",
+            keywords: "window new open".into(),
         },
         CommandItem {
             id: CommandId::IncreaseFontSize,
             title: "Increase Font Size".into(),
             shortcut: display_shortcut("increase_font_size").into(),
-            keywords: "font zoom larger bigger size",
+            keywords: "font zoom larger bigger size".into(),
         },
         CommandItem {
             id: CommandId::DecreaseFontSize,
             title: "Decrease Font Size".into(),
             shortcut: display_shortcut("decrease_font_size").into(),
-            keywords: "font zoom smaller size",
+            keywords: "font zoom smaller size".into(),
         },
         CommandItem {
             id: CommandId::ResetFontSize,
             title: "Reset Font Size".into(),
             shortcut: display_shortcut("reset_font_size").into(),
-            keywords: "font zoom reset default size",
+            keywords: "font zoom reset default size".into(),
         },
         CommandItem {
             id: CommandId::TogglePaneZoom,
             title: "Toggle Pane Zoom".into(),
             shortcut: display_shortcut("toggle_pane_zoom").into(),
-            keywords: "zoom maximize pane split",
+            keywords: "zoom maximize pane split".into(),
         },
         CommandItem {
             id: CommandId::ToggleBroadcast,
             title: "Toggle Broadcast Input".into(),
             shortcut: display_shortcut("toggle_broadcast").into(),
-            keywords: "broadcast all panes input",
+            keywords: "broadcast all panes input".into(),
         },
         CommandItem {
             id: CommandId::JumpPrevPrompt,
             title: "Jump to Previous Prompt".into(),
             shortcut: display_shortcut("jump_prev_prompt").into(),
-            keywords: "prompt shell osc133 jump previous",
+            keywords: "prompt shell osc133 jump previous".into(),
         },
         CommandItem {
             id: CommandId::JumpNextPrompt,
             title: "Jump to Next Prompt".into(),
             shortcut: display_shortcut("jump_next_prompt").into(),
-            keywords: "prompt shell osc133 jump next",
+            keywords: "prompt shell osc133 jump next".into(),
         },
         CommandItem {
             id: CommandId::ToggleQuickSelect,
             title: "Toggle Quick Select".into(),
             shortcut: display_shortcut("toggle_quick_select").into(),
-            keywords: "quick select labels links",
+            keywords: "quick select labels links".into(),
         },
         CommandItem {
             id: CommandId::OpenQuickTerminal,
             title: "Open Quick Terminal".into(),
             shortcut: display_shortcut("open_quick_terminal").into(),
-            keywords: "quick terminal dropdown window",
+            keywords: "quick terminal dropdown window".into(),
         },
         CommandItem {
             id: CommandId::ExportScrollback,
             title: "Export Scrollback to File".into(),
             shortcut: display_shortcut("export_scrollback").into(),
-            keywords: "export scrollback save file editor dump",
+            keywords: "export scrollback save file editor dump".into(),
         },
         CommandItem {
             id: CommandId::ClearRunLedger,
             title: "Clear Run Ledger".into(),
             shortcut: "".into(),
-            keywords: "clear run ledger history runs delete",
+            keywords: "clear run ledger history runs delete".into(),
         },
         CommandItem {
             id: CommandId::MarkTabSeen,
             title: "Mark Tab as Seen".into(),
             shortcut: "".into(),
-            keywords: "mark seen attention unread tab badge",
+            keywords: "mark seen attention unread tab badge".into(),
         },
         CommandItem {
             id: CommandId::TogglePaneFacts,
             title: "Toggle Pane Facts".into(),
             shortcut: "".into(),
-            keywords: "pane facts cwd process tree ports info",
+            keywords: "pane facts cwd process tree ports info".into(),
         },
         CommandItem {
             id: CommandId::ToggleRunLedger,
             title: "Toggle Run Ledger".into(),
             shortcut: display_shortcut("toggle_run_ledger").into(),
-            keywords: "run ledger panel history attention",
+            keywords: "run ledger panel history attention".into(),
         },
         CommandItem {
             id: CommandId::SendSelection,
             title: "Send Selection to Pane".into(),
             shortcut: "".into(),
-            keywords: "send selection paste pty agent",
+            keywords: "send selection paste pty agent".into(),
         },
         CommandItem {
             id: CommandId::PipeSelection,
             title: "Pipe Selection to Command".into(),
             shortcut: "".into(),
-            keywords: "pipe selection command external",
+            keywords: "pipe selection command external".into(),
         },
         CommandItem {
             id: CommandId::SendGitDiff,
             title: "Send Git Diff to Pane".into(),
             shortcut: "".into(),
-            keywords: "git diff send review pane",
+            keywords: "git diff send review pane".into(),
         },
         CommandItem {
             id: CommandId::ToggleDiff,
             title: "Toggle Diff Inspector".into(),
             shortcut: display_shortcut("toggle_diff").into(),
-            keywords: "git diff inspector review overlay patch",
+            keywords: "git diff inspector review overlay patch".into(),
         },
         CommandItem {
             id: CommandId::ToggleHistorySearch,
             title: "Search Shell History".into(),
             shortcut: display_shortcut("toggle_history_search").into(),
-            keywords: "history fuzzy search histfile",
+            keywords: "history fuzzy search histfile".into(),
+        },
+        CommandItem {
+            id: CommandId::TogglePluginMonitor,
+            title: "Toggle Plugin Monitor".into(),
+            shortcut: display_shortcut("toggle_plugin_monitor").into(),
+            keywords: "plugin monitor process kill".into(),
         },
     ]
+}
+
+pub fn plugin_items(commands: &[plugin_host::LoadedPluginCommand]) -> Vec<CommandItem> {
+    commands
+        .iter()
+        .enumerate()
+        .map(|(index, plugin)| {
+            let mut keywords = plugin.command.keywords.join(" ");
+            if !plugin.command.description.is_empty() {
+                keywords.push(' ');
+                keywords.push_str(&plugin.command.description);
+            }
+            keywords.push(' ');
+            keywords.push_str(&plugin.plugin_name);
+            CommandItem {
+                id: CommandId::Plugin(index),
+                title: plugin.command.title.clone().into(),
+                shortcut: "Plugin".into(),
+                keywords: keywords.into(),
+            }
+        })
+        .collect()
+}
+
+/// Dynamic RenderStatus Btn entries. Title is already attributed by
+/// [`crate::plugin_chrome::attributed_title`]. Shortcut column repeats the
+/// plugin id so a copied built-in title cannot pass as host chrome.
+pub fn contribution_items(
+    entries: &[crate::plugin_chrome::PaletteContribution],
+) -> Vec<CommandItem> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| CommandItem {
+            id: CommandId::PluginContribution(index),
+            title: entry.title.clone().into(),
+            shortcut: entry.plugin_id.clone().into(),
+            keywords: format!(
+                "{} {} {} plugin",
+                entry.title, entry.action, entry.plugin_id
+            )
+            .into(),
+        })
+        .collect()
 }
 
 /// Case-insensitive substring filter over title + keywords.
@@ -435,5 +497,58 @@ mod tests {
             commands().iter().any(|i| i.id == CommandId::ToggleDiff),
             "Toggle Diff Inspector must appear in the palette"
         );
+        assert_eq!(
+            CommandId::from_str("toggle_plugin_monitor"),
+            Some(CommandId::TogglePluginMonitor)
+        );
+        assert_eq!(
+            CommandId::from_str("plugin_monitor"),
+            Some(CommandId::TogglePluginMonitor)
+        );
+        assert!(
+            commands()
+                .iter()
+                .any(|i| i.id == CommandId::TogglePluginMonitor
+                    && i.keywords.as_ref().contains("plugin monitor process kill")),
+            "Plugin Monitor must appear in the palette with the required keywords"
+        );
+    }
+
+    #[test]
+    fn contribution_items_cannot_impersonate_a_builtin_command_id() {
+        let entries = [crate::plugin_chrome::PaletteContribution {
+            plugin_id: "demo".into(),
+            title: "demo: Reload Settings".into(),
+            action: "reload_settings".into(),
+            arg: None,
+            surface_id: uuid::Uuid::nil(),
+        }];
+        let items = contribution_items(&entries);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, CommandId::PluginContribution(0));
+        assert_ne!(items[0].id, CommandId::ReloadSettings);
+        assert_eq!(
+            CommandId::from_str("reload_settings"),
+            Some(CommandId::ReloadSettings)
+        );
+        assert_eq!(items[0].id.as_str(), "plugin_contribution");
+        assert_eq!(CommandId::from_str("plugin_contribution"), None);
+        assert!(items[0].title.as_ref().starts_with("demo:"));
+        let builtins = commands();
+        let merged = {
+            let mut v = builtins;
+            v.extend(items);
+            v
+        };
+        let hits = filter_commands(&merged, "reload");
+        assert!(
+            hits.iter()
+                .any(|&i| merged[i].id == CommandId::ReloadSettings)
+        );
+        assert!(
+            hits.iter()
+                .any(|&i| merged[i].id == CommandId::PluginContribution(0))
+        );
+        assert!(hits[0] < hits[1] || merged[hits[0]].id == CommandId::ReloadSettings);
     }
 }

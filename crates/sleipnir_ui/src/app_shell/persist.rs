@@ -8,6 +8,7 @@ use gpui::{App, AppContext as _, Context, SharedString, Window};
 
 use super::{AppShell, Tab, snapshot_tree, tree_contains};
 use crate::pane_tree::{MIN_RATIO, PaneNode, SplitAxis};
+use crate::plugin_panel::drop_session_panels;
 use crate::session::{
     SessionAxis, SessionFile, SessionNode, SessionTab, load_session, resolve_cwd, restore_pane_key,
     sanitize_session, save_session, session_path,
@@ -44,7 +45,12 @@ impl AppShell {
             max_pane = max_pane.max(stab.tree.max_pane_id());
             let tab_id = (i as u64) + 1;
             max_tab = max_tab.max(tab_id);
-            let tree = self.materialize_tree(&stab.tree, window, cx);
+            let Some(restored_tree) = drop_session_panels(stab.tree) else {
+                continue;
+            };
+            let Some(tree) = self.materialize_tree(&restored_tree, window, cx) else {
+                continue;
+            };
             let active_pane = if tree_contains(&tree, stab.active_pane) {
                 stab.active_pane
             } else {
@@ -80,12 +86,17 @@ impl AppShell {
         node: &SessionNode,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> PaneNode {
+    ) -> Option<PaneNode> {
         match node {
             SessionNode::Leaf { id, cwd, pane_key } => {
                 let view = self.spawn_term_view_with_cwd(resolve_cwd(cwd.as_deref()), window, cx);
-                PaneNode::leaf_with_key(*id, restore_pane_key(*pane_key), view)
+                Some(PaneNode::leaf_with_key(
+                    *id,
+                    restore_pane_key(*pane_key),
+                    view,
+                ))
             }
+            SessionNode::Panel { .. } => None,
             SessionNode::Split {
                 axis,
                 ratio,
@@ -94,14 +105,17 @@ impl AppShell {
             } => {
                 let first = self.materialize_tree(first, window, cx);
                 let second = self.materialize_tree(second, window, cx);
-                PaneNode::Split {
-                    axis: match axis {
-                        SessionAxis::Horizontal => SplitAxis::Horizontal,
-                        SessionAxis::Vertical => SplitAxis::Vertical,
-                    },
-                    ratio: (*ratio).clamp(MIN_RATIO, 1.0 - MIN_RATIO),
-                    first: Box::new(first),
-                    second: Box::new(second),
+                match (first, second) {
+                    (Some(a), Some(b)) => Some(PaneNode::Split {
+                        axis: match axis {
+                            SessionAxis::Horizontal => SplitAxis::Horizontal,
+                            SessionAxis::Vertical => SplitAxis::Vertical,
+                        },
+                        ratio: (*ratio).clamp(MIN_RATIO, 1.0 - MIN_RATIO),
+                        first: Box::new(a),
+                        second: Box::new(b),
+                    }),
+                    (only, None) | (None, only) => only,
                 }
             }
         }

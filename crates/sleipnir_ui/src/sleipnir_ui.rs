@@ -12,6 +12,12 @@ mod finder_service;
 mod git_service;
 mod keymap;
 mod pane_tree;
+mod plugin_chrome;
+mod plugin_event_watch;
+mod plugin_host_calls;
+mod plugin_monitor_panel;
+mod plugin_panel;
+mod plugin_runtime;
 mod run_ledger_global;
 mod run_ledger_panel;
 mod session;
@@ -31,7 +37,8 @@ pub use app_shell::{
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
     ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight, ToggleBroadcast,
     ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    ToggleQuickSelect, ToggleRunLedger, open_sleipnir_window, try_open_sleipnir_window,
+    TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger, open_sleipnir_window,
+    try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
 pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
@@ -41,8 +48,8 @@ pub use keymap::{
     font_zoom_key_bindings, last_window_close_quits, tmux_preset_bindings,
 };
 pub use pane_tree::{
-    Branch, CloseOutcome, Direction, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath,
-    neighbor,
+    Branch, CloseOutcome, Direction, LeafContent, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis,
+    SplitPath, neighbor,
 };
 pub use run_ledger_global::RunLedgerGlobal;
 pub use session::{SessionFile, SessionNode, SessionTab, load_session, save_session, session_path};
@@ -173,6 +180,17 @@ impl TermView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_local_with(cwd, None, window, cx)
+    }
+
+    /// Spawn a pane. `command` is program + argv, never a shell line
+    /// (ADR-0013 / HostCall::OpenPane).
+    pub(crate) fn new_local_with(
+        cwd: Option<PathBuf>,
+        command: Option<(String, Vec<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings = TerminalSettings::get_global(cx).clone();
         let window_id = window.window_handle().window_id().as_u64();
         let cwd = cwd.or_else(dirs::home_dir);
@@ -180,8 +198,15 @@ impl TermView {
         for (k, v) in &settings.env {
             env.insert(k.clone(), v.clone());
         }
-        let shell =
-            terminal::apply_inject_to_shell(Shell::System, &mut env, settings.inject_osc133);
+        let shell = match command {
+            Some((program, args)) => Shell::WithArguments {
+                program,
+                args,
+                title_override: None,
+            },
+            None => Shell::System,
+        };
+        let shell = terminal::apply_inject_to_shell(shell, &mut env, settings.inject_osc133);
 
         let builder_task = TerminalBuilder::new(
             cwd,
@@ -929,6 +954,30 @@ fn notify_command_finished(dur: std::time::Duration) {
     notify_message("Sleipnir", &format!("Command finished after {secs}s"));
 }
 
+/// Escape a value for interpolation into an AppleScript `"..."` string.
+///
+/// Both `\` and `"` must be escaped. A plugin-controlled title that is
+/// interpolated raw can close the string and run the rest as AppleScript
+/// (`osascript` will execute it). Newlines are flattened so they cannot
+/// terminate the statement.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\r', '\n'], " ")
+}
+
+/// The `-e` script passed to `osascript`. Title and message are both escaped
+/// so a HostCall::Notify cannot break out of the string literals.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn applescript_notification_script(title: &str, message: &str) -> String {
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_escape(message),
+        applescript_escape(title)
+    )
+}
+
 /// Notification program for a given desktop platform.
 #[cfg(any(target_os = "linux", test))]
 fn notification_program_for(windows: bool, linux: bool) -> &'static str {
@@ -947,12 +996,14 @@ fn linux_notification_args<'a>(title: &'a str, message: &'a str) -> [&'a str; 4]
     ["--app-name", "Sleipnir", title, message]
 }
 
-/// Best-effort desktop notification (OSC 9 / 777 / command finish).
-fn notify_message(title: &str, message: &str) {
+/// Best-effort desktop notification (OSC 9 / 777 / command finish / HostCall).
+///
+/// The single notification path. HostCall::Notify must use this — a second
+/// builder would reintroduce the AppleScript injection hole.
+pub(crate) fn notify_message(title: &str, message: &str) {
     #[cfg(target_os = "macos")]
     {
-        let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
-        let script = format!("display notification \"{escaped}\" with title \"{title}\"");
+        let script = applescript_notification_script(title, message);
         let _ = std::process::Command::new("osascript")
             .args(["-e", &script])
             .spawn();
@@ -1591,6 +1642,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn applescript_title_and_message_cannot_break_out_of_the_string_literal() {
+        // A plugin-controlled title with a raw quote used to close the
+        // AppleScript string and run the rest (`do shell script ...`).
+        let title = r#"pwned" & (do shell script "id") & "x"#;
+        let message = r#"hi" & (do shell script "uname") & "y"#;
+        let script = applescript_notification_script(title, message);
+        assert_eq!(
+            script,
+            r#"display notification "hi\" & (do shell script \"uname\") & \"y" with title "pwned\" & (do shell script \"id\") & \"x""#
+        );
+        // Backslash must be doubled so a trailing \" cannot close the literal.
+        let script = applescript_notification_script(r#"end\"#, r#"body\"#);
+        assert_eq!(
+            script,
+            r#"display notification "body\\" with title "end\\""#
+        );
+        assert!(
+            !script.contains(r#"with title "end""#),
+            "raw title interpolation would close the string early"
+        );
+    }
+
+    /// Regression: the plugin status chip was rendered immediately after
+    /// `tab_scroll`, which is `None` with a single tab. The chip then collapsed
+    /// left and sat against the macOS traffic lights, inside the titlebar drag
+    /// region. It must come after `trailing_drag` so it stays at the trailing
+    /// end of the chrome band regardless of tab count.
+    #[test]
+    fn plugin_status_chip_sits_after_the_trailing_drag_region() {
+        let sources = all_ui_sources();
+        let src = sources
+            .iter()
+            .find(|src| src.contains("render_plugin_status_chip(&tokens, cx)"))
+            .expect("chrome band renders the plugin status chip");
+        let trailing = src
+            .find(".child(trailing_drag)")
+            .expect("chrome band has a trailing drag region");
+        let chip = src
+            .find("render_plugin_status_chip(&tokens, cx)")
+            .expect("chip call site");
+        assert!(
+            trailing < chip,
+            "the chip must follow trailing_drag, else a single-tab window \
+             collapses it onto the traffic lights"
+        );
+    }
+
+    /// ADR-0016 §7 requires an indicator a *plugin* cannot suppress. The host
+    /// still owns the zero case, and "0 plugins" is chrome spent on the state
+    /// that carries no information, so the chip is hidden at zero.
+    #[test]
+    fn plugin_status_chip_is_hidden_when_no_plugins_run() {
+        let sources = all_ui_sources();
+        let src = sources
+            .iter()
+            .find(|src| src.contains(r#".id("plugin-status-chip")"#))
+            .expect("plugin-status-chip is rendered somewhere");
+        let chip = src
+            .find(r#".id("plugin-status-chip")"#)
+            .expect("plugin-status-chip");
+        let body = &src[chip..];
+        let guard = body
+            .find(".when(n > 0")
+            .expect("chip content must be gated on a non-zero plugin count");
+        let label = body
+            .find("running_indicator_label(n)")
+            .expect("chip renders the running-indicator label");
+        assert!(
+            guard < label,
+            "the label must sit inside the n > 0 guard, not outside it"
+        );
+    }
+
     /// Regression: clicking Close on the confirm dialog must not hit the
     /// full-size backdrop. Other overlays (settings/update/palette) already
     /// stop mouse_down on the panel; this dialog originally omitted that.
@@ -1723,6 +1848,29 @@ mod tests {
                 .iter()
                 .any(|src| src.contains("WindowControlArea::Drag")),
             "desktop drag requires WindowControlArea::Drag"
+        );
+    }
+
+    #[test]
+    fn running_plugins_indicator_is_always_in_chrome_and_not_after_plugin_status() {
+        let sources = all_ui_sources();
+        let band_module = sources
+            .iter()
+            .find(|src| src.contains(r#".id("chrome-band")"#))
+            .expect("chrome-band");
+        let chip = band_module
+            .find("render_plugin_status_chip")
+            .expect("running-plugins indicator must be host-drawn in the chrome band");
+        let plugin_status = band_module.find("render_plugin_chrome_status");
+        assert!(
+            plugin_status.is_none_or(|p| chip < p),
+            "plugin status items must sit after the running-plugins chip so they cannot cover it"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|src| src.contains(r#".id("plugin-status-chip")"#)),
+            "the indicator id must exist so it cannot be omitted by a contribution"
         );
         assert!(
             sources

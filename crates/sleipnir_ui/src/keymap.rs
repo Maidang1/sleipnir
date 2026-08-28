@@ -59,6 +59,7 @@ pub enum BuiltinAction {
     ToggleQuickSelect,
     OpenQuickTerminal,
     ToggleRunLedger,
+    TogglePluginMonitor,
     ToggleHistorySearch,
     ToggleDiff,
     IncreaseFontSize,

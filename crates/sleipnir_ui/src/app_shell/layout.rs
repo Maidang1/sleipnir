@@ -5,16 +5,21 @@
 //! tab/pane state without widening it to the crate.
 
 use gpui::{
-    AppContext as _, Bounds, ClickEvent, Context, ElementId, Entity, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, MouseMoveEvent, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, canvas, deferred, div,
-    point, prelude::FluentBuilder as _, px,
+    App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, canvas,
+    deferred, div, point, prelude::FluentBuilder as _, px,
 };
 
 use super::{AppShell, DragState, PaneDrag, TabDragPreview};
-use crate::TermView;
+use crate::LeafContent;
 use crate::chrome::ChromeTokens;
-use crate::pane_tree::{Branch, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath};
+use crate::pane_tree::{
+    Branch, MIN_RATIO, PaneId, PaneKey, PaneNode, PaneRect, SplitAxis, SplitPath,
+};
+use crate::plugin_panel::{
+    TokenSlot, action_at, cell_from_pixels, cols_from_pixels, layout_surface, tone_slot,
+};
 
 /// A divider's hit rectangle plus the split it controls, produced by layout.
 #[derive(Clone)]
@@ -198,7 +203,7 @@ impl AppShell {
     pub(super) fn render_content(
         &mut self,
         tokens: &ChromeTokens,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(tab) = self.tabs.get(self.active) else {
@@ -208,15 +213,17 @@ impl AppShell {
         let tab_id = tab.id;
         let zoomed = tab.zoomed_pane;
 
-        // Gather leaves (id -> view) in tree order.
+        // Gather every leaf (terminals and panels) in tree order.
         let mut leaves = Vec::new();
-        tab.tree.leaves(&mut leaves);
-        let leaves: Vec<(PaneId, Entity<TermView>)> =
-            leaves.into_iter().map(|(id, v)| (id, v.clone())).collect();
+        tab.tree.walk_leaves(&mut leaves);
+        let leaves: Vec<(PaneId, PaneKey, LeafContent)> = leaves
+            .into_iter()
+            .map(|(id, key, content)| (id, key, content.clone()))
+            .collect();
 
         // Pane zoom (M13): only the zoomed leaf is shown full-size.
         if let Some(zid) = zoomed {
-            if let Some((_, view)) = leaves.iter().find(|(id, _)| *id == zid) {
+            if let Some((id, key, content)) = leaves.iter().find(|(id, _, _)| *id == zid) {
                 return div()
                     .id("pane-area-zoomed")
                     .flex_1()
@@ -229,7 +236,7 @@ impl AppShell {
                             .top_0()
                             .left_0()
                             .size_full()
-                            .child(view.clone().into_any_element()),
+                            .child(self.leaf_element(*id, *key, content, tokens, window, cx)),
                     )
                     .child(
                         div()
@@ -331,14 +338,14 @@ impl AppShell {
             );
 
         if single {
-            let (_, view) = &leaves[0];
+            let (id, key, content) = &leaves[0];
             container = container.child(
                 div()
                     .absolute()
                     .top_0()
                     .left_0()
                     .size_full()
-                    .child(view.clone().into_any_element()),
+                    .child(self.leaf_element(*id, *key, content, tokens, window, cx)),
             );
             return container.into_any_element();
         }
@@ -355,7 +362,7 @@ impl AppShell {
                 .flex()
                 .flex_row()
                 .min_h_0();
-            for (id, view) in &leaves {
+            for (id, key, content) in &leaves {
                 let is_active = *id == active_pane;
                 let pane_id = *id;
                 let mut pane = div()
@@ -364,8 +371,8 @@ impl AppShell {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .child(view.clone().into_any_element())
-                    .when(allow_pane_extract, |el| {
+                    .child(self.leaf_element(*id, *key, content, tokens, window, cx))
+                    .when(allow_pane_extract && content.is_terminal(), |el| {
                         el.child(self.pane_extract_grip(pane_id, cx))
                     });
                 if !is_active {
@@ -391,7 +398,7 @@ impl AppShell {
             return container.into_any_element();
         }
 
-        for (id, view) in &leaves {
+        for (id, key, content) in &leaves {
             let rect = pane_rects.iter().find(|r| r.id == *id);
             let Some(rect) = rect else { continue };
             let is_active = *id == active_pane;
@@ -404,8 +411,8 @@ impl AppShell {
                 .w(b.size.width)
                 .h(b.size.height)
                 .overflow_hidden()
-                .child(view.clone().into_any_element())
-                .when(allow_pane_extract, |el| {
+                .child(self.leaf_element(*id, *key, content, tokens, window, cx))
+                .when(allow_pane_extract && content.is_terminal(), |el| {
                     el.child(self.pane_extract_grip(pane_id, cx))
                 })
                 .on_mouse_down(
@@ -541,5 +548,330 @@ impl AppShell {
         let ratio = ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO);
         self.tabs[idx].tree.set_ratio(&drag.path, ratio);
         cx.notify();
+    }
+
+    fn leaf_element(
+        &self,
+        pane_id: PaneId,
+        pane_key: PaneKey,
+        content: &LeafContent,
+        tokens: &ChromeTokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        match content {
+            LeafContent::Terminal(view) => view.clone().into_any_element(),
+            LeafContent::Panel { .. } => {
+                self.render_plugin_panel(pane_id, pane_key, tokens, window, cx)
+            }
+        }
+    }
+
+    fn render_plugin_panel(
+        &self,
+        pane_id: PaneId,
+        pane_key: PaneKey,
+        tokens: &ChromeTokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (cell_w, line_h, font_family, font_size) =
+            panel_cell_metrics(window, cx, self.font_size_override);
+        let pixel_width = self
+            .pane_rects
+            .iter()
+            .find(|r| r.id == pane_id)
+            .map(|r| f32::from(r.bounds.size.width))
+            .or_else(|| self.content_bounds.map(|b| f32::from(b.size.width)))
+            .unwrap_or(80.0);
+        let cols = cols_from_pixels(pixel_width, cell_w);
+        let Some(surface) = self.plugin_panels.get(pane_key) else {
+            return div()
+                .size_full()
+                .bg(tokens.surface)
+                .child(
+                    div()
+                        .p_2()
+                        .text_xs()
+                        .text_color(tokens.fg_muted)
+                        .child("plugin panel"),
+                )
+                .into_any_element();
+        };
+        let laid = layout_surface(surface, cols);
+        let stale = surface.stale;
+        let plugin_id = surface.plugin_id.clone();
+        let surface_id = surface.surface_id;
+        let mut body = div()
+            .id(("plugin-panel", pane_id))
+            .size_full()
+            .relative()
+            .bg(tokens.content_bg)
+            .font_family(font_family)
+            .text_size(font_size)
+            .overflow_hidden();
+
+        body = paint_laid_out(body, &laid, tokens, cell_w, line_h);
+
+        if stale {
+            body = body.child(
+                div()
+                    .id(("plugin-panel-stale", pane_id))
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .px_2()
+                    .py_0p5()
+                    .bg(tokens.surface)
+                    .text_xs()
+                    .text_color(tokens.fg_muted)
+                    .child("plugin stopped"),
+            );
+        }
+
+        let cell_w_click = cell_w;
+        let line_h_click = line_h;
+        body = body.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                if let Some(tab) = this.tabs.get_mut(this.active) {
+                    if tab.active_pane != pane_id {
+                        tab.active_pane = pane_id;
+                    }
+                }
+                this.focus_active(window, cx);
+                let origin = this
+                    .pane_rects
+                    .iter()
+                    .find(|r| r.id == pane_id)
+                    .map(|r| r.bounds.origin)
+                    .or_else(|| this.content_bounds.map(|b| b.origin));
+                let Some(origin) = origin else {
+                    cx.notify();
+                    return;
+                };
+                let local_x = f32::from(ev.position.x) - f32::from(origin.x);
+                let local_y = f32::from(ev.position.y) - f32::from(origin.y);
+                let pos = cell_from_pixels(local_x, local_y, cell_w_click, line_h_click);
+                if let Some(surface) = this.plugin_panels.get(pane_key) {
+                    if surface.stale {
+                        cx.notify();
+                        return;
+                    }
+                    let laid = layout_surface(surface, cols);
+                    if let Some(hit) = action_at(&laid, pos.col, pos.row) {
+                        crate::plugin_runtime::push_action(
+                            &plugin_id, surface_id, hit.action, hit.arg, cx,
+                        );
+                    }
+                }
+                cx.notify();
+            }),
+        );
+        body.into_any_element()
+    }
+
+    pub(super) fn render_plugin_chrome_status(
+        &mut self,
+        tokens: &ChromeTokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use crate::plugin_chrome::MAX_STATUS_COLS;
+        if self.plugin_chrome.is_empty() {
+            return div().into_any_element();
+        }
+        let (cell_w, line_h, font_family, font_size) =
+            panel_cell_metrics(window, cx, self.font_size_override);
+        let Some(laid) = self.plugin_chrome.status_layout(MAX_STATUS_COLS) else {
+            return div().into_any_element();
+        };
+        let width = px((laid.width as f32 * cell_w).max(1.0));
+        // Chrome is one band high. Clip rather than grow the titlebar.
+        let height = px((laid.height as f32 * line_h).clamp(1.0, 28.0));
+        let mut body = div()
+            .id("plugin-chrome-status")
+            .flex_shrink_0()
+            .w(width)
+            .h(height)
+            .relative()
+            .overflow_hidden()
+            .font_family(font_family)
+            .text_size(font_size);
+        body = paint_laid_out(body, laid, tokens, cell_w, line_h);
+        body.into_any_element()
+    }
+}
+
+fn panel_cell_metrics(
+    window: &Window,
+    cx: &App,
+    font_size_override: Option<Pixels>,
+) -> (f32, f32, SharedString, Pixels) {
+    use gpui::TextStyle;
+    use sleipnir_settings::{TerminalPalette, TerminalSettings};
+    let settings = TerminalSettings::get_global(cx);
+    let font_family = settings
+        .font_family
+        .clone()
+        .unwrap_or_else(|| sleipnir_settings::default_font_family().into());
+    let font_size = font_size_override
+        .or(settings.font_size)
+        .unwrap_or(px(14.))
+        .max(px(8.));
+    let line_height_factor = settings.line_height.value().max(1.0);
+    let font_features = settings
+        .font_features
+        .clone()
+        .unwrap_or_else(gpui::FontFeatures::disable_ligatures);
+    let text_style = TextStyle {
+        font_family: font_family.clone().into(),
+        font_features,
+        font_weight: settings.font_weight.unwrap_or_default(),
+        font_size: font_size.into(),
+        font_fallbacks: settings.font_fallbacks.clone(),
+        color: TerminalPalette::get_global(cx).foreground,
+        ..Default::default()
+    };
+    let font_id = cx.text_system().resolve_font(&text_style.font());
+    let cell_width = cx
+        .text_system()
+        .advance(font_id, font_size, 'm')
+        .map(|a| a.width)
+        .unwrap_or(px(8.))
+        .max(px(4.));
+    let line_height = px(f32::from(font_size) * line_height_factor).max(px(10.));
+    let _ = window;
+    (
+        f32::from(cell_width),
+        f32::from(line_height),
+        font_family.into(),
+        font_size,
+    )
+}
+
+fn slot_color(tokens: &ChromeTokens, slot: TokenSlot) -> Hsla {
+    match slot {
+        TokenSlot::Fg => tokens.fg,
+        TokenSlot::Muted => tokens.fg_muted,
+        TokenSlot::Accent => tokens.accent,
+        TokenSlot::Ok => tokens.ok,
+        TokenSlot::Warn => tokens.warn,
+        TokenSlot::Err => tokens.err,
+    }
+}
+
+fn paint_laid_out(
+    mut root: gpui::Stateful<gpui::Div>,
+    laid: &sleipnir_widget::Layout,
+    tokens: &ChromeTokens,
+    cell_w: f32,
+    line_h: f32,
+) -> gpui::Stateful<gpui::Div> {
+    for (i, node) in laid.walk().enumerate() {
+        root = root.child(paint_node(i, node, tokens, cell_w, line_h, false));
+    }
+    root.child(paint_node(
+        usize::MAX,
+        &laid.attribution,
+        tokens,
+        cell_w,
+        line_h,
+        true,
+    ))
+}
+
+fn paint_node(
+    key: usize,
+    node: &sleipnir_widget::LaidOut,
+    tokens: &ChromeTokens,
+    cell_w: f32,
+    line_h: f32,
+    attribution: bool,
+) -> gpui::AnyElement {
+    use sleipnir_widget::LaidOutKind;
+    let r = node.rect;
+    let left = px(r.col as f32 * cell_w);
+    let top = px(r.row as f32 * line_h);
+    let width = px((r.width as f32 * cell_w).max(1.0));
+    let height = px((r.height as f32 * line_h).max(1.0));
+    let mut el = div()
+        .id(("w", key as u64))
+        .absolute()
+        .left(left)
+        .top(top)
+        .w(width)
+        .h(height)
+        .overflow_hidden();
+    if attribution {
+        el = el.bg(tokens.surface);
+    }
+    match &node.kind {
+        LaidOutKind::Col | LaidOutKind::Row => el.into_any_element(),
+        LaidOutKind::Text { lines, role, bold } => {
+            let color = slot_color(tokens, tone_slot(*role));
+            let mut col = div().flex().flex_col();
+            for line in lines {
+                let mut row = div().h(px(line_h)).text_color(color).child(line.clone());
+                if *bold {
+                    row = row.font_weight(gpui::FontWeight::BOLD);
+                }
+                col = col.child(row);
+            }
+            el.child(col).into_any_element()
+        }
+        LaidOutKind::Code { lines } => {
+            let mut col = div().flex().flex_col().bg(tokens.surface);
+            for line in lines {
+                col = col.child(
+                    div()
+                        .h(px(line_h))
+                        .text_color(tokens.fg)
+                        .child(line.text.clone()),
+                );
+            }
+            el.child(col).into_any_element()
+        }
+        LaidOutKind::Badge { text, role } => el
+            .bg(tokens.surface)
+            .px_1()
+            .text_color(slot_color(tokens, tone_slot(*role)))
+            .child(text.clone())
+            .into_any_element(),
+        LaidOutKind::Bar { filled, width: w } => {
+            let fill_w = px((*filled as f32 / (*w).max(1) as f32) * f32::from(width));
+            el.bg(tokens.surface)
+                .child(div().h_full().w(fill_w).bg(tokens.accent))
+                .into_any_element()
+        }
+        LaidOutKind::Spark { levels } => {
+            const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+            let s: String = levels
+                .iter()
+                .map(|&lv| BLOCKS[lv.min(8) as usize])
+                .collect();
+            el.text_color(tokens.accent).child(s).into_any_element()
+        }
+        LaidOutKind::Sep => el.bg(tokens.border).h(px(1.0)).into_any_element(),
+        LaidOutKind::Btn { text, .. } => el
+            .bg(tokens.hover)
+            .px_1()
+            .cursor_pointer()
+            .text_color(tokens.accent)
+            .child(text.clone())
+            .into_any_element(),
+        LaidOutKind::Unknown => el
+            .text_color(tokens.fg_muted)
+            .child("[?]")
+            .into_any_element(),
+        LaidOutKind::Truncated => el
+            .text_color(tokens.warn)
+            .child("… truncated")
+            .into_any_element(),
+        LaidOutKind::Attribution { label, .. } => el
+            .text_color(tokens.fg_muted)
+            .text_xs()
+            .child(label.clone())
+            .into_any_element(),
     }
 }

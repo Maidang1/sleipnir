@@ -13,6 +13,7 @@ pub use themes::{
 
 use collections::HashMap;
 use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels, px};
+use plugin_host::Permission;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap as StdHashMap;
@@ -197,6 +198,19 @@ pub struct TerminalSettings {
     pub keybinding_preset: KeybindingPreset,
     /// Chrome banner after session restore when a pane has Run history.
     pub show_tombstone: bool,
+    /// External command plugin discovery and permission policy.
+    pub plugins: PluginSettings,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct PluginSettings {
+    /// Master switch. Disabled means no manifests are read and no plugin runs.
+    pub enabled: bool,
+    /// Extra plugin roots layered after the platform config directory.
+    pub directories: Vec<PathBuf>,
+    /// Permissions that installed plugin commands may exercise.
+    pub allowed_permissions: Vec<Permission>,
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -302,6 +316,7 @@ impl Default for TerminalSettings {
             pipe_selection_command: None,
             keybinding_preset: KeybindingPreset::Default,
             show_tombstone: true,
+            plugins: PluginSettings::default(),
         }
     }
 }
@@ -534,6 +549,8 @@ struct SettingsFile {
     #[serde(default)]
     show_tombstone: Option<bool>,
     #[serde(default)]
+    plugins: Option<PluginSettings>,
+    #[serde(default)]
     terminal: TerminalSettingsFile,
 }
 
@@ -683,6 +700,9 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.show_tombstone {
         settings.show_tombstone = v;
     }
+    if let Some(v) = file.plugins {
+        settings.plugins = v;
+    }
     let t = file.terminal;
     if let Some(size) = t.font_size {
         settings.font_size = Some(px(size));
@@ -786,6 +806,7 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         pipe_selection_command: None,
         keybinding_preset: Some(KeybindingPreset::Default),
         show_tombstone: Some(true),
+        plugins: None,
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some(default_font_family().into()),
@@ -1115,6 +1136,30 @@ mod tests {
         if let Some(config) = dirs::config_dir() {
             assert_eq!(win_dir, config.join("sleipnir"));
         }
+    }
+
+    #[test]
+    fn plugins_are_default_off_and_permissions_parse() {
+        let raw = r#"{
+  "plugins": {
+    "enabled": true,
+    "directories": ["/opt/sleipnir-plugins"],
+    "allowed_permissions": ["read_visible_screen", "write_terminal"]
+  }
+}"#;
+        let file: SettingsFile = serde_json::from_str(raw).expect("parse plugins");
+        let mut settings = TerminalSettings::default();
+        assert!(!settings.plugins.enabled);
+        merge_file(&mut settings, file);
+        assert!(settings.plugins.enabled);
+        assert_eq!(
+            settings.plugins.allowed_permissions,
+            vec![Permission::ReadVisibleScreen, Permission::WriteTerminal]
+        );
+        assert_eq!(
+            settings.plugins.directories,
+            vec![PathBuf::from("/opt/sleipnir-plugins")]
+        );
     }
 
     #[test]

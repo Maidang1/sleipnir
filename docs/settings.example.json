@@ -15,6 +15,18 @@
   "pipe_selection_command": "",
   "keybinding_preset": "default",
   "show_tombstone": true,
+  "plugins": {
+    "enabled": false,
+    "directories": [],
+    "allowed_permissions": [
+      "read_selection",
+      "read_visible_screen",
+      "read_cwd",
+      "read_title",
+      "write_terminal",
+      "clipboard"
+    ]
+  },
   "custom_theme": {
     "background": "#0d1117",
     "foreground": "#e6edf3",

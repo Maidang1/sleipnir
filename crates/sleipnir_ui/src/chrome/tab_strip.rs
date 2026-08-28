@@ -2,7 +2,7 @@
 
 use gpui::{
     App, AppContext as _, Context, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px, svg,
 };
 use run_ledger::Badge;
@@ -42,6 +42,12 @@ impl AppShell {
                     continue;
                 };
                 let badge = tab_badge_for(tab, cx);
+                let keys = tab.tree.all_pane_keys();
+                let plugin_badges = self.plugin_badges_for_tab(&keys, ix == active);
+                let failed = crate::plugin_chrome::ledger_failed_wash(
+                    tab_has_failed_attention(badge),
+                    &plugin_badges,
+                );
                 let agent = if show_icons {
                     agent::identify_tab(tab, cx)
                 } else {
@@ -58,6 +64,8 @@ impl AppShell {
                         .filter(|state| state.tab_id == tab.id)
                         .map(|state| state.buffer.clone()),
                     badge,
+                    plugin_badges,
+                    failed,
                     agent,
                     tokens,
                     geo,
@@ -89,7 +97,9 @@ pub(crate) fn render_tab_chip(
     is_hovered: bool,
     is_bell: bool,
     rename_buffer: Option<String>,
-    badge: Option<Badge>,
+    _badge: Option<Badge>,
+    plugin_badges: Vec<crate::plugin_chrome::PluginTabBadge>,
+    failed: bool,
     agent: Option<AgentKind>,
     tokens: &ChromeTokens,
     geo: &ChromeGeometry,
@@ -103,7 +113,6 @@ pub(crate) fn render_tab_chip(
     };
     let tab_id = tab.id;
     let is_renaming = rename_buffer.is_some();
-    let failed = tab_has_failed_attention(badge);
     let bg = chip_background(is_active, is_hovered, is_bell, failed, tokens, palette);
     let fg = if is_active || is_bell || is_hovered || failed {
         tokens.fg
@@ -194,6 +203,28 @@ pub(crate) fn render_tab_chip(
     }))
     .when_some(agent, |el, kind| el.child(render_agent_mark(kind)))
     .child(body)
+    .children(plugin_badges.into_iter().map(|b| {
+        let color = match b.tone {
+            plugin_protocol::v2::Tone::Ok => tokens.ok,
+            plugin_protocol::v2::Tone::Warn => tokens.warn,
+            plugin_protocol::v2::Tone::Err => tokens.err,
+            plugin_protocol::v2::Tone::Accent => tokens.accent,
+            plugin_protocol::v2::Tone::Dim => tokens.fg_muted,
+            plugin_protocol::v2::Tone::Fg => tokens.fg,
+        };
+        div()
+            .id(SharedString::from(format!(
+                "plugin-tab-badge-{tab_id}-{}",
+                b.plugin_id
+            )))
+            .flex_shrink_0()
+            .px_1()
+            .rounded(px(3.0))
+            .bg(tokens.surface)
+            .text_xs()
+            .text_color(color)
+            .child(format!("{}:{}", b.plugin_id, b.text))
+    }))
     .into_any_element()
 }
 

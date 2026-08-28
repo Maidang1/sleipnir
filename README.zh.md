@@ -24,6 +24,7 @@ Sleipnir 是一个独立终端应用，基于 [GPUI](https://gpui.rs) 构建，�
 - 智能粘贴、路径链接以及跟随系统的主题
 - 滚动历史搜索、Diff 检查和命令运行记录
 - 兼容 Zed 的 `terminal.*` 设置，支持热重载
+- 可选的外部命令插件：通过权限声明向命令面板添加扩展，默认关闭
 
 ## 安装
 
@@ -74,7 +75,7 @@ cargo build --release -p sleipnir
 - `notify_on_command_finish_secs`
 - `run_ledger`
 
-完整示例配置请参考 [`docs/settings.example.json`](docs/settings.example.json)。
+完整示例配置请参考 [`docs/settings.example.json`](docs/settings.example.json)。插件开发与示例请参考 [`docs/plugins.md`](docs/plugins.md)。
 
 ## 快捷键
 
