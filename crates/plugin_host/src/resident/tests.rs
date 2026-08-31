@@ -1053,18 +1053,15 @@ fn wedged_subscriber_drops_without_blocking_others() {
             .sup
             .broadcast(run_started(pane(1), &format!("echo {i}")));
         dropped += report.dropped();
+        rx.recv_timeout(Duration::from_secs(2)).expect(
+            "healthy subscriber must receive each event without waiting for the wedged one",
+        );
     }
     assert!(dropped > 0, "a full queue must drop, not grow");
     let snap = env.sup.snapshot("wedged").unwrap();
     assert!(
         snap.events_dropped > 0,
         "Monitor must see events_dropped: {snap:?}"
-    );
-
-    barrier_invoke(&env, "healthy");
-    assert!(
-        rx.try_iter().next().is_some(),
-        "a healthy subscriber must still receive while another is wedged"
     );
 
     let _ = hold_tx.send(());
