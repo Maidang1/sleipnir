@@ -7,8 +7,9 @@
 //! way they do today, but the leftover is retained instead of discarded
 //! (`terminal.rs` currently takes `scroll_px` modulo the viewport height).
 //!
-//! `row` is the grid line at the viewport origin. Each spilled whole row is
-//! one `Scroll::Delta` the host applies to `display_offset`.
+//! `row` is the absolute line at the viewport origin, not the grid's
+//! `display_offset`. Each spilled whole row is an absolute-line delta; the
+//! host converts it at the `Scroll::Delta` boundary.
 
 use crate::geometry::{RowGeometry, i32_from_usize, usize_from_i32};
 use crate::{HitTarget, Px};
@@ -20,8 +21,8 @@ use crate::{HitTarget, Px};
 /// pixel height, which is what makes scrolling over it pixel-accurate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewportPosition {
-    /// Grid line at the viewport origin. Mirrors the integer part of scroll
-    /// (`display_offset` on the grid, once the host has applied the spill).
+    /// Absolute line at the viewport origin. This is not a `display_offset`;
+    /// the two coordinate systems point in opposite directions.
     pub row: usize,
     /// Host-side remainder. Never sent to the grid.
     pub sub: Px,

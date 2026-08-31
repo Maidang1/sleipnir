@@ -15,7 +15,7 @@ pub use osc133::{
     gutter_marks_from_markers, rebase_markers_after_history_shrink,
 };
 pub(crate) use row_map::PointerMap;
-pub use row_map::{accumulate_wheel, hit_display, viewport_top_abs, y_for_display};
+pub use row_map::{hit_display, viewport_top_abs, y_for_display};
 pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
 pub use shell_semantics::{
     ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
@@ -42,6 +42,7 @@ use mappings::mouse::{
     scroll_report,
 };
 use row_geometry::{RowGeometry, ViewportPosition};
+use row_map::absolute_line_delta_to_display_offset_delta;
 
 use collections::{HashMap, VecDeque};
 use futures::StreamExt;
@@ -2603,15 +2604,16 @@ impl Terminal {
                 // Retain the sub-row remainder instead of discarding it with a
                 // modulo of the viewport height (ADR-0018 decision 2).
                 let delta = f32::from(e.delta.pixel_delta(line_height).y) * scroll_multiplier;
-                let spilled = accumulate_wheel(
-                    &mut self.viewport.sub,
-                    delta,
-                    &self.row_geometry,
+                self.viewport.row = usize::try_from(viewport_top_abs(
                     self.last_history_size as i32,
                     self.last_content.display_offset,
-                );
-                self.viewport.row = self.last_content.display_offset;
-                Some(spilled)
+                ))
+                .unwrap_or(0);
+                let absolute_line_delta =
+                    self.viewport.apply_pixel_delta(delta, &self.row_geometry);
+                Some(absolute_line_delta_to_display_offset_delta(
+                    absolute_line_delta,
+                ))
             }
             TouchPhase::Ended | TouchPhase::Cancelled => None,
         }

@@ -133,68 +133,17 @@ impl<'a> PointerMap<'a> {
     }
 }
 
-/// Walk `sub` against successive row heights. The returned i32 is a
-/// `display_offset` delta: positive means more into history. `sub` is left
-/// in `[0, height_of(current_top))`.
-pub fn accumulate_wheel(
-    sub: &mut f32,
-    delta_px: f32,
-    geom: &RowGeometry,
-    history_size: i32,
-    display_offset: usize,
-) -> i32 {
-    if !delta_px.is_finite() {
-        return 0;
-    }
-    let mut offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
-    let history = history_size.max(0);
-    *sub += delta_px;
-    if !sub.is_finite() {
-        *sub = 0.0;
-        return 0;
-    }
-    let mut spilled = 0i32;
-    for _ in 0..10_000 {
-        let top_abs = history.saturating_sub(offset);
-        let h = geom.height_of(top_abs);
-        if !h.is_finite() || h <= 0.0 {
-            *sub = 0.0;
-            break;
-        }
-        if *sub >= h {
-            *sub -= h;
-            spilled = spilled.saturating_add(1);
-            offset = offset.saturating_add(1);
-            if offset > history {
-                *sub = 0.0;
-                break;
-            }
-            continue;
-        }
-        if *sub < 0.0 {
-            if offset <= 0 {
-                *sub = 0.0;
-                break;
-            }
-            offset = offset.saturating_sub(1);
-            let h_prev = geom.height_of(history.saturating_sub(offset));
-            if !h_prev.is_finite() || h_prev <= 0.0 {
-                *sub = 0.0;
-                break;
-            }
-            *sub += h_prev;
-            spilled = spilled.saturating_sub(1);
-            continue;
-        }
-        break;
-    }
-    spilled
+/// Adapt the absolute-line delta reported by [`ViewportPosition`] to the
+/// legacy wheel contract consumed by `Scroll::Delta`. Wheel pixel deltas and
+/// `display_offset` deltas intentionally share a sign, so this preserves it.
+pub(crate) fn absolute_line_delta_to_display_offset_delta(delta: i32) -> i32 {
+    delta
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use row_geometry::{Anchor, Block, BlockId, RunId};
+    use row_geometry::{Anchor, Block, BlockId, RunId, ViewportPosition};
 
     fn bid(n: u128) -> BlockId {
         BlockId::from_u128(n)
@@ -305,27 +254,169 @@ mod tests {
     }
 
     #[test]
-    fn accumulate_wheel_retains_remainder() {
+    fn wheel_delta_preserves_the_legacy_scroll_delta_direction() {
         let g = geom(16.0, &[]);
-        let mut sub = 0.0;
-        let spilled = accumulate_wheel(&mut sub, 40.0, &g, 40, 0);
-        assert_eq!(spilled, 2);
-        assert_eq!(sub, 8.0);
-        let spilled = accumulate_wheel(&mut sub, -20.0, &g, 40, 2);
-        assert_eq!(spilled, -1);
-        assert_eq!(sub, 4.0);
+        for (initial_sub, delta_px, expected_display_offset_delta) in
+            [(0.0, 40.0, 2), (4.0, -20.0, -1)]
+        {
+            let mut viewport = ViewportPosition {
+                row: viewport_top_abs(40, 2) as usize,
+                sub: initial_sub,
+            };
+            let absolute_line_delta = viewport.apply_pixel_delta(delta_px, &g);
+
+            assert_eq!(
+                absolute_line_delta_to_display_offset_delta(absolute_line_delta),
+                expected_display_offset_delta,
+                "pixel delta {delta_px} must retain the legacy Scroll::Delta sign"
+            );
+        }
     }
 
     #[test]
-    fn accumulate_wheel_walks_a_tall_block() {
-        let g = geom(16.0, &[(1, 38, 5)]);
-        // history 40, offset 2 → top_abs = 38, the block.
-        let mut sub = 0.0;
-        let spilled = accumulate_wheel(&mut sub, 3.0 * 16.0, &g, 40, 2);
-        assert_eq!(spilled, 0);
-        assert_eq!(sub, 3.0 * 16.0);
-        let spilled = accumulate_wheel(&mut sub, 2.0 * 16.0 + 4.0, &g, 40, 2);
-        assert_eq!(spilled, 1);
-        assert_eq!(sub, 4.0);
+    fn wheel_route_characterization() {
+        struct Case {
+            name: &'static str,
+            blocks: &'static [(u128, i32, u16)],
+            history_size: i32,
+            display_offset: usize,
+            initial_sub: f32,
+            delta_px: f32,
+            expected_absolute_delta: i32,
+            expected_display_offset_delta: i32,
+            expected_clamped_offset: i32,
+            expected_sub: f32,
+        }
+
+        let cases = [
+            Case {
+                name: "positive delta",
+                blocks: &[],
+                history_size: 40,
+                display_offset: 0,
+                initial_sub: 0.0,
+                delta_px: 40.0,
+                expected_absolute_delta: 2,
+                expected_display_offset_delta: 2,
+                expected_clamped_offset: 2,
+                expected_sub: 8.0,
+            },
+            Case {
+                name: "negative delta",
+                blocks: &[],
+                history_size: 40,
+                display_offset: 2,
+                initial_sub: 4.0,
+                delta_px: -20.0,
+                expected_absolute_delta: -1,
+                expected_display_offset_delta: -1,
+                expected_clamped_offset: 1,
+                expected_sub: 0.0,
+            },
+            Case {
+                name: "inside tall block",
+                blocks: &[(1, 38, 5)],
+                history_size: 40,
+                display_offset: 2,
+                initial_sub: 0.0,
+                delta_px: 3.0 * 16.0,
+                expected_absolute_delta: 0,
+                expected_display_offset_delta: 0,
+                expected_clamped_offset: 2,
+                expected_sub: 3.0 * 16.0,
+            },
+            Case {
+                name: "across tall block",
+                blocks: &[(1, 38, 5)],
+                history_size: 40,
+                display_offset: 2,
+                initial_sub: 3.0 * 16.0,
+                delta_px: 2.0 * 16.0 + 4.0,
+                expected_absolute_delta: 1,
+                expected_display_offset_delta: 1,
+                expected_clamped_offset: 3,
+                expected_sub: 4.0,
+            },
+            Case {
+                name: "clamped before absolute line zero",
+                blocks: &[],
+                history_size: 40,
+                display_offset: 40,
+                initial_sub: 0.0,
+                delta_px: -20.0,
+                expected_absolute_delta: 0,
+                expected_display_offset_delta: 0,
+                expected_clamped_offset: 40,
+                expected_sub: 0.0,
+            },
+            Case {
+                name: "clamped at bottom display offset",
+                blocks: &[],
+                history_size: 40,
+                display_offset: 0,
+                initial_sub: 0.0,
+                delta_px: 20.0,
+                expected_absolute_delta: 1,
+                expected_display_offset_delta: 1,
+                expected_clamped_offset: 1,
+                expected_sub: 4.0,
+            },
+            Case {
+                name: "NaN is ignored",
+                blocks: &[],
+                history_size: 40,
+                display_offset: 2,
+                initial_sub: 3.0,
+                delta_px: f32::NAN,
+                expected_absolute_delta: 0,
+                expected_display_offset_delta: 0,
+                expected_clamped_offset: 2,
+                expected_sub: 3.0,
+            },
+            Case {
+                name: "infinity is ignored",
+                blocks: &[],
+                history_size: 40,
+                display_offset: 2,
+                initial_sub: 3.0,
+                delta_px: f32::INFINITY,
+                expected_absolute_delta: 0,
+                expected_display_offset_delta: 0,
+                expected_clamped_offset: 2,
+                expected_sub: 3.0,
+            },
+        ];
+
+        for case in cases {
+            let g = geom(16.0, case.blocks);
+            let top_abs = viewport_top_abs(case.history_size, case.display_offset);
+            let mut viewport = ViewportPosition {
+                row: usize::try_from(top_abs).unwrap_or(0),
+                sub: case.initial_sub,
+            };
+            let absolute_delta = viewport.apply_pixel_delta(case.delta_px, &g);
+            let display_offset_delta = absolute_line_delta_to_display_offset_delta(absolute_delta);
+            let clamped_offset = i32::try_from(case.display_offset)
+                .unwrap_or(i32::MAX)
+                .saturating_add(display_offset_delta)
+                .clamp(0, case.history_size.max(0));
+
+            assert_eq!(
+                absolute_delta, case.expected_absolute_delta,
+                "{} absolute-line delta",
+                case.name
+            );
+            assert_eq!(
+                display_offset_delta, case.expected_display_offset_delta,
+                "{} display-offset delta",
+                case.name
+            );
+            assert_eq!(
+                clamped_offset, case.expected_clamped_offset,
+                "{} clamped offset",
+                case.name
+            );
+            assert_eq!(viewport.sub, case.expected_sub, "{} remainder", case.name);
+        }
     }
 }
