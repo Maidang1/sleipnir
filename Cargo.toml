@@ -17,7 +17,9 @@ members = [
     "crates/plugin_protocol",
     "crates/plugin_grants",
     "crates/sleipnir_plugin_sdk",
+    "crates/sleipnir_plugin_failed_run",
     "crates/sleipnir_widget",
+    "crates/row_geometry",
     # OS-branched entry; gpui / gpui_macos / gpui_windows / gpui_linux come from Zed via git.
     "crates/gpui_platform",
 ]
@@ -62,6 +64,7 @@ plugin_protocol = { path = "crates/plugin_protocol" }
 plugin_grants = { path = "crates/plugin_grants" }
 sleipnir-plugin = { path = "crates/sleipnir_plugin_sdk" }
 sleipnir_widget = { path = "crates/sleipnir_widget" }
+row_geometry = { path = "crates/row_geometry" }
 gpui_platform = { path = "crates/gpui_platform", default-features = false, features = ["font-kit"] }
 
 # ---------------------------------------------------------------------------

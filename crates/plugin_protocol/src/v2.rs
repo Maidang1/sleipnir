@@ -262,11 +262,19 @@ pub struct PaneInfo {
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum HostCallResult {
     Ok,
-    Screen { text: String },
-    Panes { panes: Vec<PaneInfo> },
-    Pane { pane: PaneKey },
+    Screen {
+        text: String,
+    },
+    Panes {
+        panes: Vec<PaneInfo>,
+    },
+    Pane {
+        pane: PaneKey,
+    },
     /// Includes the denial case: a call whose capability was not granted.
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -280,9 +288,13 @@ pub enum HostCallResult {
 #[serde(tag = "target", rename_all = "snake_case")]
 pub enum RenderTarget {
     /// Anchored to a Run, inside scrollback (ADR-0018).
-    Block { anchor: RunId },
+    Block {
+        anchor: RunId,
+    },
     /// Occupies a split (ADR-0017's first mount point).
-    Panel { pane: PaneKey },
+    Panel {
+        pane: PaneKey,
+    },
     Status,
 }
 
@@ -349,8 +361,12 @@ pub enum Widget {
         tone: Tone,
     },
     /// Progress in `0.0..=1.0`.
-    Bar { v: f32 },
-    Spark { vs: Vec<f32> },
+    Bar {
+        v: f32,
+    },
+    Spark {
+        vs: Vec<f32>,
+    },
     Sep,
     /// The only interactive node (ADR-0017 constraint 3). No inputs, no drag,
     /// no focus management — text entry is what the command palette is for.
@@ -388,10 +404,7 @@ pub fn measure(widget: &Widget) -> TreeStats {
             Widget::Col { children, .. } | Widget::Row { children, .. } => children.as_slice(),
             _ => &[],
         };
-        let mut stats = TreeStats {
-            nodes: 1,
-            depth,
-        };
+        let mut stats = TreeStats { nodes: 1, depth };
         for child in children {
             let sub = walk(child, depth + 1);
             stats.nodes += sub.nodes;
@@ -524,7 +537,10 @@ mod tests {
         let other = Uuid::from_u128(2);
         let event = HostEvent::PaneFocused { pane };
 
-        assert!(event.matches(&EventFilter::default()), "empty filter passes all");
+        assert!(
+            event.matches(&EventFilter::default()),
+            "empty filter passes all"
+        );
         assert!(event.matches(&EventFilter {
             panes: vec![pane],
             kinds: vec![EventKind::PaneFocused],
@@ -546,10 +562,16 @@ mod tests {
             Capability::HostCallListPanes
         );
         assert_eq!(
-            RenderTarget::Block { anchor: Uuid::nil() }.required_capability(),
+            RenderTarget::Block {
+                anchor: Uuid::nil()
+            }
+            .required_capability(),
             Capability::RenderBlock
         );
-        assert_eq!(RenderTarget::Status.required_capability(), Capability::RenderStatus);
+        assert_eq!(
+            RenderTarget::Status.required_capability(),
+            Capability::RenderStatus
+        );
     }
 
     #[test]
@@ -576,10 +598,13 @@ mod tests {
                 },
                 Widget::Row {
                     gap: 0,
-                    children: vec![Widget::Sep, Widget::Badge {
-                        s: "3000".into(),
-                        tone: Tone::Warn,
-                    }],
+                    children: vec![
+                        Widget::Sep,
+                        Widget::Badge {
+                            s: "3000".into(),
+                            tone: Tone::Warn,
+                        },
+                    ],
                 },
             ],
         };

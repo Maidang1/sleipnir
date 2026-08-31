@@ -1,9 +1,13 @@
-//! Official Rust SDK for Sleipnir plugins (ADR-0015).
+//! Official Rust SDK for Sleipnir plugins (ADR-0015, ADR-0016).
 //!
-//! A plugin author writes plain Rust: implement [`Plugin`], call [`run`] from
-//! `main`. The SDK owns the wire protocol — the handshake, the
-//! read/decode/dispatch/encode loop over stdin/stdout, and serialization — so
-//! the author never touches JSON or process plumbing.
+//! A plugin author writes plain Rust: implement [`Plugin`] (v1) or
+//! [`v2::Plugin`], call [`run`] / [`v2::run`] from `main`. The SDK owns the
+//! wire protocol — the handshake, the read/decode/dispatch/encode loop over
+//! stdin/stdout, and serialization — so the author never touches JSON or
+//! process plumbing.
+//!
+//! v1 is request/response. [`v2`] is the resident, event-driven, rendering
+//! surface (ADR-0016). Both remain supported for the N / N-1 window.
 //!
 //! ```no_run
 //! use sleipnir_plugin::{Plugin, Manifest, CommandSpec, Capability, Invoke, Output, Lifecycle, run};
@@ -37,6 +41,9 @@
 //! fn main() { run(Echo); }
 //! ```
 
+pub mod v2;
+mod widgets;
+
 use std::io::{BufRead, Write};
 
 pub use plugin_protocol::{
@@ -67,7 +74,7 @@ impl Output {
         Self::Copy(text.into())
     }
 
-    fn into_wire(self) -> ProtoOutput {
+    pub(crate) fn into_wire(self) -> ProtoOutput {
         match self {
             Output::Ignore => ProtoOutput::Ignore,
             Output::Insert(text) => ProtoOutput::Insert { text },
@@ -233,7 +240,10 @@ mod tests {
         })
         .unwrap();
         let msgs = conversation(&format!("{hello}\n"));
-        let PluginMessage::Ready { manifest, requests, .. } = &msgs[0] else {
+        let PluginMessage::Ready {
+            manifest, requests, ..
+        } = &msgs[0]
+        else {
             panic!("expected ready");
         };
         assert_eq!(manifest.id, "copycat");
@@ -274,8 +284,12 @@ mod tests {
         })
         .unwrap();
         let mut out = Vec::new();
-        let err = serve(CopyCat, std::io::Cursor::new(format!("{hello}\n")), &mut out)
-            .unwrap_err();
+        let err = serve(
+            CopyCat,
+            std::io::Cursor::new(format!("{hello}\n")),
+            &mut out,
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
     }
 
@@ -294,6 +308,10 @@ mod tests {
         .unwrap();
         // Invoke after shutdown must not be served.
         let msgs = conversation(&format!("{hello}\n{shutdown}\n{extra}\n"));
-        assert_eq!(msgs.len(), 1, "only the Ready reply, nothing after shutdown");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "only the Ready reply, nothing after shutdown"
+        );
     }
 }

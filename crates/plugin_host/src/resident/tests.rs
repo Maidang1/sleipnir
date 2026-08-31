@@ -804,6 +804,7 @@ fn declared_capabilities_include_resident_from_lifecycle() {
         lifecycle: PluginLifecycle::Resident,
         binary: "x".into(),
         args: vec![],
+        permissions: BTreeSet::new(),
         commands: vec![crate::PluginCommand {
             id: "run".into(),
             title: "Run".into(),
@@ -817,6 +818,35 @@ fn declared_capabilities_include_resident_from_lifecycle() {
     assert!(caps.contains(&Capability::ReadCwd));
     assert!(caps.contains(&Capability::Resident));
     assert!(!caps.contains(&Capability::SubscribeEvents));
+}
+
+#[test]
+fn declared_capabilities_include_plugin_level_v2_permissions() {
+    // Ready.requests is checked against this set. If plugin.json cannot
+    // name subscribe_events / render_block, a v2 plugin cannot load.
+    let manifest = crate::PluginManifest {
+        id: "failed-run".into(),
+        name: "Failed Run".into(),
+        version: "1".into(),
+        api_version: crate::PLUGIN_API_VERSION_V2,
+        description: String::new(),
+        enabled: true,
+        lifecycle: PluginLifecycle::Resident,
+        binary: "x".into(),
+        args: vec![],
+        permissions: BTreeSet::from([
+            crate::Permission::SubscribeEvents,
+            crate::Permission::RenderBlock,
+            crate::Permission::ReadCwd,
+        ]),
+        commands: vec![],
+    };
+    let caps = declared_capabilities(&manifest);
+    assert!(caps.contains(&Capability::SubscribeEvents));
+    assert!(caps.contains(&Capability::RenderBlock));
+    assert!(caps.contains(&Capability::ReadCwd));
+    assert!(caps.contains(&Capability::Resident));
+    assert!(!caps.contains(&Capability::RenderPanel));
 }
 
 fn connect_subscriber(

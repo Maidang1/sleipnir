@@ -1,5 +1,5 @@
 [package]
-name = "sleipnir-plugin"
+name = "row_geometry"
 version = "0.1.0"
 edition.workspace = true
 publish = false
@@ -9,9 +9,8 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/lib.rs"
+path = "src/row_geometry.rs"
+doctest = false
 
 [dependencies]
 plugin_protocol.workspace = true
-serde_json.workspace = true
-uuid.workspace = true

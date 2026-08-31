@@ -496,6 +496,7 @@ impl AppShell {
                             axis,
                             container: screen_container,
                         });
+                        this.set_all_blocks_frozen(true, cx);
                         cx.notify();
                     }),
                 );
@@ -516,6 +517,7 @@ impl AppShell {
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
                         this.drag = None;
+                        this.set_all_blocks_frozen(false, cx);
                         this.schedule_session_save(cx);
                         cx.notify();
                     }),

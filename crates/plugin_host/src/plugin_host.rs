@@ -37,11 +37,29 @@ use std::time::Duration;
 
 pub mod resident;
 
-pub const PLUGIN_API_VERSION: u32 = PROTOCOL_VERSION;
+/// Default `plugin.json` `api_version` when the field is omitted: v1.
+///
+/// This is **not** `plugin_protocol::PROTOCOL_VERSION` aliased blindly. The
+/// host speaks protocol v2; ADR-0016 §8 keeps v1 manifests loadable for the
+/// N / N-1 window. A missing field must keep meaning "v1", otherwise every
+/// existing `plugin.json` would silently become a v2 manifest.
+pub const PLUGIN_API_VERSION: u32 = 1;
+/// Current manifest / protocol version (ADR-0016).
+pub const PLUGIN_API_VERSION_V2: u32 = plugin_protocol::v2::PROTOCOL_VERSION;
 const MANIFEST_FILE: &str = "plugin.json";
 
-/// Permission is the user-facing capability name; it maps 1:1 to the wire
+/// True when `plugin.json` `api_version` is in the N / N-1 window.
+pub fn api_version_supported(version: u32) -> bool {
+    version == PLUGIN_API_VERSION || version == PLUGIN_API_VERSION_V2
+}
+
+/// Permission is the user-facing capability name; it maps 1:1 to the v2 wire
 /// `Capability`. Kept as its own type so settings/schema stay in this crate.
+///
+/// The v1 seven are snapshots taken when the user asked. The v2 additions are
+/// categorically stronger (ADR-0016 §4) and exist so `plugin.json` can declare
+/// them for pre-launch audit — the whole point of keeping the file
+/// (ADR-0015). They are never implied by the v1 set.
 #[derive(
     Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -54,23 +72,46 @@ pub enum Permission {
     WriteTerminal,
     Clipboard,
     Network,
+    /// Process stays up between invocations.
+    Resident,
+    /// Continuous observation; narrowable with `EventFilter`.
+    SubscribeEvents,
+    RenderBlock,
+    RenderPanel,
+    RenderStatus,
+    HostCallNotify,
+    HostCallReadScreen,
+    HostCallListPanes,
+    HostCallOpenPane,
 }
 
 impl Permission {
-    fn to_capability(self) -> Capability {
+    /// Map onto the v1 wire capability. v2-only permissions have no v1
+    /// equivalent; `run_command` (the per-invocation path) cannot grant them.
+    fn to_capability(self) -> Option<Capability> {
         match self {
-            Self::ReadSelection => Capability::ReadSelection,
-            Self::ReadVisibleScreen => Capability::ReadVisibleScreen,
-            Self::ReadCwd => Capability::ReadCwd,
-            Self::ReadTitle => Capability::ReadTitle,
-            Self::WriteTerminal => Capability::WriteTerminal,
-            Self::Clipboard => Capability::Clipboard,
-            Self::Network => Capability::Network,
+            Self::ReadSelection => Some(Capability::ReadSelection),
+            Self::ReadVisibleScreen => Some(Capability::ReadVisibleScreen),
+            Self::ReadCwd => Some(Capability::ReadCwd),
+            Self::ReadTitle => Some(Capability::ReadTitle),
+            Self::WriteTerminal => Some(Capability::WriteTerminal),
+            Self::Clipboard => Some(Capability::Clipboard),
+            Self::Network => Some(Capability::Network),
+            Self::Resident
+            | Self::SubscribeEvents
+            | Self::RenderBlock
+            | Self::RenderPanel
+            | Self::RenderStatus
+            | Self::HostCallNotify
+            | Self::HostCallReadScreen
+            | Self::HostCallListPanes
+            | Self::HostCallOpenPane => None,
         }
     }
 
-    /// Map onto the v2 wire capability. The v1 seven are 1:1; v2-only
-    /// capabilities are not representable here and must be declared separately.
+    /// Map onto the v2 wire capability. 1:1 with [`Permission`]; snake_case
+    /// names match `plugin_protocol::v2::Capability` so `plugin.json` and
+    /// `plugin-grants.json` share a vocabulary.
     pub fn to_v2(self) -> plugin_protocol::v2::Capability {
         match self {
             Self::ReadSelection => plugin_protocol::v2::Capability::ReadSelection,
@@ -80,6 +121,15 @@ impl Permission {
             Self::WriteTerminal => plugin_protocol::v2::Capability::WriteTerminal,
             Self::Clipboard => plugin_protocol::v2::Capability::Clipboard,
             Self::Network => plugin_protocol::v2::Capability::Network,
+            Self::Resident => plugin_protocol::v2::Capability::Resident,
+            Self::SubscribeEvents => plugin_protocol::v2::Capability::SubscribeEvents,
+            Self::RenderBlock => plugin_protocol::v2::Capability::RenderBlock,
+            Self::RenderPanel => plugin_protocol::v2::Capability::RenderPanel,
+            Self::RenderStatus => plugin_protocol::v2::Capability::RenderStatus,
+            Self::HostCallNotify => plugin_protocol::v2::Capability::HostCallNotify,
+            Self::HostCallReadScreen => plugin_protocol::v2::Capability::HostCallReadScreen,
+            Self::HostCallListPanes => plugin_protocol::v2::Capability::HostCallListPanes,
+            Self::HostCallOpenPane => plugin_protocol::v2::Capability::HostCallOpenPane,
         }
     }
 }
@@ -106,8 +156,9 @@ impl PluginLifecycle {
     }
 }
 
-/// `plugin.json` v1 (ADR-0015). Declares the binary, lifecycle, and the
-/// commands with the capabilities each needs.
+/// `plugin.json` (ADR-0015, extended by ADR-0016). Declares the binary,
+/// lifecycle, and the capabilities the plugin may request. The host trusts this
+/// file for launch and permission decisions; `Ready.requests` cannot exceed it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
@@ -127,6 +178,11 @@ pub struct PluginManifest {
     pub binary: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Plugin-level capabilities (ADR-0016). A resident that never contributes
+    /// a palette command still has to declare `subscribe_events` / `render_*`
+    /// here so a user can audit them without running the binary.
+    #[serde(default)]
+    pub permissions: BTreeSet<Permission>,
     #[serde(default)]
     pub commands: Vec<PluginCommand>,
 }
@@ -169,11 +225,28 @@ impl PluginContext {
     }
 }
 
+/// One discovered plugin, whether or not it contributes palette commands.
+///
+/// v2 residents can be command-less (they live on events and `Render`). The
+/// catalog has to retain them or they are invisible to auto-start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedPlugin {
+    pub manifest: PluginManifest,
+    pub directory: PathBuf,
+}
+
+impl LoadedPlugin {
+    pub fn id(&self) -> &str {
+        &self.manifest.id
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedPluginCommand {
     pub plugin_id: String,
     pub plugin_name: String,
     pub plugin_version: String,
+    pub api_version: u32,
     pub lifecycle: PluginLifecycle,
     pub binary: String,
     pub args: Vec<String>,
@@ -189,6 +262,7 @@ impl LoadedPluginCommand {
 
 #[derive(Clone, Debug, Default)]
 pub struct PluginCatalog {
+    pub plugins: Vec<LoadedPlugin>,
     pub commands: Vec<LoadedPluginCommand>,
     pub diagnostics: Vec<String>,
 }
@@ -274,7 +348,8 @@ pub fn load_catalog(extra_dirs: &[PathBuf]) -> PluginCatalog {
 
 pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
     let mut catalog = PluginCatalog::default();
-    let mut seen = HashSet::new();
+    let mut seen_plugins = HashSet::new();
+    let mut seen_commands = HashSet::new();
 
     for root in roots {
         let entries = match fs::read_dir(root) {
@@ -302,9 +377,15 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
             match load_manifest(&manifest_path) {
                 Ok(manifest) if !manifest.enabled => {}
                 Ok(manifest) => {
+                    if !seen_plugins.insert(manifest.id.clone()) {
+                        catalog
+                            .diagnostics
+                            .push(format!("duplicate plugin id: {}", manifest.id));
+                        continue;
+                    }
                     for command in &manifest.commands {
                         let qualified = format!("{}.{}", manifest.id, command.id);
-                        if !seen.insert(qualified.clone()) {
+                        if !seen_commands.insert(qualified.clone()) {
                             catalog
                                 .diagnostics
                                 .push(format!("duplicate plugin command: {qualified}"));
@@ -314,6 +395,7 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
                             plugin_id: manifest.id.clone(),
                             plugin_name: manifest.name.clone(),
                             plugin_version: manifest.version.clone(),
+                            api_version: manifest.api_version,
                             lifecycle: manifest.lifecycle,
                             binary: manifest.binary.clone(),
                             args: manifest.args.clone(),
@@ -321,6 +403,10 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
                             directory: directory.clone(),
                         });
                     }
+                    catalog.plugins.push(LoadedPlugin {
+                        manifest,
+                        directory: directory.clone(),
+                    });
                 }
                 Err(err) => catalog
                     .diagnostics
@@ -340,9 +426,9 @@ fn load_manifest(path: &Path) -> Result<PluginManifest, PluginError> {
 }
 
 fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginError> {
-    if manifest.api_version != PLUGIN_API_VERSION {
+    if !api_version_supported(manifest.api_version) {
         return Err(PluginError::InvalidManifest(format!(
-            "unsupported api_version {} (expected {PLUGIN_API_VERSION})",
+            "unsupported api_version {} (supported: {PLUGIN_API_VERSION}, {PLUGIN_API_VERSION_V2})",
             manifest.api_version
         )));
     }
@@ -357,7 +443,12 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginError> {
             "binary must not be empty".into(),
         ));
     }
-    if manifest.commands.is_empty() {
+    // v1 plugins are palette commands. A v2 resident may have none: it lives
+    // on events and Render, and plugin-level `permissions` is the audit.
+    if manifest.commands.is_empty()
+        && !(manifest.api_version == PLUGIN_API_VERSION_V2
+            && manifest.lifecycle == PluginLifecycle::Resident)
+    {
         return Err(PluginError::InvalidManifest(
             "at least one command is required".into(),
         ));
@@ -425,7 +516,8 @@ pub fn run_command(
         .command
         .permissions
         .iter()
-        .map(|p| p.to_capability())
+        .copied()
+        .filter_map(Permission::to_capability)
         .collect();
 
     let program = resolve_binary(&plugin.directory, &plugin.binary);
@@ -699,6 +791,7 @@ mod tests {
             plugin_id: "x".into(),
             plugin_name: "X".into(),
             plugin_version: "1".into(),
+            api_version: PLUGIN_API_VERSION,
             lifecycle: PluginLifecycle::OnDemand,
             binary: "/nonexistent/plugin-binary".into(),
             args: vec![],
@@ -717,5 +810,135 @@ mod tests {
             err,
             PluginError::PermissionDenied(Permission::Network)
         ));
+    }
+
+    #[test]
+    fn v1_manifest_without_api_version_still_loads() {
+        // ADR-0016 §8: omitting api_version must keep meaning v1, not silently
+        // become v2 when the host's current protocol moves on.
+        let temp = tempfile::TempDir::new().unwrap();
+        write_plugin(
+            temp.path(),
+            "alpha",
+            r#"{"id":"alpha","name":"Alpha","version":"1","binary":"x","commands":[{"id":"run","title":"Run"}]}"#,
+        );
+        let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
+        assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
+        assert_eq!(catalog.plugins.len(), 1);
+        assert_eq!(catalog.plugins[0].manifest.api_version, PLUGIN_API_VERSION);
+        assert_eq!(catalog.commands[0].api_version, PLUGIN_API_VERSION);
+    }
+
+    #[test]
+    fn v2_manifest_loads_with_new_permissions_and_no_commands() {
+        let temp = tempfile::TempDir::new().unwrap();
+        write_plugin(
+            temp.path(),
+            "failed-run",
+            r#"{
+                "id":"failed-run",
+                "name":"Failed Run",
+                "version":"0.1.0",
+                "api_version":2,
+                "lifecycle":"resident",
+                "binary":"./sleipnir-plugin-failed-run",
+                "permissions":["subscribe_events","render_block","read_cwd"]
+            }"#,
+        );
+        let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
+        assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
+        assert_eq!(catalog.plugins.len(), 1);
+        assert!(
+            catalog.commands.is_empty(),
+            "a command-less resident has no palette entries"
+        );
+        let plugin = &catalog.plugins[0];
+        assert_eq!(plugin.manifest.api_version, PLUGIN_API_VERSION_V2);
+        assert_eq!(plugin.manifest.lifecycle, PluginLifecycle::Resident);
+        assert!(
+            plugin
+                .manifest
+                .permissions
+                .contains(&Permission::SubscribeEvents)
+        );
+        assert!(
+            plugin
+                .manifest
+                .permissions
+                .contains(&Permission::RenderBlock)
+        );
+        assert!(plugin.manifest.permissions.contains(&Permission::ReadCwd));
+        let caps = crate::resident::declared_capabilities(&plugin.manifest);
+        assert!(caps.contains(&plugin_protocol::v2::Capability::SubscribeEvents));
+        assert!(caps.contains(&plugin_protocol::v2::Capability::RenderBlock));
+        assert!(caps.contains(&plugin_protocol::v2::Capability::ReadCwd));
+        assert!(caps.contains(&plugin_protocol::v2::Capability::Resident));
+    }
+
+    #[test]
+    fn v2_host_call_permissions_parse() {
+        let temp = tempfile::TempDir::new().unwrap();
+        write_plugin(
+            temp.path(),
+            "calls",
+            r#"{
+                "id":"calls",
+                "name":"Calls",
+                "version":"1",
+                "api_version":2,
+                "lifecycle":"resident",
+                "binary":"x",
+                "permissions":[
+                    "resident",
+                    "render_panel",
+                    "render_status",
+                    "host_call_notify",
+                    "host_call_read_screen",
+                    "host_call_list_panes",
+                    "host_call_open_pane"
+                ]
+            }"#,
+        );
+        let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
+        assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
+        let perms = &catalog.plugins[0].manifest.permissions;
+        assert!(perms.contains(&Permission::HostCallNotify));
+        assert!(perms.contains(&Permission::HostCallOpenPane));
+        assert!(perms.contains(&Permission::RenderPanel));
+        assert!(perms.contains(&Permission::RenderStatus));
+    }
+
+    #[test]
+    fn unsupported_api_version_is_rejected() {
+        let temp = tempfile::TempDir::new().unwrap();
+        write_plugin(
+            temp.path(),
+            "future",
+            r#"{"id":"future","name":"Future","version":"1","api_version":3,"binary":"x","commands":[{"id":"run","title":"Run"}]}"#,
+        );
+        let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
+        assert!(catalog.plugins.is_empty());
+        assert!(
+            catalog.diagnostics[0].contains("unsupported api_version 3"),
+            "{:?}",
+            catalog.diagnostics
+        );
+    }
+
+    #[test]
+    fn v1_manifest_still_requires_a_command() {
+        let temp = tempfile::TempDir::new().unwrap();
+        write_plugin(
+            temp.path(),
+            "empty",
+            r#"{"id":"empty","name":"Empty","version":"1","binary":"x"}"#,
+        );
+        let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
+        assert!(catalog.plugins.is_empty());
+        assert!(
+            catalog.diagnostics[0].contains("at least one command"),
+            "{:?}",
+            catalog.diagnostics
+        );
     }
 }

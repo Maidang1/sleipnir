@@ -5269,6 +5269,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "row_geometry"
+version = "0.1.0"
+dependencies = [
+ "plugin_protocol",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5860,6 +5867,14 @@ version = "0.1.0"
 dependencies = [
  "plugin_protocol",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "sleipnir-plugin-failed-run"
+version = "0.1.0"
+dependencies = [
+ "sleipnir-plugin",
 ]
 
 [[package]]
@@ -5919,6 +5934,7 @@ dependencies = [
  "plugin_host",
  "plugin_protocol",
  "release_channel",
+ "row_geometry",
  "run_ledger",
  "serde",
  "serde_json",
@@ -6401,6 +6417,7 @@ dependencies = [
  "rand 0.9.5",
  "regex",
  "release_channel",
+ "row_geometry",
  "run_ledger",
  "serde",
  "sleipnir_settings",

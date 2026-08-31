@@ -9,12 +9,14 @@ use gpui::{
     relative, size,
 };
 use itertools::Itertools;
+use row_geometry::{HitTarget, RowGeometry};
 use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
 use std::time::Instant;
 use terminal::{
     Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
     Rgb, Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
+    viewport_top_abs, y_for_display,
 };
 
 pub struct TermElement {
@@ -89,12 +91,13 @@ impl BatchedTextRun {
         &self,
         origin: GpuiPoint<Pixels>,
         dimensions: &TerminalBounds,
+        map: &PaintMap,
         window: &mut Window,
         cx: &mut App,
     ) {
         let pos = GpuiPoint::new(
             origin.x + self.start.column as f32 * dimensions.cell_width,
-            origin.y + self.start.line as f32 * dimensions.line_height,
+            map.y(origin, self.start.line),
         );
         let force_width = if dimensions.cell_width > px(0.) {
             Some(dimensions.cell_width)
@@ -130,6 +133,37 @@ struct BgRect {
     color: gpui::Hsla,
 }
 
+/// Display-line → pixel y via RowGeometry (ADR-0018). The only path.
+#[derive(Clone)]
+struct PaintMap {
+    geom: RowGeometry,
+    top_abs: i32,
+    sub: f32,
+}
+
+impl PaintMap {
+    fn y(&self, origin: GpuiPoint<Pixels>, display_line: i32) -> Pixels {
+        origin.y
+            + px(y_for_display(
+                &self.geom,
+                display_line,
+                self.top_abs,
+                self.sub,
+            ))
+    }
+
+    fn h(&self, display_line: i32) -> Pixels {
+        let h = self
+            .geom
+            .height_of(self.top_abs.saturating_add(display_line));
+        if h.is_finite() && h > 0.0 {
+            px(h)
+        } else {
+            px(0.0)
+        }
+    }
+}
+
 pub struct LayoutState {
     hitbox: gpui::Hitbox,
     dimensions: TerminalBounds,
@@ -149,6 +183,15 @@ pub struct LayoutState {
     /// Whether to request another animation frame (M11).
     blink_animating: bool,
     gutter: Vec<GutterPaint>,
+    map: PaintMap,
+    block_paints: Vec<BlockPaint>,
+}
+
+struct BlockPaint {
+    display_line: i32,
+    layout: sleipnir_widget::Layout,
+    stale: bool,
+    frozen: bool,
 }
 
 struct GutterPaint {
@@ -204,6 +247,7 @@ impl Element for TermElement {
         let terminal_wants_blink = self.terminal_wants_blink;
         let focused = self.focused;
         let terminal = self.terminal.clone();
+        let view = self.view.clone();
 
         self.interactivity.prepaint(
             global_id,
@@ -275,6 +319,31 @@ impl Element for TermElement {
                     terminal.sync(window, cx);
                     terminal.last_content().clone()
                 });
+                view.update(cx, |v, cx| v.sync_block_lifecycle(cx));
+
+                let history = terminal.read(cx).history_size() as i32;
+                let sub = terminal.read(cx).viewport_sub();
+                let geom = terminal.read(cx).row_geometry().clone();
+                let top_abs = viewport_top_abs(history, content.display_offset);
+                let map = PaintMap {
+                    geom: geom.clone(),
+                    top_abs,
+                    sub,
+                };
+                let frozen = geom.is_frozen();
+                let skip_lines: std::collections::HashSet<i32> = if content
+                    .mode
+                    .contains(Modes::ALT_SCREEN)
+                {
+                    Default::default()
+                } else {
+                    geom.blocks()
+                        .filter(|b| b.height > 0)
+                        .map(|b| {
+                            absolute_to_display_line(b.anchor.line, history, content.display_offset)
+                        })
+                        .collect()
+                };
 
                 let selection_range = content.selection.map(|sel| sel.point_range());
                 let (batches, backgrounds) = layout_grid(
@@ -283,6 +352,7 @@ impl Element for TermElement {
                     font_size,
                     palette.as_ref(),
                     selection_range,
+                    &skip_lines,
                 );
 
                 log::debug!(
@@ -324,9 +394,9 @@ impl Element for TermElement {
                 let ime_cursor_bounds = Some(Bounds::new(
                     point(
                         origin.x + cursor_point.column as f32 * cell_width,
-                        origin.y + display_line as f32 * line_height,
+                        map.y(origin, display_line),
                     ),
-                    size(cell_width, line_height),
+                    size(cell_width, map.h(display_line).max(line_height)),
                 ));
 
                 // Honor DECTCEM / app cursor-hide (CSI ?25l). Full-screen TUIs
@@ -349,7 +419,6 @@ impl Element for TermElement {
                     {
                         Vec::new()
                     } else {
-                        let history = terminal.read(cx).history_size() as i32;
                         let rows = dimensions.num_lines() as i32;
                         terminal
                             .read(cx)
@@ -383,6 +452,32 @@ impl Element for TermElement {
                         TerminalBlink::TerminalControlled => terminal_wants_blink,
                     };
 
+                let mut block_paints = Vec::new();
+                if !content.mode.contains(Modes::ALT_SCREEN) {
+                    let rows = dimensions.num_lines() as i32;
+                    view.read(cx).blocks().iter().for_each(|surface| {
+                        let display_line = absolute_to_display_line(
+                            surface.anchor.line,
+                            history,
+                            content.display_offset,
+                        );
+                        // One extra row of overscan at each edge so a sub-row
+                        // remainder does not clip a partial Block.
+                        if display_line < -1 || display_line > rows {
+                            return;
+                        }
+                        let Some(laid) = surface.laid.clone() else {
+                            return;
+                        };
+                        block_paints.push(BlockPaint {
+                            display_line,
+                            layout: laid,
+                            stale: surface.stale,
+                            frozen,
+                        });
+                    });
+                }
+
                 LayoutState {
                     hitbox,
                     dimensions,
@@ -402,6 +497,8 @@ impl Element for TermElement {
                     blink_alpha,
                     blink_animating,
                     gutter,
+                    map,
+                    block_paints,
                 }
             },
         )
@@ -446,20 +543,29 @@ impl Element for TermElement {
                     window.set_cursor_style(cursor_style, &layout.hitbox);
 
                     for bg in &layout.backgrounds {
-                        paint_bg(origin, bg, &layout.dimensions, window);
+                        paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
                     }
                     for bg in &layout.search_rects {
-                        paint_bg(origin, bg, &layout.dimensions, window);
+                        paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
                     }
                     // Hover link underlines (M11): thin strip at bottom of each cell span.
                     for ul in &layout.hover_underlines {
-                        paint_underline(origin, ul, &layout.dimensions, window);
+                        paint_underline(origin, ul, &layout.dimensions, &layout.map, window);
                     }
                     for batch in &layout.batches {
-                        batch.paint(origin, &layout.dimensions, window, cx);
+                        batch.paint(origin, &layout.dimensions, &layout.map, window, cx);
                     }
                     for mark in &layout.gutter {
-                        paint_gutter_triangle(origin, mark, &layout.dimensions, window);
+                        paint_gutter_triangle(
+                            origin,
+                            mark,
+                            &layout.dimensions,
+                            &layout.map,
+                            window,
+                        );
+                    }
+                    for block in &layout.block_paints {
+                        paint_block(origin, block, &layout.dimensions, &layout.map, window, cx);
                     }
 
                     if self.focused
@@ -475,6 +581,7 @@ impl Element for TermElement {
                                 ch,
                                 origin,
                                 &layout.dimensions,
+                                &layout.map,
                                 layout.blink_alpha,
                                 window,
                                 cx,
@@ -495,6 +602,7 @@ impl Element for TermElement {
 impl TermElement {
     fn register_mouse_listeners(&mut self, window: &mut Window) {
         let terminal = self.terminal.clone();
+        let view = self.view.clone();
         let focus = self.focus.clone();
 
         // Forward left/right/middle so mouse-mode apps (Herdr, vim, etc.) receive
@@ -503,9 +611,13 @@ impl TermElement {
         for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
             self.interactivity.on_mouse_down(button, {
                 let terminal = terminal.clone();
+                let view = view.clone();
                 let focus = focus.clone();
                 move |e: &MouseDownEvent, window, cx| {
                     window.focus(&focus, cx);
+                    if button == MouseButton::Left && try_block_click(&terminal, &view, e, cx) {
+                        return;
+                    }
                     if button == MouseButton::Left && try_gutter_click(&terminal, e, cx) {
                         return;
                     }
@@ -573,16 +685,17 @@ fn paint_bg(
     origin: GpuiPoint<Pixels>,
     bg: &BgRect,
     dimensions: &TerminalBounds,
+    map: &PaintMap,
     window: &mut Window,
 ) {
     let rect = Bounds::new(
         point(
             origin.x + bg.start_col as f32 * dimensions.cell_width,
-            origin.y + bg.line as f32 * dimensions.line_height,
+            map.y(origin, bg.line),
         ),
         size(
             ((bg.end_col - bg.start_col + 1) as f32) * dimensions.cell_width,
-            dimensions.line_height,
+            map.h(bg.line).max(px(1.)),
         ),
     );
     window.paint_quad(fill(rect, bg.color));
@@ -593,9 +706,10 @@ fn paint_underline(
     origin: GpuiPoint<Pixels>,
     bg: &BgRect,
     dimensions: &TerminalBounds,
+    map: &PaintMap,
     window: &mut Window,
 ) {
-    let h = (dimensions.line_height * 0.08).max(px(1.));
+    let h = (map.h(bg.line) * 0.08).max(px(1.));
     let width_cells = (bg.end_col - bg.start_col + 1).max(1) as f32;
     // Cap absurd LINE_END spans to the visible width.
     let max_cols = dimensions.num_columns() as f32;
@@ -603,7 +717,7 @@ fn paint_underline(
     let rect = Bounds::new(
         point(
             origin.x + bg.start_col as f32 * dimensions.cell_width,
-            origin.y + (bg.line as f32 + 1.0) * dimensions.line_height - h,
+            map.y(origin, bg.line) + map.h(bg.line) - h,
         ),
         size(cols * dimensions.cell_width, h),
     );
@@ -621,11 +735,13 @@ fn gutter_color(status: Option<i32>, palette: &TerminalPalette) -> gpui::Hsla {
 fn paint_gutter_triangle(
     origin: GpuiPoint<Pixels>,
     mark: &GutterPaint,
-    dimensions: &TerminalBounds,
+    _dimensions: &TerminalBounds,
+    map: &PaintMap,
     window: &mut Window,
 ) {
-    let mid_y = origin.y + (mark.display_line as f32 + 0.5) * dimensions.line_height;
-    let h = dimensions.line_height.min(px(8.0));
+    let row_h = map.h(mark.display_line);
+    let mid_y = map.y(origin, mark.display_line) + row_h * 0.5;
+    let h = row_h.min(px(8.0));
     let step = px(2.0);
     let x0 = origin.x + px(1.0);
     for i in 0..3 {
@@ -645,13 +761,46 @@ fn paint_gutter_triangle(
     }
 }
 
+fn try_block_click(
+    terminal: &Entity<Terminal>,
+    view: &Entity<crate::TermView>,
+    e: &MouseDownEvent,
+    cx: &mut App,
+) -> bool {
+    let content = terminal.read(cx).last_content().clone();
+    if content.mode.contains(Modes::ALT_SCREEN) {
+        return false;
+    }
+    let origin = content.terminal_bounds.bounds.origin;
+    let local = gpui::point(e.position.x - origin.x, e.position.y - origin.y);
+    let hit = terminal.read(cx).hit_local(local);
+    let HitTarget::Block { id, local_y } = hit else {
+        return false;
+    };
+    let cell_w = f32::from(content.terminal_bounds.cell_width);
+    let line_h = f32::from(content.terminal_bounds.line_height);
+    let pos = crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
+    let Some(surface) = view.read(cx).blocks().get(id).cloned() else {
+        return true;
+    };
+    if surface.stale {
+        return true;
+    }
+    let Some(laid) = surface.laid.as_ref() else {
+        return true;
+    };
+    if let Some(hit) = crate::plugin_block::action_at(laid, pos.col, pos.row) {
+        crate::plugin_runtime::push_action(&surface.plugin_id, id, hit.action, hit.arg, cx);
+    }
+    true
+}
+
 fn try_gutter_click(terminal: &Entity<Terminal>, e: &MouseDownEvent, cx: &mut App) -> bool {
     let content = terminal.read(cx).last_content().clone();
     if content.mode.contains(Modes::ALT_SCREEN) {
         return false;
     }
     let origin = content.terminal_bounds.bounds.origin;
-    let line_h = content.terminal_bounds.line_height;
     let x = e.position.x - origin.x;
     if x < px(0.) || x > px(8.) {
         return false;
@@ -660,8 +809,18 @@ fn try_gutter_click(terminal: &Entity<Terminal>, e: &MouseDownEvent, cx: &mut Ap
     if y < px(0.) {
         return false;
     }
-    let display_line = (f32::from(y) / f32::from(line_h).max(1.0)).floor() as i32;
     let history = terminal.read(cx).history_size() as i32;
+    let hit = terminal.read(cx).hit_local(gpui::point(x, y));
+    let abs = match hit {
+        HitTarget::Cell { line } => line,
+        HitTarget::Block { id, .. } => terminal
+            .read(cx)
+            .row_geometry()
+            .get(id)
+            .map(|b| b.anchor.line)
+            .unwrap_or(0),
+    };
+    let display_line = absolute_to_display_line(abs, history, content.display_offset);
     let marks = terminal.read(cx).gutter_overlay();
     let Some(mark) = marks.into_iter().find(|m| {
         absolute_to_display_line(m.line, history, content.display_offset) == display_line
@@ -760,6 +919,7 @@ fn layout_grid(
     font_size: Pixels,
     palette: &TerminalPalette,
     selection: Option<TerminalRange>,
+    skip_lines: &std::collections::HashSet<i32>,
 ) -> (Vec<BatchedTextRun>, Vec<BgRect>) {
     let mut batches: Vec<BatchedTextRun> = Vec::new();
     let mut backgrounds: Vec<BgRect> = Vec::new();
@@ -771,6 +931,9 @@ fn layout_grid(
             batches.push(batch);
         }
         let display_line = line_index as i32;
+        if skip_lines.contains(&display_line) {
+            continue;
+        }
 
         for indexed in line {
             let cell = &indexed.cell;
@@ -869,6 +1032,7 @@ fn paint_terminal_cursor(
     ch: char,
     origin: GpuiPoint<Pixels>,
     dimensions: &TerminalBounds,
+    map: &PaintMap,
     blink_alpha: f32,
     window: &mut Window,
     cx: &mut App,
@@ -877,9 +1041,9 @@ fn paint_terminal_cursor(
     let cursor_color = palette.cursor.opacity(blink_alpha.clamp(0.0, 1.0));
     let cell_origin = point(
         origin.x + col as f32 * dimensions.cell_width,
-        origin.y + line as f32 * dimensions.line_height,
+        map.y(origin, line),
     );
-    let cell = size(dimensions.cell_width, dimensions.line_height);
+    let cell = size(dimensions.cell_width, map.h(line).max(px(1.)));
 
     match shape {
         CursorShape::Hidden => {}
@@ -927,19 +1091,152 @@ fn paint_terminal_cursor(
             }
         }
         CursorShape::Underline => {
-            let h = (dimensions.line_height * 0.12).max(px(1.));
+            let row_h = map.h(line);
+            let h = (row_h * 0.12).max(px(1.));
             let underline = Bounds::new(
-                point(cell_origin.x, cell_origin.y + dimensions.line_height - h),
+                point(cell_origin.x, cell_origin.y + row_h - h),
                 size(dimensions.cell_width, h),
             );
             window.paint_quad(fill(underline, cursor_color));
         }
         CursorShape::Bar => {
             let w = (dimensions.cell_width * 0.15).max(px(1.));
-            let bar = Bounds::new(cell_origin, size(w, dimensions.line_height));
+            let bar = Bounds::new(cell_origin, size(w, map.h(line)));
             window.paint_quad(fill(bar, cursor_color));
         }
     }
+}
+
+fn paint_block(
+    origin: GpuiPoint<Pixels>,
+    block: &BlockPaint,
+    dimensions: &TerminalBounds,
+    map: &PaintMap,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let palette = TerminalPalette::get_global(cx);
+    let top = map.y(origin, block.display_line);
+    let height = map.h(block.display_line).max(px(1.));
+    let width = dimensions.bounds.size.width;
+    let bounds = Bounds::new(point(origin.x, top), size(width, height));
+    let bg = if block.frozen {
+        palette.background.blend(gpui::Hsla::black().opacity(0.12))
+    } else if block.stale {
+        palette.background.blend(gpui::Hsla::black().opacity(0.2))
+    } else {
+        palette.background
+    };
+    window.paint_quad(fill(bounds, bg));
+    if block.frozen {
+        return;
+    }
+    let cell_w = dimensions.cell_width;
+    let line_h = dimensions.line_height;
+    let font_size = TerminalSettings::get_global(cx)
+        .font_size
+        .unwrap_or(px(14.));
+    for node in block.layout.walk() {
+        paint_laid_node(
+            origin.x,
+            top,
+            node,
+            cell_w,
+            line_h,
+            palette.as_ref(),
+            font_size,
+            window,
+            cx,
+        );
+    }
+    paint_laid_node(
+        origin.x,
+        top,
+        &block.layout.attribution,
+        cell_w,
+        line_h,
+        palette.as_ref(),
+        font_size,
+        window,
+        cx,
+    );
+}
+
+fn paint_laid_node(
+    origin_x: Pixels,
+    block_top: Pixels,
+    node: &sleipnir_widget::LaidOut,
+    cell_w: Pixels,
+    line_h: Pixels,
+    palette: &TerminalPalette,
+    font_size: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use sleipnir_widget::LaidOutKind;
+    let r = node.rect;
+    let x = origin_x + cell_w * r.col as f32;
+    let y = block_top + line_h * r.row as f32;
+    let w = cell_w * r.width as f32;
+    let h = line_h * r.height.max(1) as f32;
+    let color = match &node.kind {
+        LaidOutKind::Text { role, .. } | LaidOutKind::Badge { role, .. } => match role {
+            sleipnir_widget::ToneRole::Foreground => palette.foreground,
+            sleipnir_widget::ToneRole::Muted => palette.foreground.opacity(0.55),
+            sleipnir_widget::ToneRole::Accent => palette.ansi[4],
+            sleipnir_widget::ToneRole::Success => palette.ansi[2],
+            sleipnir_widget::ToneRole::Warning => palette.ansi[3],
+            sleipnir_widget::ToneRole::Danger => palette.ansi[1],
+        },
+        LaidOutKind::Attribution { .. } => palette.foreground.opacity(0.55),
+        LaidOutKind::Btn { .. } => palette.ansi[4],
+        LaidOutKind::Truncated => palette.ansi[3],
+        _ => palette.foreground,
+    };
+    let text = match &node.kind {
+        LaidOutKind::Text { lines, .. } => lines.join("\n"),
+        LaidOutKind::Code { lines } => lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => text.clone(),
+        LaidOutKind::Attribution { label, .. } => label.clone(),
+        LaidOutKind::Unknown => "[?]".into(),
+        LaidOutKind::Truncated => "… truncated".into(),
+        LaidOutKind::Sep => {
+            window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.))), color));
+            return;
+        }
+        LaidOutKind::Bar { filled, width: bw } => {
+            let fill_w = w * (*filled as f32 / (*bw).max(1) as f32);
+            window.paint_quad(fill(
+                Bounds::new(point(x, y), size(w, h)),
+                palette.background.blend(gpui::Hsla::black().opacity(0.15)),
+            ));
+            window.paint_quad(fill(
+                Bounds::new(point(x, y), size(fill_w, h)),
+                palette.ansi[4],
+            ));
+            return;
+        }
+        LaidOutKind::Col | LaidOutKind::Row | LaidOutKind::Spark { .. } => return,
+    };
+    if text.is_empty() {
+        return;
+    }
+    let style = TextRun {
+        len: text.len(),
+        font: window.text_style().font(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let _ = window
+        .text_system()
+        .shape_line(text.into(), font_size, &[style], None)
+        .paint(point(x, y), line_h, gpui::TextAlign::Left, None, window, cx);
 }
 
 /// Use the active theme's ANSI red for an unmistakable selected-input fill.

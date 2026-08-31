@@ -37,6 +37,7 @@ vte.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
 run_ledger.workspace = true
+row_geometry.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

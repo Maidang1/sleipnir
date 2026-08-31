@@ -33,6 +33,7 @@ plugin_host.workspace = true
 plugin_grants.workspace = true
 plugin_protocol.workspace = true
 sleipnir_widget.workspace = true
+row_geometry.workspace = true
 sysinfo.workspace = true
 async-channel.workspace = true
 

@@ -83,14 +83,22 @@ impl LaunchSpec {
     }
 }
 
-/// Union of every command permission in `plugin.json`, plus `Resident` when
-/// the manifest declares that lifecycle. Ready.requests must be a subset.
+/// Union of plugin-level and per-command permissions in `plugin.json`, plus
+/// `Resident` when the manifest declares that lifecycle. Ready.requests must
+/// be a subset. Plugin-level permissions exist so a command-less resident can
+/// still be audited before launch (ADR-0015 / ADR-0016).
 pub fn declared_capabilities(manifest: &PluginManifest) -> BTreeSet<Capability> {
     let mut set: BTreeSet<Capability> = manifest
-        .commands
+        .permissions
         .iter()
-        .flat_map(|command| command.permissions.iter().copied().map(Permission::to_v2))
+        .copied()
+        .map(Permission::to_v2)
         .collect();
+    for command in &manifest.commands {
+        for permission in &command.permissions {
+            set.insert(permission.to_v2());
+        }
+    }
     if manifest.lifecycle == PluginLifecycle::Resident {
         set.insert(Capability::Resident);
     }

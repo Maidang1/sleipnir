@@ -389,9 +389,7 @@ impl AppShell {
                                 // panel title plus the empty-state line already
                                 // say "no plugins", so a "0 plugins" counter here
                                 // is the same fact a third time.
-                                .when(running > 0, |el| {
-                                    el.child(running_indicator_label(running))
-                                }),
+                                .when(running > 0, |el| el.child(running_indicator_label(running))),
                         ),
                 )
                 .child(body),

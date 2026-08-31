@@ -12,6 +12,7 @@ mod finder_service;
 mod git_service;
 mod keymap;
 mod pane_tree;
+mod plugin_block;
 mod plugin_chrome;
 mod plugin_event_watch;
 mod plugin_host_calls;
@@ -144,6 +145,9 @@ pub struct TermView {
     last_render_at: Option<Instant>,
     /// Last repaint we requested while off screen (throttle bookkeeping).
     last_offscreen_notify_at: Option<Instant>,
+    /// Host-owned Block surfaces for this pane (ADR-0018). Process-local.
+    blocks: crate::plugin_block::BlockRegistry,
+    last_block_history: usize,
     _spawn: Task<()>,
 }
 
@@ -248,6 +252,8 @@ impl TermView {
             copy_toast: None,
             last_render_at: None,
             last_offscreen_notify_at: None,
+            blocks: crate::plugin_block::BlockRegistry::new(),
+            last_block_history: 0,
             _spawn: spawn,
         }
     }
@@ -335,6 +341,92 @@ impl TermView {
                 cx.notify();
             });
         }
+    }
+
+    pub(crate) fn blocks(&self) -> &crate::plugin_block::BlockRegistry {
+        &self.blocks
+    }
+
+    pub(crate) fn apply_block_render(
+        &mut self,
+        plugin_id: &str,
+        run_id: plugin_protocol::v2::RunId,
+        tree: plugin_protocol::v2::Widget,
+        granted: bool,
+        ledger_anchor: Option<run_ledger::Anchor>,
+        existing_id: Option<plugin_protocol::v2::BlockId>,
+        cx: &mut Context<Self>,
+    ) -> crate::plugin_block::ApplyBlock {
+        use crate::plugin_block::ApplyBlock;
+        let out =
+            self.blocks
+                .apply_render(plugin_id, run_id, tree, granted, ledger_anchor, existing_id);
+        if matches!(out, ApplyBlock::Inserted | ApplyBlock::Replaced) {
+            self.sync_blocks_to_terminal(cx);
+        }
+        out
+    }
+
+    pub(crate) fn mark_blocks_stale(&mut self, plugin_id: &str) {
+        self.blocks.mark_plugin_stale(plugin_id);
+    }
+
+    pub(crate) fn mark_missing_blocks_stale(&mut self, live: &std::collections::BTreeSet<String>) {
+        self.blocks.mark_missing_stale(live);
+    }
+
+    pub(crate) fn set_blocks_frozen(&mut self, frozen: bool, cx: &mut Context<Self>) {
+        if !frozen {
+            self.blocks.invalidate_layouts();
+        }
+        if let Some(term) = self.terminal_entity().cloned() {
+            term.update(cx, |term, _| term.set_blocks_frozen(frozen));
+        }
+        if !frozen {
+            self.sync_blocks_to_terminal(cx);
+        }
+    }
+
+    pub(crate) fn sync_block_lifecycle(&mut self, cx: &mut Context<Self>) {
+        let Some(term) = self.terminal_entity().cloned() else {
+            return;
+        };
+        let hist = term.read(cx).history_size();
+        if hist < self.last_block_history {
+            let removed = (self.last_block_history - hist) as i32;
+            self.blocks.rebase_after_history_shrink(removed);
+        }
+        self.last_block_history = hist;
+        self.sync_blocks_to_terminal(cx);
+    }
+
+    fn sync_blocks_to_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(term) = self.terminal_entity().cloned() else {
+            return;
+        };
+        let cols = term
+            .read(cx)
+            .last_content()
+            .terminal_bounds
+            .num_columns()
+            .min(u16::MAX as usize) as u16;
+        let frozen = term.read(cx).row_geometry().is_frozen();
+        self.blocks.relayout(cols.max(1), frozen);
+        let blocks = self.blocks.geometry_blocks();
+        let live: std::collections::BTreeSet<_> = blocks.iter().map(|b| b.id).collect();
+        self.blocks.retain_live(&live);
+        term.update(cx, |term, _| {
+            let keep: std::collections::BTreeSet<_> =
+                term.row_geometry().blocks().map(|b| b.id).collect();
+            for id in keep {
+                if !blocks.iter().any(|b| b.id == id) {
+                    term.remove_block(id);
+                }
+            }
+            for b in blocks {
+                term.upsert_block(b);
+            }
+        });
     }
 
     fn attach_terminal(
@@ -1761,6 +1853,49 @@ mod tests {
     /// a new module never silently drops it from the scans below. This file is
     /// skipped because the assertions themselves contain the markup they look
     /// for, which would otherwise satisfy every check trivially.
+    /// ADR-0018: a future patch must not silently reintroduce `line * line_height`
+    /// for a y coordinate. Widget-local cell rows (plugin_block paint) are
+    /// integer cells, not grid display lines, and are excluded.
+    #[test]
+    fn host_y_coordinates_go_through_row_geometry() {
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let term = std::fs::read_to_string(src_dir.join("term_element.rs")).unwrap();
+        for needle in [
+            "as f32 * dimensions.line_height",
+            "as f32 * line_height",
+            "as f32 + 0.5) * dimensions.line_height",
+            "as f32 + 1.0) * dimensions.line_height",
+            "as f32 + 0.5) * line_height",
+        ] {
+            assert!(
+                !term.contains(needle),
+                "term_element.rs must not compute a y as line * line_height ({needle})"
+            );
+        }
+        assert!(
+            term.contains("y_for_display") && term.contains("PaintMap"),
+            "term_element.rs must route y through RowGeometry via PaintMap"
+        );
+        let terminal_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("terminal")
+            .join("src");
+        for name in ["mappings/mouse.rs", "terminal.rs"] {
+            let src = std::fs::read_to_string(terminal_dir.join(name)).unwrap();
+            assert!(
+                !src.contains("pos.y / cur_size.line_height")
+                    && !src.contains("pos.y / terminal_bounds.line_height"),
+                "{name} must not divide y by line_height to get a line"
+            );
+        }
+        assert!(
+            !std::fs::read_to_string(terminal_dir.join("terminal.rs"))
+                .unwrap()
+                .contains("scroll_px %="),
+            "scroll remainder must be retained, not discarded with modulo"
+        );
+    }
+
     fn all_ui_sources() -> Vec<String> {
         fn walk(dir: &std::path::Path, skip: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).expect("read src dir") {

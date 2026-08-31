@@ -25,10 +25,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Protocol v2 draft (ADR-0016): bidirectional, multiplexed messaging with
+/// Protocol v2 (ADR-0016): bidirectional, multiplexed messaging with
 /// correlation ids, event push, widget rendering and plugin-initiated host
-/// calls. v1 below remains the shipped contract; v2 is not yet served by the
-/// host or the SDK.
+/// calls. v1 below remains the on-demand contract; the resident supervisor
+/// and the SDK's `v2` module speak this dialect.
 pub mod v2;
 
 /// Protocol version the host and SDK negotiate. Bump on any wire change.

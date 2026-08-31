@@ -1,4 +1,5 @@
 mod mappings;
+mod row_map;
 
 mod alacritty;
 mod osc133;
@@ -13,6 +14,8 @@ pub use osc133::{
     GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
     gutter_marks_from_markers, rebase_markers_after_history_shrink,
 };
+pub(crate) use row_map::PointerMap;
+pub use row_map::{accumulate_wheel, hit_display, viewport_top_abs, y_for_display};
 pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
 pub use shell_semantics::{
     ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
@@ -38,6 +41,7 @@ use mappings::mouse::{
     alt_scroll, grid_point, grid_point_and_side, mouse_button_report, mouse_moved_report,
     scroll_report,
 };
+use row_geometry::{RowGeometry, ViewportPosition};
 
 use collections::{HashMap, VecDeque};
 use futures::StreamExt;
@@ -51,7 +55,7 @@ use util::{paths::PathStyle, truncate_and_trailoff};
 
 use std::{
     borrow::Cow,
-    cmp::{self, min},
+    cmp,
     fmt::{self, Display, Formatter},
     future::Future,
     ops::{BitOr, BitOrAssign, Deref},
@@ -900,6 +904,8 @@ impl TerminalBuilder {
                 selection_head: None,
                 frozen_selection: None,
                 scroll_px: px(0.),
+                viewport: ViewportPosition::new(0),
+                row_geometry: RowGeometry::new(16.0),
                 next_link_id: 0,
                 selection_phase: SelectionPhase::Ended,
                 hyperlink_regex_searches: RegexSearches::new(
@@ -1066,6 +1072,10 @@ pub struct Terminal {
     frozen_selection: Option<SelectionRange>,
     title_override: Option<String>,
     scroll_px: Pixels,
+    /// Host-side sub-row remainder (ADR-0018 decision 2). Never sent to the grid.
+    viewport: ViewportPosition,
+    /// Block heights and the mapping both paint and hit-testing use.
+    row_geometry: RowGeometry,
     next_link_id: usize,
     selection_phase: SelectionPhase,
     hyperlink_regex_searches: RegexSearches,
@@ -1267,11 +1277,7 @@ impl Terminal {
             }
             InternalEvent::UpdateSelection(position) => {
                 trace!("Updating selection: position={position:?}");
-                let (point, side) = grid_point_and_side(
-                    *position,
-                    self.last_content.terminal_bounds,
-                    display_offset(term),
-                );
+                let (point, side) = grid_point_and_side(self.pointer_map_locked(term), *position);
 
                 if update_term_selection(term, point, side) {
                     self.selection_head = Some(point);
@@ -1328,11 +1334,7 @@ impl Terminal {
             InternalEvent::FindHyperlink(position, open) => {
                 trace!("Finding hyperlink at position: position={position:?}, open={open:?}");
 
-                let point = grid_point(
-                    *position,
-                    self.last_content.terminal_bounds,
-                    display_offset(term),
-                );
+                let point = grid_point(self.pointer_map_locked(term), *position);
 
                 match find_from_terminal_point(
                     term,
@@ -1451,6 +1453,76 @@ impl Terminal {
         &self.last_content
     }
 
+    /// Mapping paint and hit-testing share. The grid's `display_offset` is
+    /// the integer part; [`Self::viewport_sub`] is the host remainder.
+    pub(crate) fn pointer_map(&self) -> PointerMap<'_> {
+        let (display_offset, history_size) = {
+            let term = self.term.lock_unfair();
+            (display_offset(&term), term.history_size() as i32)
+        };
+        self.pointer_map_parts(display_offset, history_size)
+    }
+
+    /// [`Self::pointer_map`] for callers that **already hold** the terminal lock.
+    ///
+    /// `process_terminal_event` is handed `term: &mut AlacrittyTerm`, i.e. the
+    /// lock is held for the whole call. Going through `pointer_map` there
+    /// re-enters `FairMutex::lock_unfair` on the same thread and parks forever
+    /// (observed as a 100% CPU hang). Any path under a held lock uses this.
+    pub(crate) fn pointer_map_locked(&self, term: &AlacrittyTerm) -> PointerMap<'_> {
+        self.pointer_map_parts(display_offset(term), term.history_size() as i32)
+    }
+
+    fn pointer_map_parts(&self, display_offset: usize, history_size: i32) -> PointerMap<'_> {
+        PointerMap {
+            size: self.last_content.terminal_bounds,
+            display_offset,
+            geometry: &self.row_geometry,
+            history_size,
+            sub: self.viewport.sub,
+        }
+    }
+
+    /// Pixel y relative to the terminal origin → cell or Block (ADR-0018).
+    pub fn hit_local(&self, pos: GpuiPoint<Pixels>) -> row_geometry::HitTarget {
+        self.pointer_map().hit(pos)
+    }
+
+    pub fn row_geometry(&self) -> &RowGeometry {
+        &self.row_geometry
+    }
+
+    pub fn row_geometry_mut(&mut self) -> &mut RowGeometry {
+        &mut self.row_geometry
+    }
+
+    pub fn viewport_sub(&self) -> f32 {
+        self.viewport.sub
+    }
+
+    /// Flush the remainder so a jump lands a Block against the viewport edge.
+    pub fn set_viewport_sub(&mut self, sub: f32) {
+        self.viewport.sub = if sub.is_finite() && sub >= 0.0 {
+            sub
+        } else {
+            0.0
+        };
+    }
+
+    pub fn set_blocks_frozen(&mut self, frozen: bool) {
+        self.row_geometry.set_frozen(frozen);
+    }
+
+    /// Replace the Block set from the mount point. Heights are integer rows
+    /// from `sleipnir_widget::layout`. While frozen, upsert keeps pinned heights.
+    pub fn upsert_block(&mut self, block: row_geometry::Block) {
+        self.row_geometry.upsert(block);
+    }
+
+    pub fn remove_block(&mut self, id: row_geometry::BlockId) {
+        self.row_geometry.remove(id);
+    }
+
     /// Feed OSC 133 scanner and record prompt markers at the current cursor line.
     pub fn ingest_osc133(&mut self, bytes: &[u8]) {
         for kind in self.osc133.push(bytes) {
@@ -1528,9 +1600,11 @@ impl Terminal {
     }
 
     /// Scroll so `absolute` line (OSC 133 marker coords) is near the top.
+    /// Sets `sub` to 0 so a Block at that anchor lands flush (ADR-0018).
     pub fn scroll_to_absolute(&mut self, absolute: i32, column: usize) {
         let history = self.term.lock_unfair().history_size() as i32;
         let grid_line = absolute_to_grid_line(absolute, history);
+        self.viewport.jump_to_anchor(absolute);
         self.events
             .push_back(InternalEvent::ScrollToPoint(Point::new(grid_line, column)));
     }
@@ -1660,6 +1734,8 @@ impl Terminal {
         if delta_lines != 0 {
             scroll_display(&mut term, Scroll::Delta(delta_lines));
         }
+        // Flush so a Block at the prompt lands against the viewport edge.
+        self.viewport.jump_to_anchor(target_line);
         true
     }
 
@@ -2103,10 +2179,21 @@ impl Terminal {
         if history_size < self.last_history_size {
             let removed = (self.last_history_size - history_size) as i32;
             rebase_markers_after_history_shrink(&mut self.prompt_markers, removed);
+            self.row_geometry.rebase_after_history_shrink(removed);
         }
         self.last_history_size = history_size;
-
+        let screen_lines = terminal.screen_lines();
         self.last_content = make_content(&terminal, &self.last_content);
+        self.row_geometry
+            .set_line_height(f32::from(self.last_content.terminal_bounds.line_height));
+        self.row_geometry.set_line_count(
+            i32::try_from(history_size.saturating_add(screen_lines)).unwrap_or(i32::MAX),
+        );
+        let alt = self.last_content.mode.contains(Modes::ALT_SCREEN);
+        self.row_geometry.set_alt_screen(alt);
+        if alt {
+            self.viewport.sub = 0.0;
+        }
         drop(terminal);
 
         // A frozen "select all" must survive alacritty's internal selection
@@ -2176,11 +2263,7 @@ impl Terminal {
             // `mouse_up` resolves it: release on the same link opens it,
             // otherwise the gesture is dropped.
             if self.mouse_down_hyperlink.is_none() {
-                let (point, side) = grid_point_and_side(
-                    position,
-                    self.last_content.terminal_bounds,
-                    self.last_content.display_offset,
-                );
+                let (point, side) = grid_point_and_side(self.pointer_map(), position);
 
                 if self.mouse_changed(point, side) {
                     let bytes = mouse_moved_report(
@@ -2241,11 +2324,7 @@ impl Terminal {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if !self.mouse_mode(e.modifiers.shift) {
             if let Some(hyperlink) = &self.mouse_down_hyperlink {
-                let point = grid_point(
-                    position,
-                    self.last_content.terminal_bounds,
-                    self.last_content.display_offset,
-                );
+                let point = grid_point(self.pointer_map(), position);
 
                 if !hyperlink.range.contains(point) {
                     self.mouse_down_hyperlink = None;
@@ -2306,11 +2385,7 @@ impl Terminal {
         // Any mouse interaction clears the frozen select-all.
         self.frozen_selection = None;
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        let point = grid_point(
-            position,
-            self.last_content.terminal_bounds,
-            self.last_content.display_offset,
-        );
+        let point = grid_point(self.pointer_map(), position);
 
         if e.button == MouseButton::Left && !e.modifiers.secondary() {
             // Alt+Click always attempts cursor move (original behavior).
@@ -2350,11 +2425,7 @@ impl Terminal {
             match e.button {
                 MouseButton::Left => {
                     self.mouse_down_position = Some(e.position);
-                    let (point, side) = grid_point_and_side(
-                        position,
-                        self.last_content.terminal_bounds,
-                        self.last_content.display_offset,
-                    );
+                    let (point, side) = grid_point_and_side(self.pointer_map(), position);
 
                     let selection_type = match e.click_count {
                         0 => return, //This is a release
@@ -2420,11 +2491,7 @@ impl Terminal {
 
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if let Some(mouse_down_hyperlink) = self.mouse_down_hyperlink.take() {
-            let point = grid_point(
-                position,
-                self.last_content.terminal_bounds,
-                self.last_content.display_offset,
-            );
+            let point = grid_point(self.pointer_map(), position);
 
             if self
                 .find_hyperlink_at_point(point)
@@ -2447,11 +2514,7 @@ impl Terminal {
         }
 
         if self.mouse_mode(e.modifiers.shift) {
-            let point = grid_point(
-                position,
-                self.last_content.terminal_bounds,
-                self.last_content.display_offset,
-            );
+            let point = grid_point(self.pointer_map(), position);
 
             let bytes =
                 mouse_button_report(point, e.button, e.modifiers, false, self.last_content.mode);
@@ -2466,8 +2529,7 @@ impl Terminal {
 
             //Hyperlinks
             if self.selection_phase == SelectionPhase::Ended {
-                let mouse_cell_index =
-                    content_index_for_mouse(position, &self.last_content.terminal_bounds);
+                let mouse_cell_index = self.pointer_map().content_index(position);
                 if let Some(link) = self
                     .last_content
                     .cells
@@ -2497,9 +2559,8 @@ impl Terminal {
         {
             if mouse_mode {
                 let point = grid_point(
+                    self.pointer_map(),
                     e.position - self.last_content.terminal_bounds.bounds.origin,
-                    self.last_content.terminal_bounds,
-                    self.last_content.display_offset,
                 );
 
                 if let Some(scrolls) = scroll_report(point, scroll_lines, e, self.last_content.mode)
@@ -2533,26 +2594,25 @@ impl Terminal {
     ) -> Option<i32> {
         let line_height = self.last_content.terminal_bounds.line_height;
         match e.touch_phase {
-            /* Reset scroll state on started */
             TouchPhase::Started => {
                 self.scroll_px = px(0.);
+                self.viewport.sub = 0.0;
                 None
             }
-            /* Calculate the appropriate scroll lines */
             TouchPhase::Moved => {
-                let old_offset = (self.scroll_px / line_height) as i32;
-
-                self.scroll_px += e.delta.pixel_delta(line_height).y * scroll_multiplier;
-
-                let new_offset = (self.scroll_px / line_height) as i32;
-
-                // Whenever we hit the edges, reset our stored scroll to 0
-                // so we can respond to changes in direction quickly
-                self.scroll_px %= self.last_content.terminal_bounds.height();
-
-                Some(new_offset - old_offset)
+                // Retain the sub-row remainder instead of discarding it with a
+                // modulo of the viewport height (ADR-0018 decision 2).
+                let delta = f32::from(e.delta.pixel_delta(line_height).y) * scroll_multiplier;
+                let spilled = accumulate_wheel(
+                    &mut self.viewport.sub,
+                    delta,
+                    &self.row_geometry,
+                    self.last_history_size as i32,
+                    self.last_content.display_offset,
+                );
+                self.viewport.row = self.last_content.display_offset;
+                Some(spilled)
             }
-            // Cancellation does not commit a scroll, same as a plain end.
             TouchPhase::Ended | TouchPhase::Cancelled => None,
         }
     }
@@ -2835,17 +2895,47 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
         .and_then(normalize_path_command_name)
 }
 
-fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBounds) -> usize {
-    let col = (pos.x / terminal_bounds.cell_width()).round() as usize;
-    let clamped_col = min(col, terminal_bounds.num_columns().saturating_sub(1));
-    let row = (pos.y / terminal_bounds.line_height()).round() as usize;
-    let clamped_row = min(row, terminal_bounds.num_lines().saturating_sub(1));
-    clamped_row * terminal_bounds.num_columns() + clamped_col
-}
-
 #[cfg(test)]
 mod tests {
     use super::terminal_looks_busy;
+
+    /// Regression (ADR-0018 integration): `sync` holds the terminal lock across
+    /// `process_terminal_event`, which is handed `term: &mut AlacrittyTerm`.
+    /// Routing coordinates through `pointer_map` there re-entered
+    /// `FairMutex::lock_unfair` on the same thread and parked forever — a 100%
+    /// CPU hang reproducible by opening Settings. Paths under the held lock must
+    /// use `pointer_map_locked`, which takes the borrow instead of re-locking.
+    ///
+    /// A runtime test would have to deadlock to fail, so this inspects the
+    /// source: inside `process_terminal_event` there must be no `pointer_map()`
+    /// call and no `self.term.lock_unfair()`.
+    #[test]
+    fn process_terminal_event_never_relocks_the_terminal() {
+        let src = include_str!("terminal.rs");
+        let start = src
+            .find("fn process_terminal_event(")
+            .expect("process_terminal_event exists");
+        // The next `fn` at the same indentation ends the body.
+        let body_start = start + "fn process_terminal_event(".len();
+        let end = src[body_start..]
+            .find("\n    pub(crate) fn pointer_map(")
+            .map(|off| body_start + off)
+            .expect("pointer_map follows process_terminal_event");
+        let body = &src[start..end];
+        assert!(
+            !body.contains("self.pointer_map()"),
+            "process_terminal_event must use pointer_map_locked; \
+             pointer_map() re-locks and self-deadlocks"
+        );
+        assert!(
+            !body.contains("self.term.lock_unfair()"),
+            "the lock is already held for this call"
+        );
+        assert!(
+            body.contains("pointer_map_locked(term)"),
+            "coordinates must still route through RowGeometry"
+        );
+    }
 
     // M1: full integration tests disabled (Zed settings stack removed)
 

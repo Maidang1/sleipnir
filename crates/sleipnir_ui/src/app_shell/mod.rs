@@ -367,13 +367,18 @@ struct CloseConfirmState {
     kind: ConfirmKind,
 }
 
-/// Enough to finish an invoke after the user approves. The dialog itself
+/// Enough to finish a launch after the user approves. The dialog itself
 /// renders [`crate::plugin_monitor_panel::ConsentPrompt`] only.
 struct PluginConsentPending {
     prompt: crate::plugin_monitor_panel::ConsentPrompt,
-    plugin: plugin_host::LoadedPluginCommand,
+    kind: PluginConsentKind,
     hash: String,
     request: Vec<plugin_protocol::v2::Capability>,
+}
+
+enum PluginConsentKind {
+    Command(plugin_host::LoadedPluginCommand),
+    Resident(plugin_host::LoadedPlugin),
 }
 
 impl Focusable for AppShell {
@@ -562,6 +567,9 @@ impl AppShell {
             RunLedgerGlobal::flush_now_in(cx);
             async {}
         }));
+        // Resident plugins need a live session to receive events. This is
+        // where first-run consent is asked; a grant is never implied.
+        shell.start_resident_plugins(cx);
         shell
     }
 
@@ -902,7 +910,11 @@ impl AppShell {
                     tree,
                     ..
                 } => self.apply_chrome_status(&plugin_id, tree, cx),
-                Inbound::Render { .. } => {}
+                Inbound::Render {
+                    target: RenderTarget::Block { anchor },
+                    tree,
+                    ..
+                } => self.apply_block_render(&plugin_id, anchor, tree, cx),
                 Inbound::Call { id, call } => {
                     self.handle_host_call(&plugin_id, id, call, window, cx)
                 }
@@ -915,9 +927,11 @@ impl AppShell {
                 live.insert(snap.plugin_id);
             } else {
                 self.plugin_panels.mark_plugin_stale(&snap.plugin_id);
+                self.mark_blocks_stale(&snap.plugin_id, cx);
             }
         }
         self.plugin_panels.mark_missing_stale(&live);
+        self.mark_missing_blocks_stale(&live, cx);
         if self.plugin_chrome.sync_live(&live) {
             self.rebuild_palette_items();
         }
@@ -967,6 +981,91 @@ impl AppShell {
             ApplyPanel::DeniedOccupied => {
                 log::warn!("plugin {plugin_id} tried to take another plugin's panel");
             }
+        }
+    }
+
+    fn apply_block_render(
+        &mut self,
+        plugin_id: &str,
+        run_id: plugin_protocol::v2::RunId,
+        tree: plugin_protocol::v2::Widget,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::plugin_block::{ApplyBlock, render_block_granted};
+        use plugin_protocol::v2::Capability;
+        let granted = crate::plugin_runtime::has_grant(plugin_id, Capability::RenderBlock, cx);
+        let granted = render_block_granted(if granted {
+            &[Capability::RenderBlock]
+        } else {
+            &[]
+        });
+        let (pane, ledger_anchor, existing) = if cx.has_global::<RunLedgerGlobal>() {
+            let snap = cx.global::<RunLedgerGlobal>().snapshot();
+            snap.into_iter()
+                .find(|r| r.id == run_id)
+                .map(|r| {
+                    let existing = self.view_for_pane(r.pane).and_then(|v| {
+                        v.read(cx)
+                            .blocks()
+                            .iter()
+                            .find(|s| s.run_id == run_id && s.plugin_id == plugin_id)
+                            .map(|s| s.block_id)
+                    });
+                    (Some(r.pane), r.anchor, existing)
+                })
+                .unwrap_or((None, None, None))
+        } else {
+            (None, None, None)
+        };
+        let Some(pane) = pane else {
+            log::warn!("plugin {plugin_id} RenderBlock: no Run for anchor");
+            return;
+        };
+        let Some(view) = self.view_for_pane(pane) else {
+            log::warn!("plugin {plugin_id} RenderBlock: no pane for Run");
+            return;
+        };
+        let out = view.update(cx, |v, cx| {
+            v.apply_block_render(
+                plugin_id,
+                run_id,
+                tree,
+                granted,
+                ledger_anchor,
+                existing,
+                cx,
+            )
+        });
+        match out {
+            ApplyBlock::Inserted | ApplyBlock::Replaced => cx.notify(),
+            ApplyBlock::DeniedGrant => {
+                log::warn!("plugin {plugin_id} RenderBlock denied (no grant)");
+            }
+            ApplyBlock::DeniedAnchor => {
+                log::warn!("plugin {plugin_id} RenderBlock denied (no process-local anchor)");
+            }
+        }
+    }
+
+    fn mark_blocks_stale(&mut self, plugin_id: &str, cx: &mut Context<Self>) {
+        for (_, view) in self.all_live_panes() {
+            view.update(cx, |v, _| v.mark_blocks_stale(plugin_id));
+        }
+    }
+
+    fn mark_missing_blocks_stale(
+        &mut self,
+        live: &std::collections::BTreeSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        for (_, view) in self.all_live_panes() {
+            view.update(cx, |v, _| v.mark_missing_blocks_stale(live));
+        }
+    }
+
+    fn set_all_blocks_frozen(&mut self, frozen: bool, cx: &mut Context<Self>) {
+        for (_, view) in self.all_live_panes() {
+            view.update(cx, |v, cx| v.set_blocks_frozen(frozen, cx));
         }
     }
 
@@ -1234,6 +1333,7 @@ impl AppShell {
         self.plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
         self.rebuild_palette_items();
         self.palette_selected = 0;
+        self.start_resident_plugins(cx);
     }
 
     pub(crate) fn plugin_badges_for_tab(
@@ -1771,13 +1871,24 @@ impl AppShell {
             return;
         };
         self.mode.close(OverlayKind::PluginConsent);
+        let plugin_id = match &pending.kind {
+            PluginConsentKind::Command(plugin) => plugin.plugin_id.clone(),
+            PluginConsentKind::Resident(plugin) => plugin.manifest.id.clone(),
+        };
         crate::plugin_runtime::save_grant(
-            &pending.plugin.plugin_id,
+            &plugin_id,
             &pending.request,
             &pending.hash,
             pending.prompt.tier,
         );
-        self.invoke_plugin_command(pending.plugin, cx);
+        match pending.kind {
+            PluginConsentKind::Command(plugin) => self.invoke_plugin_command(plugin, cx),
+            PluginConsentKind::Resident(plugin) => {
+                self.connect_resident(plugin, pending.request, cx)
+            }
+        }
+        // Another resident may still be waiting on first-run consent.
+        self.start_resident_plugins(cx);
         cx.notify();
     }
 
@@ -1854,7 +1965,7 @@ impl AppShell {
                         &missing,
                         &previously,
                     ),
-                    plugin,
+                    kind: PluginConsentKind::Command(plugin),
                     hash,
                     request,
                 });
@@ -1872,6 +1983,14 @@ impl AppShell {
         plugin: plugin_host::LoadedPluginCommand,
         cx: &mut Context<Self>,
     ) {
+        // v2 and resident sessions speak the multiplexed dialect; the v1
+        // per-invocation path cannot carry Event / Render / Call.
+        if plugin.api_version >= plugin_host::PLUGIN_API_VERSION_V2
+            || plugin.lifecycle == plugin_host::PluginLifecycle::Resident
+        {
+            self.invoke_v2_command(plugin, cx);
+            return;
+        }
         let Some(view) = self.active_view(cx) else {
             return;
         };
@@ -1892,6 +2011,150 @@ impl AppShell {
             this.update(cx, |_this, cx| match result {
                 Ok(output) => crate::plugin_runtime::apply_output(output, &view, cx),
                 Err(err) => log::warn!("plugin {qualified_id} failed: {err}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn invoke_v2_command(
+        &mut self,
+        plugin: plugin_host::LoadedPluginCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        let context = crate::plugin_runtime::build_context(&plugin, &view, cx);
+        let Some(loaded) = crate::plugin_runtime::PluginRuntime::plugins(cx)
+            .into_iter()
+            .find(|p| p.manifest.id == plugin.plugin_id)
+        else {
+            log::warn!("plugin {} not in catalog", plugin.plugin_id);
+            return;
+        };
+        let grants = crate::plugin_runtime::grants();
+        let granted: Vec<plugin_protocol::v2::Capability> = grants
+            .grants
+            .get(&plugin.plugin_id)
+            .map(|r| r.granted.iter().copied().collect())
+            .unwrap_or_else(|| crate::plugin_runtime::requested_capabilities(&plugin));
+        let spec = crate::plugin_runtime::launch_spec(&loaded, granted);
+        let Some(sup) = crate::plugin_runtime::supervisor(cx) else {
+            return;
+        };
+        let command_id = plugin.command.id.clone();
+        let qualified_id = plugin.qualified_id();
+        let invoke_ctx = plugin_protocol::InvokeContext {
+            cwd: context.cwd,
+            title: context.title,
+            selection: context.selection,
+            visible_screen: context.visible_screen,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { sup.invoke(&spec, &command_id, invoke_ctx) })
+                .await;
+            this.update(cx, |_this, cx| match result {
+                Ok(output) => {
+                    let routed = match output {
+                        plugin_protocol::Output::Ignore => plugin_host::PluginRunOutput::Ignored,
+                        plugin_protocol::Output::Insert { text } => {
+                            plugin_host::PluginRunOutput::Insert(text)
+                        }
+                        plugin_protocol::Output::Copy { text } => {
+                            plugin_host::PluginRunOutput::Copy(text)
+                        }
+                    };
+                    crate::plugin_runtime::apply_output(routed, &view, cx);
+                }
+                Err(err) => log::warn!("plugin {qualified_id} failed: {err}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Handshake every granted resident. First-run / binary-change / new-cap
+    /// gaps become a consent prompt; nothing is launched without a grant.
+    fn start_resident_plugins(&mut self, cx: &mut Context<Self>) {
+        if self.plugin_consent.is_some() {
+            return;
+        }
+        for plugin in crate::plugin_runtime::PluginRuntime::plugins(cx) {
+            if plugin.manifest.lifecycle != plugin_host::PluginLifecycle::Resident {
+                continue;
+            }
+            if crate::plugin_runtime::is_plugin_live(&plugin.manifest.id, cx) {
+                continue;
+            }
+            let request = crate::plugin_runtime::requested_capabilities_for_plugin(&plugin);
+            let hash = crate::plugin_runtime::loaded_plugin_hash(&plugin).unwrap_or_default();
+            let grants = crate::plugin_runtime::grants();
+            let record = grants.grants.get(&plugin.manifest.id);
+            match plugin_grants::check(&request, record, &hash) {
+                plugin_grants::Decision::Allowed => {
+                    let granted = record
+                        .map(|r| r.granted.iter().copied().collect())
+                        .unwrap_or_else(|| request.clone());
+                    self.connect_resident(plugin, granted, cx);
+                }
+                plugin_grants::Decision::NeedsConsent { reason, missing } => {
+                    let previously: Vec<_> = record
+                        .map(|r| r.granted.iter().copied().collect())
+                        .unwrap_or_default();
+                    let tier = record.map(|r| r.tier).unwrap_or(plugin_grants::Tier::Local);
+                    self.plugin_consent = Some(PluginConsentPending {
+                        prompt: crate::plugin_monitor_panel::consent_prompt(
+                            &plugin.manifest.id,
+                            &plugin.manifest.name,
+                            tier,
+                            reason,
+                            &missing,
+                            &previously,
+                        ),
+                        kind: PluginConsentKind::Resident(plugin),
+                        hash,
+                        request,
+                    });
+                    self.mode.open(OverlayKind::PluginConsent);
+                    cx.notify();
+                    return;
+                }
+                plugin_grants::Decision::Denied(message) => {
+                    log::warn!("plugin {} denied: {message}", plugin.manifest.id);
+                }
+            }
+        }
+    }
+
+    fn connect_resident(
+        &mut self,
+        plugin: plugin_host::LoadedPlugin,
+        granted: Vec<plugin_protocol::v2::Capability>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sup) = crate::plugin_runtime::supervisor(cx) else {
+            return;
+        };
+        let spec = crate::plugin_runtime::launch_spec(&plugin, granted);
+        let id = plugin.manifest.id;
+        // Claim the launch synchronously. `is_plugin_live` cannot see a connect
+        // that has been spawned but not yet completed, so without this a second
+        // window (or a settings reload racing construction) starts the same
+        // resident process twice.
+        if !crate::plugin_runtime::begin_connect(&id, cx) {
+            return;
+        }
+        log::info!("plugin: starting resident {id}");
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { sup.connect(&spec) }).await;
+            this.update(cx, |_this, cx| {
+                if let Err(err) = result {
+                    log::warn!("plugin {id} failed to start: {err}");
+                }
+                // Release on both paths: a failed launch must stay retryable.
+                crate::plugin_runtime::finish_connect(&id, cx);
             })
             .ok();
         })

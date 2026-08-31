@@ -1,11 +1,11 @@
-use std::cmp::{self, min};
 use std::iter::repeat;
 
 /// Most of the code, and specifically the constants, in this are copied from Alacritty,
 /// with modifications for our circumstances
 use gpui::{Modifiers, MouseButton, Pixels, Point as GpuiPoint, ScrollWheelEvent, px};
 
-use crate::{Modes, Point, SelectionSide, TerminalBounds};
+use crate::row_map::PointerMap;
+use crate::{Modes, Point, SelectionSide};
 
 enum MouseFormat {
     Sgr,
@@ -191,48 +191,15 @@ pub(crate) fn mouse_moved_report(
     }
 }
 
-pub(crate) fn grid_point(
-    pos: GpuiPoint<Pixels>,
-    cur_size: TerminalBounds,
-    display_offset: usize,
-) -> Point {
-    grid_point_and_side(pos, cur_size, display_offset).0
+pub(crate) fn grid_point(map: PointerMap<'_>, pos: GpuiPoint<Pixels>) -> Point {
+    map.grid_point(pos)
 }
 
 pub(crate) fn grid_point_and_side(
+    map: PointerMap<'_>,
     pos: GpuiPoint<Pixels>,
-    cur_size: TerminalBounds,
-    display_offset: usize,
 ) -> (Point, SelectionSide) {
-    let mut column = (pos.x / cur_size.cell_width) as usize;
-    let cell_x = cmp::max(px(0.), pos.x) % cur_size.cell_width;
-    let half_cell_width = cur_size.cell_width / 2.0;
-    let mut side = if cell_x > half_cell_width {
-        SelectionSide::Right
-    } else {
-        SelectionSide::Left
-    };
-
-    let last_column = cur_size.num_columns().saturating_sub(1);
-    if column > last_column {
-        column = last_column;
-        side = SelectionSide::Right;
-    }
-    let column = min(column, last_column);
-    let mut line = (pos.y / cur_size.line_height) as i32;
-    let bottommost_line = i32::try_from(cur_size.num_lines().saturating_sub(1)).unwrap_or(i32::MAX);
-    if line > bottommost_line {
-        line = bottommost_line;
-        side = SelectionSide::Right;
-    } else if line < 0 {
-        side = SelectionSide::Left;
-    }
-
-    let display_offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
-    (
-        Point::new(line.saturating_sub(display_offset), column),
-        side,
-    )
+    map.grid_point_and_side(pos)
 }
 
 ///Generate the bytes to send to the terminal, from the cell location, a mouse event, and the terminal mode

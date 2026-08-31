@@ -1,12 +1,14 @@
 //! UI adapter for manifest-based external command plugins.
 
-use gpui::{App, Global};
+use gpui::{App, BorrowAppContext as _, Global};
 use plugin_grants::{GrantRecord, GrantsFile, Tier};
 use plugin_host::resident::{
-    BroadcastReport, ConnectionSnapshot, ProcessLauncher, Supervisor, SupervisorConfig, SystemClock,
+    BroadcastReport, ConnectionSnapshot, ConnectionState, LaunchSpec, ProcessLauncher, Supervisor,
+    SupervisorConfig, SystemClock,
 };
 use plugin_host::{
-    LoadedPluginCommand, Permission, PluginCatalog, PluginContext, PluginLifecycle, PluginRunOutput,
+    LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginContext, PluginLifecycle,
+    PluginRunOutput,
 };
 use plugin_protocol::v2::{Capability, HostEvent};
 use sleipnir_settings::TerminalSettings;
@@ -19,7 +21,15 @@ use crate::TermView;
 
 pub struct PluginRuntime {
     catalog: PluginCatalog,
-    supervisor: Supervisor,
+    supervisor: Arc<Supervisor>,
+    /// Plugin ids whose `connect` has been spawned but has not finished yet.
+    ///
+    /// `is_plugin_live` reads supervisor snapshots, which only turn `Live`
+    /// *after* the async connect completes. Two synchronous calls to
+    /// `start_resident_plugins` (a second window, or a settings reload racing
+    /// construction) therefore both pass that check and both launch the same
+    /// resident process. This set closes that window synchronously.
+    connecting: BTreeSet<String>,
 }
 
 impl Global for PluginRuntime {}
@@ -29,11 +39,12 @@ impl PluginRuntime {
         if !cx.has_global::<PluginRuntime>() {
             cx.set_global(PluginRuntime {
                 catalog: PluginCatalog::default(),
-                supervisor: Supervisor::new(
+                connecting: BTreeSet::new(),
+                supervisor: Arc::new(Supervisor::new(
                     SupervisorConfig::default(),
                     Arc::new(ProcessLauncher),
                     Arc::new(SystemClock),
-                ),
+                )),
             });
         }
         Self::reload(cx);
@@ -50,8 +61,9 @@ impl PluginRuntime {
             log::warn!("plugin: {diagnostic}");
         }
         log::info!(
-            "plugin: enabled={} loaded {} command(s): {:?} (allowed_permissions={:?})",
+            "plugin: enabled={} loaded {} plugin(s), {} command(s): {:?} (allowed_permissions={:?})",
             settings.plugins.enabled,
+            catalog.plugins.len(),
             catalog.commands.len(),
             catalog
                 .commands
@@ -68,6 +80,13 @@ impl PluginRuntime {
             return Vec::new();
         }
         cx.global::<PluginRuntime>().catalog.commands.clone()
+    }
+
+    pub fn plugins(cx: &App) -> Vec<LoadedPlugin> {
+        if !cx.has_global::<PluginRuntime>() {
+            return Vec::new();
+        }
+        cx.global::<PluginRuntime>().catalog.plugins.clone()
     }
 }
 
@@ -135,24 +154,72 @@ pub fn requested_capabilities(plugin: &LoadedPluginCommand) -> Vec<Capability> {
 }
 
 pub fn plugin_binary_hash(plugin: &LoadedPluginCommand) -> Option<String> {
-    let path = plugin_binary_path(plugin)?;
+    hash_plugin_binary(&plugin.directory, &plugin.binary)
+}
+
+pub fn loaded_plugin_hash(plugin: &LoadedPlugin) -> Option<String> {
+    hash_plugin_binary(&plugin.directory, &plugin.manifest.binary)
+}
+
+fn hash_plugin_binary(directory: &Path, binary: &str) -> Option<String> {
+    let path = plugin_binary_path(directory, binary)?;
     plugin_grants::hash_binary(&path).ok()
 }
 
-fn plugin_binary_path(plugin: &LoadedPluginCommand) -> Option<PathBuf> {
-    let bin = Path::new(&plugin.binary);
-    let candidate =
-        if bin.is_absolute() || plugin.binary.contains('/') || plugin.binary.contains('\\') {
-            plugin.directory.join(bin)
+fn plugin_binary_path(directory: &Path, binary: &str) -> Option<PathBuf> {
+    let bin = Path::new(binary);
+    let candidate = if bin.is_absolute() || binary.contains('/') || binary.contains('\\') {
+        directory.join(bin)
+    } else {
+        let next_to_manifest = directory.join(binary);
+        if next_to_manifest.is_file() {
+            next_to_manifest
         } else {
-            let next_to_manifest = plugin.directory.join(&plugin.binary);
-            if next_to_manifest.is_file() {
-                next_to_manifest
-            } else {
-                PathBuf::from(&plugin.binary)
-            }
-        };
+            PathBuf::from(binary)
+        }
+    };
     candidate.is_file().then_some(candidate)
+}
+
+/// Full declared set from `plugin.json`. This is what Ready.requests is
+/// checked against, and what first-run consent asks for.
+pub fn requested_capabilities_for_plugin(plugin: &LoadedPlugin) -> Vec<Capability> {
+    plugin_host::resident::declared_capabilities(&plugin.manifest)
+        .into_iter()
+        .collect()
+}
+
+pub fn launch_spec(plugin: &LoadedPlugin, granted: Vec<Capability>) -> LaunchSpec {
+    LaunchSpec::from_plugin(&plugin.manifest, &plugin.directory, granted)
+}
+
+pub fn supervisor(cx: &App) -> Option<Arc<Supervisor>> {
+    cx.try_global::<PluginRuntime>()
+        .map(|rt| Arc::clone(&rt.supervisor))
+}
+
+pub fn is_plugin_live(plugin_id: &str, cx: &App) -> bool {
+    snapshots(cx)
+        .iter()
+        .any(|s| s.plugin_id == plugin_id && s.state == ConnectionState::Live)
+}
+
+/// Claim the right to launch `plugin_id`, returning false when someone already
+/// has it. Synchronous and global, so it closes the gap between spawning a
+/// connect and the supervisor reporting the connection as `Live`.
+pub fn begin_connect(plugin_id: &str, cx: &mut App) -> bool {
+    if !cx.has_global::<PluginRuntime>() {
+        return false;
+    }
+    cx.update_global(|rt: &mut PluginRuntime, _| rt.connecting.insert(plugin_id.to_string()))
+}
+
+/// Release a claim taken by [`begin_connect`], on success or failure. A failed
+/// launch must be retryable, so this is called on both paths.
+pub fn finish_connect(plugin_id: &str, cx: &mut App) {
+    if cx.has_global::<PluginRuntime>() {
+        cx.update_global(|rt: &mut PluginRuntime, _| rt.connecting.remove(plugin_id));
+    }
 }
 
 pub fn grants() -> GrantsFile {
@@ -303,6 +370,27 @@ fn is_leap(year: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: `connect_resident` logs and then spawns the real connect, so
+    /// `is_plugin_live` still reports false until that task lands. Two
+    /// synchronous `start_resident_plugins` calls both passed and launched the
+    /// same resident twice (observed as a duplicated "starting resident" log).
+    /// The claim must be exclusive, and releasing must make it retryable.
+    #[test]
+    fn connect_claim_is_exclusive_and_released() {
+        let mut connecting: BTreeSet<String> = BTreeSet::new();
+        assert!(connecting.insert("failed-run".into()), "first claim wins");
+        assert!(
+            !connecting.insert("failed-run".into()),
+            "second claim must lose while the first is in flight"
+        );
+        assert!(connecting.insert("other".into()), "claims are per plugin");
+        connecting.remove("failed-run");
+        assert!(
+            connecting.insert("failed-run".into()),
+            "a released claim must be retryable after a failed launch"
+        );
+    }
 
     #[test]
     fn rfc3339_unix_epoch() {
