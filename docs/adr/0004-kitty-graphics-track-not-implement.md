@@ -2,6 +2,13 @@
 
 **Status:** accepted (reopens the "no graphics protocol" boundary from M0–M15)
 
+**Last verified:** 2026-09-01. This decision is still current. The workspace pins
+`alacritty_terminal` at `561594c` and `vte` at `94ce0d5`; those revisions only
+carry Sleipnir's OSC 133/9/777 hook. The terminal model still has no image store
+or placement model, and `TermElement` still has no image-rendering layer. A
+separate `kitty-protocol` branch in the `vte` repository is not referenced by
+this workspace and is not product support.
+
 ## Context
 
 The M0–M15 non-goals listed "Kitty graphics protocol" as explicitly out of

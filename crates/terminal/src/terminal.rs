@@ -9,6 +9,8 @@ mod run_tracker;
 mod shell_semantics;
 pub mod terminal_settings;
 
+pub mod kitty_graphics;
+
 pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
 pub use osc133::{
     GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
@@ -23,6 +25,7 @@ pub use shell_semantics::{
     command_output_range, inject_script, triple_click_kind, wrap_shell_for_inject,
     wrap_shell_for_inject_in,
 };
+pub use kitty_graphics::VisiblePlacement;
 
 #[cfg(not(windows))]
 use anyhow::Context as _;
@@ -390,6 +393,7 @@ pub struct Content {
     pub scrolled_to_top: bool,
     pub scrolled_to_bottom: bool,
     pub bottom_row_occupied: bool,
+    pub image_placements: Vec<VisiblePlacement>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -417,6 +421,7 @@ impl Default for Content {
             scrolled_to_top: false,
             scrolled_to_bottom: false,
             bottom_row_occupied: false,
+            image_placements: Vec::new(),
         }
     }
 }
@@ -587,6 +592,7 @@ type ColorFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
 type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send + 'static>;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) enum TerminalBackendEvent {
     MouseCursorDirty,
     Title(String),
@@ -606,6 +612,8 @@ pub(crate) enum TerminalBackendEvent {
     Osc133(String),
     /// Desktop notification from OSC 9 / OSC 777.
     DesktopNotification(String),
+    /// A Kitty graphics APC command (raw bytes between `G` and `ST`).
+    GraphicsCommand(Vec<u8>),
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -626,6 +634,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
             Self::Osc133(kind) => write!(f, "Osc133({kind})"),
             Self::DesktopNotification(msg) => write!(f, "DesktopNotification({msg})"),
+            Self::GraphicsCommand(data) => write!(f, "GraphicsCommand({} bytes)", data.len()),
         }
     }
 }
@@ -922,6 +931,8 @@ impl TerminalBuilder {
                 osc133: Osc133Scanner::new(),
                 last_history_size: 0,
                 osc_notify: OscNotifyScanner::new(),
+                image_store: kitty_graphics::ImageStore::new(),
+                apc_scanner: kitty_graphics::ApcScanner::new(),
                 prompt_markers: Vec::new(),
                 last_busy: false,
                 busy_since: None,
@@ -1092,6 +1103,10 @@ pub struct Terminal {
     /// gutter marker lines must be rebased.
     last_history_size: usize,
     osc_notify: OscNotifyScanner,
+    /// Kitty graphics image store.
+    image_store: kitty_graphics::ImageStore,
+    /// APC byte scanner for extracting Kitty graphics sequences.
+    apc_scanner: kitty_graphics::ApcScanner,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
     /// Last known busy state for command-finish notify (M14).
@@ -1213,6 +1228,9 @@ impl Terminal {
             }
             TerminalBackendEvent::DesktopNotification(msg) => {
                 cx.emit(Event::Notify(msg));
+            }
+            TerminalBackendEvent::GraphicsCommand(data) => {
+                self.handle_graphics_command(data);
             }
         }
     }
@@ -1658,6 +1676,40 @@ impl Terminal {
         for n in self.osc_notify.push(bytes) {
             cx.emit(Event::Notify(n.message));
         }
+    }
+
+    fn handle_graphics_command(&mut self, data: Vec<u8>) {
+        let Some(cmd) = kitty_graphics::parse_graphics_command(&data) else {
+            return;
+        };
+        let (cursor_line, cursor_col) = {
+            let term = self.term.lock_unfair();
+            let cursor = term.grid().cursor.point;
+            (
+                cursor.line.0 + term.history_size() as i32,
+                cursor.column.0,
+            )
+        };
+        if let Some(response) = self.image_store.process_command(cmd, cursor_line, cursor_col) {
+            self.write_to_pty(response);
+        }
+    }
+
+    /// Feed raw PTY bytes through the APC scanner, dispatching any extracted
+    /// Kitty graphics commands to the image store.
+    pub fn ingest_apc_graphics(&mut self, bytes: &[u8]) {
+        let result = self.apc_scanner.feed(bytes);
+        for cmd_data in result.commands {
+            self.handle_graphics_command(cmd_data);
+        }
+    }
+
+    pub fn image_store(&self) -> &kitty_graphics::ImageStore {
+        &self.image_store
+    }
+
+    pub fn image_store_mut(&mut self) -> &mut kitty_graphics::ImageStore {
+        &mut self.image_store
     }
 
     /// Scrollback lines that mark prompt starts (for jump navigation).
@@ -2181,10 +2233,16 @@ impl Terminal {
             let removed = (self.last_history_size - history_size) as i32;
             rebase_markers_after_history_shrink(&mut self.prompt_markers, removed);
             self.row_geometry.rebase_after_history_shrink(removed);
+            self.image_store.rebase_after_history_shrink(removed);
         }
         self.last_history_size = history_size;
         let screen_lines = terminal.screen_lines();
         self.last_content = make_content(&terminal, &self.last_content);
+        self.last_content.image_placements = self.image_store.visible_placements(
+            self.last_content.display_offset,
+            history_size,
+            screen_lines,
+        );
         self.row_geometry
             .set_line_height(f32::from(self.last_content.terminal_bounds.line_height));
         self.row_geometry.set_line_count(

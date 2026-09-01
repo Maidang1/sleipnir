@@ -5871,6 +5871,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sleipnir-plugin-disk3d"
+version = "0.1.0"
+dependencies = [
+ "plugin_protocol",
+ "sleipnir-plugin",
+ "sleipnir_widget",
+ "uuid",
+]
+
+[[package]]
 name = "sleipnir-plugin-failed-run"
 version = "0.1.0"
 dependencies = [
@@ -5927,6 +5937,7 @@ dependencies = [
  "diff_core",
  "dirs",
  "gpui",
+ "image",
  "itertools 0.14.0",
  "log",
  "objc",
@@ -5941,6 +5952,7 @@ dependencies = [
  "sleipnir_ctl",
  "sleipnir_settings",
  "sleipnir_widget",
+ "smallvec",
  "syntax",
  "sysinfo 0.37.2",
  "tempfile",
@@ -6405,7 +6417,9 @@ version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64 0.22.1",
  "collections",
+ "flate2",
  "futures",
  "futures-lite 1.13.0",
  "gpui",
@@ -6414,6 +6428,7 @@ dependencies = [
  "log",
  "parking_lot",
  "percent-encoding",
+ "png 0.17.16",
  "rand 0.9.5",
  "regex",
  "release_channel",

@@ -811,6 +811,7 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> 
         scrolled_to_top: content.display_offset == term.history_size(),
         scrolled_to_bottom: content.display_offset == 0,
         bottom_row_occupied,
+        image_placements: Vec::new(),
     }
 }
 

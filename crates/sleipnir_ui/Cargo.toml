@@ -36,6 +36,8 @@ sleipnir_widget.workspace = true
 row_geometry.workspace = true
 sysinfo.workspace = true
 async-channel.workspace = true
+image.workspace = true
+smallvec.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

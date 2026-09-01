@@ -1,0 +1,20 @@
+{
+  "id": "disk3d",
+  "name": "Disk 3D",
+  "version": "0.1.0",
+  "api_version": 2,
+  "enabled": true,
+  "lifecycle": "resident",
+  "binary": "./sleipnir-plugin-disk3d",
+  "permissions": ["resident", "render_panel", "subscribe_events", "read_cwd"],
+  "commands": [
+    {
+      "id": "open",
+      "title": "Disk 3D: Chart This Directory",
+      "description": "Open a 3D disk-usage chart for the working directory.",
+      "keywords": ["disk", "usage", "3d", "size", "du"],
+      "permissions": ["read_cwd"],
+      "timeout_secs": 15
+    }
+  ]
+}

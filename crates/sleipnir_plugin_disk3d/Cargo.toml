@@ -1,0 +1,24 @@
+[package]
+name = "sleipnir-plugin-disk3d"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sleipnir-plugin-disk3d"
+path = "src/main.rs"
+
+[dependencies]
+sleipnir-plugin.workspace = true
+plugin_protocol.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sleipnir_widget.workspace = true

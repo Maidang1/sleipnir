@@ -2,16 +2,17 @@
 
 use crate::cursor_blink_alpha;
 use gpui::{
-    App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
+    App, Bounds, Corners, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
     GlobalElementId, InputHandler, InteractiveElement, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ScrollWheelEvent,
-    StatefulInteractiveElement, TextRun, TextStyle, UTF16Selection, Window, fill, point, px,
-    relative, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, RenderImage,
+    ScrollWheelEvent, StatefulInteractiveElement, TextRun, TextStyle, UTF16Selection, Window, fill,
+    point, px, relative, size,
 };
 use itertools::Itertools;
 use row_geometry::{HitTarget, RowGeometry};
 use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
+use std::sync::Arc;
 use std::time::Instant;
 use terminal::{
     Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
@@ -185,6 +186,19 @@ pub struct LayoutState {
     gutter: Vec<GutterPaint>,
     map: PaintMap,
     block_paints: Vec<BlockPaint>,
+    image_quads_below: Vec<ImageQuad>,
+    image_quads_above: Vec<ImageQuad>,
+}
+
+struct ImageQuad {
+    display_line: i32,
+    column: usize,
+    columns: u32,
+    rows: u32,
+    x_offset: u32,
+    y_offset: u32,
+    z_index: i32,
+    image: Arc<RenderImage>,
 }
 
 struct BlockPaint {
@@ -478,6 +492,13 @@ impl Element for TermElement {
                     });
                 }
 
+                let (image_quads_below, image_quads_above) =
+                    if TerminalSettings::get_global(cx).graphics_protocol {
+                        build_image_quads(&content.image_placements)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+
                 LayoutState {
                     hitbox,
                     dimensions,
@@ -499,6 +520,8 @@ impl Element for TermElement {
                     gutter,
                     map,
                     block_paints,
+                    image_quads_below,
+                    image_quads_above,
                 }
             },
         )
@@ -545,6 +568,9 @@ impl Element for TermElement {
                     for bg in &layout.backgrounds {
                         paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
                     }
+                    for quad in &layout.image_quads_below {
+                        paint_image_quad(origin, quad, &layout.dimensions, &layout.map, window);
+                    }
                     for bg in &layout.search_rects {
                         paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
                     }
@@ -566,6 +592,9 @@ impl Element for TermElement {
                     }
                     for block in &layout.block_paints {
                         paint_block(origin, block, &layout.dimensions, &layout.map, window, cx);
+                    }
+                    for quad in &layout.image_quads_above {
+                        paint_image_quad(origin, quad, &layout.dimensions, &layout.map, window);
                     }
 
                     if self.focused
@@ -1336,6 +1365,109 @@ fn named_color(named: NamedColor, palette: &TerminalPalette) -> gpui::Hsla {
         BrightForeground => palette.bright_foreground,
         DimForeground => palette.foreground,
     }
+}
+
+fn rgba_to_bgra(mut data: Vec<u8>) -> Vec<u8> {
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    data
+}
+
+fn build_image_quads(
+    placements: &[terminal::kitty_graphics::VisiblePlacement],
+) -> (Vec<ImageQuad>, Vec<ImageQuad>) {
+    use image::ImageBuffer;
+    use smallvec::SmallVec;
+
+    let mut below = Vec::new();
+    let mut above = Vec::new();
+
+    for p in placements {
+        let w = p.image_width;
+        let h = p.image_height;
+        if w == 0 || h == 0 {
+            continue;
+        }
+
+        let sx = p.src_x;
+        let sy = p.src_y;
+        let sw = p.src_width.min(w.saturating_sub(sx));
+        let sh = p.src_height.min(h.saturating_sub(sy));
+        if sw == 0 || sh == 0 {
+            continue;
+        }
+
+        let mut cropped = Vec::with_capacity((sw * sh * 4) as usize);
+        for row in sy..sy + sh {
+            let row_start = (row * w + sx) as usize * 4;
+            let row_end = row_start + sw as usize * 4;
+            if row_end <= p.image.len() {
+                cropped.extend_from_slice(&p.image[row_start..row_end]);
+            }
+        }
+
+        let bgra = rgba_to_bgra(cropped);
+        let Some(buffer) = ImageBuffer::from_raw(sw, sh, bgra) else {
+            continue;
+        };
+        let frame = image::Frame::new(buffer);
+        let render = Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)));
+
+        let quad = ImageQuad {
+            display_line: p.display_line,
+            column: p.display_col,
+            columns: p.display_cols,
+            rows: p.display_rows,
+            x_offset: p.x_offset,
+            y_offset: p.y_offset,
+            z_index: p.z_index,
+            image: render,
+        };
+
+        if p.z_index < 0 {
+            below.push(quad);
+        } else {
+            above.push(quad);
+        }
+    }
+
+    below.sort_by_key(|q| q.z_index);
+    above.sort_by_key(|q| q.z_index);
+    (below, above)
+}
+
+fn paint_image_quad(
+    origin: GpuiPoint<Pixels>,
+    quad: &ImageQuad,
+    dimensions: &TerminalBounds,
+    map: &PaintMap,
+    window: &mut Window,
+) {
+    let x = origin.x + quad.column as f32 * dimensions.cell_width + px(quad.x_offset as f32);
+    let y = map.y(origin, quad.display_line) + px(quad.y_offset as f32);
+    let w = dimensions.cell_width * quad.columns as f32;
+    let h = {
+        let mut total = px(0.);
+        for r in 0..quad.rows as i32 {
+            total += map.h(quad.display_line + r).max(dimensions.line_height);
+        }
+        total
+    };
+
+    if w <= px(0.) || h <= px(0.) {
+        return;
+    }
+
+    let bounds = Bounds::new(point(x, y), size(w, h));
+    let _ = window.paint_image(
+        bounds,
+        bounds,
+        Corners::default(),
+        quad.image.clone(),
+        0,
+        false,
+    );
 }
 
 fn is_blank(cell: &Cell) -> bool {

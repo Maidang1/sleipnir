@@ -1,5 +1,7 @@
 # Kitty Graphics：把像素塞进字符格子
 
+> **项目状态说明（2026-09-01 核对）：** 本文是 Kitty Graphics 协议的背景资料，不是 Sleipnir 的功能说明。当前仓库使用的 `alacritty_terminal` / `vte` 固定版本只包含 OSC 133/9/777 扩展；终端模型没有图像存储或 placement，`TermElement` 也没有图像渲染层，因此 Sleipnir **尚未支持** Kitty Graphics。`vte` 仓库里名为 `kitty-protocol` 的独立分支没有被本项目引用，不能视为产品支持。当前决策见 [ADR-0004](adr/0004-kitty-graphics-track-not-implement.md)。
+
 终端默认只认识字符。你 `cat` 一张 png，得到的是乱码，或者被半块字符糊成的马赛克。2017 年，Kitty 终端的作者 Kovid Goyal 写了一套协议：跑在终端里的程序把像素数据发给模拟器，由模拟器自己画到屏幕上。官方名字是 Terminal Graphics Protocol，大家口头都叫 Kitty Graphics。
 
 终端是一张字符网格，每个格子只能放一个字符、一种前景色、一种背景色。图是连续像素，尺度和格子对不上。协议做的就是让真图像进这张网格，并且还能和文字一起滚、一起叠、一起被删。

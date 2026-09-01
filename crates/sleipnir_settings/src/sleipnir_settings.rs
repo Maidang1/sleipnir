@@ -200,6 +200,8 @@ pub struct TerminalSettings {
     pub show_tombstone: bool,
     /// External command plugin discovery and permission policy.
     pub plugins: PluginSettings,
+    /// Enable Kitty Graphics Protocol image display. Default true.
+    pub graphics_protocol: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -317,6 +319,7 @@ impl Default for TerminalSettings {
             keybinding_preset: KeybindingPreset::Default,
             show_tombstone: true,
             plugins: PluginSettings::default(),
+            graphics_protocol: true,
         }
     }
 }
@@ -550,6 +553,9 @@ struct SettingsFile {
     show_tombstone: Option<bool>,
     #[serde(default)]
     plugins: Option<PluginSettings>,
+    /// Enable Kitty Graphics Protocol image display. Default true.
+    #[serde(default)]
+    graphics_protocol: Option<bool>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
@@ -703,6 +709,9 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.plugins {
         settings.plugins = v;
     }
+    if let Some(v) = file.graphics_protocol {
+        settings.graphics_protocol = v;
+    }
     let t = file.terminal;
     if let Some(size) = t.font_size {
         settings.font_size = Some(px(size));
@@ -807,6 +816,7 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         keybinding_preset: Some(KeybindingPreset::Default),
         show_tombstone: Some(true),
         plugins: None,
+        graphics_protocol: Some(true),
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some(default_font_family().into()),

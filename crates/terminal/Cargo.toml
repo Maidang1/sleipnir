@@ -18,7 +18,9 @@ doctest = false
 [dependencies]
 alacritty_terminal.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 collections.workspace = true
+flate2.workspace = true
 futures.workspace = true
 futures-lite.workspace = true
 gpui.workspace = true
@@ -36,6 +38,7 @@ urlencoding.workspace = true
 vte.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
+png.workspace = true
 run_ledger.workspace = true
 row_geometry.workspace = true
 
