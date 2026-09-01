@@ -14,6 +14,7 @@ use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_co
 use std::ops::Range as StdRange;
 use std::sync::Arc;
 use std::time::Instant;
+use collections::HashMap;
 use terminal::{
     Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
     Rgb, Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
@@ -492,12 +493,29 @@ impl Element for TermElement {
                     });
                 }
 
-                let (image_quads_below, image_quads_above) =
+                let (mut image_quads_below, mut image_quads_above) =
                     if TerminalSettings::get_global(cx).graphics_protocol {
                         build_image_quads(&content.image_placements)
                     } else {
                         (Vec::new(), Vec::new())
                     };
+
+                if TerminalSettings::get_global(cx).graphics_protocol {
+                    let placeholder_quads = build_placeholder_quads(
+                        &content.cells,
+                        &content.placeholder_images,
+                        content.display_offset,
+                    );
+                    for quad in placeholder_quads {
+                        if quad.z_index < 0 {
+                            image_quads_below.push(quad);
+                        } else {
+                            image_quads_above.push(quad);
+                        }
+                    }
+                    image_quads_below.sort_by_key(|q| q.z_index);
+                    image_quads_above.sort_by_key(|q| q.z_index);
+                }
 
                 LayoutState {
                     hitbox,
@@ -992,7 +1010,7 @@ fn layout_grid(
                 push_bg(&mut backgrounds, display_line, col, color);
             }
 
-            if cell.is_wide_char_spacer() || is_blank(cell) {
+            if cell.is_wide_char_spacer() || cell.character() == KITTY_PLACEHOLDER || is_blank(cell) {
                 continue;
             }
 
@@ -1437,6 +1455,144 @@ fn build_image_quads(
     (below, above)
 }
 
+fn build_placeholder_quads(
+    cells: &[IndexedCell],
+    placeholder_images: &HashMap<u32, (Arc<Vec<u8>>, u32, u32)>,
+    _display_offset: usize,
+) -> Vec<ImageQuad> {
+    use image::ImageBuffer;
+    use itertools::Itertools;
+    use smallvec::SmallVec;
+
+    if placeholder_images.is_empty() {
+        return Vec::new();
+    }
+
+    struct TileInfo {
+        image_id: u32,
+        tile_row: u32,
+        tile_col: u32,
+        display_line: i32,
+        screen_col: usize,
+    }
+
+    let mut tiles = Vec::new();
+    let linegroups = cells.iter().chunk_by(|c| c.point.line);
+    for (line_idx, (_, line)) in linegroups.into_iter().enumerate() {
+        let display_line = line_idx as i32;
+        for indexed in line {
+            if let Some(ph) = decode_placeholder_cell(&indexed.cell) {
+                if placeholder_images.contains_key(&ph.image_id) {
+                    tiles.push(TileInfo {
+                        image_id: ph.image_id,
+                        tile_row: ph.row,
+                        tile_col: ph.col,
+                        display_line,
+                        screen_col: indexed.point.column,
+                    });
+                }
+            }
+        }
+    }
+
+    if tiles.is_empty() {
+        return Vec::new();
+    }
+
+    // Group tiles by (image_id, tile_row) to form contiguous row spans.
+    // Each row span becomes one ImageQuad.
+    #[derive(Hash, Eq, PartialEq, Clone)]
+    struct GroupKey {
+        image_id: u32,
+        tile_row: u32,
+        display_line: i32,
+    }
+
+    let mut groups: HashMap<GroupKey, (u32, u32, usize)> = Default::default();
+    for t in &tiles {
+        let key = GroupKey {
+            image_id: t.image_id,
+            tile_row: t.tile_row,
+            display_line: t.display_line,
+        };
+        let entry = groups
+            .entry(key)
+            .or_insert((t.tile_col, t.tile_col, t.screen_col));
+        entry.0 = entry.0.min(t.tile_col);
+        entry.1 = entry.1.max(t.tile_col);
+        entry.2 = entry.2.min(t.screen_col);
+    }
+
+    let mut quads = Vec::new();
+    for (key, (min_tile_col, max_tile_col, screen_col_start)) in &groups {
+        let (rgba_data, img_w, img_h) = match placeholder_images.get(&key.image_id) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        // Determine the total tile grid dimensions from all tiles of this image.
+        let mut max_row = 0u32;
+        let mut max_col_global = 0u32;
+        for t in &tiles {
+            if t.image_id == key.image_id {
+                max_row = max_row.max(t.tile_row);
+                max_col_global = max_col_global.max(t.tile_col);
+            }
+        }
+        let total_rows = max_row + 1;
+        let total_cols = max_col_global + 1;
+
+        let tile_w = img_w / total_cols;
+        let tile_h = img_h / total_rows;
+        if tile_w == 0 || tile_h == 0 {
+            continue;
+        }
+
+        let src_x = min_tile_col * tile_w;
+        let src_y = key.tile_row * tile_h;
+        let cols_in_span = max_tile_col - min_tile_col + 1;
+        let crop_w = cols_in_span * tile_w;
+        let crop_h = tile_h;
+
+        let clamped_sx = src_x.min(*img_w);
+        let clamped_sy = src_y.min(*img_h);
+        let clamped_w = crop_w.min(img_w.saturating_sub(clamped_sx));
+        let clamped_h = crop_h.min(img_h.saturating_sub(clamped_sy));
+        if clamped_w == 0 || clamped_h == 0 {
+            continue;
+        }
+
+        let mut cropped = Vec::with_capacity((clamped_w * clamped_h * 4) as usize);
+        for row in clamped_sy..clamped_sy + clamped_h {
+            let row_start = (row * img_w + clamped_sx) as usize * 4;
+            let row_end = row_start + clamped_w as usize * 4;
+            if row_end <= rgba_data.len() {
+                cropped.extend_from_slice(&rgba_data[row_start..row_end]);
+            }
+        }
+
+        let bgra = rgba_to_bgra(cropped);
+        let Some(buffer) = ImageBuffer::from_raw(clamped_w, clamped_h, bgra) else {
+            continue;
+        };
+        let frame = image::Frame::new(buffer);
+        let render = Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)));
+
+        quads.push(ImageQuad {
+            display_line: key.display_line,
+            column: *screen_col_start,
+            columns: cols_in_span,
+            rows: 1,
+            x_offset: 0,
+            y_offset: 0,
+            z_index: 0,
+            image: render,
+        });
+    }
+
+    quads
+}
+
 fn paint_image_quad(
     origin: GpuiPoint<Pixels>,
     quad: &ImageQuad,
@@ -1475,6 +1631,40 @@ fn is_blank(cell: &Cell) -> bool {
         && cell.zerowidth().map(|z| z.is_empty()).unwrap_or(true)
         && !cell.has_underline()
         && !cell.has_strikeout()
+}
+
+const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+struct PlaceholderTile {
+    image_id: u32,
+    row: u32,
+    col: u32,
+}
+
+fn decode_placeholder_cell(cell: &Cell) -> Option<PlaceholderTile> {
+    if cell.character() != KITTY_PLACEHOLDER {
+        return None;
+    }
+    let image_id = match cell.foreground() {
+        Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32),
+        _ => return None,
+    };
+    if image_id == 0 {
+        return None;
+    }
+    let (mut row, mut col) = (0u32, 0u32);
+    if let Some(zw) = cell.zerowidth() {
+        for &ch in zw {
+            let cp = ch as u32;
+            if cp >= 0x0305 && cp < 0x0305 + 256 {
+                row = cp - 0x0305;
+            }
+            if cp >= 0x030D && cp < 0x030D + 256 {
+                col = cp - 0x030D;
+            }
+        }
+    }
+    Some(PlaceholderTile { image_id, row, col })
 }
 
 struct TerminalInputHandler {

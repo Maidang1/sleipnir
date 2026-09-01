@@ -189,6 +189,16 @@ pub fn render(view: &View, cols: u16, rows: u16) -> Widget {
     clamp_to_budget(root.into())
 }
 
+/// Chrome-only tree for GPU mode: header + legend + controls, no raster rows.
+pub fn render_chrome_only(view: &View) -> Widget {
+    let mut root = col().gap(0).child(header(view));
+    if view.scan.is_empty() {
+        root = root.child(text("Nothing to chart in this directory.").tone(Tone::Dim));
+    }
+    root = root.child(sep()).child(legend(view)).child(controls());
+    root.into()
+}
+
 fn header(view: &View) -> Widget {
     let scan = &view.scan;
     let root = scan

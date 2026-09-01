@@ -12,10 +12,20 @@
 use plugin_protocol::v2::{Capability, Widget};
 use sleipnir_widget::{Hit, Layout, ToneRole, hit_test, layout};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::pane_tree::PaneKey;
 use crate::session::SessionNode;
+
+/// GPU-rendered image from a plugin, painted above the background in the panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelImage {
+    pub image_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub data: Arc<Vec<u8>>,
+}
 
 /// One plugin-drawn panel. The tree is data; the host stores it.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +37,8 @@ pub struct PanelSurface {
     pub tree: Widget,
     /// Plugin process is gone. The last tree stays, visibly marked.
     pub stale: bool,
+    /// GPU-rendered image from the plugin, painted above background, below chrome.
+    pub image: Option<PanelImage>,
 }
 
 /// Outcome of applying a `Render { target: Panel }`.
@@ -102,6 +114,7 @@ impl PanelRegistry {
                         surface_id: Uuid::new_v4(),
                         tree,
                         stale: false,
+                        image: None,
                     },
                 );
                 ApplyPanel::Create { pane_key: pane }
@@ -125,6 +138,23 @@ impl PanelRegistry {
             if !live.contains(&surface.plugin_id) {
                 surface.stale = true;
             }
+        }
+    }
+
+    /// Store a GPU-rendered image on a panel surface owned by `plugin_id`.
+    /// Returns `true` if the image was accepted.
+    pub fn set_image(
+        &mut self,
+        pane: PaneKey,
+        plugin_id: &str,
+        image: PanelImage,
+    ) -> bool {
+        match self.surfaces.get_mut(&pane) {
+            Some(surface) if surface.plugin_id == plugin_id => {
+                surface.image = Some(image);
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -358,6 +388,7 @@ mod tests {
             surface_id: Uuid::nil(),
             tree: btn("Go", "retry"),
             stale: false,
+            image: None,
         };
         let laid = layout_surface(&surface, 20);
         let hit = action_at(&laid, 0, 0).expect("btn");
@@ -373,6 +404,7 @@ mod tests {
             surface_id: Uuid::nil(),
             tree: text("plugin:evil"),
             stale: false,
+            image: None,
         };
         let laid = layout_surface(&surface, 20);
         assert!(matches!(

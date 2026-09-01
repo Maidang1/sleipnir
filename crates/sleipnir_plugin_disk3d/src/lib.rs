@@ -11,13 +11,15 @@
 //! - [`scan`]   — the bounded filesystem walk that produces the numbers.
 //! - [`view`]   — scan + camera → widget tree. Pure, so it is unit testable.
 
+pub mod gpu;
+pub mod gpu_scene;
 pub mod raster;
 pub mod scan;
 pub mod view;
 
 pub use raster::{Camera, Canvas, Scene};
 pub use scan::{Entry, Scan, human_bytes, scan};
-pub use view::{View, render};
+pub use view::{View, render, render_chrome_only};
 
 /// Yaw step per arrow press, in radians (15°).
 pub const YAW_STEP: f32 = std::f32::consts::PI / 12.0;

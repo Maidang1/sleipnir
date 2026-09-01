@@ -1145,6 +1145,7 @@ impl AppShell {
             Capability::HostCallReadScreen,
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
+            Capability::HostCallWriteGraphics,
         ]
         .into_iter()
         .filter(|cap| crate::plugin_runtime::has_grant(plugin_id, *cap, cx))
@@ -1198,6 +1199,28 @@ impl AppShell {
                 }
             }
             CallPlan::OpenPane { cwd, command } => self.execute_open_pane(cwd, command, window, cx),
+            CallPlan::WriteGraphics {
+                pane,
+                image_id,
+                width,
+                height,
+                rgba,
+            } => {
+                use crate::plugin_panel::PanelImage;
+                use std::sync::Arc;
+                let image = PanelImage {
+                    image_id,
+                    width,
+                    height,
+                    data: Arc::new(rgba),
+                };
+                if self.plugin_panels.set_image(pane, plugin_id, image) {
+                    window.refresh();
+                    HostCallResult::GraphicsOk { image_id }
+                } else {
+                    error_result("pane not found or not owned by this plugin")
+                }
+            }
         };
         if !crate::plugin_runtime::reply_host_call(plugin_id, id, result, cx) {
             log::debug!("plugin {plugin_id} Call {id} reply dropped (session gone)");

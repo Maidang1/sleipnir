@@ -2,6 +2,7 @@ mod apc_scanner;
 mod protocol;
 mod receiver;
 mod store;
+mod transmission;
 
 pub use apc_scanner::{ApcScanner, ScanResult};
 pub use protocol::{

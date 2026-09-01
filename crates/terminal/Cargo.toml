@@ -44,6 +44,7 @@ row_geometry.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+memmap2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
@@ -51,4 +52,5 @@ windows.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 rand.workspace = true
+tempfile.workspace = true
 util_macros.workspace = true

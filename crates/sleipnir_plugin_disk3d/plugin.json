@@ -6,7 +6,7 @@
   "enabled": true,
   "lifecycle": "resident",
   "binary": "./sleipnir-plugin-disk3d",
-  "permissions": ["resident", "render_panel", "subscribe_events", "read_cwd"],
+  "permissions": ["resident", "render_panel", "subscribe_events", "read_cwd", "host_call_write_graphics"],
   "commands": [
     {
       "id": "open",

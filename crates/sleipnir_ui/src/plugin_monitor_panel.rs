@@ -229,6 +229,7 @@ pub fn capability_label(cap: Capability) -> &'static str {
         Capability::HostCallReadScreen => "can read any pane's screen",
         Capability::HostCallListPanes => "can list open panes",
         Capability::HostCallOpenPane => "can open a new pane",
+        Capability::HostCallWriteGraphics => "can send GPU-rendered images",
     }
 }
 
@@ -440,6 +441,7 @@ mod tests {
             Capability::HostCallReadScreen,
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
+            Capability::HostCallWriteGraphics,
         ];
         for cap in caps {
             let label = capability_label(cap);

@@ -5,11 +5,13 @@
 //! tab/pane state without widening it to the crate.
 
 use gpui::{
-    App, AppContext as _, Bounds, ClickEvent, Context, ElementId, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, canvas,
-    deferred, div, point, prelude::FluentBuilder as _, px,
+    App, AppContext as _, Bounds, ClickEvent, Corners, Context, ElementId, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement as _, Pixels, RenderImage, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, WindowControlArea, canvas, deferred, div, point,
+    prelude::FluentBuilder as _, px,
 };
+use std::sync::Arc;
 
 use super::{AppShell, DragState, PaneDrag, TabDragPreview};
 use crate::LeafContent;
@@ -604,6 +606,7 @@ impl AppShell {
         let stale = surface.stale;
         let plugin_id = surface.plugin_id.clone();
         let surface_id = surface.surface_id;
+        let panel_image = surface.image.clone();
         let mut body = div()
             .id(("plugin-panel", pane_id))
             .size_full()
@@ -612,6 +615,31 @@ impl AppShell {
             .font_family(font_family)
             .text_size(font_size)
             .overflow_hidden();
+
+        if let Some(img) = panel_image {
+            let render_image = build_panel_render_image(&img);
+            body = body.child(
+                canvas(
+                    move |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        if let Some(ref ri) = render_image {
+                            let _ = window.paint_image(
+                                bounds,
+                                bounds,
+                                Corners::default(),
+                                ri.clone(),
+                                0,
+                                false,
+                            );
+                        }
+                    },
+                )
+                .size_full()
+                .absolute()
+                .top_0()
+                .left_0(),
+            );
+        }
 
         body = paint_laid_out(body, &laid, tokens, cell_w, line_h);
 
@@ -876,4 +904,28 @@ fn paint_node(
             .child(label.clone())
             .into_any_element(),
     }
+}
+
+fn build_panel_render_image(
+    img: &crate::plugin_panel::PanelImage,
+) -> Option<Arc<RenderImage>> {
+    use image::ImageBuffer;
+    use smallvec::SmallVec;
+
+    let w = img.width;
+    let h = img.height;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let expected = (w as usize) * (h as usize) * 4;
+    if img.data.len() < expected {
+        return None;
+    }
+    let mut bgra = img.data[..expected].to_vec();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let buffer = ImageBuffer::from_raw(w, h, bgra)?;
+    let frame = image::Frame::new(buffer);
+    Some(Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1))))
 }

@@ -16,6 +16,8 @@
 use plugin_protocol::v2::{Capability, HostCall, HostCallResult, PaneInfo};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use base64::Engine as _;
+
 use crate::pane_tree::PaneKey;
 
 /// Notify title cap. A plugin-controlled string is interpolated into a
@@ -31,6 +33,8 @@ pub const MAX_OPEN_COMMAND_CHARS: usize = 1024;
 pub const RATE_WINDOW_MS: u64 = 5_000;
 /// Max accepted calls per plugin in [`RATE_WINDOW_MS`].
 pub const RATE_MAX_CALLS: u32 = 10;
+/// Max RGBA pixel count per WriteGraphics call (4096x4096).
+pub const MAX_GRAPHICS_PIXELS: u32 = 4096 * 4096;
 
 /// Program + argv for OpenPane. Never a shell command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +59,13 @@ pub enum CallPlan {
     OpenPane {
         cwd: Option<String>,
         command: Option<OpenCommand>,
+    },
+    WriteGraphics {
+        pane: PaneKey,
+        image_id: u32,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
     },
 }
 
@@ -127,6 +138,16 @@ pub fn plan_call(
             Ok((cwd, command)) => CallPlan::OpenPane { cwd, command },
             Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
         },
+        HostCall::WriteGraphics {
+            image_id,
+            width,
+            height,
+            data_b64,
+            pane,
+        } => match parse_write_graphics(*image_id, *width, *height, data_b64, *pane) {
+            Ok(plan) => plan,
+            Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
+        },
     }
 }
 
@@ -177,6 +198,54 @@ pub fn parse_open_command(command: &str) -> Result<OpenCommand, String> {
 /// Truncate visible screen text at a char boundary.
 pub fn cap_screen(text: String) -> String {
     cap_chars(&text, MAX_SCREEN_CHARS)
+}
+
+fn parse_write_graphics(
+    image_id: u32,
+    width: u32,
+    height: u32,
+    data_b64: &str,
+    pane: PaneKey,
+) -> Result<CallPlan, String> {
+    if width == 0 || height == 0 {
+        return Err("image dimensions must be non-zero".into());
+    }
+    let pixels = width as u64 * height as u64;
+    if pixels > MAX_GRAPHICS_PIXELS as u64 {
+        return Err(format!(
+            "image {width}x{height} exceeds {MAX_GRAPHICS_PIXELS} pixel cap"
+        ));
+    }
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|e| format!("base64 decode failed: {e}"))?;
+    let rgba = decode_png_rgba(&png, width, height)?;
+    Ok(CallPlan::WriteGraphics {
+        pane,
+        image_id,
+        width,
+        height,
+        rgba,
+    })
+}
+
+/// Decode a PNG frame to RGBA and confirm it matches the declared dimensions.
+///
+/// `write_graphics` PNG-compresses the buffer before base64 so a full frame
+/// fits the host's line cap; the host reverses that here back to raw RGBA for
+/// `paint_image`.
+fn decode_png_rgba(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG decode failed: {e}"))?
+        .into_rgba8();
+    if image.width() != width || image.height() != height {
+        return Err(format!(
+            "PNG {}x{} does not match declared {width}x{height}",
+            image.width(),
+            image.height()
+        ));
+    }
+    Ok(image.into_raw())
 }
 
 /// ListPanes reports only terminal panes. A plugin Panel is not a PTY and
@@ -467,5 +536,93 @@ mod tests {
             0,
         );
         assert!(matches!(plan, CallPlan::ListPanes));
+    }
+
+    fn png_of(width: u32, height: u32) -> String {
+        let rgba = vec![0x7fu8; (width * height * 4) as usize];
+        let buffer: image::RgbaImage =
+            image::ImageBuffer::from_raw(width, height, rgba).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        buffer.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    }
+
+    #[test]
+    fn write_graphics_decodes_png_back_to_rgba() {
+        let mut limiter = HostCallLimiter::new();
+        let (w, h) = (8u32, 6u32);
+        let call = HostCall::WriteGraphics {
+            image_id: 3,
+            width: w,
+            height: h,
+            data_b64: png_of(w, h),
+            pane: key(1),
+        };
+        let plan = plan_call(
+            "gfx",
+            &call,
+            &[Capability::HostCallWriteGraphics],
+            &mut limiter,
+            0,
+        );
+        match plan {
+            CallPlan::WriteGraphics {
+                image_id,
+                width,
+                height,
+                rgba,
+                ..
+            } => {
+                assert_eq!(image_id, 3);
+                assert_eq!((width, height), (w, h));
+                // Decoded back to raw RGBA: 4 bytes per pixel.
+                assert_eq!(rgba.len(), (w * h * 4) as usize);
+                assert!(rgba.iter().all(|&b| b == 0x7f));
+            }
+            other => panic!("expected WriteGraphics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_graphics_rejects_dimension_mismatch() {
+        let mut limiter = HostCallLimiter::new();
+        // PNG is 8x6 but the call claims 10x10.
+        let call = HostCall::WriteGraphics {
+            image_id: 1,
+            width: 10,
+            height: 10,
+            data_b64: png_of(8, 6),
+            pane: key(1),
+        };
+        let plan = plan_call(
+            "gfx",
+            &call,
+            &[Capability::HostCallWriteGraphics],
+            &mut limiter,
+            0,
+        );
+        match plan {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("does not match"), "{message}");
+            }
+            other => panic!("expected Error reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_graphics_needs_its_capability() {
+        let mut limiter = HostCallLimiter::new();
+        let call = HostCall::WriteGraphics {
+            image_id: 1,
+            width: 8,
+            height: 6,
+            data_b64: png_of(8, 6),
+            pane: key(1),
+        };
+        let plan = plan_call("gfx", &call, &[], &mut limiter, 0);
+        assert!(matches!(
+            plan,
+            CallPlan::Reply(HostCallResult::Error { .. })
+        ));
     }
 }

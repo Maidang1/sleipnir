@@ -5865,6 +5865,8 @@ dependencies = [
 name = "sleipnir-plugin"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "image",
  "plugin_protocol",
  "serde_json",
  "uuid",
@@ -5874,10 +5876,13 @@ dependencies = [
 name = "sleipnir-plugin-disk3d"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "plugin_protocol",
+ "pollster 0.4.0",
  "sleipnir-plugin",
  "sleipnir_widget",
  "uuid",
+ "wgpu",
 ]
 
 [[package]]
@@ -5933,6 +5938,7 @@ name = "sleipnir_ui"
 version = "0.1.1"
 dependencies = [
  "async-channel",
+ "base64 0.22.1",
  "collections",
  "diff_core",
  "dirs",
@@ -6426,6 +6432,7 @@ dependencies = [
  "itertools 0.14.0",
  "libc",
  "log",
+ "memmap2",
  "parking_lot",
  "percent-encoding",
  "png 0.17.16",
@@ -6437,6 +6444,7 @@ dependencies = [
  "serde",
  "sleipnir_settings",
  "sysinfo 0.37.2",
+ "tempfile",
  "thiserror 2.0.20",
  "url",
  "urlencoding",

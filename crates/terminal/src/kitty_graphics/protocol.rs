@@ -75,6 +75,11 @@ pub struct GraphicsCommand {
     pub z_index: i32,
     pub delete_target: Option<DeleteTarget>,
     pub composition_mode: CompositionMode,
+    pub unicode_placeholder: bool,
+    pub frame_number: u32,
+    pub frame_gap: u32,
+    pub background_frame: u32,
+    pub loop_count: i32,
     pub payload: Vec<u8>,
 }
 
@@ -104,6 +109,11 @@ impl Default for GraphicsCommand {
             z_index: 0,
             delete_target: None,
             composition_mode: CompositionMode::AlphaBlend,
+            unicode_placeholder: false,
+            frame_number: 0,
+            frame_gap: 0,
+            background_frame: 0,
+            loop_count: 0,
             payload: Vec::new(),
         }
     }
@@ -197,8 +207,39 @@ pub fn parse_graphics_command(data: &[u8]) -> Option<GraphicsCommand> {
                     _ => DeleteTarget::All,
                 });
             }
+            "U" => cmd.unicode_placeholder = value == "1",
+            "S" => cmd.loop_count = value.parse().unwrap_or(0),
             _ => {}
         }
+    }
+
+    // Context-dependent keys: v/z/r have different meanings for animation actions.
+    match cmd.action {
+        Action::TransmitFrame => {
+            if let Some(v) = kvs.get("v") {
+                cmd.frame_gap = v.parse().unwrap_or(0);
+            }
+            if let Some(z) = kvs.get("z") {
+                cmd.frame_number = z.parse().unwrap_or(0);
+            }
+            if let Some(r) = kvs.get("r") {
+                cmd.background_frame = r.parse().unwrap_or(0);
+            }
+        }
+        Action::ControlAnimation => {
+            if let Some(v) = kvs.get("v") {
+                cmd.frame_gap = v.parse().unwrap_or(0);
+            }
+            if let Some(z) = kvs.get("z") {
+                cmd.frame_number = z.parse().unwrap_or(0);
+            }
+        }
+        Action::ComposeFrame => {
+            if let Some(z) = kvs.get("z") {
+                cmd.frame_number = z.parse().unwrap_or(0);
+            }
+        }
+        _ => {}
     }
 
     if cmd.action == Action::Delete {
@@ -338,5 +379,42 @@ mod tests {
         cmd.image_id = 7;
         let resp = format_error_response(&cmd, "ENOENT");
         assert_eq!(resp, b"\x1b_Gi=7;EENOENT\x1b\\");
+    }
+
+    #[test]
+    fn parse_unicode_placeholder_flag() {
+        let data = b"a=T,i=1,U=1,f=32,s=10,v=10;payload";
+        let cmd = parse_graphics_command(data).unwrap();
+        assert!(cmd.unicode_placeholder);
+        assert_eq!(cmd.action, Action::TransmitAndDisplay);
+    }
+
+    #[test]
+    fn parse_transmit_frame_context_keys() {
+        let data = b"a=f,i=1,z=3,v=40,r=1,O=1;framedata";
+        let cmd = parse_graphics_command(data).unwrap();
+        assert_eq!(cmd.action, Action::TransmitFrame);
+        assert_eq!(cmd.frame_number, 3);
+        assert_eq!(cmd.frame_gap, 40);
+        assert_eq!(cmd.background_frame, 1);
+        assert_eq!(cmd.composition_mode, CompositionMode::Overwrite);
+    }
+
+    #[test]
+    fn parse_control_animation_action() {
+        let data = b"a=a,i=1,S=3,v=50,z=2";
+        let cmd = parse_graphics_command(data).unwrap();
+        assert_eq!(cmd.action, Action::ControlAnimation);
+        assert_eq!(cmd.loop_count, 3);
+        assert_eq!(cmd.frame_gap, 50);
+        assert_eq!(cmd.frame_number, 2);
+    }
+
+    #[test]
+    fn parse_compose_frame_action() {
+        let data = b"a=c,i=1,z=5;composedata";
+        let cmd = parse_graphics_command(data).unwrap();
+        assert_eq!(cmd.action, Action::ComposeFrame);
+        assert_eq!(cmd.frame_number, 5);
     }
 }

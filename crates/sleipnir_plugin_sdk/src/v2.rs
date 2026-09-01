@@ -26,6 +26,8 @@ pub use plugin_protocol::v2::{
 };
 pub use plugin_protocol::{CommandSpec, InvokeContext, Lifecycle, Manifest};
 
+use base64::Engine as _;
+
 /// The trait a v2 plugin implements.
 ///
 /// `manifest`, `requests` and `event_filter` are asked once during the
@@ -147,6 +149,59 @@ impl Context<'_> {
             }
         }
     }
+
+    /// Send an RGBA pixel buffer to the host for display in a panel.
+    ///
+    /// `image_id` is a stable identifier chosen by the plugin; reusing the same
+    /// id replaces the previous frame. Returns the acknowledged `image_id` on
+    /// success.
+    ///
+    /// The frame is PNG-compressed before transport: a raw 800×600 RGBA buffer
+    /// base64-encodes to ~2.5 MB, which blows the host's line cap, while a PNG
+    /// of a chart on a flat background is tens of KB. `data_b64` therefore
+    /// carries a base64-encoded PNG, not raw RGBA.
+    pub fn write_graphics(
+        &mut self,
+        image_id: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        pane: PaneKey,
+    ) -> Result<u32, String> {
+        let png = encode_png(width, height, rgba)?;
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let result = self.call(HostCall::WriteGraphics {
+            image_id,
+            width,
+            height,
+            data_b64,
+            pane,
+        });
+        match result {
+            HostCallResult::GraphicsOk { image_id } => Ok(image_id),
+            HostCallResult::Error { message } => Err(message),
+            other => Err(format!("unexpected result: {other:?}")),
+        }
+    }
+}
+
+/// PNG-encode an RGBA buffer. Returns the PNG bytes, or an error if the buffer
+/// length does not match `width * height * 4`.
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = (width as usize) * (height as usize) * 4;
+    if rgba.len() != expected {
+        return Err(format!(
+            "RGBA length {} does not match {width}x{height}x4 = {expected}",
+            rgba.len()
+        ));
+    }
+    let buffer: image::RgbaImage = image::ImageBuffer::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| "failed to wrap RGBA buffer".to_string())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    buffer
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG encode failed: {e}"))?;
+    Ok(png.into_inner())
 }
 
 trait SessionIo {

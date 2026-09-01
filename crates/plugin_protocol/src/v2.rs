@@ -91,6 +91,7 @@ pub enum Capability {
     HostCallReadScreen,
     HostCallListPanes,
     HostCallOpenPane,
+    HostCallWriteGraphics,
 }
 
 impl Capability {
@@ -234,6 +235,13 @@ pub enum HostCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },
+    WriteGraphics {
+        image_id: u32,
+        width: u32,
+        height: u32,
+        data_b64: String,
+        pane: PaneKey,
+    },
 }
 
 impl HostCall {
@@ -244,6 +252,7 @@ impl HostCall {
             Self::ReadScreen { .. } => Capability::HostCallReadScreen,
             Self::ListPanes => Capability::HostCallListPanes,
             Self::OpenPane { .. } => Capability::HostCallOpenPane,
+            Self::WriteGraphics { .. } => Capability::HostCallWriteGraphics,
         }
     }
 }
@@ -270,6 +279,9 @@ pub enum HostCallResult {
     },
     Pane {
         pane: PaneKey,
+    },
+    GraphicsOk {
+        image_id: u32,
     },
     /// Includes the denial case: a call whose capability was not granted.
     Error {

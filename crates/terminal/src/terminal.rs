@@ -394,6 +394,7 @@ pub struct Content {
     pub scrolled_to_bottom: bool,
     pub bottom_row_occupied: bool,
     pub image_placements: Vec<VisiblePlacement>,
+    pub placeholder_images: HashMap<u32, (Arc<Vec<u8>>, u32, u32)>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -422,6 +423,7 @@ impl Default for Content {
             scrolled_to_bottom: false,
             bottom_row_occupied: false,
             image_placements: Vec::new(),
+            placeholder_images: Default::default(),
         }
     }
 }
@@ -2243,6 +2245,32 @@ impl Terminal {
             history_size,
             screen_lines,
         );
+
+        // Collect images referenced by Unicode placeholder cells (U+10EEEE).
+        {
+            let mut placeholder_images: HashMap<u32, (Arc<Vec<u8>>, u32, u32)> = Default::default();
+            for ic in &self.last_content.cells {
+                if ic.cell.character() == '\u{10EEEE}' {
+                    let image_id = match ic.cell.foreground() {
+                        Color::Spec(rgb) => {
+                            ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32)
+                        }
+                        _ => continue,
+                    };
+                    if image_id == 0 {
+                        continue;
+                    }
+                    if placeholder_images.contains_key(&image_id) {
+                        continue;
+                    }
+                    if let Some(img) = self.image_store.get_image(image_id) {
+                        placeholder_images
+                            .insert(image_id, (img.data.clone(), img.width, img.height));
+                    }
+                }
+            }
+            self.last_content.placeholder_images = placeholder_images;
+        }
         self.row_geometry
             .set_line_height(f32::from(self.last_content.terminal_bounds.line_height));
         self.row_geometry.set_line_count(

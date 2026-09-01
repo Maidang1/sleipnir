@@ -12,6 +12,7 @@ workspace = true
 path = "src/sleipnir_ui.rs"
 
 [dependencies]
+base64.workspace = true
 collections.workspace = true
 dirs.workspace = true
 gpui.workspace = true

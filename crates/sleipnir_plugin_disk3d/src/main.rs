@@ -22,8 +22,9 @@ use sleipnir_plugin::v2::{
     Output, PaneKey, Plugin, RenderTarget, run,
 };
 use sleipnir_plugin_disk3d::{
-    PITCH_STEP, SPIN_STEP, View, YAW_STEP, ZOOM_STEP, render, scan::scan,
+    PITCH_STEP, SPIN_STEP, View, YAW_STEP, ZOOM_STEP, render, render_chrome_only, scan::scan,
 };
+use sleipnir_plugin_disk3d::gpu::GpuRenderer;
 
 /// Assumed panel size. The host does not report the split's cell size, so the
 /// tree is built for a typical half-window split; `view::render` auto-fits the
@@ -31,6 +32,10 @@ use sleipnir_plugin_disk3d::{
 /// correctness.
 const ASSUMED_COLS: u16 = 78;
 const ASSUMED_ROWS: u16 = 26;
+
+/// Fixed GPU render resolution. The host scales it to the panel area.
+const GPU_WIDTH: u32 = 800;
+const GPU_HEIGHT: u32 = 600;
 
 /// Frames drawn by one "Spin ½ turn" press.
 ///
@@ -46,26 +51,53 @@ struct Disk3d {
     panel: Option<PaneKey>,
     /// Latest cwd from the event stream; the chart follows it.
     cwd: Option<PathBuf>,
+    /// GPU renderer; `None` means fallback to software raster.
+    gpu: Option<GpuRenderer>,
+    /// Stable image id for WriteGraphics frame replacement.
+    image_id: u32,
 }
 
 impl Disk3d {
     fn new() -> Self {
+        let gpu = GpuRenderer::try_new();
+        if gpu.is_some() {
+            eprintln!("disk3d: GPU renderer initialised");
+        } else {
+            eprintln!("disk3d: no GPU, using software rasteriser");
+        }
         Self {
             view: View::new(scan(&std::env::current_dir().unwrap_or_default())),
             panel: None,
             cwd: None,
+            gpu,
+            image_id: 1,
         }
     }
 
+    fn pane_key(&mut self) -> PaneKey {
+        *self.panel.get_or_insert_with(uuid::Uuid::new_v4)
+    }
+
     fn target(&mut self) -> RenderTarget {
-        let pane = *self.panel.get_or_insert_with(uuid::Uuid::new_v4);
+        let pane = self.pane_key();
         RenderTarget::Panel { pane }
     }
 
     fn draw(&mut self, ctx: &mut Context<'_>) {
-        let target = self.target();
-        let tree = render(&self.view, ASSUMED_COLS, ASSUMED_ROWS);
-        let _ = ctx.render(target, tree);
+        let has_gpu = self.gpu.is_some();
+        if has_gpu {
+            let pane = self.pane_key();
+            let gpu = self.gpu.as_ref().unwrap();
+            let rgba = gpu.render_frame(&self.view, GPU_WIDTH, GPU_HEIGHT);
+            let _ = ctx.write_graphics(self.image_id, GPU_WIDTH, GPU_HEIGHT, &rgba, pane);
+            let target = self.target();
+            let tree = render_chrome_only(&self.view);
+            let _ = ctx.render(target, tree);
+        } else {
+            let target = self.target();
+            let tree = render(&self.view, ASSUMED_COLS, ASSUMED_ROWS);
+            let _ = ctx.render(target, tree);
+        }
     }
 
     /// Rescan the directory the chart is currently about.
@@ -104,12 +136,16 @@ impl Plugin for Disk3d {
     }
 
     fn requests(&self) -> Vec<Capability> {
-        vec![
+        let mut caps = vec![
             Capability::Resident,
             Capability::RenderPanel,
             Capability::SubscribeEvents,
             Capability::ReadCwd,
-        ]
+        ];
+        if self.gpu.is_some() {
+            caps.push(Capability::HostCallWriteGraphics);
+        }
+        caps
     }
 
     /// `SubscribeEvents` is continuous observation, so the filter is as narrow
