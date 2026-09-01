@@ -83,7 +83,7 @@ pub enum Permission {
     HostCallReadScreen,
     HostCallListPanes,
     HostCallOpenPane,
-    HostCallWriteGraphics,
+    HostCallDrawScene,
 }
 
 impl Permission {
@@ -107,7 +107,7 @@ impl Permission {
             | Self::HostCallReadScreen
             | Self::HostCallListPanes
             | Self::HostCallOpenPane
-            | Self::HostCallWriteGraphics => None,
+            | Self::HostCallDrawScene => None,
         }
     }
 
@@ -132,7 +132,7 @@ impl Permission {
             Self::HostCallReadScreen => plugin_protocol::v2::Capability::HostCallReadScreen,
             Self::HostCallListPanes => plugin_protocol::v2::Capability::HostCallListPanes,
             Self::HostCallOpenPane => plugin_protocol::v2::Capability::HostCallOpenPane,
-            Self::HostCallWriteGraphics => plugin_protocol::v2::Capability::HostCallWriteGraphics,
+            Self::HostCallDrawScene => plugin_protocol::v2::Capability::HostCallDrawScene,
         }
     }
 }

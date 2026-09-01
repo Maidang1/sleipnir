@@ -3,7 +3,9 @@
 //! Kept free of I/O and of the wire protocol so the whole view is unit
 //! testable: given a scan and a camera, the tree is a pure function.
 
-use plugin_protocol::v2::{MAX_WIDGET_NODES, Tone, Widget, measure};
+use plugin_protocol::v2::{
+    MAX_WIDGET_NODES, SceneBar, SceneCamera, SceneData, Tone, Widget, measure,
+};
 use sleipnir_plugin::v2::{badge, btn, col, row, sep, text};
 
 use crate::raster::{Camera, Scene, default_light};
@@ -95,6 +97,31 @@ impl View {
         self.selected = 0;
         self.scan = scan;
     }
+
+    /// Apply a host-driven camera. The host owns the interactive camera (drag to
+    /// rotate, wheel to zoom) and reports the new state as a `camera` action
+    /// arg, `yaw=..&pitch=..&zoom=..`. Missing or malformed fields keep the
+    /// current value, and pitch/zoom are clamped to the same readable range the
+    /// button controls use, so a stray value cannot flatten or explode the view.
+    pub fn apply_camera_arg(&mut self, arg: &str) {
+        for pair in arg.split('&') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let Ok(v) = value.trim().parse::<f32>() else {
+                continue;
+            };
+            if !v.is_finite() {
+                continue;
+            }
+            match key.trim() {
+                "yaw" => self.camera.yaw = wrap_angle(v),
+                "pitch" => self.camera.pitch = v.clamp(0.05, 1.35),
+                "zoom" => self.zoom = v.clamp(0.5, 2.5),
+                _ => {}
+            }
+        }
+    }
 }
 
 fn wrap_angle(a: f32) -> f32 {
@@ -146,6 +173,77 @@ pub fn build_scene(view: &View) -> Scene {
 /// compact from every angle instead of a long wall.
 pub fn grid_cols(n: usize) -> usize {
     (n as f64).sqrt().ceil().max(1.0) as usize
+}
+
+/// Bar colours, cycled by entry index. RGB so the host paints them directly
+/// (the widget schema's semantic tones do not reach the projected scene).
+const PALETTE: &[[u8; 3]] = &[
+    [102, 178, 242],
+    [242, 140, 89],
+    [115, 217, 128],
+    [230, 115, 166],
+    [178, 140, 230],
+    [242, 204, 89],
+    [128, 204, 204],
+    [217, 153, 115],
+];
+
+/// Selected bar colour: bright so it reads next to the legend.
+const SELECTED_COLOR: [u8; 3] = [255, 255, 153];
+
+/// Floor plane colour.
+const FLOOR_COLOR: [u8; 3] = [46, 46, 56];
+
+/// Build the compact scene description the host projects and paints.
+///
+/// Heights are normalised to the largest entry (`0.0..=1.0`) with the same
+/// visible floor [`MIN_BAR_SHARE`] the software raster used, so a directory
+/// dominated by one entry still shows its small children. The host owns
+/// projection, so this carries geometry and colour only — no pixels.
+pub fn build_scene_data(view: &View) -> SceneData {
+    let entries = &view.scan.entries;
+    let cols = if entries.is_empty() {
+        0
+    } else {
+        grid_cols(entries.len()) as u32
+    };
+    let rows = if entries.is_empty() {
+        0
+    } else {
+        entries.len().div_ceil(cols.max(1) as usize) as u32
+    };
+    let largest = view.scan.largest_bytes().max(1);
+    let bars = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let share = entry.bytes as f32 / largest as f32;
+            let height = share.max(MIN_BAR_SHARE).clamp(0.0, 1.0);
+            let selected = i == view.selected;
+            SceneBar {
+                gx: (i as u32) % cols.max(1),
+                gz: (i as u32) / cols.max(1),
+                height,
+                color: if selected {
+                    SELECTED_COLOR
+                } else {
+                    PALETTE[i % PALETTE.len()]
+                },
+                selected,
+            }
+        })
+        .collect();
+    SceneData {
+        cols,
+        rows,
+        floor: FLOOR_COLOR,
+        camera: SceneCamera {
+            yaw: view.camera.yaw,
+            pitch: view.camera.pitch,
+            zoom: view.zoom,
+        },
+        bars,
+    }
 }
 
 /// Rows available to the raster on a surface of `rows` total.
@@ -597,5 +695,65 @@ mod tests {
         view.replace_scan(scan_of(vec![entry("only", 10, false)]));
         assert_eq!(view.selected, 0);
         assert!(view.selected_entry().is_some());
+    }
+
+    #[test]
+    fn scene_data_is_normalised_and_grid_bounded() {
+        let view = sample_view();
+        let scene = build_scene_data(&view);
+        assert!(scene.cols >= 1 && scene.rows >= 1);
+        assert_eq!(scene.bars.len(), 4);
+        // The tallest entry is a full-height (1.0) bar; all heights are shares.
+        assert!((scene.bars[0].height - 1.0).abs() < 1e-4);
+        for bar in &scene.bars {
+            assert!((0.0..=1.0).contains(&bar.height), "height {bar:?}");
+            assert!(bar.gx < scene.cols, "gx out of grid: {bar:?}");
+            assert!(bar.gz < scene.rows, "gz out of grid: {bar:?}");
+        }
+        // Exactly the selected entry carries the selected flag/colour.
+        assert!(scene.bars[0].selected);
+        assert_eq!(scene.bars[0].color, SELECTED_COLOR);
+        assert!(scene.bars.iter().skip(1).all(|b| !b.selected));
+        // The camera mirrors the view.
+        assert_eq!(scene.camera.yaw, view.camera.yaw);
+        assert_eq!(scene.camera.pitch, view.camera.pitch);
+        assert_eq!(scene.camera.zoom, view.zoom);
+    }
+
+    #[test]
+    fn empty_scene_data_has_no_bars_and_no_grid() {
+        let scene = build_scene_data(&View::new(scan_of(vec![])));
+        assert_eq!(scene.cols, 0);
+        assert_eq!(scene.rows, 0);
+        assert!(scene.bars.is_empty());
+    }
+
+    #[test]
+    fn a_dominated_directory_keeps_small_bars_visible_in_the_scene() {
+        let view = View::new(scan_of(vec![
+            entry("target", 6_000_000_000, true),
+            entry("crates", 1_700_000, true),
+            entry("README.md", 2_390, false),
+        ]));
+        let scene = build_scene_data(&view);
+        // Even the smallest bar keeps the visible plinth, never zero height.
+        assert!(scene.bars.iter().all(|b| b.height >= MIN_BAR_SHARE - 1e-6));
+    }
+
+    #[test]
+    fn apply_camera_arg_updates_and_clamps() {
+        let mut view = sample_view();
+        view.apply_camera_arg("yaw=1.0&pitch=0.5&zoom=1.5");
+        assert!((view.camera.yaw - 1.0).abs() < 1e-4);
+        assert!((view.camera.pitch - 0.5).abs() < 1e-4);
+        assert!((view.zoom - 1.5).abs() < 1e-4);
+        // Out-of-range pitch and zoom are clamped, not accepted raw.
+        view.apply_camera_arg("pitch=9.0&zoom=99.0");
+        assert!(view.camera.pitch <= 1.35);
+        assert!(view.zoom <= 2.5);
+        // Malformed fields are ignored, leaving the current values intact.
+        let before = (view.camera.yaw, view.camera.pitch, view.zoom);
+        view.apply_camera_arg("yaw=notanumber&garbage");
+        assert_eq!((view.camera.yaw, view.camera.pitch, view.zoom), before);
     }
 }

@@ -91,7 +91,7 @@ pub enum Capability {
     HostCallReadScreen,
     HostCallListPanes,
     HostCallOpenPane,
-    HostCallWriteGraphics,
+    HostCallDrawScene,
 }
 
 impl Capability {
@@ -218,7 +218,9 @@ impl HostEvent {
 /// Each maps to something already reachable through the control surface
 /// (ADR-0011), so v2 adds no power the machine did not already expose locally —
 /// it changes *who* may ask, which is why each is separately granted.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: `DrawScene` carries floating-point geometry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub enum HostCall {
     Notify {
@@ -235,13 +237,83 @@ pub enum HostCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },
-    WriteGraphics {
-        image_id: u32,
-        width: u32,
-        height: u32,
-        data_b64: String,
+    /// A 3D scene the host projects and paints with vector polygons.
+    ///
+    /// Replaces the earlier `WriteGraphics` PNG path: the plugin sends compact
+    /// geometry, and the host owns projection and painting. That keeps the chart
+    /// crisp at any panel size (no bitmap scaling) and lets the host drive the
+    /// camera locally without a round-trip per frame (ADR-0004/ADR-0017 bar
+    /// images; this is geometry, projected host-side).
+    DrawScene {
         pane: PaneKey,
+        scene: SceneData,
     },
+}
+
+/// A 3D bar-chart scene in normalised, host-agnostic form.
+///
+/// Geometry only: no pixels, no projection. The host projects with the
+/// [`SceneCamera`] against the panel's real bounds every frame, so resizing and
+/// camera moves never need another message.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SceneData {
+    /// Grid columns the bars are laid out on.
+    #[serde(default)]
+    pub cols: u32,
+    /// Grid rows the bars are laid out on.
+    #[serde(default)]
+    pub rows: u32,
+    /// Floor plane colour, RGB.
+    #[serde(default)]
+    pub floor: [u8; 3],
+    #[serde(default)]
+    pub camera: SceneCamera,
+    #[serde(default)]
+    pub bars: Vec<SceneBar>,
+}
+
+/// One bar: a grid cell, a normalised height, and a colour.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SceneBar {
+    /// Grid X index, `0..cols`.
+    #[serde(default)]
+    pub gx: u32,
+    /// Grid Z index, `0..rows`.
+    #[serde(default)]
+    pub gz: u32,
+    /// Height as a share of the tallest bar, `0.0..=1.0`.
+    #[serde(default)]
+    pub height: f32,
+    /// Bar colour, RGB.
+    #[serde(default)]
+    pub color: [u8; 3],
+    #[serde(default)]
+    pub selected: bool,
+}
+
+/// Orthographic camera: yaw about Y, pitch about X, plus a zoom multiplier.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneCamera {
+    #[serde(default)]
+    pub yaw: f32,
+    #[serde(default)]
+    pub pitch: f32,
+    #[serde(default = "default_zoom")]
+    pub zoom: f32,
+}
+
+fn default_zoom() -> f32 {
+    1.0
+}
+
+impl Default for SceneCamera {
+    fn default() -> Self {
+        Self {
+            yaw: 0.0,
+            pitch: 0.0,
+            zoom: 1.0,
+        }
+    }
 }
 
 impl HostCall {
@@ -252,7 +324,7 @@ impl HostCall {
             Self::ReadScreen { .. } => Capability::HostCallReadScreen,
             Self::ListPanes => Capability::HostCallListPanes,
             Self::OpenPane { .. } => Capability::HostCallOpenPane,
-            Self::WriteGraphics { .. } => Capability::HostCallWriteGraphics,
+            Self::DrawScene { .. } => Capability::HostCallDrawScene,
         }
     }
 }
@@ -280,9 +352,7 @@ pub enum HostCallResult {
     Pane {
         pane: PaneKey,
     },
-    GraphicsOk {
-        image_id: u32,
-    },
+    SceneOk,
     /// Includes the denial case: a call whose capability was not granted.
     Error {
         message: String,
@@ -650,5 +720,64 @@ mod tests {
                 bold: false
             }
         );
+    }
+
+    #[test]
+    fn draw_scene_call_round_trips_and_declares_its_capability() {
+        let call = HostCall::DrawScene {
+            pane: Uuid::from_u128(3),
+            scene: SceneData {
+                cols: 3,
+                rows: 2,
+                floor: [18, 18, 22],
+                camera: SceneCamera {
+                    yaw: 0.7,
+                    pitch: 0.42,
+                    zoom: 1.25,
+                },
+                bars: vec![
+                    SceneBar {
+                        gx: 0,
+                        gz: 0,
+                        height: 1.0,
+                        color: [40, 70, 95],
+                        selected: true,
+                    },
+                    SceneBar {
+                        gx: 1,
+                        gz: 0,
+                        height: 0.25,
+                        color: [95, 55, 35],
+                        selected: false,
+                    },
+                ],
+            },
+        };
+        assert_eq!(
+            call.required_capability(),
+            Capability::HostCallDrawScene
+        );
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(line.contains(r#""call":"draw_scene""#));
+        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+    }
+
+    #[test]
+    fn scene_ok_result_round_trips() {
+        let result = HostCallResult::SceneOk;
+        let line = serde_json::to_string(&result).unwrap();
+        assert!(line.contains(r#""result":"scene_ok""#));
+        assert_eq!(serde_json::from_str::<HostCallResult>(&line).unwrap(), result);
+    }
+
+    #[test]
+    fn scene_camera_zoom_defaults_to_one_when_absent() {
+        // A camera decoded from an older/partial payload must not collapse the
+        // projection with zoom 0.
+        let cam: SceneCamera = serde_json::from_str(r#"{"yaw":0.1,"pitch":0.2}"#).unwrap();
+        assert_eq!(cam.zoom, 1.0);
+        let scene: SceneData = serde_json::from_str(r#"{"cols":1,"rows":1}"#).unwrap();
+        assert_eq!(scene.camera.zoom, 1.0);
+        assert!(scene.bars.is_empty());
     }
 }

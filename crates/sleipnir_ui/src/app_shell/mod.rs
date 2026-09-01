@@ -16,7 +16,7 @@ mod update;
 use gpui::{
     App, AppContext as _, BorrowAppContext, Bounds, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels,
-    Render, ScrollHandle, SharedString, Styled as _, Task, TitlebarOptions, Window,
+    Point, Render, ScrollHandle, SharedString, Styled as _, Task, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div,
     prelude::FluentBuilder as _, px, size,
 };
@@ -274,6 +274,19 @@ struct DragState {
     container: Bounds<Pixels>,
 }
 
+/// In-progress plugin-panel camera drag. The host owns the interactive camera:
+/// dragging rotates (yaw/pitch), and the last pointer position is kept so each
+/// move applies a delta. The plugin is not consulted per frame — the host
+/// mutates the stored scene camera and repaints locally, then reports the final
+/// camera as a throttled `camera` action so the legend stays in sync.
+#[derive(Clone)]
+struct PanelDrag {
+    pane_key: PaneKey,
+    plugin_id: String,
+    surface_id: plugin_protocol::v2::BlockId,
+    last: Point<Pixels>,
+}
+
 /// Window root: unified chrome band + active terminal.
 pub struct AppShell {
     pub(crate) tabs: Vec<Tab>,
@@ -294,6 +307,12 @@ pub struct AppShell {
     content_bounds: Option<Bounds<Pixels>>,
     /// Active divider drag, if any.
     drag: Option<DragState>,
+    /// Active plugin-panel camera drag, if any (host-owned interactive camera).
+    panel_drag: Option<PanelDrag>,
+    /// Last time a `camera` action was pushed to a plugin, ms since epoch. The
+    /// local repaint is immediate; the action is throttled so a drag does not
+    /// flood the plugin with legend redraws.
+    panel_camera_last_ms: u64,
     /// In-progress inline tab rename, if any.
     pub(crate) rename: Option<RenameState>,
     /// Which modal overlay is showing, plus the transient find / quick-select
@@ -508,6 +527,8 @@ impl AppShell {
             pane_rects: Vec::new(),
             content_bounds: None,
             drag: None,
+            panel_drag: None,
+            panel_camera_last_ms: 0,
             rename: None,
             mode: UiMode {
                 overlay: if has_update_outcome {
@@ -1145,7 +1166,7 @@ impl AppShell {
             Capability::HostCallReadScreen,
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
-            Capability::HostCallWriteGraphics,
+            Capability::HostCallDrawScene,
         ]
         .into_iter()
         .filter(|cap| crate::plugin_runtime::has_grant(plugin_id, *cap, cx))
@@ -1199,24 +1220,15 @@ impl AppShell {
                 }
             }
             CallPlan::OpenPane { cwd, command } => self.execute_open_pane(cwd, command, window, cx),
-            CallPlan::WriteGraphics {
-                pane,
-                image_id,
-                width,
-                height,
-                rgba,
-            } => {
-                use crate::plugin_panel::PanelImage;
-                use std::sync::Arc;
-                let image = PanelImage {
-                    image_id,
-                    width,
-                    height,
-                    data: Arc::new(rgba),
-                };
-                if self.plugin_panels.set_image(pane, plugin_id, image) {
+            CallPlan::DrawScene { pane, scene } => {
+                // A fresh scene from the plugin is authoritative, including its
+                // camera: the host adopts it so the plugin's own controls (spin,
+                // rescan, cd) keep the view in sync. Host-driven camera moves go
+                // the other way and never resend the scene (see the camera
+                // action path), so this cannot fight an in-progress drag.
+                if self.plugin_panels.set_scene(pane, plugin_id, scene) {
                     window.refresh();
-                    HostCallResult::GraphicsOk { image_id }
+                    HostCallResult::SceneOk
                 } else {
                     error_result("pane not found or not owned by this plugin")
                 }
@@ -1225,6 +1237,131 @@ impl AppShell {
         if !crate::plugin_runtime::reply_host_call(plugin_id, id, result, cx) {
             log::debug!("plugin {plugin_id} Call {id} reply dropped (session gone)");
         }
+    }
+
+    /// Rotate a plugin panel's camera from a drag delta. The host owns the
+    /// camera: it mutates the stored scene and repaints immediately (no plugin
+    /// round-trip, so the motion is smooth), then reports the new camera to the
+    /// plugin as a throttled `camera` action so the legend stays in sync.
+    fn drag_panel_camera(
+        &mut self,
+        pane_key: PaneKey,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.panel_drag.as_ref() else {
+            return;
+        };
+        if drag.pane_key != pane_key {
+            return;
+        }
+        let dx = f32::from(position.x) - f32::from(drag.last.x);
+        let dy = f32::from(position.y) - f32::from(drag.last.y);
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        // Pixels-to-radians: a full panel width is roughly a half turn.
+        const YAW_PER_PX: f32 = 0.01;
+        const PITCH_PER_PX: f32 = 0.01;
+        let Some(scene) = self.plugin_panels.scene(pane_key) else {
+            return;
+        };
+        let mut camera = scene.camera;
+        camera.yaw = wrap_camera_angle(camera.yaw + dx * YAW_PER_PX);
+        camera.pitch = (camera.pitch - dy * PITCH_PER_PX).clamp(0.05, 1.35);
+        self.plugin_panels.set_scene_camera(pane_key, camera);
+        if let Some(drag) = self.panel_drag.as_mut() {
+            drag.last = position;
+        }
+        cx.notify();
+        self.push_panel_camera(pane_key, false, cx);
+    }
+
+    /// Zoom a plugin panel's camera from a scroll-wheel delta.
+    fn zoom_panel_camera(
+        &mut self,
+        pane_key: PaneKey,
+        ev: &gpui::ScrollWheelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scene) = self.plugin_panels.scene(pane_key) else {
+            return;
+        };
+        // A line of wheel travel is one zoom step; pixel deltas are scaled down.
+        let dy = match ev.delta {
+            gpui::ScrollDelta::Lines(p) => p.y,
+            gpui::ScrollDelta::Pixels(p) => f32::from(p.y) / 40.0,
+        };
+        if dy == 0.0 {
+            return;
+        }
+        let mut camera = scene.camera;
+        let factor = 1.0 + dy * 0.1;
+        camera.zoom = (camera.zoom * factor).clamp(0.5, 2.5);
+        self.plugin_panels.set_scene_camera(pane_key, camera);
+        cx.notify();
+        self.push_panel_camera(pane_key, false, cx);
+    }
+
+    /// End a camera drag and push the final camera unthrottled, so the plugin's
+    /// legend settles on the exact resting view.
+    fn end_panel_camera_drag(&mut self, pane_key: PaneKey, cx: &mut Context<Self>) {
+        let is_ours = self
+            .panel_drag
+            .as_ref()
+            .is_some_and(|d| d.pane_key == pane_key);
+        if !is_ours {
+            return;
+        }
+        self.push_panel_camera(pane_key, true, cx);
+        self.panel_drag = None;
+    }
+
+    /// Report a panel's current camera to its plugin as a `camera` action.
+    ///
+    /// Throttled unless `force`: the local repaint already happened, so this only
+    /// keeps the plugin-owned legend in sync. Per the no-loopback rule the plugin
+    /// answers `camera` by resending chrome only, never the scene, so this cannot
+    /// bounce back and fight the drag.
+    fn push_panel_camera(&mut self, pane_key: PaneKey, force: bool, cx: &mut Context<Self>) {
+        const THROTTLE_MS: u64 = 40;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if !force && now.saturating_sub(self.panel_camera_last_ms) < THROTTLE_MS {
+            return;
+        }
+        let Some((plugin_id, surface_id)) = self
+            .panel_drag
+            .as_ref()
+            .filter(|d| d.pane_key == pane_key)
+            .map(|d| (d.plugin_id.clone(), d.surface_id))
+            .or_else(|| {
+                // Wheel zoom has no active drag; look the surface up directly.
+                self.plugin_panels
+                    .get(pane_key)
+                    .map(|s| (s.plugin_id.clone(), s.surface_id))
+            })
+        else {
+            return;
+        };
+        let Some(scene) = self.plugin_panels.scene(pane_key) else {
+            return;
+        };
+        let camera = scene.camera;
+        let arg = format!(
+            "yaw={}&pitch={}&zoom={}",
+            camera.yaw, camera.pitch, camera.zoom
+        );
+        self.panel_camera_last_ms = now;
+        crate::plugin_runtime::push_action(
+            &plugin_id,
+            surface_id,
+            "camera".to_string(),
+            Some(arg),
+            cx,
+        );
     }
 
     fn terminal_and_panel_keys(
@@ -1695,6 +1832,40 @@ impl AppShell {
                 }
                 self.commit_workspace(window, cx);
             }
+        }
+    }
+
+    /// Close one plugin Panel leaf from its host-drawn close control (ADR-0017).
+    ///
+    /// The host owns the surface, so this always works even when the plugin is
+    /// wedged or offers no exit of its own. A Panel is never a PTY and never the
+    /// last workspace pane (it always shares a tab with a terminal), so closing
+    /// it collapses its split and keeps the tab; it never triggers tab close.
+    fn close_panel_pane(
+        &mut self,
+        pane_id: PaneId,
+        pane_key: PaneKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        match tab.tree.close(pane_id) {
+            CloseOutcome::Closed => {
+                self.plugin_panels.remove(pane_key);
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.active_pane = tab.tree.first_leaf_id();
+                }
+                self.commit_workspace(window, cx);
+            }
+            // TreeEmpty would mean the panel was the tab's only leaf, which the
+            // insert path forbids; fall back to the tab-close path just in case.
+            CloseOutcome::TreeEmpty => {
+                self.plugin_panels.remove(pane_key);
+                self.close_active_tab(window, cx);
+            }
+            CloseOutcome::NotFound => {}
         }
     }
 
@@ -2467,6 +2638,17 @@ fn run_event_to_host(
 
 fn tree_contains(tree: &PaneNode, id: PaneId) -> bool {
     tree.contains_leaf(id)
+}
+
+/// Wrap a camera yaw into `[0, 2π)` so the host-driven camera stays finite over
+/// a long drag; mirrors the plugin's own `wrap_angle`.
+fn wrap_camera_angle(a: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    let mut a = a % tau;
+    if a < 0.0 {
+        a += tau;
+    }
+    a
 }
 
 /// Whether a pane of the *active* tab is actually painted, given the tab's

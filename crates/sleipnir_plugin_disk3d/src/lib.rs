@@ -2,24 +2,25 @@
 //!
 //! The point is the *data*: each cuboid is a direct child of the working
 //! directory, its height is that child's share of the bytes, and the picture is
-//! rotatable so the bars can be read from any side. Rendering is a genuine
-//! software rasteriser (projection, z-buffer, Lambert shading) whose
-//! framebuffer happens to be character cells, because ADR-0004 declines the
-//! graphics protocol and ADR-0017 bans images. Split into three testable parts:
+//! rotatable so the bars can be read from any side. The plugin sends a compact
+//! [`view::build_scene_data`] scene to the host, which projects it and paints
+//! vector polygons (crisp at any panel size, camera driven host-side). A
+//! software rasteriser is kept as a text-only fallback for hosts without the
+//! `draw_scene` grant. Split into testable parts:
 //!
-//! - [`raster`] — 3D maths and the cell framebuffer. Knows nothing about disks.
+//! - [`raster`] — 3D maths and the cell framebuffer fallback. Knows nothing
+//!   about disks.
 //! - [`scan`]   — the bounded filesystem walk that produces the numbers.
-//! - [`view`]   — scan + camera → widget tree. Pure, so it is unit testable.
+//! - [`view`]   — scan + camera → scene / widget tree. Pure, so it is unit
+//!   testable.
 
-pub mod gpu;
-pub mod gpu_scene;
 pub mod raster;
 pub mod scan;
 pub mod view;
 
 pub use raster::{Camera, Canvas, Scene};
 pub use scan::{Entry, Scan, human_bytes, scan};
-pub use view::{View, render, render_chrome_only};
+pub use view::{View, build_scene_data, render, render_chrome_only};
 
 /// Yaw step per arrow press, in radians (15°).
 pub const YAW_STEP: f32 = std::f32::consts::PI / 12.0;

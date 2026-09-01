@@ -106,9 +106,6 @@ urlencoding = "2.1.2"
 ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 vte = { version = "0.15.0", features = ["ansi"] }
-wgpu = "29"
-pollster = "0.4"
-bytemuck = { version = "1", features = ["derive"] }
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [workspace.lints.rust]

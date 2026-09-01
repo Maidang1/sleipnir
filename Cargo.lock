@@ -5865,8 +5865,6 @@ dependencies = [
 name = "sleipnir-plugin"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "image",
  "plugin_protocol",
  "serde_json",
  "uuid",
@@ -5876,13 +5874,10 @@ dependencies = [
 name = "sleipnir-plugin-disk3d"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "plugin_protocol",
- "pollster 0.4.0",
  "sleipnir-plugin",
  "sleipnir_widget",
  "uuid",
- "wgpu",
 ]
 
 [[package]]

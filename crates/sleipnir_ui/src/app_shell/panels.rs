@@ -383,13 +383,42 @@ impl AppShell {
                         )
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(tokens.fg_muted)
-                                // Only meaningful once something is running: the
-                                // panel title plus the empty-state line already
-                                // say "no plugins", so a "0 plugins" counter here
-                                // is the same fact a third time.
-                                .when(running > 0, |el| el.child(running_indicator_label(running))),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.fg_muted)
+                                        // Only meaningful once something is
+                                        // running: the panel title plus the
+                                        // empty-state line already say "no
+                                        // plugins", so a "0 plugins" counter
+                                        // here is the same fact a third time.
+                                        .when(running > 0, |el| {
+                                            el.child(running_indicator_label(running))
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .id("plugin-monitor-close")
+                                        .w(px(18.0))
+                                        .h(px(18.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(4.0))
+                                        .cursor_pointer()
+                                        .text_color(tokens.fg_muted)
+                                        .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
+                                        .child("×")
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, _, cx| {
+                                                this.close_plugin_monitor(cx);
+                                            },
+                                        )),
+                                ),
                         ),
                 )
                 .child(body),

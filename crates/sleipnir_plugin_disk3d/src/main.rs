@@ -6,11 +6,18 @@
 //! then follows the working directory: `cd` somewhere and the chart is for
 //! *that* directory.
 //!
+//! Rendering is host-side: the plugin sends a compact scene (grid + normalised
+//! bar heights + colours) via `draw_scene`, and the host projects and paints it
+//! as vector polygons. That keeps the chart crisp at any panel size and lets the
+//! host drive the camera locally (drag to rotate, wheel to zoom) without a
+//! round-trip per frame. When the host has not granted `draw_scene`, the plugin
+//! falls back to the text rasteriser so the chart still shows.
+//!
 //! Two protocol facts shape the code:
 //!
-//! - The panel's real pixel size is never sent to the plugin, so the surface
-//!   size is assumed and the tree is clamped to the node budget in `view`
-//!   rather than relying on host truncation.
+//! - The panel's real pixel size is never sent to the plugin, so the fallback
+//!   raster is built for an assumed split size and clamped to the node budget in
+//!   `view`; the host owns framing for the vector path.
 //! - `RenderTarget::Panel` needs a `PaneKey` the host does not yet own; the host
 //!   creates the split on first render for an unknown key. The key is minted
 //!   once and reused, so every later render replaces that same panel in place.
@@ -22,20 +29,16 @@ use sleipnir_plugin::v2::{
     Output, PaneKey, Plugin, RenderTarget, run,
 };
 use sleipnir_plugin_disk3d::{
-    PITCH_STEP, SPIN_STEP, View, YAW_STEP, ZOOM_STEP, render, render_chrome_only, scan::scan,
+    PITCH_STEP, SPIN_STEP, View, YAW_STEP, ZOOM_STEP, build_scene_data, render, render_chrome_only,
+    scan::scan,
 };
-use sleipnir_plugin_disk3d::gpu::GpuRenderer;
 
-/// Assumed panel size. The host does not report the split's cell size, so the
-/// tree is built for a typical half-window split; `view::render` auto-fits the
-/// projection and clamps the node count, so being wrong costs framing, never
-/// correctness.
+/// Assumed panel size for the text fallback. The host does not report the
+/// split's cell size, so the tree is built for a typical half-window split;
+/// `view::render` auto-fits the projection and clamps the node count, so being
+/// wrong costs framing, never correctness.
 const ASSUMED_COLS: u16 = 78;
 const ASSUMED_ROWS: u16 = 26;
-
-/// Fixed GPU render resolution. The host scales it to the panel area.
-const GPU_WIDTH: u32 = 800;
-const GPU_HEIGHT: u32 = 600;
 
 /// Frames drawn by one "Spin ½ turn" press.
 ///
@@ -51,26 +54,18 @@ struct Disk3d {
     panel: Option<PaneKey>,
     /// Latest cwd from the event stream; the chart follows it.
     cwd: Option<PathBuf>,
-    /// GPU renderer; `None` means fallback to software raster.
-    gpu: Option<GpuRenderer>,
-    /// Stable image id for WriteGraphics frame replacement.
-    image_id: u32,
+    /// Whether the host granted `draw_scene`. Decided at hello; drives the
+    /// vector path vs the text fallback.
+    can_draw_scene: bool,
 }
 
 impl Disk3d {
     fn new() -> Self {
-        let gpu = GpuRenderer::try_new();
-        if gpu.is_some() {
-            eprintln!("disk3d: GPU renderer initialised");
-        } else {
-            eprintln!("disk3d: no GPU, using software rasteriser");
-        }
         Self {
             view: View::new(scan(&std::env::current_dir().unwrap_or_default())),
             panel: None,
             cwd: None,
-            gpu,
-            image_id: 1,
+            can_draw_scene: false,
         }
     }
 
@@ -83,13 +78,12 @@ impl Disk3d {
         RenderTarget::Panel { pane }
     }
 
+    /// Draw the whole panel: the scene (host-projected) plus the chrome tree.
     fn draw(&mut self, ctx: &mut Context<'_>) {
-        let has_gpu = self.gpu.is_some();
-        if has_gpu {
+        if self.can_draw_scene {
             let pane = self.pane_key();
-            let gpu = self.gpu.as_ref().unwrap();
-            let rgba = gpu.render_frame(&self.view, GPU_WIDTH, GPU_HEIGHT);
-            let _ = ctx.write_graphics(self.image_id, GPU_WIDTH, GPU_HEIGHT, &rgba, pane);
+            let scene = build_scene_data(&self.view);
+            let _ = ctx.draw_scene(pane, scene);
             let target = self.target();
             let tree = render_chrome_only(&self.view);
             let _ = ctx.render(target, tree);
@@ -97,6 +91,20 @@ impl Disk3d {
             let target = self.target();
             let tree = render(&self.view, ASSUMED_COLS, ASSUMED_ROWS);
             let _ = ctx.render(target, tree);
+        }
+    }
+
+    /// Redraw only the chrome (legend), leaving the host-owned scene in place.
+    /// Used when the host drives the camera: the geometry has not changed, only
+    /// the view, so resending the scene would be wasted work — and would fight
+    /// the host's local camera (see the camera-sync rule in `on_action`).
+    fn draw_chrome(&mut self, ctx: &mut Context<'_>) {
+        if self.can_draw_scene {
+            let target = self.target();
+            let tree = render_chrome_only(&self.view);
+            let _ = ctx.render(target, tree);
+        } else {
+            self.draw(ctx);
         }
     }
 
@@ -136,16 +144,22 @@ impl Plugin for Disk3d {
     }
 
     fn requests(&self) -> Vec<Capability> {
-        let mut caps = vec![
+        vec![
             Capability::Resident,
             Capability::RenderPanel,
             Capability::SubscribeEvents,
             Capability::ReadCwd,
-        ];
-        if self.gpu.is_some() {
-            caps.push(Capability::HostCallWriteGraphics);
+            Capability::HostCallDrawScene,
+        ]
+    }
+
+    fn on_hello(&mut self, granted: &[Capability], _id: uuid::Uuid, _ctx: &mut Context<'_>) {
+        self.can_draw_scene = granted.contains(&Capability::HostCallDrawScene);
+        if self.can_draw_scene {
+            eprintln!("disk3d: host-side vector rendering enabled");
+        } else {
+            eprintln!("disk3d: no draw_scene grant, using text rasteriser");
         }
-        caps
     }
 
     /// `SubscribeEvents` is continuous observation, so the filter is as narrow
@@ -193,9 +207,22 @@ impl Plugin for Disk3d {
         &mut self,
         _block_id: BlockId,
         action: &str,
-        _arg: Option<&str>,
+        arg: Option<&str>,
         ctx: &mut Context<'_>,
     ) {
+        // Camera-sync rule (no loopback): the host owns the interactive camera.
+        // A host-driven camera move arrives as `camera`; the plugin only updates
+        // its own camera and resends the *chrome* so the legend stays in sync —
+        // it must NOT resend the scene, or it would fight the host's local
+        // camera. The plugin's own controls below change the data/camera and
+        // resend the scene, which the host adopts on arrival.
+        if action == "camera" {
+            if let Some(arg) = arg {
+                self.view.apply_camera_arg(arg);
+            }
+            self.draw_chrome(ctx);
+            return;
+        }
         match action {
             "yaw-" => self.view.yaw_by(-YAW_STEP),
             "yaw+" => self.view.yaw_by(YAW_STEP),

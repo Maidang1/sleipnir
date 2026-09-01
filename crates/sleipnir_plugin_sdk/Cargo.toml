@@ -12,8 +12,6 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-base64.workspace = true
-image.workspace = true
 plugin_protocol.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

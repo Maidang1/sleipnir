@@ -19,9 +19,6 @@ path = "src/main.rs"
 sleipnir-plugin.workspace = true
 plugin_protocol.workspace = true
 uuid.workspace = true
-wgpu.workspace = true
-pollster.workspace = true
-bytemuck.workspace = true
 
 [dev-dependencies]
 sleipnir_widget.workspace = true

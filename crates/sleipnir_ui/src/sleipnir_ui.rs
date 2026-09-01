@@ -19,6 +19,7 @@ mod plugin_host_calls;
 mod plugin_monitor_panel;
 mod plugin_panel;
 mod plugin_runtime;
+mod panel_scene_paint;
 mod run_ledger_global;
 mod run_ledger_panel;
 mod session;

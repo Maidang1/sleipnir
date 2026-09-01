@@ -13,10 +13,8 @@
 //! Pure decision logic. No gpui, no window, no process spawn. The shell
 //! executes the plan and always calls `reply`.
 
-use plugin_protocol::v2::{Capability, HostCall, HostCallResult, PaneInfo};
+use plugin_protocol::v2::{Capability, HostCall, HostCallResult, PaneInfo, SceneData};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-use base64::Engine as _;
 
 use crate::pane_tree::PaneKey;
 
@@ -33,8 +31,12 @@ pub const MAX_OPEN_COMMAND_CHARS: usize = 1024;
 pub const RATE_WINDOW_MS: u64 = 5_000;
 /// Max accepted calls per plugin in [`RATE_WINDOW_MS`].
 pub const RATE_MAX_CALLS: u32 = 10;
-/// Max RGBA pixel count per WriteGraphics call (4096x4096).
-pub const MAX_GRAPHICS_PIXELS: u32 = 4096 * 4096;
+/// Max bars in one DrawScene call. Matches the scanner's `MAX_BARS` with
+/// generous headroom; an external plugin sending more is malformed, not drawn.
+pub const MAX_SCENE_BARS: usize = 256;
+/// Max grid extent (cols or rows) in one DrawScene call. A bar grid larger than
+/// this cannot be laid out legibly and is almost certainly a bad payload.
+pub const MAX_SCENE_GRID: u32 = 64;
 
 /// Program + argv for OpenPane. Never a shell command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +46,9 @@ pub struct OpenCommand {
 }
 
 /// What the UI should do for one `Call`. Always ends in a reply.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Eq`: `DrawScene` carries floating-point geometry.
+#[derive(Clone, Debug, PartialEq)]
 pub enum CallPlan {
     /// No side effect: send this result as the Reply.
     Reply(HostCallResult),
@@ -60,12 +64,9 @@ pub enum CallPlan {
         cwd: Option<String>,
         command: Option<OpenCommand>,
     },
-    WriteGraphics {
+    DrawScene {
         pane: PaneKey,
-        image_id: u32,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
+        scene: SceneData,
     },
 }
 
@@ -138,14 +139,11 @@ pub fn plan_call(
             Ok((cwd, command)) => CallPlan::OpenPane { cwd, command },
             Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
         },
-        HostCall::WriteGraphics {
-            image_id,
-            width,
-            height,
-            data_b64,
-            pane,
-        } => match parse_write_graphics(*image_id, *width, *height, data_b64, *pane) {
-            Ok(plan) => plan,
+        HostCall::DrawScene { pane, scene } => match validate_scene(scene) {
+            Ok(()) => CallPlan::DrawScene {
+                pane: *pane,
+                scene: scene.clone(),
+            },
             Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
         },
     }
@@ -200,52 +198,38 @@ pub fn cap_screen(text: String) -> String {
     cap_chars(&text, MAX_SCREEN_CHARS)
 }
 
-fn parse_write_graphics(
-    image_id: u32,
-    width: u32,
-    height: u32,
-    data_b64: &str,
-    pane: PaneKey,
-) -> Result<CallPlan, String> {
-    if width == 0 || height == 0 {
-        return Err("image dimensions must be non-zero".into());
-    }
-    let pixels = width as u64 * height as u64;
-    if pixels > MAX_GRAPHICS_PIXELS as u64 {
-        return Err(format!(
-            "image {width}x{height} exceeds {MAX_GRAPHICS_PIXELS} pixel cap"
-        ));
-    }
-    let png = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|e| format!("base64 decode failed: {e}"))?;
-    let rgba = decode_png_rgba(&png, width, height)?;
-    Ok(CallPlan::WriteGraphics {
-        pane,
-        image_id,
-        width,
-        height,
-        rgba,
-    })
-}
-
-/// Decode a PNG frame to RGBA and confirm it matches the declared dimensions.
+/// Validate a `DrawScene` payload before the host stores it.
 ///
-/// `write_graphics` PNG-compresses the buffer before base64 so a full frame
-/// fits the host's line cap; the host reverses that here back to raw RGBA for
-/// `paint_image`.
-fn decode_png_rgba(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
-        .map_err(|e| format!("PNG decode failed: {e}"))?
-        .into_rgba8();
-    if image.width() != width || image.height() != height {
+/// Cheap structural checks only: bar count and grid extent are bounded so a
+/// malformed or hostile plugin cannot force the host to lay out an absurd grid,
+/// and every bar must sit inside the declared grid. Geometry values (height,
+/// colour) are clamped at paint time, not rejected here.
+fn validate_scene(scene: &SceneData) -> Result<(), String> {
+    if scene.bars.len() > MAX_SCENE_BARS {
         return Err(format!(
-            "PNG {}x{} does not match declared {width}x{height}",
-            image.width(),
-            image.height()
+            "scene has {} bars, exceeds {MAX_SCENE_BARS}",
+            scene.bars.len()
         ));
     }
-    Ok(image.into_raw())
+    // An empty scene is legal (nothing to chart); a non-empty one needs a grid.
+    if !scene.bars.is_empty() && (scene.cols == 0 || scene.rows == 0) {
+        return Err("scene has bars but a zero-sized grid".into());
+    }
+    if scene.cols > MAX_SCENE_GRID || scene.rows > MAX_SCENE_GRID {
+        return Err(format!(
+            "scene grid {}x{} exceeds {MAX_SCENE_GRID}",
+            scene.cols, scene.rows
+        ));
+    }
+    for bar in &scene.bars {
+        if bar.gx >= scene.cols || bar.gz >= scene.rows {
+            return Err(format!(
+                "bar at ({},{}) is outside the {}x{} grid",
+                bar.gx, bar.gz, scene.cols, scene.rows
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// ListPanes reports only terminal panes. A plugin Panel is not a PTY and
@@ -538,87 +522,117 @@ mod tests {
         assert!(matches!(plan, CallPlan::ListPanes));
     }
 
-    fn png_of(width: u32, height: u32) -> String {
-        let rgba = vec![0x7fu8; (width * height * 4) as usize];
-        let buffer: image::RgbaImage =
-            image::ImageBuffer::from_raw(width, height, rgba).unwrap();
-        let mut png = std::io::Cursor::new(Vec::new());
-        buffer.write_to(&mut png, image::ImageFormat::Png).unwrap();
-        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    fn scene(cols: u32, rows: u32, bars: Vec<plugin_protocol::v2::SceneBar>) -> HostCall {
+        HostCall::DrawScene {
+            pane: key(1),
+            scene: SceneData {
+                cols,
+                rows,
+                floor: [18, 18, 22],
+                camera: plugin_protocol::v2::SceneCamera::default(),
+                bars,
+            },
+        }
     }
 
-    #[test]
-    fn write_graphics_decodes_png_back_to_rgba() {
-        let mut limiter = HostCallLimiter::new();
-        let (w, h) = (8u32, 6u32);
-        let call = HostCall::WriteGraphics {
-            image_id: 3,
-            width: w,
-            height: h,
-            data_b64: png_of(w, h),
-            pane: key(1),
-        };
-        let plan = plan_call(
-            "gfx",
-            &call,
-            &[Capability::HostCallWriteGraphics],
-            &mut limiter,
-            0,
-        );
-        match plan {
-            CallPlan::WriteGraphics {
-                image_id,
-                width,
-                height,
-                rgba,
-                ..
-            } => {
-                assert_eq!(image_id, 3);
-                assert_eq!((width, height), (w, h));
-                // Decoded back to raw RGBA: 4 bytes per pixel.
-                assert_eq!(rgba.len(), (w * h * 4) as usize);
-                assert!(rgba.iter().all(|&b| b == 0x7f));
-            }
-            other => panic!("expected WriteGraphics, got {other:?}"),
+    fn bar(gx: u32, gz: u32) -> plugin_protocol::v2::SceneBar {
+        plugin_protocol::v2::SceneBar {
+            gx,
+            gz,
+            height: 0.5,
+            color: [40, 70, 95],
+            selected: false,
         }
     }
 
     #[test]
-    fn write_graphics_rejects_dimension_mismatch() {
+    fn draw_scene_accepts_a_well_formed_scene() {
         let mut limiter = HostCallLimiter::new();
-        // PNG is 8x6 but the call claims 10x10.
-        let call = HostCall::WriteGraphics {
-            image_id: 1,
-            width: 10,
-            height: 10,
-            data_b64: png_of(8, 6),
-            pane: key(1),
-        };
+        let call = scene(2, 2, vec![bar(0, 0), bar(1, 1)]);
         let plan = plan_call(
             "gfx",
             &call,
-            &[Capability::HostCallWriteGraphics],
+            &[Capability::HostCallDrawScene],
+            &mut limiter,
+            0,
+        );
+        match plan {
+            CallPlan::DrawScene { pane, scene } => {
+                assert_eq!(pane, key(1));
+                assert_eq!(scene.bars.len(), 2);
+            }
+            other => panic!("expected DrawScene, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_scene_rejects_too_many_bars() {
+        let mut limiter = HostCallLimiter::new();
+        let bars: Vec<_> = (0..MAX_SCENE_BARS + 1).map(|_| bar(0, 0)).collect();
+        let call = scene(MAX_SCENE_GRID, MAX_SCENE_GRID, bars);
+        let plan = plan_call(
+            "gfx",
+            &call,
+            &[Capability::HostCallDrawScene],
             &mut limiter,
             0,
         );
         match plan {
             CallPlan::Reply(HostCallResult::Error { message }) => {
-                assert!(message.contains("does not match"), "{message}");
+                assert!(message.contains("exceeds"), "{message}");
             }
             other => panic!("expected Error reply, got {other:?}"),
         }
     }
 
     #[test]
-    fn write_graphics_needs_its_capability() {
+    fn draw_scene_rejects_out_of_grid_bar_and_bad_dimensions() {
         let mut limiter = HostCallLimiter::new();
-        let call = HostCall::WriteGraphics {
-            image_id: 1,
-            width: 8,
-            height: 6,
-            data_b64: png_of(8, 6),
-            pane: key(1),
-        };
+        // A bar outside the declared grid.
+        let call = scene(1, 1, vec![bar(2, 0)]);
+        let plan = plan_call(
+            "gfx",
+            &call,
+            &[Capability::HostCallDrawScene],
+            &mut limiter,
+            0,
+        );
+        assert!(matches!(
+            plan,
+            CallPlan::Reply(HostCallResult::Error { .. })
+        ));
+        // Bars present but a zero-sized grid.
+        let call = scene(0, 0, vec![bar(0, 0)]);
+        let plan = plan_call(
+            "gfx",
+            &call,
+            &[Capability::HostCallDrawScene],
+            &mut limiter,
+            0,
+        );
+        assert!(matches!(
+            plan,
+            CallPlan::Reply(HostCallResult::Error { .. })
+        ));
+        // An oversized grid.
+        let call = scene(MAX_SCENE_GRID + 1, 1, vec![]);
+        let plan = plan_call(
+            "gfx",
+            &call,
+            &[Capability::HostCallDrawScene],
+            &mut limiter,
+            0,
+        );
+        assert!(matches!(
+            plan,
+            CallPlan::Reply(HostCallResult::Error { .. })
+        ));
+    }
+
+    #[test]
+    fn draw_scene_needs_its_capability() {
+        let mut limiter = HostCallLimiter::new();
+        let call = scene(1, 1, vec![bar(0, 0)]);
         let plan = plan_call("gfx", &call, &[], &mut limiter, 0);
         assert!(matches!(
             plan,

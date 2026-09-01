@@ -9,23 +9,18 @@
 //! Pure decision logic. No gpui, no window. The shell calls these helpers,
 //! then paints the [`sleipnir_widget::Layout`] they did not recompute.
 
-use plugin_protocol::v2::{Capability, Widget};
+use plugin_protocol::v2::{Capability, SceneData, Widget};
 use sleipnir_widget::{Hit, Layout, ToneRole, hit_test, layout};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::pane_tree::PaneKey;
 use crate::session::SessionNode;
 
-/// GPU-rendered image from a plugin, painted above the background in the panel.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PanelImage {
-    pub image_id: u32,
-    pub width: u32,
-    pub height: u32,
-    pub data: Arc<Vec<u8>>,
-}
+/// A 3D scene sent by a plugin, projected and painted host-side in the panel.
+/// Mirrors [`plugin_protocol::v2::SceneData`]; the host stores it verbatim and
+/// owns projection so the picture stays crisp at any panel size.
+pub type PanelScene = SceneData;
 
 /// One plugin-drawn panel. The tree is data; the host stores it.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,8 +32,8 @@ pub struct PanelSurface {
     pub tree: Widget,
     /// Plugin process is gone. The last tree stays, visibly marked.
     pub stale: bool,
-    /// GPU-rendered image from the plugin, painted above background, below chrome.
-    pub image: Option<PanelImage>,
+    /// 3D scene from the plugin, projected and painted below the chrome.
+    pub scene: Option<PanelScene>,
 }
 
 /// Outcome of applying a `Render { target: Panel }`.
@@ -114,7 +109,7 @@ impl PanelRegistry {
                         surface_id: Uuid::new_v4(),
                         tree,
                         stale: false,
-                        image: None,
+                        scene: None,
                     },
                 );
                 ApplyPanel::Create { pane_key: pane }
@@ -141,21 +136,42 @@ impl PanelRegistry {
         }
     }
 
-    /// Store a GPU-rendered image on a panel surface owned by `plugin_id`.
-    /// Returns `true` if the image was accepted.
-    pub fn set_image(
-        &mut self,
-        pane: PaneKey,
-        plugin_id: &str,
-        image: PanelImage,
-    ) -> bool {
+    /// Store a 3D scene on a panel surface owned by `plugin_id`. Returns `true`
+    /// if the scene was accepted.
+    pub fn set_scene(&mut self, pane: PaneKey, plugin_id: &str, scene: PanelScene) -> bool {
         match self.surfaces.get_mut(&pane) {
             Some(surface) if surface.plugin_id == plugin_id => {
-                surface.image = Some(image);
+                surface.scene = Some(scene);
                 true
             }
             _ => false,
         }
+    }
+
+    /// Update just the camera on an existing scene. Used for host-driven camera
+    /// moves that must not wait for the plugin to resend geometry. Returns
+    /// `true` if a scene was present to update.
+    pub fn set_scene_camera(
+        &mut self,
+        pane: PaneKey,
+        camera: plugin_protocol::v2::SceneCamera,
+    ) -> bool {
+        match self.surfaces.get_mut(&pane) {
+            Some(surface) => match surface.scene.as_mut() {
+                Some(scene) => {
+                    scene.camera = camera;
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Read the current scene on `pane`, if any. The interactive camera reads
+    /// this to seed a drag before mutating it.
+    pub fn scene(&self, pane: PaneKey) -> Option<&PanelScene> {
+        self.surfaces.get(&pane).and_then(|s| s.scene.as_ref())
     }
 }
 
@@ -388,7 +404,7 @@ mod tests {
             surface_id: Uuid::nil(),
             tree: btn("Go", "retry"),
             stale: false,
-            image: None,
+            scene: None,
         };
         let laid = layout_surface(&surface, 20);
         let hit = action_at(&laid, 0, 0).expect("btn");
@@ -404,7 +420,7 @@ mod tests {
             surface_id: Uuid::nil(),
             tree: text("plugin:evil"),
             stale: false,
-            image: None,
+            scene: None,
         };
         let laid = layout_surface(&surface, 20);
         assert!(matches!(
@@ -481,5 +497,47 @@ mod tests {
         assert!(!render_panel_granted(&[]));
         assert!(!render_panel_granted(&[Capability::SubscribeEvents]));
         assert!(render_panel_granted(&[Capability::RenderPanel]));
+    }
+
+    #[test]
+    fn set_scene_requires_owner_and_camera_update_is_in_place() {
+        use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
+        let mut reg = PanelRegistry::new();
+        let terminals = BTreeSet::new();
+        reg.apply_render("demo", key(1), text("hi"), true, &terminals);
+        let scene = SceneData {
+            cols: 1,
+            rows: 1,
+            floor: [1, 2, 3],
+            camera: SceneCamera {
+                yaw: 0.1,
+                pitch: 0.2,
+                zoom: 1.0,
+            },
+            bars: vec![SceneBar {
+                gx: 0,
+                gz: 0,
+                height: 1.0,
+                color: [9, 9, 9],
+                selected: true,
+            }],
+        };
+        // A different plugin cannot write into this surface.
+        assert!(!reg.set_scene(key(1), "other", scene.clone()));
+        assert!(reg.set_scene(key(1), "demo", scene));
+        assert!(reg.scene(key(1)).is_some());
+        // Camera-only update keeps the geometry and just moves the view.
+        let cam = SceneCamera {
+            yaw: 1.0,
+            pitch: 0.5,
+            zoom: 2.0,
+        };
+        assert!(reg.set_scene_camera(key(1), cam));
+        let scene = reg.scene(key(1)).unwrap();
+        assert_eq!(scene.camera, cam);
+        assert_eq!(scene.bars.len(), 1);
+        // No scene on a fresh pane means no camera to move.
+        reg.apply_render("demo", key(2), text("x"), true, &terminals);
+        assert!(!reg.set_scene_camera(key(2), cam));
     }
 }
