@@ -28,8 +28,8 @@ mod hit;
 mod layout;
 
 pub use cells::{
-    ATTRIBUTION_ROWS, BAR_COLS, CHIP_PAD, ELLIPSIS, MAX_CODE_LINES, MAX_LEAF_CHARS, UNKNOWN_COLS,
-    cell_cols, fit_cols, wrap_text,
+    ATTRIBUTION_ROWS, BAR_COLS, CHIP_PAD, ELLIPSIS, MAX_CODE_LINES, MAX_LEAF_CHARS, SPARK_RAMP,
+    UNKNOWN_COLS, cell_cols, fit_cols, spark_glyphs, wrap_text,
 };
 pub use geom::{CellPos, CellRect};
 pub use hit::{Hit, hit_test};

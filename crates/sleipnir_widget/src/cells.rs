@@ -157,6 +157,21 @@ pub fn spark_levels(vs: &[f32], width: u32) -> Vec<u8> {
     slice.iter().map(|&v| spark_level(v, min, max)).collect()
 }
 
+/// Eighth-block ramp for one spark level (`0..=8`, saturating).
+///
+/// One Unicode scalar is one cell, which is what [`spark_levels`] and layout
+/// reserved. Shared so the Block and Panel painters cannot draw the same
+/// sparkline differently — they render one schema (ADR-0017).
+pub const SPARK_RAMP: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Render quantized spark levels as ramp glyphs, one cell each.
+pub fn spark_glyphs(levels: &[u8]) -> String {
+    levels
+        .iter()
+        .map(|&lv| SPARK_RAMP[(lv as usize).min(SPARK_RAMP.len() - 1)])
+        .collect()
+}
+
 fn spark_level(v: f32, min: f32, max: f32) -> u8 {
     if !v.is_finite() || !min.is_finite() || !max.is_finite() {
         return 0;

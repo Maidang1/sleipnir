@@ -1162,6 +1162,46 @@ fn paint_block(
     );
 }
 
+/// Text a Block paints for one laid-out node, or `None` when the node draws no
+/// text (containers, and the two kinds painted as quads).
+///
+/// Pure so the Block/Panel parity this had to be fixed for is testable without
+/// a window. There is deliberately **no catch-all**: a new [`LaidOutKind`] must
+/// be decided here, not silently rendered as the empty string. `Spark` was
+/// dropped exactly that way, and because layout still reserves its cells the
+/// symptom was correctly-sized blank space with nothing logged.
+fn block_text_for(kind: &sleipnir_widget::LaidOutKind) -> Option<String> {
+    use sleipnir_widget::LaidOutKind;
+    match kind {
+        LaidOutKind::Text { lines, .. } => Some(lines.join("\n")),
+        LaidOutKind::Code { lines } => Some(
+            lines
+                .iter()
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => Some(text.clone()),
+        LaidOutKind::Attribution { label, .. } => Some(label.clone()),
+        LaidOutKind::Unknown => Some("[?]".into()),
+        LaidOutKind::Truncated => Some("… truncated".into()),
+        // Shared ramp, so a sparkline reads the same in a Block and a Panel.
+        LaidOutKind::Spark { levels } => Some(sleipnir_widget::spark_glyphs(levels)),
+        // Painted as quads by the caller, which needs bounds this cannot see.
+        LaidOutKind::Sep | LaidOutKind::Bar { .. } => None,
+        LaidOutKind::Col | LaidOutKind::Row => None,
+    }
+}
+
+/// Whether a laid-out node paints bold.
+///
+/// `bold` is part of the schema and the Panel painter honours it; a Block that
+/// ignored it would render the same tree differently depending on where it is
+/// mounted. Split out from the painter so it is testable without a `Window`.
+fn block_is_bold(kind: &sleipnir_widget::LaidOutKind) -> bool {
+    matches!(kind, sleipnir_widget::LaidOutKind::Text { bold: true, .. })
+}
+
 fn paint_laid_node(
     origin_x: Pixels,
     block_top: Pixels,
@@ -1191,19 +1231,20 @@ fn paint_laid_node(
         LaidOutKind::Attribution { .. } => palette.foreground.opacity(0.55),
         LaidOutKind::Btn { .. } => palette.ansi[4],
         LaidOutKind::Truncated => palette.ansi[3],
-        _ => palette.foreground,
+        // Matches the Panel painter's accent for sparklines.
+        LaidOutKind::Spark { .. } => palette.ansi[4],
+        // No catch-all: a new `LaidOutKind` must be considered here, not
+        // silently painted in the default foreground. The Panel painter
+        // (`app_shell/plugin_paint.rs`) is exhaustive for the same reason;
+        // the two must not drift.
+        LaidOutKind::Col
+        | LaidOutKind::Row
+        | LaidOutKind::Code { .. }
+        | LaidOutKind::Bar { .. }
+        | LaidOutKind::Sep
+        | LaidOutKind::Unknown => palette.foreground,
     };
     let text = match &node.kind {
-        LaidOutKind::Text { lines, .. } => lines.join("\n"),
-        LaidOutKind::Code { lines } => lines
-            .iter()
-            .map(|l| l.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => text.clone(),
-        LaidOutKind::Attribution { label, .. } => label.clone(),
-        LaidOutKind::Unknown => "[?]".into(),
-        LaidOutKind::Truncated => "… truncated".into(),
         LaidOutKind::Sep => {
             window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.))), color));
             return;
@@ -1220,14 +1261,21 @@ fn paint_laid_node(
             ));
             return;
         }
-        LaidOutKind::Col | LaidOutKind::Row | LaidOutKind::Spark { .. } => return,
+        kind => match block_text_for(kind) {
+            Some(text) => text,
+            None => return,
+        },
     };
     if text.is_empty() {
         return;
     }
+    let mut font = window.text_style().font();
+    if block_is_bold(&node.kind) {
+        font.weight = gpui::FontWeight::BOLD;
+    }
     let style = TextRun {
         len: text.len(),
-        font: window.text_style().font(),
+        font,
         color,
         background_color: None,
         underline: None,
@@ -1355,6 +1403,108 @@ struct TerminalInputHandler {
 mod tests {
     use super::*;
     use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
+
+    /// Both mount points render one schema (ADR-0017), so a variant the Panel
+    /// painter draws and the Block painter drops is an invisible failure:
+    /// `sleipnir_widget::layout` still reserves the cells, so the Block shows
+    /// correctly-sized blank space with nothing logged. That is exactly how
+    /// `Spark` was lost.
+    ///
+    /// The compiler is the primary guard: neither painter has a catch-all, so
+    /// a new `LaidOutKind` fails the build in both. This covers the half the
+    /// compiler cannot see — a variant matched but rendered as empty text,
+    /// which paints nothing at all.
+    #[test]
+    fn block_painter_produces_text_for_every_visible_kind() {
+        use sleipnir_widget::{CodeLine, LaidOutKind};
+
+        let visible = [
+            LaidOutKind::Text {
+                lines: vec!["hi".into()],
+                tone: sleipnir_widget::Tone::Fg,
+                bold: false,
+            },
+            LaidOutKind::Code {
+                lines: vec![CodeLine {
+                    text: "fn main(){}".into(),
+                    truncated: false,
+                }],
+            },
+            LaidOutKind::Badge {
+                text: "3000".into(),
+                tone: sleipnir_widget::Tone::Ok,
+            },
+            LaidOutKind::Spark {
+                levels: vec![0, 4, 8],
+            },
+            LaidOutKind::Btn {
+                text: "Retry".into(),
+                action: "retry".into(),
+                arg: None,
+            },
+            LaidOutKind::Unknown,
+            LaidOutKind::Truncated,
+            LaidOutKind::Attribution {
+                plugin_id: "demo".into(),
+                label: "demo".into(),
+            },
+        ];
+
+        for kind in visible {
+            let text = block_text_for(&kind);
+            assert!(
+                text.is_some_and(|t| !t.is_empty()),
+                "{kind:?} renders as nothing in a Block; \
+                 layout reserved its cells, so this is blank space"
+            );
+        }
+
+        // Containers and the two quad-painted kinds legitimately produce no
+        // text; they are drawn as geometry or not at all.
+        for kind in [LaidOutKind::Col, LaidOutKind::Row] {
+            assert!(block_text_for(&kind).is_none(), "{kind:?} is a container");
+        }
+    }
+
+    /// A sparkline must read identically in a Block and a Panel; both go
+    /// through one shared ramp.
+    #[test]
+    fn spark_renders_as_ramp_glyphs() {
+        use sleipnir_widget::LaidOutKind;
+        let text = block_text_for(&LaidOutKind::Spark {
+            levels: vec![0, 4, 8],
+        })
+        .expect("spark renders");
+        assert_eq!(text, " ▄█");
+        assert_eq!(text.chars().count(), 3, "one glyph per reserved cell");
+    }
+
+    /// `bold` is in the schema and the Panel painter honours it; a Block that
+    /// ignored it would render the same tree differently by mount point.
+    #[test]
+    fn block_painter_honours_bold_only_on_bold_text() {
+        use sleipnir_widget::{LaidOutKind, Tone};
+
+        let bold = LaidOutKind::Text {
+            lines: vec!["loud".into()],
+            tone: Tone::Fg,
+            bold: true,
+        };
+        let plain = LaidOutKind::Text {
+            lines: vec!["quiet".into()],
+            tone: Tone::Fg,
+            bold: false,
+        };
+        assert!(block_is_bold(&bold), "bold text must paint bold");
+        assert!(!block_is_bold(&plain), "plain text must not paint bold");
+        assert!(
+            !block_is_bold(&LaidOutKind::Badge {
+                text: "x".into(),
+                tone: Tone::Ok,
+            }),
+            "only Text carries bold in the schema"
+        );
+    }
 
     #[test]
     fn selection_background_uses_theme_ansi_red() {

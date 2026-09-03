@@ -165,7 +165,11 @@ impl AppShell {
                     // on top of the scene.
                     if let Some(hit) = action_at(&laid, pos.col, pos.row) {
                         crate::plugin_runtime::push_action(
-                            &down_plugin_id, surface_id, hit.action, hit.arg, cx,
+                            &down_plugin_id,
+                            surface_id,
+                            hit.action,
+                            hit.arg,
+                            cx,
                         );
                         this.panel_drag = None;
                         cx.notify();
@@ -188,11 +192,10 @@ impl AppShell {
         );
 
         if has_scene {
-            body = body.on_mouse_move(cx.listener(
-                move |this, ev: &MouseMoveEvent, _window, cx| {
+            body =
+                body.on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _window, cx| {
                     this.drag_panel_camera(pane_key, ev.position, cx);
-                },
-            ));
+                }));
             body = body.on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _ev: &gpui::MouseUpEvent, _window, cx| {
@@ -377,14 +380,10 @@ pub(super) fn paint_node(
                 .child(div().h_full().w(fill_w).bg(tokens.accent))
                 .into_any_element()
         }
-        LaidOutKind::Spark { levels } => {
-            const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-            let s: String = levels
-                .iter()
-                .map(|&lv| BLOCKS[lv.min(8) as usize])
-                .collect();
-            el.text_color(tokens.accent).child(s).into_any_element()
-        }
+        LaidOutKind::Spark { levels } => el
+            .text_color(tokens.accent)
+            .child(sleipnir_widget::spark_glyphs(levels))
+            .into_any_element(),
         LaidOutKind::Sep => el.bg(tokens.border).h(px(1.0)).into_any_element(),
         LaidOutKind::Btn { text, .. } => el
             .bg(tokens.hover)
@@ -433,12 +432,7 @@ pub(super) fn paint_panel_scene(
         let pts: Vec<gpui::Point<Pixels>> = face
             .pts
             .iter()
-            .map(|p| {
-                gpui_point(
-                    origin.x + gpui_px(p[0]),
-                    origin.y + gpui_px(p[1]),
-                )
-            })
+            .map(|p| gpui_point(origin.x + gpui_px(p[0]), origin.y + gpui_px(p[1])))
             .collect();
         let mut builder = PathBuilder::fill();
         builder.add_polygon(&pts, true);
