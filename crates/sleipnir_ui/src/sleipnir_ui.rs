@@ -149,7 +149,6 @@ pub struct TermView {
     last_offscreen_notify_at: Option<Instant>,
     /// Host-owned Block surfaces for this pane (ADR-0018). Process-local.
     blocks: crate::plugin_block::BlockRegistry,
-    last_block_history: usize,
     _spawn: Task<()>,
 }
 
@@ -255,7 +254,6 @@ impl TermView {
             last_render_at: None,
             last_offscreen_notify_at: None,
             blocks: crate::plugin_block::BlockRegistry::new(),
-            last_block_history: 0,
             _spawn: spawn,
         }
     }
@@ -390,12 +388,14 @@ impl TermView {
         let Some(term) = self.terminal_entity().cloned() else {
             return;
         };
-        let hist = term.read(cx).history_size();
-        if hist < self.last_block_history {
-            let removed = (self.last_block_history - hist) as i32;
+        // History belongs to the terminal; it already detected this shrink in
+        // `sync` and rebased its own geometry. Rebase the surfaces by the same
+        // amount so the push in `sync_blocks_to_terminal` below does not write
+        // stale absolute lines back over that geometry.
+        let removed = term.update(cx, |term, _| term.take_history_shrink());
+        if removed > 0 {
             self.blocks.rebase_after_history_shrink(removed);
         }
-        self.last_block_history = hist;
         self.sync_blocks_to_terminal(cx);
     }
 
@@ -412,8 +412,6 @@ impl TermView {
         let frozen = term.read(cx).row_geometry().is_frozen();
         self.blocks.relayout(cols.max(1), frozen);
         let blocks = self.blocks.geometry_blocks();
-        let live: std::collections::BTreeSet<_> = blocks.iter().map(|b| b.id).collect();
-        self.blocks.retain_live(&live);
         term.update(cx, |term, _| {
             let keep: std::collections::BTreeSet<_> =
                 term.row_geometry().blocks().map(|b| b.id).collect();

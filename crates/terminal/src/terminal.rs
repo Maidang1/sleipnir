@@ -919,6 +919,7 @@ impl TerminalBuilder {
                 keyboard_input_sent: false,
                 osc133: Osc133Scanner::new(),
                 last_history_size: 0,
+                pending_history_shrink: 0,
                 osc_notify: OscNotifyScanner::new(),
                 prompt_markers: Vec::new(),
                 last_busy: false,
@@ -1089,6 +1090,9 @@ pub struct Terminal {
     /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) means
     /// gutter marker lines must be rebased.
     last_history_size: usize,
+    /// Rows dropped from scrollback since the Block mount last looked.
+    /// Accumulates across syncs so a shrink cannot be missed between paints.
+    pending_history_shrink: i32,
     osc_notify: OscNotifyScanner,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
@@ -1510,6 +1514,17 @@ impl Terminal {
 
     pub fn set_blocks_frozen(&mut self, frozen: bool) {
         self.row_geometry.set_frozen(frozen);
+    }
+
+    /// Rows dropped from scrollback since the last call, then reset to zero.
+    ///
+    /// History belongs to the terminal, so the shrink is detected here once
+    /// (`sync`) rather than re-derived by every mount that stores absolute
+    /// lines. The Block mount consumes this to rebase its own surfaces, which
+    /// are then pushed back over `row_geometry` — so both sides shift by the
+    /// same amount and geometry never keeps a stale absolute line.
+    pub fn take_history_shrink(&mut self) -> i32 {
+        std::mem::take(&mut self.pending_history_shrink)
     }
 
     /// Replace the Block set from the mount point. Heights are integer rows
@@ -2175,10 +2190,14 @@ impl Terminal {
         // dropped saved lines) invalidates the absolute lines stored in the
         // gutter markers; rebase them so triangles don't strand on wrong rows.
         let history_size = terminal.history_size();
-        if history_size < self.last_history_size {
-            let removed = (self.last_history_size - history_size) as i32;
+        let removed = crate::row_map::history_shrink(self.last_history_size, history_size);
+        if removed > 0 {
             rebase_markers_after_history_shrink(&mut self.prompt_markers, removed);
             self.row_geometry.rebase_after_history_shrink(removed);
+            // Published for the Block mount, which owns the surfaces this
+            // geometry is rebuilt from and must rebase them by the same
+            // amount. Consumed (and cleared) by `take_history_shrink`.
+            self.pending_history_shrink = self.pending_history_shrink.saturating_add(removed);
         }
         self.last_history_size = history_size;
         let screen_lines = terminal.screen_lines();

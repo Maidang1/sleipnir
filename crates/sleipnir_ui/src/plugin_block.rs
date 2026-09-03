@@ -15,7 +15,7 @@ use plugin_protocol::v2::{BlockId, RunId, Widget};
 use row_geometry::{Anchor, Block};
 use run_ledger::Anchor as LedgerAnchor;
 use sleipnir_widget::{Layout, layout};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::plugin_surface::{StaleRegistry, Surface};
 
@@ -114,12 +114,6 @@ impl BlockRegistry {
             },
         );
         ApplyBlock::Inserted
-    }
-
-    /// History shrink / eviction: drop surfaces whose ids are no longer in
-    /// the geometry (the Block went with its anchor).
-    pub fn retain_live(&mut self, live: &BTreeSet<BlockId>) {
-        self.surfaces.retain(|id, _| live.contains(id));
     }
 
     /// Same rule as `rebase_markers_after_history_shrink` / RowGeometry:
@@ -222,6 +216,7 @@ mod tests {
     use super::*;
     use plugin_protocol::v2::Tone;
     use sleipnir_widget::LaidOutKind;
+    use std::collections::BTreeSet;
 
     fn text(s: &str) -> Widget {
         Widget::Text {
@@ -296,8 +291,8 @@ mod tests {
         let mut reg = BlockRegistry::new();
         reg.apply_render("demo", run(1), text("gone"), true, Some(anchor(2)), None);
         let id = reg.iter().next().unwrap().block_id;
-        let live = BTreeSet::new();
-        reg.retain_live(&live);
+        // The anchor sits inside the removed region, so the Block goes with it.
+        reg.rebase_after_history_shrink(5);
         assert!(reg.get(id).is_none());
     }
 
@@ -391,5 +386,61 @@ mod tests {
         // Simulate a width change while frozen: cache must stay.
         reg.relayout(40, true);
         assert_eq!(reg.iter().next().unwrap().laid.as_ref().unwrap().height, h);
+    }
+
+    /// The registry is the source of truth that `sync_blocks_to_terminal`
+    /// pushes into `RowGeometry`, so the registry's own rebase is what decides
+    /// which Blocks survive a scrollback shrink. `RowGeometry` rebasing itself
+    /// inside `Terminal::sync` is not a substitute: geometry is overwritten
+    /// from the registry immediately afterwards, so a registry that did not
+    /// rebase would push back stale absolute lines and resurrect a Block the
+    /// grid has forgotten.
+    ///
+    /// This models the two stages in order, which is what makes the deletion
+    /// of the duplicate tracker in `TermView` safe only when the survivor is
+    /// the registry-side rebase.
+    #[test]
+    fn registry_rebase_decides_survivors_pushed_into_geometry() {
+        use row_geometry::RowGeometry;
+
+        let mut reg = BlockRegistry::new();
+        reg.apply_render("demo", run(1), text("doomed"), true, Some(anchor(2)), None);
+        reg.apply_render("demo", run(2), text("kept"), true, Some(anchor(9)), None);
+        reg.relayout(20, false);
+
+        let mut geom = RowGeometry::new(16.0);
+        geom.set_line_count(40);
+        for b in reg.geometry_blocks() {
+            geom.upsert(b);
+        }
+        assert_eq!(geom.blocks().count(), 2);
+
+        // Stage 1: the terminal rebases its own geometry on shrink.
+        geom.rebase_after_history_shrink(5);
+        // Stage 2: the registry rebases and is pushed back over geometry.
+        reg.rebase_after_history_shrink(5);
+        reg.relayout(20, false);
+        let blocks = reg.geometry_blocks();
+        let live: BTreeSet<_> = blocks.iter().map(|b| b.id).collect();
+        for id in geom.blocks().map(|b| b.id).collect::<Vec<_>>() {
+            if !live.contains(&id) {
+                geom.remove(id);
+            }
+        }
+        for b in blocks {
+            geom.upsert(b);
+        }
+
+        // The Block anchored inside the removed region is gone from both, and
+        // the survivor sits at its shifted line in both.
+        assert_eq!(reg.iter().count(), 1, "registry dropped the doomed Block");
+        assert_eq!(geom.blocks().count(), 1, "geometry agrees with the registry");
+        let survivor = reg.iter().next().unwrap();
+        assert_eq!(survivor.anchor.line, 4, "9 - 5");
+        assert_eq!(
+            geom.get(survivor.block_id).map(|b| b.anchor.line),
+            Some(4),
+            "geometry must not hold a stale absolute line"
+        );
     }
 }

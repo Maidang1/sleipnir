@@ -20,6 +20,17 @@ pub fn viewport_top_abs(history_size: i32, display_offset: usize) -> i32 {
     history_size.saturating_sub(i32::try_from(display_offset).unwrap_or(i32::MAX))
 }
 
+/// Rows dropped from scrollback between two observations, saturating.
+///
+/// A shrink means every stored absolute line is stale by this much. History
+/// belongs to the terminal, so this is computed once there rather than
+/// re-derived by each mount that stores absolute lines (gutter markers, Block
+/// anchors) — two trackers of the same fact drift, and a drift here strands
+/// content on the wrong row.
+pub fn history_shrink(previous: usize, current: usize) -> i32 {
+    i32::try_from(previous.saturating_sub(current)).unwrap_or(i32::MAX)
+}
+
 /// Pixel y of a display line relative to the viewport origin, including the
 /// host `sub` remainder. Paint adds `origin.y`.
 pub fn y_for_display(geom: &RowGeometry, display_line: i32, top_abs: i32, sub: f32) -> f32 {
@@ -411,5 +422,23 @@ mod tests {
             );
             assert_eq!(viewport.sub, case.expected_sub, "{} remainder", case.name);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // History shrink accounting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn history_shrink_reports_only_shrink() {
+        assert_eq!(history_shrink(40, 10), 30, "30 rows dropped");
+        assert_eq!(history_shrink(10, 10), 0, "steady history is not a shrink");
+        assert_eq!(history_shrink(10, 40), 0, "growth is not a shrink");
+    }
+
+    #[test]
+    fn history_shrink_saturates_instead_of_wrapping() {
+        // usize::MAX -> 0 exceeds i32; it must clamp, not wrap negative, or a
+        // rebase would shift anchors the wrong way.
+        assert_eq!(history_shrink(usize::MAX, 0), i32::MAX);
     }
 }
