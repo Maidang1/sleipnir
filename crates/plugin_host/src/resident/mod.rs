@@ -180,14 +180,37 @@ pub trait Clock: Send + Sync + 'static {
     fn now_ms(&self) -> u64;
 }
 
-pub struct SystemClock;
+/// Wall-clock-anchored monotonic milliseconds. The epoch anchor is taken once
+/// at construction; afterwards only [`std::time::Instant`] advances the clock,
+/// so an NTP step cannot fast-forward idle eviction or backoff.
+pub struct SystemClock {
+    origin: std::time::Instant,
+    epoch_ms: u64,
+}
+
+impl SystemClock {
+    pub fn new() -> Self {
+        let epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Self {
+            origin: std::time::Instant::now(),
+            epoch_ms,
+        }
+    }
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
+        self.epoch_ms
+            .saturating_add(self.origin.elapsed().as_millis() as u64)
     }
 }
 

@@ -11,7 +11,7 @@ use sleipnir_plugin::v2::{
     Capability, Context, EventFilter, EventKind, HostEvent, Lifecycle, Manifest, Plugin,
     RenderTarget, RunId, run,
 };
-use sleipnir_plugin_failed_run::{failure_tree, is_failure, retried_tree};
+use sleipnir_plugin_failed_run::{failure_tree, retried_tree};
 
 struct RunInfo {
     command: String,
@@ -54,7 +54,6 @@ impl Plugin for FailedRun {
             Capability::Resident,
             Capability::SubscribeEvents,
             Capability::RenderBlock,
-            Capability::ReadCwd,
         ]
     }
 
@@ -78,14 +77,15 @@ impl Plugin for FailedRun {
                 duration_ms,
                 ..
             } => {
-                if !is_failure(exit_code) {
-                    return;
-                }
+                // Drop the RunStarted entry on every finish — success or
+                // failure — so `started` cannot leak completed runs.
                 let command = self
                     .started
                     .remove(&run_id)
                     .unwrap_or_else(|| "<unknown>".into());
-                let code = exit_code.unwrap_or(1);
+                let Some(code) = exit_code.filter(|c| *c != 0) else {
+                    return;
+                };
                 let tree = failure_tree(&command, code, duration_ms, &run_id.to_string());
                 self.rendered.insert(
                     run_id,

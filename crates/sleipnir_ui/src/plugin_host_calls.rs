@@ -122,7 +122,10 @@ pub fn plan_call(
             message: format!("capability {need:?} not granted"),
         });
     }
-    if !limiter.allow(plugin_id, now_ms) {
+    // DrawScene is exempt from the anti-spam limiter: it only repaints the
+    // host's own surface (no external side effect like Notify / OpenPane),
+    // and legitimate animations (e.g. disk3d Spin) exceed the budget.
+    if !matches!(call, HostCall::DrawScene { .. }) && !limiter.allow(plugin_id, now_ms) {
         return CallPlan::Reply(HostCallResult::Error {
             message: "rate limited".into(),
         });
@@ -448,6 +451,25 @@ mod tests {
             CallPlan::Notify { .. } => {}
             other => panic!("window should have expired: {other:?}"),
         }
+    }
+
+    #[test]
+    fn draw_scene_is_exempt_from_the_rate_limiter() {
+        // DrawScene only repaints the host's own surface; it has no external
+        // side effect like Notify / OpenPane. The anti-spam limiter must not
+        // freeze a granted animation (disk3d Spin sends 22 frames in 1.8s).
+        let mut limiter = HostCallLimiter::new();
+        let granted = [Capability::HostCallDrawScene];
+        let call = scene(1, 1, vec![bar(0, 0)]);
+        for i in 0..RATE_MAX_CALLS + 12 {
+            let plan = plan_call("gfx", &call, &granted, &mut limiter, 1_000);
+            assert!(
+                matches!(plan, CallPlan::DrawScene { .. }),
+                "frame {i} must not be rate limited, got {plan:?}"
+            );
+        }
+        // Exemption must not count towards (or inflate) the dropped counter.
+        assert_eq!(limiter.dropped_counts().get("gfx").copied().unwrap_or(0), 0);
     }
 
     #[test]

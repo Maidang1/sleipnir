@@ -9,7 +9,7 @@
 use super::session::Session;
 use super::transport::Launcher;
 use super::{
-    BroadcastReport, Clock, ConnectionSnapshot, ConnectionState, Delivery, Inbound, LaunchSpec,
+    BroadcastReport, Clock, ConnectionSnapshot, ConnectionState, Inbound, LaunchSpec,
     PendingInvoke, SessionError, SupervisorConfig, mutex_lock,
 };
 use crate::PluginLifecycle;
@@ -111,12 +111,15 @@ impl Supervisor {
     ) -> Result<Output, SessionError> {
         let session = self.connect(spec)?;
         let result = session.invoke(command_id, context, self.config.request_timeout);
-        if spec.lifecycle == PluginLifecycle::OnDemand {
-            session.teardown(self.config.shutdown_grace);
-            self.drop_live(&spec.plugin_id);
-        }
-        if result.is_err() && session.is_dead() {
-            self.reap_dead(&spec.plugin_id);
+        match spec.lifecycle {
+            // OnDemand never enters the live map; dropping the Arc tears the
+            // session down. The explicit teardown bounds the shutdown grace.
+            PluginLifecycle::OnDemand => session.teardown(self.config.shutdown_grace),
+            PluginLifecycle::Resident => {
+                if result.is_err() && session.is_dead() {
+                    self.reap_dead(&spec.plugin_id);
+                }
+            }
         }
         result
     }
@@ -128,29 +131,6 @@ impl Supervisor {
         context: InvokeContext,
     ) -> Result<PendingInvoke, SessionError> {
         self.connect(spec)?.begin_invoke(command_id, context)
-    }
-
-    pub fn push_event(
-        &self,
-        plugin_id: &str,
-        event: v2::HostEvent,
-    ) -> Result<MessageId, SessionError> {
-        let Some(session) = self.live_if_usable(plugin_id) else {
-            return Err(SessionError::Disconnected);
-        };
-        match super::event_bus::fan_out(std::iter::once(session), event)
-            .outcomes
-            .into_iter()
-            .next()
-            .map(|(_, d)| d)
-        {
-            Some(Delivery::Delivered { id }) => Ok(id),
-            Some(Delivery::Filtered) => Err(SessionError::Protocol(
-                "event filtered or subscribe_events not granted".into(),
-            )),
-            Some(Delivery::Dropped) => Err(SessionError::Backpressure),
-            Some(Delivery::Skipped) | None => Err(SessionError::Disconnected),
-        }
     }
 
     /// Fan-out one event to every live connection. Never blocks: missing

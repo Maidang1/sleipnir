@@ -101,14 +101,7 @@ pub fn scan(root: &Path) -> Scan {
                     budget.unreadable += 1;
                     continue;
                 };
-                if meta.file_type().is_symlink() {
-                    entries.push(Entry {
-                        name,
-                        bytes: meta.len(),
-                        is_dir: false,
-                        aggregated: false,
-                    });
-                } else if meta.is_dir() {
+                if meta.is_dir() {
                     let bytes = dir_size(&item.path(), 1, &mut budget);
                     entries.push(Entry {
                         name,
@@ -117,6 +110,8 @@ pub fn scan(root: &Path) -> Scan {
                         aggregated: false,
                     });
                 } else {
+                    // Symlinks land here: sized as the link itself, never
+                    // traversed.
                     entries.push(Entry {
                         name,
                         bytes: meta.len(),

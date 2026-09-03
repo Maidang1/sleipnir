@@ -15,7 +15,6 @@ use sleipnir_settings::TerminalSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::TermView;
 
@@ -43,7 +42,7 @@ impl PluginRuntime {
                 supervisor: Arc::new(Supervisor::new(
                     SupervisorConfig::default(),
                     Arc::new(ProcessLauncher),
-                    Arc::new(SystemClock),
+                    Arc::new(SystemClock::new()),
                 )),
             });
         }
@@ -153,15 +152,15 @@ pub fn requested_capabilities(plugin: &LoadedPluginCommand) -> Vec<Capability> {
     caps
 }
 
-pub fn plugin_binary_hash(plugin: &LoadedPluginCommand) -> Option<String> {
+pub fn plugin_binary_hash(plugin: &LoadedPluginCommand) -> Option<plugin_grants::BinaryHash> {
     hash_plugin_binary(&plugin.directory, &plugin.binary)
 }
 
-pub fn loaded_plugin_hash(plugin: &LoadedPlugin) -> Option<String> {
+pub fn loaded_plugin_hash(plugin: &LoadedPlugin) -> Option<plugin_grants::BinaryHash> {
     hash_plugin_binary(&plugin.directory, &plugin.manifest.binary)
 }
 
-fn hash_plugin_binary(directory: &Path, binary: &str) -> Option<String> {
+fn hash_plugin_binary(directory: &Path, binary: &str) -> Option<plugin_grants::BinaryHash> {
     let path = plugin_binary_path(directory, binary)?;
     plugin_grants::hash_binary(&path).ok()
 }
@@ -196,6 +195,16 @@ pub fn launch_spec(plugin: &LoadedPlugin, granted: Vec<Capability>) -> LaunchSpe
 pub fn supervisor(cx: &App) -> Option<Arc<Supervisor>> {
     cx.try_global::<PluginRuntime>()
         .map(|rt| Arc::clone(&rt.supervisor))
+}
+
+/// Drive the resident supervisor's housekeeping: reap dead sessions, apply
+/// crash backoff, reset crash counters past `stable_after`, evict idle
+/// residents. The shell calls this on a timer; without it `idle` and
+/// `stable_after` would be decorative.
+pub fn tick(cx: &App) {
+    if let Some(rt) = cx.try_global::<PluginRuntime>() {
+        rt.supervisor.tick();
+    }
 }
 
 pub fn is_plugin_live(plugin_id: &str, cx: &App) -> bool {
@@ -303,13 +312,15 @@ pub fn reply_host_call(
         .is_some()
 }
 
-/// Persist a grant bound to `hash`. An empty hash is refused: a grant without
-/// binary identity would let a later binary inherit the approval.
-pub fn save_grant(plugin_id: &str, request: &[Capability], hash: &str, tier: Tier) {
-    if hash.is_empty() {
-        log::warn!("plugin: refusing to persist a grant without a binary hash");
-        return;
-    }
+/// Persist a grant bound to `hash`. The [`plugin_grants::BinaryHash`] newtype
+/// makes an unhashed grant unrepresentable: a grant without binary identity
+/// would let a later binary inherit the approval.
+pub fn save_grant(
+    plugin_id: &str,
+    request: &[Capability],
+    hash: &plugin_grants::BinaryHash,
+    tier: Tier,
+) {
     let path = plugin_grants::default_grants_path();
     let mut file = plugin_grants::load(&path);
     file.grants.insert(
@@ -317,54 +328,13 @@ pub fn save_grant(plugin_id: &str, request: &[Capability], hash: &str, tier: Tie
         GrantRecord {
             granted: request.iter().copied().collect(),
             binary_hash: hash.to_string(),
-            granted_at: rfc3339_now(),
+            granted_at: plugin_grants::now_stamp(),
             tier,
         },
     );
     if let Err(err) = plugin_grants::save(&path, &file) {
         log::warn!("plugin: failed to save grants: {err}");
     }
-}
-
-fn rfc3339_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    rfc3339_from_unix(secs)
-}
-
-fn rfc3339_from_unix(secs: u64) -> String {
-    let mut days = secs / 86_400;
-    let rem = secs % 86_400;
-    let hh = rem / 3600;
-    let mm = (rem % 3600) / 60;
-    let ss = rem % 60;
-    let mut year = 1970i32;
-    loop {
-        let diy = if is_leap(year) { 366 } else { 365 };
-        if days < diy {
-            break;
-        }
-        days -= diy;
-        year += 1;
-    }
-    let feb = if is_leap(year) { 29 } else { 28 };
-    let months = [31, feb, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 1u32;
-    for dim in months {
-        if days < dim {
-            break;
-        }
-        days -= dim;
-        month += 1;
-    }
-    let day = days as u32 + 1;
-    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
-}
-
-fn is_leap(year: i32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 #[cfg(test)]
@@ -390,12 +360,5 @@ mod tests {
             connecting.insert("failed-run".into()),
             "a released claim must be retryable after a failed launch"
         );
-    }
-
-    #[test]
-    fn rfc3339_unix_epoch() {
-        assert_eq!(rfc3339_from_unix(0), "1970-01-01T00:00:00Z");
-        assert_eq!(rfc3339_from_unix(1), "1970-01-01T00:00:01Z");
-        assert_eq!(rfc3339_from_unix(1_704_067_200), "2024-01-01T00:00:00Z");
     }
 }

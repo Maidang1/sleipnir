@@ -6,5 +6,5 @@
   "enabled": true,
   "lifecycle": "resident",
   "binary": "./sleipnir-plugin-failed-run",
-  "permissions": ["subscribe_events", "render_block", "read_cwd"]
+  "permissions": ["subscribe_events", "render_block"]
 }

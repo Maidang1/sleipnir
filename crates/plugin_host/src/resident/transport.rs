@@ -38,7 +38,6 @@ pub trait LineSource: Send {
 /// teardown joins hang and a wedged plugin stalls the host.
 pub trait PluginProcess: Send {
     fn pid(&self) -> Option<u32>;
-    fn is_alive(&self) -> bool;
     fn kill(&mut self) -> io::Result<()>;
     /// Wait up to `timeout` for exit. The in-memory impl never sleeps: it
     /// returns immediately whether the stand-in is already dead.
@@ -153,10 +152,27 @@ pub(crate) fn read_line_limited<R: BufRead>(
             return Ok(RecvLine::Line(String::from_utf8_lossy(&buf).into_owned()));
         }
         if buf.len().saturating_add(available.len()) > max_bytes {
+            // Discard the rest of the frame without storing it: consume up to
+            // and including the newline so the next read resyncs on a frame
+            // boundary. Nothing accumulates, so an endless line stays bounded.
             let n = available.len();
             reader.consume(n);
-            let mut rest = Vec::new();
-            let _ = reader.read_until(b'\n', &mut rest);
+            loop {
+                let rest = reader.fill_buf()?;
+                if rest.is_empty() {
+                    break;
+                }
+                match rest.iter().position(|&b| b == b'\n') {
+                    Some(i) => {
+                        reader.consume(i + 1);
+                        break;
+                    }
+                    None => {
+                        let n = rest.len();
+                        reader.consume(n);
+                    }
+                }
+            }
             return Ok(RecvLine::Oversized);
         }
         buf.extend_from_slice(available);
@@ -170,13 +186,6 @@ struct ChildProcess(Child);
 impl PluginProcess for ChildProcess {
     fn pid(&self) -> Option<u32> {
         Some(self.0.id())
-    }
-
-    fn is_alive(&self) -> bool {
-        // `try_wait` needs `&mut self`; we cannot call it here. The supervisor
-        // observes death from the reader EOF path, which is the source of
-        // truth for "the plugin is gone".
-        true
     }
 
     fn kill(&mut self) -> io::Result<()> {
@@ -357,10 +366,6 @@ struct MemoryProcess {
 impl PluginProcess for MemoryProcess {
     fn pid(&self) -> Option<u32> {
         None
-    }
-
-    fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
     }
 
     fn kill(&mut self) -> io::Result<()> {

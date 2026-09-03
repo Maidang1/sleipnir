@@ -1,5 +1,5 @@
 [package]
-name = "sleipnir_widget"
+name = "atomic_write"
 version = "0.1.0"
 edition.workspace = true
 publish = false
@@ -9,8 +9,6 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/sleipnir_widget.rs"
-doctest = false
+path = "src/atomic_write.rs"
 
 [dependencies]
-plugin_protocol.workspace = true

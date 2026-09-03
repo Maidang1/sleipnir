@@ -332,22 +332,15 @@ impl Session {
         })
     }
 
-    pub fn push_event(&self, event: v2::HostEvent) -> Result<MessageId, SessionError> {
-        match self.receive_event(&event) {
-            Delivery::Delivered { id } => Ok(id),
-            Delivery::Filtered => Err(SessionError::Protocol(
-                "event filtered or subscribe_events not granted".into(),
-            )),
-            Delivery::Dropped => Err(SessionError::Backpressure),
-            Delivery::Skipped => Err(SessionError::Disconnected),
-        }
-    }
-
     /// Offer one event to this connection. Never blocks.
     ///
-    /// A plugin without [`Capability::SubscribeEvents`] is Filtered, not
-    /// Delivered — that is the security property of the event path.
+    /// `RunStarted.command` is redacted with `run_ledger::redact` here — the
+    /// only wire choke point — so a missed redact at the capture site cannot
+    /// leak a secret onto the wire. A plugin without
+    /// [`Capability::SubscribeEvents`] is Filtered, not Delivered — that is the
+    /// security property of the event path.
     pub fn receive_event(&self, event: &v2::HostEvent) -> Delivery {
+        let event = redact_run_started(event.clone());
         if self.is_dead() || self.is_shutting_down() {
             return Delivery::Skipped;
         }
@@ -360,10 +353,7 @@ impl Session {
         }
         drop(filter);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        match self.enqueue_msg(&HostMessage::Event {
-            id,
-            event: event.clone(),
-        }) {
+        match self.enqueue_msg(&HostMessage::Event { id, event }) {
             Ok(()) => {
                 self.touch();
                 Delivery::Delivered { id }
@@ -536,14 +526,7 @@ impl Session {
             Err(err) => {
                 self.malformed.fetch_add(1, Ordering::Relaxed);
                 log::warn!("plugin {} sent garbage (ignored): {err}", self.plugin_id);
-                let mut slot = mutex_lock(&self.handshake);
-                if matches!(&*slot, HandshakeSlot::Waiting(_)) {
-                    if let HandshakeSlot::Waiting(tx) =
-                        std::mem::replace(&mut *slot, HandshakeSlot::Done)
-                    {
-                        let _ = tx.send(Err(SessionError::Protocol(format!("garbage: {err}"))));
-                    }
-                }
+                self.fail_handshake(SessionError::Protocol(format!("garbage: {err}")));
                 return;
             }
         };
@@ -638,7 +621,7 @@ fn validate_ready(spec: &LaunchSpec, ready: &ReadyInfo) -> Result<(), SessionErr
     // cannot exceed what plugin.json declared.
     for command in &ready.manifest.commands {
         for cap in &command.capabilities {
-            let v2_cap = v1_cap_to_v2(*cap);
+            let v2_cap = v2::Capability::from(*cap);
             if !spec.declared_capabilities.contains(&v2_cap) {
                 return Err(SessionError::CapabilityExceeded { capability: v2_cap });
             }
@@ -647,15 +630,20 @@ fn validate_ready(spec: &LaunchSpec, ready: &ReadyInfo) -> Result<(), SessionErr
     Ok(())
 }
 
-fn v1_cap_to_v2(cap: plugin_protocol::Capability) -> Capability {
-    match cap {
-        plugin_protocol::Capability::ReadSelection => Capability::ReadSelection,
-        plugin_protocol::Capability::ReadVisibleScreen => Capability::ReadVisibleScreen,
-        plugin_protocol::Capability::ReadCwd => Capability::ReadCwd,
-        plugin_protocol::Capability::ReadTitle => Capability::ReadTitle,
-        plugin_protocol::Capability::WriteTerminal => Capability::WriteTerminal,
-        plugin_protocol::Capability::Clipboard => Capability::Clipboard,
-        plugin_protocol::Capability::Network => Capability::Network,
+fn redact_run_started(event: v2::HostEvent) -> v2::HostEvent {
+    match event {
+        v2::HostEvent::RunStarted {
+            run_id,
+            pane,
+            command,
+            cwd,
+        } => v2::HostEvent::RunStarted {
+            run_id,
+            pane,
+            command: run_ledger::redact_command(&command),
+            cwd,
+        },
+        other => other,
     }
 }
 
@@ -744,5 +732,29 @@ where
 fn join_thread(handle: Option<JoinHandle<()>>) {
     if let Some(handle) = handle {
         let _ = handle.join();
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_run_started;
+    use plugin_protocol::v2::HostEvent;
+    use uuid::Uuid;
+
+    #[test]
+    fn run_started_command_is_redacted_before_anyone_sees_it() {
+        let event = HostEvent::RunStarted {
+            run_id: Uuid::nil(),
+            pane: Uuid::nil(),
+            command: "AWS_SECRET_ACCESS_KEY=supersecret aws s3 ls".into(),
+            cwd: None,
+        };
+        let HostEvent::RunStarted { command, .. } = redact_run_started(event) else {
+            panic!("expected RunStarted");
+        };
+        assert!(
+            !command.contains("supersecret"),
+            "raw secret must not survive redact: {command}"
+        );
     }
 }

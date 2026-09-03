@@ -3,12 +3,10 @@
 //! Layout math stays in integers. `f32` appears only as schema input (`Bar`,
 //! `Spark`) and is reduced to a cell count before anything is positioned.
 
-use syntax::{Language, language_for_path};
-
 /// Cap on characters consumed from a single `text` / `code` node.
 ///
 /// Node/depth budgets (ADR-0017 constraint 5) do not bound string size. One
-/// unbounded leaf would still freeze the UI thread on wrap/highlight.
+/// unbounded leaf would still freeze the UI thread on wrap.
 pub const MAX_LEAF_CHARS: usize = 8192;
 
 /// Cap on `code` lines after the character cap. Wrapped code is forbidden;
@@ -89,9 +87,6 @@ pub fn wrap_text(s: &str, width: u32) -> Vec<String> {
         used = used.saturating_add(w);
     }
     lines.push(current);
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
     lines
 }
 
@@ -125,27 +120,6 @@ pub fn fit_cols(s: &str, width: u32) -> (String, bool) {
     (out, true)
 }
 
-/// Map a schema `lang` ("rust", "rs", "foo.rs") onto [`language_for_path`].
-/// Unresolved languages stay plain text; highlighting is best-effort.
-pub fn language_for_widget(lang: &str) -> Option<&'static Language> {
-    let trimmed = lang.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(found) = language_for_path(trimmed) {
-        return Some(found);
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    let ext = match lower.as_str() {
-        "rust" | "rs" => "rs",
-        "python" | "py" | "pyi" => "py",
-        "javascript" | "js" | "jsx" | "mjs" | "cjs" => "js",
-        "json" => "json",
-        other => other,
-    };
-    language_for_path(&format!("file.{ext}"))
-}
-
 /// Convert a `Bar` value in `0.0..=1.0` to filled cells. Non-finite and
 /// negative values collapse to empty; values above 1 fill the track.
 pub fn bar_filled(v: f32, width: u32) -> u32 {
@@ -156,9 +130,6 @@ pub fn bar_filled(v: f32, width: u32) -> u32 {
         return width;
     }
     let milli = (v * 1000.0).round();
-    if !milli.is_finite() {
-        return 0;
-    }
     let milli = (milli as u32).min(1000);
     ((milli as u64 * width as u64) / 1000) as u32
 }
@@ -194,9 +165,6 @@ fn spark_level(v: f32, min: f32, max: f32) -> u8 {
         return 4;
     }
     let t = (v - min) / (max - min);
-    if !t.is_finite() {
-        return 0;
-    }
     let t = t.clamp(0.0, 1.0);
     (t * 8.0).round().clamp(0.0, 8.0) as u8
 }
@@ -256,14 +224,5 @@ mod tests {
         assert_eq!(spark_levels(&[], 8), vec![0]);
         let levels = spark_levels(&[f32::NAN, f32::INFINITY, 1.0, 2.0], 4);
         assert_eq!(levels.len(), 4);
-    }
-
-    #[test]
-    fn language_names_resolve_like_paths() {
-        assert!(language_for_widget("rust").is_some());
-        assert!(language_for_widget("rs").is_some());
-        assert!(language_for_widget("file.py").is_some());
-        assert!(language_for_widget("nope").is_none());
-        assert!(language_for_widget("").is_none());
     }
 }

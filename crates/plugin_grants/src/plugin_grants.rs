@@ -22,9 +22,10 @@ use plugin_protocol::v2::Capability;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write as _};
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// On-disk schema version. Unknown versions are treated as corrupt.
 pub const GRANTS_VERSION: u32 = 1;
@@ -75,10 +76,7 @@ impl Default for GrantsFile {
     }
 }
 
-/// Outcome of comparing a request against a stored grant.
-///
-/// [`Decision::Denied`] is for host-level policy that consent cannot override
-/// (a capability forbidden at the plugin's trust tier). [`check`] itself never
+/// Outcome of comparing a request against a stored grant. [`check`] never
 /// denies: every gap is a consent question, not a silent block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
@@ -88,7 +86,6 @@ pub enum Decision {
         reason: ConsentReason,
         missing: Vec<Capability>,
     },
-    Denied(String),
 }
 
 /// Why fresh consent is required. Distinct so the UI can explain the prompt.
@@ -101,6 +98,30 @@ pub enum ConsentReason {
     NewCapabilities,
 }
 
+/// `sha256:<hex>` of a plugin binary, produced only by [`hash_binary`]. The
+/// consent contract's identity type: an unhashable binary has no `BinaryHash`,
+/// so a caller cannot smuggle an empty-string sentinel into [`check`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinaryHash(String);
+
+impl BinaryHash {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Wrap a precomputed hash string. For tests and fixtures in other crates;
+    /// production code obtains hashes from [`hash_binary`] only.
+    pub fn from_raw(hash: String) -> Self {
+        Self(hash)
+    }
+}
+
+impl std::fmt::Display for BinaryHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Compare a capability request to a stored grant and the hash of the binary
 /// now on disk.
 ///
@@ -109,7 +130,11 @@ pub enum ConsentReason {
 /// capabilities (`Resident`, `SubscribeEvents`, `Render*`, `HostCall*`) are
 /// never implied by v1 ones — membership is exact; [`Capability::is_v1`] is a
 /// classifier, not a promotion rule.
-pub fn check(request: &[Capability], record: Option<&GrantRecord>, actual_hash: &str) -> Decision {
+pub fn check(
+    request: &[Capability],
+    record: Option<&GrantRecord>,
+    actual_hash: &BinaryHash,
+) -> Decision {
     let Some(record) = record else {
         return Decision::NeedsConsent {
             reason: ConsentReason::FirstRun,
@@ -117,7 +142,7 @@ pub fn check(request: &[Capability], record: Option<&GrantRecord>, actual_hash: 
         };
     };
 
-    if record.binary_hash != actual_hash {
+    if record.binary_hash != actual_hash.as_str() {
         return Decision::NeedsConsent {
             reason: ConsentReason::BinaryChanged,
             missing: request.to_vec(),
@@ -139,11 +164,11 @@ pub fn check(request: &[Capability], record: Option<&GrantRecord>, actual_hash: 
     }
 }
 
-/// SHA-256 of `path`, formatted `sha256:<hex>`.
+/// SHA-256 of `path`.
 ///
 /// Streams the file; a plugin binary must not be pulled fully into memory just
 /// to decide whether it is still the one that was approved.
-pub fn hash_binary(path: &Path) -> io::Result<String> {
+pub fn hash_binary(path: &Path) -> io::Result<BinaryHash> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8 * 1024];
@@ -154,7 +179,50 @@ pub fn hash_binary(path: &Path) -> io::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("sha256:{}", hex_encode(&hasher.finalize())))
+    Ok(BinaryHash(format!("sha256:{}", hex_encode(&hasher.finalize()))))
+}
+
+/// RFC3339 UTC timestamp for [`GrantRecord::granted_at`]. This crate owns the
+/// format so writers cannot drift from what readers persist.
+pub fn now_stamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    rfc3339_from_unix(secs)
+}
+
+fn rfc3339_from_unix(secs: u64) -> String {
+    let mut days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hh = rem / 3600;
+    let mm = (rem % 3600) / 60;
+    let ss = rem % 60;
+    let mut year = 1970i32;
+    loop {
+        let diy = if is_leap(year) { 366 } else { 365 };
+        if days < diy {
+            break;
+        }
+        days -= diy;
+        year += 1;
+    }
+    let feb = if is_leap(year) { 29 } else { 28 };
+    let months = [31, feb, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1u32;
+    for dim in months {
+        if days < dim {
+            break;
+        }
+        days -= dim;
+        month += 1;
+    }
+    let day = days as u32 + 1;
+    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+fn is_leap(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 /// Config directory convention matching `plugin_host::default_plugin_dir_for`
@@ -189,7 +257,7 @@ pub fn load(path: &Path) -> GrantsFile {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return GrantsFile::default(),
         Err(_) => {
-            quarantine(path);
+            atomic_write::quarantine(path);
             return GrantsFile::default();
         }
     };
@@ -197,72 +265,23 @@ pub fn load(path: &Path) -> GrantsFile {
     match parse_grants_file(&bytes) {
         Some(file) => file,
         None => {
-            quarantine(path);
+            atomic_write::quarantine(path);
             GrantsFile::default()
         }
     }
 }
 
-/// Write `file` atomically: stage to a sibling `.tmp`, then rename over `path`.
-///
-/// Mirrors `run_ledger::store`: parent dirs are created, the staged file is
-/// `0600` on Unix, and a failed publish deletes the leftover tmp.
+/// Write `file` atomically (see `atomic_write`): stage to a sibling `.tmp`,
+/// then rename over `path`.
 pub fn save(path: &Path, file: &GrantsFile) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-
     let json = serde_json::to_vec_pretty(file)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    let tmp = sibling_path(path, ".tmp");
-    let staged = stage_then_publish(&tmp, path, &json);
-    if staged.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    staged
+    atomic_write::save_atomic(path, &json)
 }
 
 fn parse_grants_file(bytes: &[u8]) -> Option<GrantsFile> {
     let file: GrantsFile = serde_json::from_slice(bytes).ok()?;
     (file.version == GRANTS_VERSION).then_some(file)
-}
-
-/// Durably write `json` to `tmp`, then atomically move it onto `path`.
-fn stage_then_publish(tmp: &Path, path: &Path, json: &[u8]) -> io::Result<()> {
-    let mut output = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(tmp)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        output.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    output.write_all(json)?;
-    output.sync_all()?;
-    drop(output);
-    // `rename` replaces the destination on both POSIX and Windows.
-    fs::rename(tmp, path)?;
-    sync_parent(path)
-}
-
-fn quarantine(path: &Path) {
-    let _ = fs::rename(path, bak_path(path));
-}
-
-fn bak_path(path: &Path) -> PathBuf {
-    let mut raw = path.as_os_str().to_owned();
-    raw.push(".bak");
-    PathBuf::from(raw)
-}
-
-fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut raw = path.as_os_str().to_owned();
-    raw.push(suffix);
-    PathBuf::from(raw)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -273,19 +292,6 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
-}
-
-#[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -305,6 +311,10 @@ mod tests {
         }
     }
 
+    fn bh(hash: &str) -> BinaryHash {
+        BinaryHash(hash.into())
+    }
+
     fn grants_path() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("plugin-grants.json");
@@ -314,7 +324,7 @@ mod tests {
     #[test]
     fn first_run_needs_consent_for_the_whole_request() {
         let request = [Capability::ReadCwd, Capability::SubscribeEvents];
-        let Decision::NeedsConsent { reason, missing } = check(&request, None, HASH_A) else {
+        let Decision::NeedsConsent { reason, missing } = check(&request, None, &bh(HASH_A)) else {
             panic!("expected NeedsConsent");
         };
         assert_eq!(reason, ConsentReason::FirstRun);
@@ -325,7 +335,7 @@ mod tests {
     fn exact_match_is_allowed() {
         let request = [Capability::ReadCwd, Capability::Network];
         let stored = record(HASH_A, &request);
-        assert_eq!(check(&request, Some(&stored), HASH_A), Decision::Allowed);
+        assert_eq!(check(&request, Some(&stored), &bh(HASH_A)), Decision::Allowed);
     }
 
     #[test]
@@ -335,7 +345,7 @@ mod tests {
         // is irrelevant once the bytes changed.
         let request = [Capability::ReadCwd, Capability::Network];
         let stored = record(HASH_A, &request);
-        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), HASH_B)
+        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), &bh(HASH_B))
         else {
             panic!("expected NeedsConsent");
         };
@@ -347,7 +357,7 @@ mod tests {
     fn hash_mismatch_takes_priority_over_new_capabilities() {
         let stored = record(HASH_A, &[Capability::ReadCwd]);
         let request = [Capability::ReadCwd, Capability::SubscribeEvents];
-        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), HASH_B)
+        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), &bh(HASH_B))
         else {
             panic!("expected NeedsConsent");
         };
@@ -363,7 +373,7 @@ mod tests {
             Capability::Network,
             Capability::Clipboard,
         ];
-        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), HASH_A)
+        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), &bh(HASH_A))
         else {
             panic!("expected NeedsConsent");
         };
@@ -382,7 +392,7 @@ mod tests {
             ],
         );
         let request = [Capability::ReadCwd, Capability::Clipboard];
-        assert_eq!(check(&request, Some(&stored), HASH_A), Decision::Allowed);
+        assert_eq!(check(&request, Some(&stored), &bh(HASH_A)), Decision::Allowed);
     }
 
     #[test]
@@ -417,7 +427,7 @@ mod tests {
             Capability::HostCallOpenPane,
             Capability::HostCallDrawScene,
         ] {
-            let Decision::NeedsConsent { reason, missing } = check(&[cap], Some(&stored), HASH_A)
+            let Decision::NeedsConsent { reason, missing } = check(&[cap], Some(&stored), &bh(HASH_A))
             else {
                 panic!("{cap:?} must not be implied by the v1 set");
             };
@@ -444,7 +454,7 @@ mod tests {
         let (_dir, path) = grants_path();
         let loaded = load(&path);
         assert_eq!(loaded, GrantsFile::default());
-        assert!(!bak_path(&path).exists());
+        assert!(!atomic_write::bak_path(&path).exists());
     }
 
     #[test]
@@ -458,7 +468,7 @@ mod tests {
             "broken file must fail closed"
         );
         assert!(
-            bak_path(&path).exists(),
+            atomic_write::bak_path(&path).exists(),
             "corrupt file must be renamed to .bak"
         );
         assert!(
@@ -473,7 +483,7 @@ mod tests {
         fs::write(&path, r#"{"version":99,"grants":{}}"#).unwrap();
         let loaded = load(&path);
         assert_eq!(loaded, GrantsFile::default());
-        assert!(bak_path(&path).exists());
+        assert!(atomic_write::bak_path(&path).exists());
         assert!(!path.exists());
     }
 
@@ -495,7 +505,7 @@ mod tests {
         file.grants.get_mut("port-watcher").unwrap().tier = Tier::Sandboxed;
         save(&path, &file).unwrap();
         assert!(
-            !sibling_path(&path, ".tmp").exists(),
+            !atomic_write::sibling_path(&path, ".tmp").exists(),
             "atomic save must not leave a tmp sibling"
         );
         assert_eq!(load(&path), file);
@@ -538,14 +548,14 @@ mod tests {
         let empty = dir.path().join("empty.bin");
         fs::write(&empty, []).unwrap();
         assert_eq!(
-            hash_binary(&empty).unwrap(),
+            hash_binary(&empty).unwrap().as_str(),
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
 
         let hello = dir.path().join("hello.bin");
         fs::write(&hello, b"hello").unwrap();
         assert_eq!(
-            hash_binary(&hello).unwrap(),
+            hash_binary(&hello).unwrap().as_str(),
             "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
 
@@ -555,6 +565,7 @@ mod tests {
         let payload = vec![0x5a; 20 * 1024];
         fs::write(&big, &payload).unwrap();
         let streamed = hash_binary(&big).unwrap();
+        let streamed = streamed.as_str();
         let mut hasher = Sha256::new();
         hasher.update(&payload);
         assert_eq!(
@@ -563,6 +574,13 @@ mod tests {
         );
         assert!(streamed.starts_with("sha256:"));
         assert_eq!(streamed.len(), "sha256:".len() + 64);
+    }
+
+    #[test]
+    fn rfc3339_unix_epoch() {
+        assert_eq!(rfc3339_from_unix(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_from_unix(1), "1970-01-01T00:00:01Z");
+        assert_eq!(rfc3339_from_unix(1_704_067_200), "2024-01-01T00:00:00Z");
     }
 
     #[test]

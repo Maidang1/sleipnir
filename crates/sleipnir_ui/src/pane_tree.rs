@@ -332,36 +332,15 @@ impl PaneNode {
         new_id: PaneId,
         new_view: Entity<TermView>,
     ) -> bool {
-        match self {
-            PaneNode::Leaf {
-                id,
-                pane_key,
-                content,
-            } if *id == target => {
-                // Rebuild this leaf as a split: first = old leaf, second = new.
-                // Keep the original pane_key so Run Ledger ownership stays put.
-                let old = PaneNode::Leaf {
-                    id: *id,
-                    pane_key: *pane_key,
-                    content: content.clone(),
-                };
-                *self = PaneNode::Split {
-                    axis,
-                    ratio: 0.5,
-                    first: Box::new(old),
-                    second: Box::new(PaneNode::leaf(new_id, new_view)),
-                };
-                true
-            }
-            PaneNode::Leaf { .. } => false,
-            PaneNode::Split { first, second, .. } => {
-                if first.contains(target) {
-                    first.split(target, axis, new_id, new_view)
-                } else {
-                    second.split(target, axis, new_id, new_view)
-                }
-            }
-        }
+        // The new terminal leaf gets a fresh pane_key; the original leaf keeps
+        // its own so Run Ledger ownership stays put.
+        self.split_content(
+            target,
+            axis,
+            new_id,
+            Uuid::new_v4(),
+            LeafContent::Terminal(new_view),
+        )
     }
 
     /// Split `target` and install `content` as the new second child. Used to

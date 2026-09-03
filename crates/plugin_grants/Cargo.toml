@@ -12,6 +12,7 @@ workspace = true
 path = "src/plugin_grants.rs"
 
 [dependencies]
+atomic_write.workspace = true
 dirs.workspace = true
 plugin_protocol.workspace = true
 serde.workspace = true

@@ -100,26 +100,22 @@ impl View {
 
     /// Apply a host-driven camera. The host owns the interactive camera (drag to
     /// rotate, wheel to zoom) and reports the new state as a `camera` action
-    /// arg, `yaw=..&pitch=..&zoom=..`. Missing or malformed fields keep the
-    /// current value, and pitch/zoom are clamped to the same readable range the
-    /// button controls use, so a stray value cannot flatten or explode the view.
+    /// whose arg is a JSON [`SceneCamera`] — the same typed payload the scene
+    /// itself carries. Missing or malformed payloads keep the current values,
+    /// and pitch/zoom are clamped to the same readable range the button
+    /// controls use, so a stray value cannot flatten or explode the view.
     pub fn apply_camera_arg(&mut self, arg: &str) {
-        for pair in arg.split('&') {
-            let Some((key, value)) = pair.split_once('=') else {
-                continue;
-            };
-            let Ok(v) = value.trim().parse::<f32>() else {
-                continue;
-            };
-            if !v.is_finite() {
-                continue;
-            }
-            match key.trim() {
-                "yaw" => self.camera.yaw = wrap_angle(v),
-                "pitch" => self.camera.pitch = v.clamp(0.05, 1.35),
-                "zoom" => self.zoom = v.clamp(0.5, 2.5),
-                _ => {}
-            }
+        let Ok(cam) = serde_json::from_str::<SceneCamera>(arg) else {
+            return;
+        };
+        if cam.yaw.is_finite() {
+            self.camera.yaw = wrap_angle(cam.yaw);
+        }
+        if cam.pitch.is_finite() {
+            self.camera.pitch = cam.pitch.clamp(0.05, 1.35);
+        }
+        if cam.zoom.is_finite() {
+            self.zoom = cam.zoom.clamp(0.5, 2.5);
         }
     }
 }
@@ -133,38 +129,28 @@ fn wrap_angle(a: f32) -> f32 {
     a
 }
 
-/// Build the scene: one cuboid per entry on a square-ish grid, plus a floor
-/// tick under each.
+/// Build the raster scene for the text fallback: one cuboid per entry on a
+/// square-ish grid, plus a floor tick under each.
 ///
-/// The grid is the reason this is 3D rather than a bar chart drawn in
-/// perspective: entries occupy both floor axes, so rotating the camera reveals
-/// bars that were behind others, and a dozen directories stay readable in a
-/// width that a single row of bars could not fit.
+/// This is a thin adapter over [`build_scene_data`]: grid layout, height
+/// normalisation and selected colouring live there, so the two render paths
+/// can never disagree about the model. Here the normalised heights are scaled
+/// back to world units and the grid is centred on the origin so auto-fit
+/// framing stays stable as the entry count changes.
 pub fn build_scene(view: &View) -> Scene {
     let mut scene = Scene::new();
-    let entries = &view.scan.entries;
-    if entries.is_empty() {
+    let data = build_scene_data(view);
+    if data.bars.is_empty() {
         return scene;
     }
     let light = default_light();
-    let largest = view.scan.largest_bytes().max(1);
-    let cols = grid_cols(entries.len());
-    let rows = entries.len().div_ceil(cols);
-    // Centre the grid on the origin so auto-fit framing stays stable as the
-    // entry count changes.
-    let x0 = -((cols as f32 - 1.0) * BAR_PITCH) * 0.5;
-    let z0 = -((rows as f32 - 1.0) * BAR_PITCH) * 0.5;
-    for (i, entry) in entries.iter().enumerate() {
-        let gx = i % cols;
-        let gz = i / cols;
-        let x = x0 + gx as f32 * BAR_PITCH;
-        let z = z0 + gz as f32 * BAR_PITCH;
-        // Linear in share of the largest entry, with a visible floor: a bar
-        // twice as tall is twice as big. A log scale would flatter small dirs.
-        let share = entry.bytes as f32 / largest as f32;
-        let height = (share.max(MIN_BAR_SHARE)) * MAX_BAR_HEIGHT;
+    let x0 = -((data.cols as f32 - 1.0) * BAR_PITCH) * 0.5;
+    let z0 = -((data.rows as f32 - 1.0) * BAR_PITCH) * 0.5;
+    for bar in &data.bars {
+        let x = x0 + bar.gx as f32 * BAR_PITCH;
+        let z = z0 + bar.gz as f32 * BAR_PITCH;
         scene.floor_tick(x, z);
-        scene.bar(x, z, BAR_HALF, height, light, i == view.selected);
+        scene.bar(x, z, BAR_HALF, bar.height * MAX_BAR_HEIGHT, light, bar.selected);
     }
     scene
 }
@@ -196,10 +182,16 @@ const FLOOR_COLOR: [u8; 3] = [46, 46, 56];
 
 /// Build the compact scene description the host projects and paints.
 ///
-/// Heights are normalised to the largest entry (`0.0..=1.0`) with the same
-/// visible floor [`MIN_BAR_SHARE`] the software raster used, so a directory
-/// dominated by one entry still shows its small children. The host owns
-/// projection, so this carries geometry and colour only — no pixels.
+/// The grid is the reason this is 3D rather than a bar chart drawn in
+/// perspective: entries occupy both floor axes, so rotating the camera reveals
+/// bars that were behind others, and a dozen directories stay readable in a
+/// width that a single row of bars could not fit.
+///
+/// Heights are linear in share of the largest entry, normalised to `0.0..=1.0`
+/// with a visible floor at [`MIN_BAR_SHARE`], so a directory dominated by one
+/// entry still shows its small children; a log scale would flatter small dirs.
+/// The host owns projection, so this carries geometry and colour only — no
+/// pixels. The text fallback reuses this via [`build_scene`].
 pub fn build_scene_data(view: &View) -> SceneData {
     let entries = &view.scan.entries;
     let cols = if entries.is_empty() {
@@ -287,7 +279,8 @@ pub fn render(view: &View, cols: u16, rows: u16) -> Widget {
     clamp_to_budget(root.into())
 }
 
-/// Chrome-only tree for GPU mode: header + legend + controls, no raster rows.
+/// Chrome-only tree for the host-drawn scene: header + legend + controls, no
+/// raster rows. The host paints the geometry, so the tree carries none.
 pub fn render_chrome_only(view: &View) -> Widget {
     let mut root = col().gap(0).child(header(view));
     if view.scan.is_empty() {
@@ -743,15 +736,15 @@ mod tests {
     #[test]
     fn apply_camera_arg_updates_and_clamps() {
         let mut view = sample_view();
-        view.apply_camera_arg("yaw=1.0&pitch=0.5&zoom=1.5");
+        view.apply_camera_arg(r#"{"yaw":1.0,"pitch":0.5,"zoom":1.5}"#);
         assert!((view.camera.yaw - 1.0).abs() < 1e-4);
         assert!((view.camera.pitch - 0.5).abs() < 1e-4);
         assert!((view.zoom - 1.5).abs() < 1e-4);
         // Out-of-range pitch and zoom are clamped, not accepted raw.
-        view.apply_camera_arg("pitch=9.0&zoom=99.0");
+        view.apply_camera_arg(r#"{"pitch":9.0,"zoom":99.0}"#);
         assert!(view.camera.pitch <= 1.35);
         assert!(view.zoom <= 2.5);
-        // Malformed fields are ignored, leaving the current values intact.
+        // Malformed payloads are ignored, leaving the current values intact.
         let before = (view.camera.yaw, view.camera.pitch, view.zoom);
         view.apply_camera_arg("yaw=notanumber&garbage");
         assert_eq!((view.camera.yaw, view.camera.pitch, view.zoom), before);

@@ -250,11 +250,13 @@ impl AppShell {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let running = live_plugin_count(&snapshots);
-        let mut rows = rows_from_snapshots(&snapshots, &names, &tiers, now);
-        let drops = self.plugin_calls.dropped_counts();
-        for row in &mut rows {
-            row.host_calls_dropped = drops.get(&row.plugin_id).copied().unwrap_or(0);
-        }
+        let rows = rows_from_snapshots(
+            &snapshots,
+            &names,
+            &tiers,
+            self.plugin_calls.dropped_counts(),
+            now,
+        );
 
         let mut body = div()
             .id("plugin-monitor-body")

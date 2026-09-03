@@ -4,9 +4,8 @@ use crate::ledger::Retention;
 use crate::run::{Run, RunId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,7 +37,7 @@ pub fn load_runs(path: &Path) -> (Vec<Run>, bool) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return (Vec::new(), false),
         Err(_) => {
-            quarantine(path);
+            atomic_write::quarantine(path);
             return (Vec::new(), false);
         }
     };
@@ -46,7 +45,7 @@ pub fn load_runs(path: &Path) -> (Vec<Run>, bool) {
     match parse_runs_file(&bytes) {
         Some(file) => (file.runs, file.announced),
         None => {
-            quarantine(path);
+            atomic_write::quarantine(path);
             (Vec::new(), false)
         }
     }
@@ -70,7 +69,7 @@ pub fn save_runs(path: &Path, runs: &[Run], retention: Retention) -> io::Result<
         .read(true)
         .write(true)
         .truncate(false)
-        .open(sibling_path(path, ".lock"))?;
+        .open(atomic_write::sibling_path(path, ".lock"))?;
     lock.lock()?;
     let result = save_runs_locked(path, runs, retention);
     // Report an unlock failure only when the write itself succeeded, so the
@@ -97,32 +96,7 @@ fn save_runs_locked(path: &Path, runs: &[Run], retention: Retention) -> io::Resu
 
     // A single staging name is safe: the lock guarantees we are the only writer,
     // so the only file that can be here is a leftover from a crashed run.
-    let tmp = sibling_path(path, ".tmp");
-    let staged = stage_then_publish(&tmp, path, &json);
-    if staged.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    staged
-}
-
-/// Durably write `json` to `tmp`, then atomically move it onto `path`.
-fn stage_then_publish(tmp: &Path, path: &Path, json: &[u8]) -> io::Result<()> {
-    let mut output = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(tmp)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        output.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    output.write_all(json)?;
-    output.sync_all()?;
-    drop(output);
-    // `rename` replaces the destination on both POSIX and Windows.
-    fs::rename(tmp, path)?;
-    sync_parent(path)
+    atomic_write::save_atomic(path, &json)
 }
 
 fn parse_runs_file(bytes: &[u8]) -> Option<RunsFile> {
@@ -149,35 +123,6 @@ fn apply_retention(runs: &mut Vec<Run>, retention: Retention) {
         let drop = runs.len() - retention.max_runs;
         runs.drain(..drop);
     }
-}
-
-fn quarantine(path: &Path) {
-    let _ = fs::rename(path, bak_path(path));
-}
-
-fn bak_path(path: &Path) -> PathBuf {
-    let mut raw = path.as_os_str().to_owned();
-    raw.push(".bak");
-    PathBuf::from(raw)
-}
-
-fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut raw = path.as_os_str().to_owned();
-    raw.push(suffix);
-    PathBuf::from(raw)
-}
-
-#[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -247,7 +192,7 @@ mod tests {
         assert!(runs.is_empty());
         assert!(!announced);
         assert!(
-            bak_path(&path).exists(),
+            atomic_write::bak_path(&path).exists(),
             "corrupt file must be renamed to .bak"
         );
         assert!(
@@ -263,7 +208,7 @@ mod tests {
         let (runs, announced) = load_runs(&path);
         assert!(runs.is_empty());
         assert!(!announced);
-        assert!(bak_path(&path).exists());
+        assert!(atomic_write::bak_path(&path).exists());
     }
 
     #[test]

@@ -66,15 +66,20 @@ pub struct ConsentCopy {
 /// Sort: unhealthy first, then plugin id. A wedged or crash-looping plugin is
 /// why the Monitor exists; burying it under healthy rows would hide the kill
 /// switch. Id is the stable tie-break so equal health does not reshuffle.
+///
+/// `dropped_counts` carries the UI-side HostCall rate-limit drops so each row
+/// is formed once with its real drop count *before* sorting — a rate-limited
+/// plugin must rank as unhealthy, not backfill after the sort.
 pub fn rows_from_snapshots(
     snapshots: &[ConnectionSnapshot],
     names: &BTreeMap<String, String>,
     tiers: &BTreeMap<String, Tier>,
+    dropped_counts: &BTreeMap<String, u64>,
     _now_ms: u64,
 ) -> Vec<MonitorRow> {
     let mut rows: Vec<MonitorRow> = snapshots
         .iter()
-        .map(|snap| row_from_snapshot(snap, names, tiers))
+        .map(|snap| row_from_snapshot(snap, names, tiers, dropped_counts))
         .collect();
     rows.sort_by(|a, b| {
         health_rank(a)
@@ -88,6 +93,7 @@ fn row_from_snapshot(
     snap: &ConnectionSnapshot,
     names: &BTreeMap<String, String>,
     tiers: &BTreeMap<String, Tier>,
+    dropped_counts: &BTreeMap<String, u64>,
 ) -> MonitorRow {
     MonitorRow {
         plugin_id: snap.plugin_id.clone(),
@@ -105,7 +111,10 @@ fn row_from_snapshot(
         inbound_dropped: snap.inbound_dropped,
         malformed_lines: snap.malformed_lines,
         events_dropped: snap.events_dropped,
-        host_calls_dropped: 0,
+        host_calls_dropped: dropped_counts
+            .get(&snap.plugin_id)
+            .copied()
+            .unwrap_or(0),
         stderr: snap.stderr.clone(),
     }
 }
@@ -336,7 +345,9 @@ mod tests {
             malformed_lines: 4,
             events_dropped: 5,
         };
-        let rows = rows_from_snapshots(&[snap], &names, &tiers, 50);
+        let mut dropped = BTreeMap::new();
+        dropped.insert("port-watcher".to_string(), 7);
+        let rows = rows_from_snapshots(&[snap], &names, &tiers, &dropped, 50);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Port Watcher");
         assert_eq!(rows[0].tier, Tier::Sandboxed);
@@ -346,6 +357,7 @@ mod tests {
         assert_eq!(rows[0].inbound_dropped, 3);
         assert_eq!(rows[0].malformed_lines, 4);
         assert_eq!(rows[0].events_dropped, 5);
+        assert_eq!(rows[0].host_calls_dropped, 7);
         assert_eq!(rows[0].stderr, ["a", "b"]);
     }
 
@@ -353,6 +365,7 @@ mod tests {
     fn unknown_plugin_falls_back_to_id_and_local_tier() {
         let rows = rows_from_snapshots(
             &[snap("demo", ConnectionState::Live, 0)],
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             0,
@@ -370,7 +383,13 @@ mod tests {
             snap("mu", ConnectionState::Live, 3),
             snap("beta", ConnectionState::ShuttingDown, 0),
         ];
-        let rows = rows_from_snapshots(&snapshots, &BTreeMap::new(), &BTreeMap::new(), 0);
+        let rows = rows_from_snapshots(
+            &snapshots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            0,
+        );
         let ids: Vec<_> = rows.iter().map(|r| r.plugin_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -380,12 +399,42 @@ mod tests {
     }
 
     #[test]
+    fn sort_uses_host_call_drops_from_the_limiter() {
+        // A plugin the UI-side limiter is dropping is exactly what the
+        // Monitor exists to surface; it must rank above a healthy live row
+        // *before* rendering, not via a post-sort backfill.
+        let snapshots = [
+            snap("zeta", ConnectionState::Live, 0),
+            snap("spammer", ConnectionState::Live, 0),
+        ];
+        let mut dropped = BTreeMap::new();
+        dropped.insert("spammer".to_string(), 5);
+        let rows = rows_from_snapshots(
+            &snapshots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &dropped,
+            0,
+        );
+        let ids: Vec<_> = rows.iter().map(|r| r.plugin_id.as_str()).collect();
+        assert_eq!(ids, ["spammer", "zeta"]);
+        assert_eq!(rows[0].host_calls_dropped, 5);
+        assert_eq!(rows[1].host_calls_dropped, 0);
+    }
+
+    #[test]
     fn sort_is_stable_by_id_within_the_same_health() {
         let snapshots = [
             snap("b", ConnectionState::Dead, 0),
             snap("a", ConnectionState::Dead, 0),
         ];
-        let rows = rows_from_snapshots(&snapshots, &BTreeMap::new(), &BTreeMap::new(), 0);
+        let rows = rows_from_snapshots(
+            &snapshots,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            0,
+        );
         assert_eq!(rows[0].plugin_id, "a");
         assert_eq!(rows[1].plugin_id, "b");
     }
@@ -525,11 +574,19 @@ mod tests {
             tier: Tier::Local,
         };
         assert_eq!(
-            plugin_grants::check(&[Capability::ReadCwd], Some(&record), "sha256:aaaa"),
+            plugin_grants::check(
+                &[Capability::ReadCwd],
+                Some(&record),
+                &plugin_grants::BinaryHash::from_raw("sha256:aaaa".into()),
+            ),
             Decision::Allowed
         );
         let Decision::NeedsConsent { reason, missing } =
-            plugin_grants::check(&[Capability::ReadCwd], Some(&record), "sha256:bbbb")
+            plugin_grants::check(
+                &[Capability::ReadCwd],
+                Some(&record),
+                &plugin_grants::BinaryHash::from_raw("sha256:bbbb".into()),
+            )
         else {
             panic!("hash mismatch must ask again");
         };
@@ -539,7 +596,7 @@ mod tests {
         let Decision::NeedsConsent { reason, missing } = plugin_grants::check(
             &[Capability::ReadCwd, Capability::SubscribeEvents],
             Some(&record),
-            "sha256:aaaa",
+            &plugin_grants::BinaryHash::from_raw("sha256:aaaa".into()),
         ) else {
             panic!("new cap must ask again");
         };

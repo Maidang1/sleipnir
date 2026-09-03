@@ -44,6 +44,7 @@ impl CellRect {
         Self::new(pos.col, pos.row, width, height)
     }
 
+    #[cfg(test)]
     pub fn pos(self) -> CellPos {
         CellPos {
             col: self.col,
@@ -73,6 +74,7 @@ impl CellRect {
             && pos.row < self.bottom()
     }
 
+    #[cfg(test)]
     pub fn intersects(self, other: Self) -> bool {
         !self.is_empty()
             && !other.is_empty()

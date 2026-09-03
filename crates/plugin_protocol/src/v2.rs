@@ -52,6 +52,16 @@ pub type BlockId = Uuid;
 pub type RunId = Uuid;
 pub type PaneKey = Uuid;
 
+/// Scrollback position of a Run or Block. Process-local — never persisted:
+/// a restored anchor would claim a scrollback line that no longer means
+/// anything (ADR-0018 lifecycle).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Anchor {
+    /// Absolute line (`cursor.line + history_size` when the Run was recorded).
+    pub line: i32,
+    pub column: usize,
+}
+
 /// True when the host can speak to a plugin claiming `plugin`.
 pub fn versions_compatible(host: u32, plugin: u32) -> bool {
     plugin <= host && plugin >= host.saturating_sub(1)
@@ -108,6 +118,23 @@ impl Capability {
                 | Self::Clipboard
                 | Self::Network
         )
+    }
+}
+
+/// The v1 ↔ v2 correspondence lives here and only here; the host and the
+/// session both derive their mappings from it (the enums themselves stay
+/// distinct per ADR-0015).
+impl From<super::Capability> for Capability {
+    fn from(cap: super::Capability) -> Self {
+        match cap {
+            super::Capability::ReadSelection => Self::ReadSelection,
+            super::Capability::ReadVisibleScreen => Self::ReadVisibleScreen,
+            super::Capability::ReadCwd => Self::ReadCwd,
+            super::Capability::ReadTitle => Self::ReadTitle,
+            super::Capability::WriteTerminal => Self::WriteTerminal,
+            super::Capability::Clipboard => Self::Clipboard,
+            super::Capability::Network => Self::Network,
+        }
     }
 }
 

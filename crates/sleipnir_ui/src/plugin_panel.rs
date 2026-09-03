@@ -9,8 +9,8 @@
 //! Pure decision logic. No gpui, no window. The shell calls these helpers,
 //! then paints the [`sleipnir_widget::Layout`] they did not recompute.
 
-use plugin_protocol::v2::{Capability, SceneData, Widget};
-use sleipnir_widget::{Hit, Layout, ToneRole, hit_test, layout};
+use plugin_protocol::v2::{SceneData, Widget};
+use sleipnir_widget::{Hit, Layout, hit_test, layout};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -173,35 +173,6 @@ impl PanelRegistry {
     pub fn scene(&self, pane: PaneKey) -> Option<&PanelScene> {
         self.surfaces.get(&pane).and_then(|s| s.scene.as_ref())
     }
-}
-
-/// Token slot a mount point looks up on [`crate::chrome::ChromeTokens`].
-/// This crate does not name an `Hsla`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TokenSlot {
-    Fg,
-    Muted,
-    Accent,
-    Ok,
-    Warn,
-    Err,
-}
-
-pub fn tone_slot(role: ToneRole) -> TokenSlot {
-    match role {
-        ToneRole::Foreground => TokenSlot::Fg,
-        ToneRole::Muted => TokenSlot::Muted,
-        ToneRole::Accent => TokenSlot::Accent,
-        ToneRole::Success => TokenSlot::Ok,
-        ToneRole::Warning => TokenSlot::Warn,
-        ToneRole::Danger => TokenSlot::Err,
-    }
-}
-
-/// Grant check used at the mount point. Matches event-bus style: membership
-/// in the live grant set, not "the plugin asked for it".
-pub fn render_panel_granted(granted: &[Capability]) -> bool {
-    granted.contains(&Capability::RenderPanel)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -474,29 +445,12 @@ mod tests {
     }
 
     #[test]
-    fn tone_slots_cover_every_role() {
-        assert_eq!(tone_slot(ToneRole::Foreground), TokenSlot::Fg);
-        assert_eq!(tone_slot(ToneRole::Muted), TokenSlot::Muted);
-        assert_eq!(tone_slot(ToneRole::Accent), TokenSlot::Accent);
-        assert_eq!(tone_slot(ToneRole::Success), TokenSlot::Ok);
-        assert_eq!(tone_slot(ToneRole::Warning), TokenSlot::Warn);
-        assert_eq!(tone_slot(ToneRole::Danger), TokenSlot::Err);
-    }
-
-    #[test]
     fn cols_from_pixels_never_zero_or_panic() {
         assert_eq!(cols_from_pixels(80.0, 8.0), 10);
         assert_eq!(cols_from_pixels(0.0, 8.0), 1);
         assert_eq!(cols_from_pixels(80.0, 0.0), 1);
         assert_eq!(cols_from_pixels(f32::NAN, 8.0), 1);
         assert_eq!(cols_from_pixels(80.0, f32::INFINITY), 1);
-    }
-
-    #[test]
-    fn render_panel_granted_is_exact_membership() {
-        assert!(!render_panel_granted(&[]));
-        assert!(!render_panel_granted(&[Capability::SubscribeEvents]));
-        assert!(render_panel_granted(&[Capability::RenderPanel]));
     }
 
     #[test]

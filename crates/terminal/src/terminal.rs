@@ -9,7 +9,6 @@ mod run_tracker;
 mod shell_semantics;
 pub mod terminal_settings;
 
-pub mod kitty_graphics;
 
 pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
 pub use osc133::{
@@ -25,7 +24,6 @@ pub use shell_semantics::{
     command_output_range, inject_script, triple_click_kind, wrap_shell_for_inject,
     wrap_shell_for_inject_in,
 };
-pub use kitty_graphics::VisiblePlacement;
 
 #[cfg(not(windows))]
 use anyhow::Context as _;
@@ -40,12 +38,8 @@ use futures::{
 
 use alacritty_terminal::grid::Dimensions as _;
 use itertools::Itertools as _;
-use mappings::mouse::{
-    alt_scroll, grid_point, grid_point_and_side, mouse_button_report, mouse_moved_report,
-    scroll_report,
-};
+use mappings::mouse::{alt_scroll, mouse_button_report, mouse_moved_report, scroll_report};
 use row_geometry::{RowGeometry, ViewportPosition};
-use row_map::absolute_line_delta_to_display_offset_delta;
 
 use collections::{HashMap, VecDeque};
 use futures::StreamExt;
@@ -393,8 +387,6 @@ pub struct Content {
     pub scrolled_to_top: bool,
     pub scrolled_to_bottom: bool,
     pub bottom_row_occupied: bool,
-    pub image_placements: Vec<VisiblePlacement>,
-    pub placeholder_images: HashMap<u32, (Arc<Vec<u8>>, u32, u32)>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -422,8 +414,6 @@ impl Default for Content {
             scrolled_to_top: false,
             scrolled_to_bottom: false,
             bottom_row_occupied: false,
-            image_placements: Vec::new(),
-            placeholder_images: Default::default(),
         }
     }
 }
@@ -614,8 +604,6 @@ pub(crate) enum TerminalBackendEvent {
     Osc133(String),
     /// Desktop notification from OSC 9 / OSC 777.
     DesktopNotification(String),
-    /// A Kitty graphics APC command (raw bytes between `G` and `ST`).
-    GraphicsCommand(Vec<u8>),
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -636,7 +624,6 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
             Self::Osc133(kind) => write!(f, "Osc133({kind})"),
             Self::DesktopNotification(msg) => write!(f, "DesktopNotification({msg})"),
-            Self::GraphicsCommand(data) => write!(f, "GraphicsCommand({} bytes)", data.len()),
         }
     }
 }
@@ -933,8 +920,6 @@ impl TerminalBuilder {
                 osc133: Osc133Scanner::new(),
                 last_history_size: 0,
                 osc_notify: OscNotifyScanner::new(),
-                image_store: kitty_graphics::ImageStore::new(),
-                apc_scanner: kitty_graphics::ApcScanner::new(),
                 prompt_markers: Vec::new(),
                 last_busy: false,
                 busy_since: None,
@@ -1105,10 +1090,6 @@ pub struct Terminal {
     /// gutter marker lines must be rebased.
     last_history_size: usize,
     osc_notify: OscNotifyScanner,
-    /// Kitty graphics image store.
-    image_store: kitty_graphics::ImageStore,
-    /// APC byte scanner for extracting Kitty graphics sequences.
-    apc_scanner: kitty_graphics::ApcScanner,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
     /// Last known busy state for command-finish notify (M14).
@@ -1231,9 +1212,6 @@ impl Terminal {
             TerminalBackendEvent::DesktopNotification(msg) => {
                 cx.emit(Event::Notify(msg));
             }
-            TerminalBackendEvent::GraphicsCommand(data) => {
-                self.handle_graphics_command(data);
-            }
         }
     }
 
@@ -1298,7 +1276,7 @@ impl Terminal {
             }
             InternalEvent::UpdateSelection(position) => {
                 trace!("Updating selection: position={position:?}");
-                let (point, side) = grid_point_and_side(self.pointer_map_locked(term), *position);
+                let (point, side) = self.pointer_map_locked(term).grid_point_and_side(*position);
 
                 if update_term_selection(term, point, side) {
                     self.selection_head = Some(point);
@@ -1355,7 +1333,7 @@ impl Terminal {
             InternalEvent::FindHyperlink(position, open) => {
                 trace!("Finding hyperlink at position: position={position:?}, open={open:?}");
 
-                let point = grid_point(self.pointer_map_locked(term), *position);
+                let point = self.pointer_map_locked(term).grid_point(*position);
 
                 match find_from_terminal_point(
                     term,
@@ -1678,40 +1656,6 @@ impl Terminal {
         for n in self.osc_notify.push(bytes) {
             cx.emit(Event::Notify(n.message));
         }
-    }
-
-    fn handle_graphics_command(&mut self, data: Vec<u8>) {
-        let Some(cmd) = kitty_graphics::parse_graphics_command(&data) else {
-            return;
-        };
-        let (cursor_line, cursor_col) = {
-            let term = self.term.lock_unfair();
-            let cursor = term.grid().cursor.point;
-            (
-                cursor.line.0 + term.history_size() as i32,
-                cursor.column.0,
-            )
-        };
-        if let Some(response) = self.image_store.process_command(cmd, cursor_line, cursor_col) {
-            self.write_to_pty(response);
-        }
-    }
-
-    /// Feed raw PTY bytes through the APC scanner, dispatching any extracted
-    /// Kitty graphics commands to the image store.
-    pub fn ingest_apc_graphics(&mut self, bytes: &[u8]) {
-        let result = self.apc_scanner.feed(bytes);
-        for cmd_data in result.commands {
-            self.handle_graphics_command(cmd_data);
-        }
-    }
-
-    pub fn image_store(&self) -> &kitty_graphics::ImageStore {
-        &self.image_store
-    }
-
-    pub fn image_store_mut(&mut self) -> &mut kitty_graphics::ImageStore {
-        &mut self.image_store
     }
 
     /// Scrollback lines that mark prompt starts (for jump navigation).
@@ -2235,42 +2179,10 @@ impl Terminal {
             let removed = (self.last_history_size - history_size) as i32;
             rebase_markers_after_history_shrink(&mut self.prompt_markers, removed);
             self.row_geometry.rebase_after_history_shrink(removed);
-            self.image_store.rebase_after_history_shrink(removed);
         }
         self.last_history_size = history_size;
         let screen_lines = terminal.screen_lines();
         self.last_content = make_content(&terminal, &self.last_content);
-        self.last_content.image_placements = self.image_store.visible_placements(
-            self.last_content.display_offset,
-            history_size,
-            screen_lines,
-        );
-
-        // Collect images referenced by Unicode placeholder cells (U+10EEEE).
-        {
-            let mut placeholder_images: HashMap<u32, (Arc<Vec<u8>>, u32, u32)> = Default::default();
-            for ic in &self.last_content.cells {
-                if ic.cell.character() == '\u{10EEEE}' {
-                    let image_id = match ic.cell.foreground() {
-                        Color::Spec(rgb) => {
-                            ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32)
-                        }
-                        _ => continue,
-                    };
-                    if image_id == 0 {
-                        continue;
-                    }
-                    if placeholder_images.contains_key(&image_id) {
-                        continue;
-                    }
-                    if let Some(img) = self.image_store.get_image(image_id) {
-                        placeholder_images
-                            .insert(image_id, (img.data.clone(), img.width, img.height));
-                    }
-                }
-            }
-            self.last_content.placeholder_images = placeholder_images;
-        }
         self.row_geometry
             .set_line_height(f32::from(self.last_content.terminal_bounds.line_height));
         self.row_geometry.set_line_count(
@@ -2350,7 +2262,7 @@ impl Terminal {
             // `mouse_up` resolves it: release on the same link opens it,
             // otherwise the gesture is dropped.
             if self.mouse_down_hyperlink.is_none() {
-                let (point, side) = grid_point_and_side(self.pointer_map(), position);
+                let (point, side) = self.pointer_map().grid_point_and_side(position);
 
                 if self.mouse_changed(point, side) {
                     let bytes = mouse_moved_report(
@@ -2411,7 +2323,7 @@ impl Terminal {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if !self.mouse_mode(e.modifiers.shift) {
             if let Some(hyperlink) = &self.mouse_down_hyperlink {
-                let point = grid_point(self.pointer_map(), position);
+                let point = self.pointer_map().grid_point(position);
 
                 if !hyperlink.range.contains(point) {
                     self.mouse_down_hyperlink = None;
@@ -2472,7 +2384,7 @@ impl Terminal {
         // Any mouse interaction clears the frozen select-all.
         self.frozen_selection = None;
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        let point = grid_point(self.pointer_map(), position);
+        let point = self.pointer_map().grid_point(position);
 
         if e.button == MouseButton::Left && !e.modifiers.secondary() {
             // Alt+Click always attempts cursor move (original behavior).
@@ -2512,7 +2424,7 @@ impl Terminal {
             match e.button {
                 MouseButton::Left => {
                     self.mouse_down_position = Some(e.position);
-                    let (point, side) = grid_point_and_side(self.pointer_map(), position);
+                    let (point, side) = self.pointer_map().grid_point_and_side(position);
 
                     let selection_type = match e.click_count {
                         0 => return, //This is a release
@@ -2578,7 +2490,7 @@ impl Terminal {
 
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if let Some(mouse_down_hyperlink) = self.mouse_down_hyperlink.take() {
-            let point = grid_point(self.pointer_map(), position);
+            let point = self.pointer_map().grid_point(position);
 
             if self
                 .find_hyperlink_at_point(point)
@@ -2601,7 +2513,7 @@ impl Terminal {
         }
 
         if self.mouse_mode(e.modifiers.shift) {
-            let point = grid_point(self.pointer_map(), position);
+            let point = self.pointer_map().grid_point(position);
 
             let bytes =
                 mouse_button_report(point, e.button, e.modifiers, false, self.last_content.mode);
@@ -2645,10 +2557,9 @@ impl Terminal {
             && scroll_lines != 0
         {
             if mouse_mode {
-                let point = grid_point(
-                    self.pointer_map(),
-                    e.position - self.last_content.terminal_bounds.bounds.origin,
-                );
+                let point = self
+                    .pointer_map()
+                    .grid_point(e.position - self.last_content.terminal_bounds.bounds.origin);
 
                 if let Some(scrolls) = scroll_report(point, scroll_lines, e, self.last_content.mode)
                 {
@@ -2697,9 +2608,8 @@ impl Terminal {
                 .unwrap_or(0);
                 let absolute_line_delta =
                     self.viewport.apply_pixel_delta(delta, &self.row_geometry);
-                Some(absolute_line_delta_to_display_offset_delta(
-                    absolute_line_delta,
-                ))
+                // Wheel pixel deltas and display_offset deltas share a sign.
+                Some(absolute_line_delta)
             }
             TouchPhase::Ended | TouchPhase::Cancelled => None,
         }

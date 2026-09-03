@@ -14,15 +14,15 @@
 //!
 //! Lifecycle is declared by the plugin (per manifest):
 //! - `on_demand`: launched per invocation, shut down after. Default, strictest.
-//! - `resident`: v1 [`run_command`] still launches per invocation. Connection
-//!   caching, crash backoff, and teardown live in [`resident`] (ADR-0016).
+//! - `resident`: kept connected across invocations. Connection caching, crash
+//!   backoff, and teardown live in [`resident`] (ADR-0016).
 //!
 //! [`resident`] is the v2 supervisor: a wedged plugin must never stall the
 //! terminal, which is why stderr is drained, I/O is threaded, and the transport
 //! is a trait (so the supervisor is testable without spawning binaries).
 
 use plugin_protocol::{
-    Capability, HostMessage, InvokeContext, Lifecycle, Output, PROTOCOL_VERSION, PluginMessage,
+    Capability, HostMessage, InvokeContext, Output, PROTOCOL_VERSION, PluginMessage,
     versions_compatible,
 };
 use schemars::JsonSchema;
@@ -111,18 +111,14 @@ impl Permission {
         }
     }
 
-    /// Map onto the v2 wire capability. 1:1 with [`Permission`]; snake_case
-    /// names match `plugin_protocol::v2::Capability` so `plugin.json` and
-    /// `plugin-grants.json` share a vocabulary.
+    /// Map onto the v2 wire capability. The v1 seven are derived from
+    /// [`Permission::to_capability`] plus the shared v1 → v2 conversion in
+    /// `plugin_protocol`; the v2-only arms are listed here.
     pub fn to_v2(self) -> plugin_protocol::v2::Capability {
+        if let Some(v1) = self.to_capability() {
+            return v1.into();
+        }
         match self {
-            Self::ReadSelection => plugin_protocol::v2::Capability::ReadSelection,
-            Self::ReadVisibleScreen => plugin_protocol::v2::Capability::ReadVisibleScreen,
-            Self::ReadCwd => plugin_protocol::v2::Capability::ReadCwd,
-            Self::ReadTitle => plugin_protocol::v2::Capability::ReadTitle,
-            Self::WriteTerminal => plugin_protocol::v2::Capability::WriteTerminal,
-            Self::Clipboard => plugin_protocol::v2::Capability::Clipboard,
-            Self::Network => plugin_protocol::v2::Capability::Network,
             Self::Resident => plugin_protocol::v2::Capability::Resident,
             Self::SubscribeEvents => plugin_protocol::v2::Capability::SubscribeEvents,
             Self::RenderBlock => plugin_protocol::v2::Capability::RenderBlock,
@@ -133,6 +129,7 @@ impl Permission {
             Self::HostCallListPanes => plugin_protocol::v2::Capability::HostCallListPanes,
             Self::HostCallOpenPane => plugin_protocol::v2::Capability::HostCallOpenPane,
             Self::HostCallDrawScene => plugin_protocol::v2::Capability::HostCallDrawScene,
+            v1 => unreachable!("{v1:?} has a v1 capability"),
         }
     }
 }
@@ -145,18 +142,6 @@ pub enum PluginLifecycle {
     #[default]
     OnDemand,
     Resident,
-}
-
-impl PluginLifecycle {
-    // Reserved for the resident-connection supervisor (ADR-0015); v1 supervises
-    // per-invocation, so the wire lifecycle is not sent yet.
-    #[allow(dead_code)]
-    fn to_wire(self) -> Lifecycle {
-        match self {
-            Self::OnDemand => Lifecycle::OnDemand,
-            Self::Resident => Lifecycle::Resident,
-        }
-    }
 }
 
 /// `plugin.json` (ADR-0015, extended by ADR-0016). Declares the binary,
@@ -500,9 +485,9 @@ pub(crate) fn resolve_binary(directory: &Path, binary: &str) -> OsString {
 
 /// Launch the plugin, handshake, invoke one command, and route the result.
 ///
-/// v1 supervises per-invocation for both lifecycles: launch → Hello → Ready →
-/// Invoke → Invoked → Shutdown. The `resident` flag is recorded on the command
-/// but connection caching is a later change; correctness does not depend on it.
+/// This is the v1 per-invocation path: launch → Hello → Ready → Invoke →
+/// Invoked → Shutdown. `resident` plugins and v2 sessions are supervised by
+/// [`resident`] instead; the UI adapter routes those away before calling this.
 pub fn run_command(
     plugin: &LoadedPluginCommand,
     context: &PluginContext,

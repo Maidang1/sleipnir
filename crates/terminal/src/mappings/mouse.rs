@@ -2,10 +2,9 @@ use std::iter::repeat;
 
 /// Most of the code, and specifically the constants, in this are copied from Alacritty,
 /// with modifications for our circumstances
-use gpui::{Modifiers, MouseButton, Pixels, Point as GpuiPoint, ScrollWheelEvent, px};
+use gpui::{Modifiers, MouseButton, ScrollWheelEvent, px};
 
-use crate::row_map::PointerMap;
-use crate::{Modes, Point, SelectionSide};
+use crate::{Modes, Point};
 
 enum MouseFormat {
     Sgr,
@@ -189,17 +188,6 @@ pub(crate) fn mouse_moved_report(
     } else {
         None
     }
-}
-
-pub(crate) fn grid_point(map: PointerMap<'_>, pos: GpuiPoint<Pixels>) -> Point {
-    map.grid_point(pos)
-}
-
-pub(crate) fn grid_point_and_side(
-    map: PointerMap<'_>,
-    pos: GpuiPoint<Pixels>,
-) -> (Point, SelectionSide) {
-    map.grid_point_and_side(pos)
 }
 
 ///Generate the bytes to send to the terminal, from the cell location, a mouse event, and the terminal mode

@@ -10,15 +10,11 @@
 //! appended in a reserved band the tree cannot occupy.
 
 use crate::cells::{
-    ATTRIBUTION_ROWS, BAR_COLS, CHIP_PAD, ELLIPSIS, MAX_CODE_LINES, MAX_LEAF_CHARS, UNKNOWN_COLS,
-    attribution_label, bar_filled, cell_cols, fit_cols, language_for_widget, spark_levels,
-    take_chars, wrap_text,
+    ATTRIBUTION_ROWS, BAR_COLS, CHIP_PAD, MAX_CODE_LINES, MAX_LEAF_CHARS, UNKNOWN_COLS,
+    attribution_label, bar_filled, cell_cols, fit_cols, spark_levels, take_chars, wrap_text,
 };
 use crate::geom::{CellPos, CellRect};
-use crate::tone::ToneRole;
 use plugin_protocol::v2::{MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Tone, TreeStats, Widget, measure};
-use std::ops::Range;
-use syntax::{Token, highlight_lines};
 
 /// A laid-out widget surface: the plugin tree plus the renderer-owned
 /// attribution band beneath it.
@@ -77,15 +73,15 @@ pub struct LaidOut {
     pub children: Vec<LaidOut>,
 }
 
-/// What to paint in a [`LaidOut`] rect. Mount points map roles and tokens to
-/// `ChromeTokens`; this crate stops at the abstract description.
+/// What to paint in a [`LaidOut`] rect. Mount points map tones to
+/// `ChromeTokens`; this crate stops at the schema-level description.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaidOutKind {
     Col,
     Row,
     Text {
         lines: Vec<String>,
-        role: ToneRole,
+        tone: Tone,
         bold: bool,
     },
     Code {
@@ -93,7 +89,7 @@ pub enum LaidOutKind {
     },
     Badge {
         text: String,
-        role: ToneRole,
+        tone: Tone,
     },
     Bar {
         filled: u32,
@@ -127,9 +123,6 @@ pub enum LaidOutKind {
 pub struct CodeLine {
     pub text: String,
     pub truncated: bool,
-    /// Line-relative byte ranges into [`Self::text`], from `syntax` when
-    /// `lang` resolved. Empty when the language is unknown.
-    pub spans: Vec<(Range<usize>, Token)>,
 }
 
 struct Budget {
@@ -205,7 +198,7 @@ fn layout_node(
             layout_row(*gap, children, origin, avail, depth_left, budget)
         }
         Widget::Text { s, fg, bold } => layout_text(s, *fg, *bold, origin, avail),
-        Widget::Code { lang, s } => layout_code(lang.as_deref(), s, origin, avail),
+        Widget::Code { s, .. } => layout_code(s, origin, avail),
         Widget::Badge { s, tone } => layout_badge(s, *tone, origin, avail),
         Widget::Bar { v } => layout_bar(*v, origin, avail),
         Widget::Spark { vs } => layout_spark(vs, origin, avail),
@@ -236,14 +229,6 @@ fn layout_col(
     let mut kids = Vec::new();
     let mut y = origin.row;
     for (i, child) in children.iter().enumerate() {
-        if budget.nodes_left == 0 || child_depth == 0 {
-            if i > 0 {
-                y = y.saturating_add(gap);
-            }
-            kids.push(truncated_marker(CellPos::new(origin.col, y), avail));
-            budget.truncated = true;
-            break;
-        }
         if i > 0 {
             y = y.saturating_add(gap);
         }
@@ -254,8 +239,14 @@ fn layout_col(
             child_depth,
             budget,
         );
-        y = kid.rect.bottom();
+        let cut = matches!(kid.kind, LaidOutKind::Truncated);
+        if !cut {
+            y = kid.rect.bottom();
+        }
         kids.push(kid);
+        if cut {
+            break;
+        }
     }
     let height = y.saturating_sub(origin.row);
     LaidOut {
@@ -287,14 +278,6 @@ fn layout_row(
         if i > 0 {
             x = x.saturating_add(gap);
         }
-        if budget.nodes_left == 0 || child_depth == 0 {
-            let remain = avail.saturating_sub(x.saturating_sub(origin.col));
-            if remain > 0 {
-                kids.push(truncated_marker(CellPos::new(x, origin.row), remain));
-            }
-            budget.truncated = true;
-            break;
-        }
         let kid = layout_node(
             child,
             CellPos::new(x, origin.row),
@@ -302,16 +285,16 @@ fn layout_row(
             child_depth,
             budget,
         );
+        if matches!(kid.kind, LaidOutKind::Truncated) {
+            push_truncated(&mut kids, origin, x, avail, budget);
+            break;
+        }
         x = kid.rect.right();
         height = height.max(kid.rect.height);
         kids.push(kid);
     }
     if dropped && !matches!(kids.last().map(|k| &k.kind), Some(LaidOutKind::Truncated)) {
-        budget.truncated = true;
-        let remain = avail.saturating_sub(x.saturating_sub(origin.col));
-        if remain > 0 {
-            kids.push(truncated_marker(CellPos::new(x, origin.row), remain));
-        }
+        push_truncated(&mut kids, origin, x, avail, budget);
     }
     for kid in &mut kids {
         if matches!(kid.kind, LaidOutKind::Sep) {
@@ -325,6 +308,20 @@ fn layout_row(
         rect: CellRect::at(origin, avail, height),
         kind: LaidOutKind::Row,
         children: kids,
+    }
+}
+
+fn push_truncated(
+    kids: &mut Vec<LaidOut>,
+    origin: CellPos,
+    x: u32,
+    avail: u32,
+    budget: &mut Budget,
+) {
+    budget.truncated = true;
+    let remain = avail.saturating_sub(x.saturating_sub(origin.col));
+    if remain > 0 {
+        kids.push(truncated_marker(CellPos::new(x, origin.row), remain));
     }
 }
 
@@ -411,12 +408,22 @@ fn fit_widths(widths: &mut Vec<u32>, avail: u32, gap: u32) {
         }
         let gaps = gap.saturating_mul((n - 1) as u32);
         let sum = widths.iter().copied().fold(0, u32::saturating_add);
-        if gaps.saturating_add(sum) <= avail {
+        let mut excess = gaps.saturating_add(sum).saturating_sub(avail);
+        if excess == 0 {
             return;
         }
-        if let Some(w) = widths.iter_mut().rev().find(|w| **w > 1) {
-            *w -= 1;
-            continue;
+        // Shrink from the right, taking as much as possible from each column
+        // before moving left, so the order matches one-cell-at-a-time cuts.
+        for w in widths.iter_mut().rev() {
+            if excess == 0 {
+                break;
+            }
+            let cut = w.saturating_sub(1).min(excess);
+            *w -= cut;
+            excess -= cut;
+        }
+        if excess == 0 {
+            return;
         }
         if n > 1 {
             widths.pop();
@@ -434,14 +441,14 @@ fn layout_text(s: &str, fg: Tone, bold: bool, origin: CellPos, avail: u32) -> La
         rect: CellRect::at(origin, avail, height),
         kind: LaidOutKind::Text {
             lines,
-            role: ToneRole::from_tone(fg),
+            tone: fg,
             bold,
         },
         children: Vec::new(),
     }
 }
 
-fn layout_code(lang: Option<&str>, s: &str, origin: CellPos, avail: u32) -> LaidOut {
+fn layout_code(s: &str, origin: CellPos, avail: u32) -> LaidOut {
     // Code is never wrapped: wrapping destroys line-oriented syntax and makes
     // snippets unreadable. Overflow is truncated and marked instead.
     let (source, source_cut) = take_chars(s, MAX_LEAF_CHARS);
@@ -453,32 +460,14 @@ fn layout_code(lang: Option<&str>, s: &str, origin: CellPos, avail: u32) -> Laid
     if raw_lines.is_empty() {
         raw_lines.push("");
     }
-    let vis_source = raw_lines.join("\n");
-    let highlighted = lang
-        .and_then(language_for_widget)
-        .map(|l| highlight_lines(l, &vis_source));
 
     let mut lines = Vec::with_capacity(raw_lines.len());
     for (i, raw) in raw_lines.iter().enumerate() {
         let (text, width_cut) = fit_cols(raw, avail);
-        let prefix_bytes = if width_cut {
-            text.len().saturating_sub(ELLIPSIS.len_utf8())
-        } else {
-            text.len()
-        };
-        let spans = highlighted
-            .as_ref()
-            .and_then(|all| all.get(i))
-            .map(|spans| clip_spans(spans, prefix_bytes))
-            .unwrap_or_default();
         let truncated = width_cut
             || (line_cut && i + 1 == raw_lines.len())
             || (source_cut && i + 1 == raw_lines.len());
-        lines.push(CodeLine {
-            text,
-            truncated,
-            spans,
-        });
+        lines.push(CodeLine { text, truncated });
     }
     let height = (lines.len() as u32).max(1);
     LaidOut {
@@ -488,30 +477,12 @@ fn layout_code(lang: Option<&str>, s: &str, origin: CellPos, avail: u32) -> Laid
     }
 }
 
-fn clip_spans(spans: &[(Range<usize>, Token)], byte_len: usize) -> Vec<(Range<usize>, Token)> {
-    spans
-        .iter()
-        .filter_map(|(r, token)| {
-            let start = r.start.min(byte_len);
-            let end = r.end.min(byte_len);
-            if start < end {
-                Some((start..end, *token))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn layout_badge(s: &str, tone: Tone, origin: CellPos, avail: u32) -> LaidOut {
     let width = chip_width(s, avail);
     let (text, _) = fit_cols(s, width.saturating_sub(CHIP_PAD.saturating_mul(2)).max(1));
     LaidOut {
         rect: CellRect::at(origin, width, 1),
-        kind: LaidOutKind::Badge {
-            text,
-            role: ToneRole::from_tone(tone),
-        },
+        kind: LaidOutKind::Badge { text, tone },
         children: Vec::new(),
     }
 }

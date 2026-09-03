@@ -473,7 +473,7 @@ fn same_tree_and_width_produce_identical_layout() {
 }
 
 #[test]
-fn rust_code_highlight_is_present_and_stable() {
+fn code_layout_is_deterministic() {
     let tree = Widget::Code {
         lang: Some("rust".into()),
         s: "fn main() {}".into(),
@@ -481,23 +481,14 @@ fn rust_code_highlight_is_present_and_stable() {
     let a = layout(&tree, 40, "p");
     let b = layout(&tree, 40, "p");
     assert_eq!(a, b);
-    let LaidOutKind::Code { lines } =
-        &first_kind(&a, |k| matches!(k, LaidOutKind::Code { .. })).kind
-    else {
-        panic!("expected code");
-    };
-    assert!(
-        lines.iter().any(|l| !l.spans.is_empty()),
-        "resolved lang must produce highlight spans"
-    );
 }
 
 // ---------------------------------------------------------------------------
-// Tone roles
+// Tones pass through to the mounts
 // ---------------------------------------------------------------------------
 
 #[test]
-fn text_and_badge_carry_semantic_roles() {
+fn text_and_badge_carry_semantic_tones() {
     let tree = col(
         0,
         vec![
@@ -517,13 +508,13 @@ fn text_and_badge_carry_semantic_roles() {
     let mut saw_ok = false;
     for node in laid.walk() {
         match &node.kind {
-            LaidOutKind::Text { role, bold, .. } => {
-                assert_eq!(*role, ToneRole::Accent);
+            LaidOutKind::Text { tone, bold, .. } => {
+                assert_eq!(*tone, Tone::Accent);
                 assert!(*bold);
                 saw_accent = true;
             }
-            LaidOutKind::Badge { role, .. } => {
-                assert_eq!(*role, ToneRole::Success);
+            LaidOutKind::Badge { tone, .. } => {
+                assert_eq!(*tone, Tone::Ok);
                 saw_ok = true;
             }
             _ => {}

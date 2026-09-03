@@ -5,12 +5,6 @@
 
 use sleipnir_plugin::v2::{Tone, Widget, badge, btn, col, row, text};
 
-/// A failed run is a *non-zero* exit. Unknown / missing codes are not failures
-/// in the ledger sense and must not draw a Block.
-pub fn is_failure(exit_code: Option<i32>) -> bool {
-    matches!(exit_code, Some(code) if code != 0)
-}
-
 /// First tree: redacted command, exit, duration, Retry button.
 ///
 /// `arg` on the button is the `RunId` so the Action can re-render the same
@@ -59,14 +53,6 @@ pub fn retried_tree(command: &str, exit_code: i32, duration_ms: u64) -> Widget {
 mod tests {
     use super::*;
     use sleipnir_plugin::v2::Widget;
-
-    #[test]
-    fn only_nonzero_exit_is_a_failure() {
-        assert!(is_failure(Some(1)));
-        assert!(is_failure(Some(127)));
-        assert!(!is_failure(Some(0)));
-        assert!(!is_failure(None));
-    }
 
     #[test]
     fn failure_tree_has_a_retry_button() {

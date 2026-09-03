@@ -16,6 +16,7 @@ members = [
     "crates/plugin_host",
     "crates/plugin_protocol",
     "crates/plugin_grants",
+    "crates/atomic_write",
     "crates/sleipnir_plugin_sdk",
     "crates/sleipnir_plugin_failed_run",
     "crates/sleipnir_plugin_disk3d",
@@ -63,6 +64,7 @@ sleipnir_ctl = { path = "crates/sleipnir_ctl" }
 plugin_host = { path = "crates/plugin_host" }
 plugin_protocol = { path = "crates/plugin_protocol" }
 plugin_grants = { path = "crates/plugin_grants" }
+atomic_write = { path = "crates/atomic_write" }
 sleipnir-plugin = { path = "crates/sleipnir_plugin_sdk" }
 sleipnir_widget = { path = "crates/sleipnir_widget" }
 row_geometry = { path = "crates/row_geometry" }

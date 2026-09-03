@@ -20,7 +20,7 @@
 //!
 //! Pure state. No gpui, no window.
 
-use plugin_protocol::v2::{Capability, Tone, Widget};
+use plugin_protocol::v2::{Tone, Widget};
 use sleipnir_widget::{Layout, layout};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -271,26 +271,11 @@ impl ChromeRegistry {
     }
 }
 
-/// Grant check for the chrome mount. Same membership style as Panel.
-pub fn render_status_granted(granted: &[Capability]) -> bool {
-    granted.contains(&Capability::RenderStatus)
-}
-
 /// Display title that cannot be mistaken for a built-in. The plugin id is
 /// prefix, not suffix: a plugin named "Reload Settings" still reads as
 /// `other: Reload Settings`.
 pub fn attributed_title(plugin_id: &str, title: &str) -> String {
     format!("{plugin_id}: {title}")
-}
-
-/// Run-ledger Failed wash is independent of plugin badges.
-///
-/// WHY: Failed attention is how the user notices a broken command in this
-/// tab. A plugin that painted "ok" over it, or that reused the wash, would
-/// impersonate the ledger. The wash always applies when the ledger says
-/// Failed; plugin badges are extra labels and never set the wash.
-pub fn ledger_failed_wash(ledger_failed: bool, _plugin_badges: &[PluginTabBadge]) -> bool {
-    ledger_failed
 }
 
 fn derive_plugin(surface_id: uuid::Uuid, tree: Widget, hint_pane: Option<PaneKey>) -> PluginChrome {
@@ -347,24 +332,11 @@ fn leaf_wider_than_status(tree: &Widget) -> bool {
     over
 }
 
-fn truncate_chars(s: &str, max: usize) -> (String, bool) {
-    let n = s.chars().count();
-    if n <= max {
-        return (s.to_string(), false);
-    }
-    if max == 0 {
-        return (String::new(), true);
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push(sleipnir_widget::ELLIPSIS);
-    (out, true)
-}
-
 fn extract_badges(tree: &Widget) -> Vec<(String, Tone, bool)> {
     let mut out = Vec::new();
     walk(tree, &mut |w| {
         if let Widget::Badge { s, tone } = w {
-            let (text, truncated) = truncate_chars(s, MAX_BADGE_CHARS);
+            let (text, truncated) = sleipnir_widget::fit_cols(s, MAX_BADGE_CHARS as u32);
             out.push((text, *tone, truncated));
         }
     });
@@ -434,9 +406,6 @@ mod tests {
 
     #[test]
     fn badge_and_palette_denied_without_render_status() {
-        assert!(!render_status_granted(&[]));
-        assert!(!render_status_granted(&[Capability::RenderPanel]));
-        assert!(render_status_granted(&[Capability::RenderStatus]));
         let mut reg = ChromeRegistry::new();
         let tree = Widget::Col {
             gap: 0,
@@ -451,19 +420,18 @@ mod tests {
     }
 
     #[test]
-    fn plugin_badge_does_not_suppress_or_impersonate_ledger_failed() {
+    fn plugin_badge_is_not_a_ledger_failed_badge() {
+        // The wash is the ledger's own Failed bool; a plugin badge is only an
+        // extra attributed label and can never set or suppress it.
         let mut reg = ChromeRegistry::new();
         reg.apply_status("demo", badge("ok", Tone::Ok), true, Some(key(1)));
         let badges = reg.badges_for_tab(&[key(1)], true);
         assert_eq!(badges.len(), 1);
         assert_eq!(badges[0].text, "ok");
-        // Ledger Failed still washes even if the plugin says ok.
-        assert!(ledger_failed_wash(true, &badges));
-        // Plugin Err tone is not a ledger Failed wash.
+        // Plugin Err tone is not a ledger Failed badge type.
         let mut reg = ChromeRegistry::new();
         reg.apply_status("demo", badge("no", Tone::Err), true, Some(key(1)));
         let badges = reg.badges_for_tab(&[key(1)], true);
-        assert!(!ledger_failed_wash(false, &badges));
         assert_ne!(
             format!("{:?}", badges[0]),
             "Badge { kind: Failed, count: 1, elapsed_ms: 0 }"

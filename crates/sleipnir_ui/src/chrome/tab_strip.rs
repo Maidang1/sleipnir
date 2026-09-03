@@ -44,10 +44,9 @@ impl AppShell {
                 let badge = tab_badge_for(tab, cx);
                 let keys = tab.tree.all_pane_keys();
                 let plugin_badges = self.plugin_badges_for_tab(&keys, ix == active);
-                let failed = crate::plugin_chrome::ledger_failed_wash(
-                    tab_has_failed_attention(badge),
-                    &plugin_badges,
-                );
+                // The Failed wash is the ledger's own verdict; plugin badges
+                // can never set or suppress it.
+                let failed = tab_has_failed_attention(badge);
                 let agent = if show_icons {
                     agent::identify_tab(tab, cx)
                 } else {

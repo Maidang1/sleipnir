@@ -54,9 +54,6 @@ struct Disk3d {
     panel: Option<PaneKey>,
     /// Latest cwd from the event stream; the chart follows it.
     cwd: Option<PathBuf>,
-    /// Whether the host granted `draw_scene`. Decided at hello; drives the
-    /// vector path vs the text fallback.
-    can_draw_scene: bool,
 }
 
 impl Disk3d {
@@ -65,7 +62,6 @@ impl Disk3d {
             view: View::new(scan(&std::env::current_dir().unwrap_or_default())),
             panel: None,
             cwd: None,
-            can_draw_scene: false,
         }
     }
 
@@ -80,7 +76,7 @@ impl Disk3d {
 
     /// Draw the whole panel: the scene (host-projected) plus the chrome tree.
     fn draw(&mut self, ctx: &mut Context<'_>) {
-        if self.can_draw_scene {
+        if ctx.granted().contains(&Capability::HostCallDrawScene) {
             let pane = self.pane_key();
             let scene = build_scene_data(&self.view);
             let _ = ctx.draw_scene(pane, scene);
@@ -88,6 +84,7 @@ impl Disk3d {
             let tree = render_chrome_only(&self.view);
             let _ = ctx.render(target, tree);
         } else {
+            eprintln!("disk3d: no draw_scene grant, using text rasteriser");
             let target = self.target();
             let tree = render(&self.view, ASSUMED_COLS, ASSUMED_ROWS);
             let _ = ctx.render(target, tree);
@@ -99,7 +96,7 @@ impl Disk3d {
     /// the view, so resending the scene would be wasted work — and would fight
     /// the host's local camera (see the camera-sync rule in `on_action`).
     fn draw_chrome(&mut self, ctx: &mut Context<'_>) {
-        if self.can_draw_scene {
+        if ctx.granted().contains(&Capability::HostCallDrawScene) {
             let target = self.target();
             let tree = render_chrome_only(&self.view);
             let _ = ctx.render(target, tree);
@@ -151,15 +148,6 @@ impl Plugin for Disk3d {
             Capability::ReadCwd,
             Capability::HostCallDrawScene,
         ]
-    }
-
-    fn on_hello(&mut self, granted: &[Capability], _id: uuid::Uuid, _ctx: &mut Context<'_>) {
-        self.can_draw_scene = granted.contains(&Capability::HostCallDrawScene);
-        if self.can_draw_scene {
-            eprintln!("disk3d: host-side vector rendering enabled");
-        } else {
-            eprintln!("disk3d: no draw_scene grant, using text rasteriser");
-        }
     }
 
     /// `SubscribeEvents` is continuous observation, so the filter is as narrow

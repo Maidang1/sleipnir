@@ -133,13 +133,6 @@ impl<'a> PointerMap<'a> {
     }
 }
 
-/// Adapt the absolute-line delta reported by [`ViewportPosition`] to the
-/// legacy wheel contract consumed by `Scroll::Delta`. Wheel pixel deltas and
-/// `display_offset` deltas intentionally share a sign, so this preserves it.
-pub(crate) fn absolute_line_delta_to_display_offset_delta(delta: i32) -> i32 {
-    delta
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,7 +259,7 @@ mod tests {
             let absolute_line_delta = viewport.apply_pixel_delta(delta_px, &g);
 
             assert_eq!(
-                absolute_line_delta_to_display_offset_delta(absolute_line_delta),
+                absolute_line_delta,
                 expected_display_offset_delta,
                 "pixel delta {delta_px} must retain the legacy Scroll::Delta sign"
             );
@@ -395,7 +388,7 @@ mod tests {
                 sub: case.initial_sub,
             };
             let absolute_delta = viewport.apply_pixel_delta(case.delta_px, &g);
-            let display_offset_delta = absolute_line_delta_to_display_offset_delta(absolute_delta);
+            let display_offset_delta = absolute_delta;
             let clamped_offset = i32::try_from(case.display_offset)
                 .unwrap_or(i32::MAX)
                 .saturating_add(display_offset_delta)

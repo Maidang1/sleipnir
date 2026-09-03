@@ -11,10 +11,10 @@
 //! Pure decision logic. No gpui. Paint and hit-testing consume the cached
 //! [`Layout`]; they do not re-measure on the hot path.
 
-use plugin_protocol::v2::{BlockId, Capability, RunId, Widget};
+use plugin_protocol::v2::{BlockId, RunId, Widget};
 use row_geometry::{Anchor, Block};
 use run_ledger::Anchor as LedgerAnchor;
-use sleipnir_widget::{Hit, Layout, hit_test, layout};
+use sleipnir_widget::{Layout, layout};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One plugin-drawn Block. The tree is data; the host stores it.
@@ -182,19 +182,7 @@ impl BlockRegistry {
     }
 }
 
-pub fn render_block_granted(granted: &[Capability]) -> bool {
-    granted.contains(&Capability::RenderBlock)
-}
-
-pub fn action_at(laid: &Layout, col: u32, row: u32) -> Option<crate::plugin_panel::PanelAction> {
-    match hit_test(laid, sleipnir_widget::CellPos { col, row }) {
-        Hit::Btn { action, arg } => Some(crate::plugin_panel::PanelAction {
-            action: action.to_string(),
-            arg: arg.map(str::to_string),
-        }),
-        Hit::Miss => None,
-    }
-}
+pub use crate::plugin_panel::action_at;
 
 /// Widget text that must never appear in a copied selection (ADR-0018
 /// decision 5). Selection is a grid-coordinate concept; the grid has no
@@ -389,13 +377,6 @@ mod tests {
             !src.contains("Block {"),
             "session restore must not grow a Block variant"
         );
-    }
-
-    #[test]
-    fn render_block_granted_is_exact_membership() {
-        assert!(!render_block_granted(&[]));
-        assert!(!render_block_granted(&[Capability::RenderPanel]));
-        assert!(render_block_granted(&[Capability::RenderBlock]));
     }
 
     #[test]
