@@ -793,6 +793,64 @@ fn snapshots_report_inflight_and_restarts() {
 }
 
 #[test]
+fn snapshots_hold_at_most_one_entry_per_plugin_id() {
+    // Load-bearing for the shell's staleness sweep
+    // (`app_shell/plugins.rs::poll_plugin_inbound`): it derives the live set
+    // from these snapshots and marks every surface whose plugin is absent
+    // from it. That single sweep is only equivalent to also marking each
+    // non-live snapshot individually if a plugin_id cannot appear twice --
+    // otherwise a plugin could be reported both Live and Dead in one batch,
+    // land in `live`, and the sweep would spare surfaces it should mark.
+    //
+    // `snapshots()` unions `live` and `health`, both keyed by plugin_id, and
+    // skips health entries already in `live`. This pins that union with one
+    // dead and one live plugin present at the same time.
+    let env = Env::new();
+    let dead = env.spawn_plugin(|ep| {
+        handshake_events(ep, "dead", EventFilter::default());
+    });
+    env.sup.connect(&event_spec("dead")).unwrap();
+    wait_until(
+        || {
+            env.sup
+                .snapshot("dead")
+                .is_some_and(|s| s.state == ConnectionState::Dead)
+        },
+        "plugin drop should mark the session dead",
+    );
+    let live_plugin = env.spawn_plugin(|ep| {
+        handshake_events(ep, "live", EventFilter::default());
+        serve_until_eof(ep);
+    });
+    env.sup.connect(&event_spec("live")).unwrap();
+
+    let snaps = env.sup.snapshots();
+    let ids: Vec<&String> = snaps.iter().map(|s| &s.plugin_id).collect();
+    let unique: BTreeSet<&&String> = ids.iter().collect();
+    assert_eq!(ids.len(), unique.len(), "duplicate plugin_id in {ids:?}");
+
+    // The batch must actually contain both states, or the assertion above is
+    // vacuous and proves nothing about the union.
+    let live_set: BTreeSet<&String> = snaps
+        .iter()
+        .filter(|s| s.state == ConnectionState::Live)
+        .map(|s| &s.plugin_id)
+        .collect();
+    assert!(
+        live_set.contains(&"live".to_string()),
+        "expected the live plugin in {snaps:?}"
+    );
+    assert!(
+        !live_set.contains(&"dead".to_string()),
+        "a dead plugin must not appear in the live set: {snaps:?}"
+    );
+
+    env.sup.shutdown_all();
+    let _ = dead.join();
+    let _ = live_plugin.join();
+}
+
+#[test]
 fn declared_capabilities_include_resident_from_lifecycle() {
     let manifest = crate::PluginManifest {
         id: "x".into(),

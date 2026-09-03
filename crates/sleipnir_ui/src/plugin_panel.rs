@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use crate::pane_tree::PaneKey;
+use crate::plugin_surface::{StaleRegistry, Surface};
 use crate::session::SessionNode;
 
 /// A 3D scene sent by a plugin, projected and painted host-side in the panel.
@@ -34,6 +35,15 @@ pub struct PanelSurface {
     pub stale: bool,
     /// 3D scene from the plugin, projected and painted below the chrome.
     pub scene: Option<PanelScene>,
+}
+
+impl Surface for PanelSurface {
+    fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+    fn set_stale(&mut self, stale: bool) {
+        self.stale = stale;
+    }
 }
 
 /// Outcome of applying a `Render { target: Panel }`.
@@ -117,25 +127,6 @@ impl PanelRegistry {
         }
     }
 
-    /// A plugin that died keeps its last tree, dimmed. The host owns it
-    /// (ADR-0017); the plugin cannot un-draw it from beyond the grave.
-    pub fn mark_plugin_stale(&mut self, plugin_id: &str) {
-        for surface in self.surfaces.values_mut() {
-            if surface.plugin_id == plugin_id {
-                surface.stale = true;
-            }
-        }
-    }
-
-    /// Any surface whose plugin is not in `live` is stale.
-    pub fn mark_missing_stale(&mut self, live: &BTreeSet<String>) {
-        for surface in self.surfaces.values_mut() {
-            if !live.contains(&surface.plugin_id) {
-                surface.stale = true;
-            }
-        }
-    }
-
     /// Store a 3D scene on a panel surface owned by `plugin_id`. Returns `true`
     /// if the scene was accepted.
     pub fn set_scene(&mut self, pane: PaneKey, plugin_id: &str, scene: PanelScene) -> bool {
@@ -172,6 +163,14 @@ impl PanelRegistry {
     /// this to seed a drag before mutating it.
     pub fn scene(&self, pane: PaneKey) -> Option<&PanelScene> {
         self.surfaces.get(&pane).and_then(|s| s.scene.as_ref())
+    }
+}
+
+/// Death marks; it never drops. See [`crate::plugin_surface`].
+impl StaleRegistry for PanelRegistry {
+    type Surface = PanelSurface;
+    fn surfaces_mut(&mut self) -> impl Iterator<Item = &mut PanelSurface> {
+        self.surfaces.values_mut()
     }
 }
 
@@ -335,7 +334,7 @@ mod tests {
             reg.apply_render("demo", key(1), text("one"), true, &terminals),
             ApplyPanel::Create { .. }
         ));
-        reg.mark_plugin_stale("demo");
+        reg.mark_missing_stale(&BTreeSet::new());
         assert!(reg.get(key(1)).unwrap().stale);
         let out = reg.apply_render("demo", key(1), text("two"), true, &terminals);
         assert_eq!(out, ApplyPanel::Replace { pane_key: key(1) });

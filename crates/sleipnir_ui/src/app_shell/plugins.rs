@@ -7,6 +7,7 @@
 //! `panels.rs`.
 
 use super::*;
+use crate::plugin_surface::StaleRegistry;
 
 /// Enough to finish a launch after the user approves. The dialog itself
 /// renders [`crate::plugin_monitor_panel::ConsentPrompt`] only.
@@ -106,17 +107,20 @@ impl AppShell {
             }
         }
         let snapshots = crate::plugin_runtime::snapshots(cx);
-        let mut live = std::collections::BTreeSet::new();
-        for snap in snapshots {
-            if snap.state == ConnectionState::Live {
-                live.insert(snap.plugin_id);
-            } else {
-                self.plugin_panels.mark_plugin_stale(&snap.plugin_id);
-                self.mark_blocks_stale(&snap.plugin_id, cx);
-            }
-        }
+        let live: std::collections::BTreeSet<String> = snapshots
+            .into_iter()
+            .filter(|snap| snap.state == ConnectionState::Live)
+            .map(|snap| snap.plugin_id)
+            .collect();
+        // One sweep per mount, driven by `live` alone. Marking each non-live
+        // snapshot individually first would be redundant: snapshots hold at
+        // most one entry per plugin_id, so a non-live plugin is by definition
+        // absent from `live` and the sweep already covers it.
         self.plugin_panels.mark_missing_stale(&live);
         self.mark_missing_blocks_stale(&live, cx);
+        // Chrome is the exception: transient decoration is dropped, not
+        // dimmed, so a dead plugin cannot leave a badge misreporting live
+        // state (see `plugin_surface`).
         if self.plugin_chrome.sync_live(&live) {
             self.rebuild_palette_items();
         }
@@ -217,11 +221,6 @@ impl AppShell {
             ApplyBlock::DeniedAnchor => {
                 log::warn!("plugin {plugin_id} RenderBlock denied (no process-local anchor)");
             }
-        }
-    }
-    pub(super) fn mark_blocks_stale(&mut self, plugin_id: &str, cx: &mut Context<Self>) {
-        for (_, view) in self.all_live_panes() {
-            view.update(cx, |v, _| v.mark_blocks_stale(plugin_id));
         }
     }
     pub(super) fn mark_missing_blocks_stale(

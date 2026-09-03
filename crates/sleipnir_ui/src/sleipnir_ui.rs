@@ -19,6 +19,7 @@ mod plugin_host_calls;
 mod plugin_monitor_panel;
 mod plugin_panel;
 mod plugin_runtime;
+mod plugin_surface;
 mod panel_scene_paint;
 mod run_ledger_global;
 mod run_ledger_panel;
@@ -368,11 +369,8 @@ impl TermView {
         out
     }
 
-    pub(crate) fn mark_blocks_stale(&mut self, plugin_id: &str) {
-        self.blocks.mark_plugin_stale(plugin_id);
-    }
-
     pub(crate) fn mark_missing_blocks_stale(&mut self, live: &std::collections::BTreeSet<String>) {
+        use crate::plugin_surface::StaleRegistry;
         self.blocks.mark_missing_stale(live);
     }
 

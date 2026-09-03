@@ -17,6 +17,8 @@ use run_ledger::Anchor as LedgerAnchor;
 use sleipnir_widget::{Layout, layout};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::plugin_surface::{StaleRegistry, Surface};
+
 /// One plugin-drawn Block. The tree is data; the host stores it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockSurface {
@@ -28,6 +30,15 @@ pub struct BlockSurface {
     /// Cached layout. Invalidated on tree replace / width change / unfreeze.
     pub laid: Option<Layout>,
     pub stale: bool,
+}
+
+impl Surface for BlockSurface {
+    fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+    fn set_stale(&mut self, stale: bool) {
+        self.stale = stale;
+    }
 }
 
 /// Outcome of applying a `Render { target: Block }`.
@@ -105,22 +116,6 @@ impl BlockRegistry {
         ApplyBlock::Inserted
     }
 
-    pub fn mark_plugin_stale(&mut self, plugin_id: &str) {
-        for surface in self.surfaces.values_mut() {
-            if surface.plugin_id == plugin_id {
-                surface.stale = true;
-            }
-        }
-    }
-
-    pub fn mark_missing_stale(&mut self, live: &BTreeSet<String>) {
-        for surface in self.surfaces.values_mut() {
-            if !live.contains(&surface.plugin_id) {
-                surface.stale = true;
-            }
-        }
-    }
-
     /// History shrink / eviction: drop surfaces whose ids are no longer in
     /// the geometry (the Block went with its anchor).
     pub fn retain_live(&mut self, live: &BTreeSet<BlockId>) {
@@ -179,6 +174,14 @@ impl BlockRegistry {
                     .unwrap_or(1),
             })
             .collect()
+    }
+}
+
+/// Death marks; it never drops. See [`crate::plugin_surface`].
+impl StaleRegistry for BlockRegistry {
+    type Surface = BlockSurface;
+    fn surfaces_mut(&mut self) -> impl Iterator<Item = &mut BlockSurface> {
+        self.surfaces.values_mut()
     }
 }
 
@@ -267,7 +270,7 @@ mod tests {
             ApplyBlock::Inserted
         );
         let id = reg.iter().next().unwrap().block_id;
-        reg.mark_plugin_stale("demo");
+        reg.mark_missing_stale(&BTreeSet::new());
         assert!(reg.get(id).unwrap().stale);
         let out = reg.apply_render("demo", run(1), text("two"), true, Some(anchor(4)), Some(id));
         assert_eq!(out, ApplyBlock::Replaced);
