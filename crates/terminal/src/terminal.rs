@@ -9,7 +9,6 @@ mod run_tracker;
 mod shell_semantics;
 pub mod terminal_settings;
 
-
 pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
 pub use osc133::{
     GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
