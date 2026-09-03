@@ -2,12 +2,16 @@
 
 **Status:** accepted (reopens the "no graphics protocol" boundary from M0–M15)
 
-**Last verified:** 2026-09-01. This decision is still current. The workspace pins
-`alacritty_terminal` at `561594c` and `vte` at `94ce0d5`; those revisions only
-carry Sleipnir's OSC 133/9/777 hook. The terminal model still has no image store
-or placement model, and `TermElement` still has no image-rendering layer. A
-separate `kitty-protocol` branch in the `vte` repository is not referenced by
-this workspace and is not product support.
+**Cost assessment superseded by [ADR-0019](0019-kitty-graphics-reassessment.md).**
+The decision to track rather than ship still holds; the estimates below do not.
+
+**Retracted claim.** This ADR previously carried a "Last verified: 2026-09-01"
+note asserting that "the terminal model still has no image store or placement
+model, and `TermElement` still has no image-rendering layer." That was false
+when written: the same commit that added the note (`51daed0`) also added
+`crates/terminal/src/kitty_graphics/` and an image-quad layer in
+`term_element.rs`. The implementation was removed two days later in `32afbbd`
+without a recorded reason. See [ADR-0019](0019-kitty-graphics-reassessment.md).
 
 ## Context
 

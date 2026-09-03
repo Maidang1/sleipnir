@@ -76,11 +76,7 @@ gpui_platform = { path = "crates/gpui_platform", default-features = false, featu
 # Fork of zed-industries/alacritty @ 4c129667 + OSC 133/9/777 (ADR-0005).
 alacritty_terminal = { git = "https://github.com/Maidang1/alacritty", rev = "561594caa275f00914a039356816fe70467a2d44" }
 anyhow = "1.0.86"
-base64 = "0.22"
-flate2 = "1.1"
-png = "0.17"
 imara-diff = "0.1"
-image = { version = "0.25.1", default-features = false, features = ["png"] }
 smallvec = { version = "1.6", features = ["union", "const_new"] }
 async-channel = "2.5.0"
 dirs = "6.0"
@@ -90,7 +86,6 @@ futures-lite = "1.13"
 itertools = "0.14.0"
 libc = "0.2"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
-memmap2 = "0.9"
 parking_lot = "0.12.1"
 percent-encoding = "2.3.2"
 rand = "0.9"
