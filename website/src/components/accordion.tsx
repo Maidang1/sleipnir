@@ -1,9 +1,12 @@
 import { useState, type ReactNode } from 'react'
-import { ChevronDown, ChevronUp } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export type FaqItem = { q: string; a: ReactNode }
 
+/**
+ * FAQ styled like querying a man page: `? question` rows that expand into
+ * indented answers. `+`/`-` markers instead of chevrons.
+ */
 export function Accordion({ items }: { items: FaqItem[] }) {
   const [open, setOpen] = useState<string | null>(null)
 
@@ -17,14 +20,36 @@ export function Accordion({ items }: { items: FaqItem[] }) {
               type="button"
               aria-expanded={isOpen}
               onClick={() => setOpen(isOpen ? null : item.q)}
-              className="group flex w-full items-start justify-between gap-4 rounded-lg py-2.5 text-left text-[15px] font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/60"
+              className="group flex w-full items-baseline justify-between gap-4 rounded-[2px] px-1 py-3 text-left font-mono text-[13.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <span>{item.q}</span>
-              {isOpen ? (
-                <ChevronUp className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-              ) : (
-                <ChevronDown className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-              )}
+              <span className="min-w-0">
+                <span
+                  className={cn(
+                    'mr-2 transition-colors',
+                    isOpen ? 'text-ansi-amber' : 'text-ansi-dimgreen group-hover:text-ansi-amber',
+                  )}
+                  aria-hidden
+                >
+                  ?
+                </span>
+                <span
+                  className={cn(
+                    'transition-colors',
+                    isOpen ? 'text-foreground' : 'text-foreground/85 group-hover:text-foreground',
+                  )}
+                >
+                  {item.q}
+                </span>
+              </span>
+              <span
+                className={cn(
+                  'shrink-0 font-mono text-[13px] transition-colors',
+                  isOpen ? 'text-ansi-green' : 'text-muted-foreground group-hover:text-ansi-green',
+                )}
+                aria-hidden
+              >
+                {isOpen ? '[-]' : '[+]'}
+              </span>
             </button>
             <div
               className={cn(
@@ -33,7 +58,7 @@ export function Accordion({ items }: { items: FaqItem[] }) {
               )}
             >
               <div className="overflow-hidden">
-                <div className="max-w-[38rem] pb-2.5 text-sm leading-relaxed text-muted-foreground">
+                <div className="max-w-[42rem] pb-4 pl-6 text-[13px] leading-relaxed text-muted-foreground">
                   {item.a}
                 </div>
               </div>

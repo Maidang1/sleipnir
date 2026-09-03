@@ -25,11 +25,14 @@ export function InstallCommand({ className }: { className?: string }) {
   }
 
   return (
-    <div className={cn('flex max-w-2xl flex-col gap-2', className)}>
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/70 px-3 py-2">
+    <div className={cn('flex w-full max-w-2xl min-w-0 flex-col gap-2', className)}>
+      <div className="flex min-w-0 items-center gap-2 rounded-[2px] border border-border bg-card px-3 py-2.5 transition-colors focus-within:border-ansi-green/50">
+        <span className="shrink-0 font-mono text-[12.5px] text-ansi-green" aria-hidden>
+          $
+        </span>
         <pre
           tabIndex={0}
-          className="m-0 min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[12.5px] leading-6 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+          className="m-0 min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[12.5px] leading-6 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <code>{INSTALL_COMMAND}</code>
         </pre>
@@ -37,10 +40,15 @@ export function InstallCommand({ className }: { className?: string }) {
           type="button"
           onClick={() => void copy()}
           aria-label={copied ? 'Copied install command' : 'Copy install command'}
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
+          className={cn(
+            'inline-flex size-8 shrink-0 items-center justify-center rounded-[2px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring',
+            copied
+              ? 'text-ansi-green'
+              : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+          )}
         >
           {copied ? (
-            <Check className="size-3.5" strokeWidth={1.75} />
+            <Check className="size-3.5" strokeWidth={2} />
           ) : (
             <Copy className="size-3.5" strokeWidth={1.75} />
           )}
@@ -49,7 +57,10 @@ export function InstallCommand({ className }: { className?: string }) {
           {copied ? 'Copied to clipboard' : ''}
         </span>
       </div>
-      <p className="max-w-xl text-xs leading-relaxed text-muted-foreground">{INSTALL_HINT}</p>
+      <p className="max-w-xl font-mono text-[11px] leading-relaxed text-muted-foreground/80">
+        <span className="text-ansi-dimgreen"># </span>
+        {INSTALL_HINT}
+      </p>
     </div>
   )
 }

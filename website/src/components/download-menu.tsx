@@ -118,7 +118,7 @@ export function DownloadMenu({
           aria-label="Download Sleipnir"
           onKeyDown={onMenuKey}
           className={cn(
-            'absolute top-full z-50 mt-1.5 min-w-56 origin-top rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md',
+            'absolute top-full z-50 mt-1.5 min-w-56 origin-top rounded-[2px] border border-border bg-popover p-1 font-mono text-popover-foreground shadow-[0_8px_30px_oklch(0_0_0/50%)]',
             align === 'end' ? 'right-0' : 'left-0',
           )}
         >
@@ -132,7 +132,7 @@ export function DownloadMenu({
               target={item.external ? '_blank' : undefined}
               rel={item.external ? 'noreferrer' : undefined}
               className={cn(
-                'flex h-8 items-center rounded-md px-2.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring/60',
+                'flex h-8 items-center rounded-[2px] px-2.5 text-[12.5px] outline-none hover:bg-accent hover:text-ansi-green focus-visible:ring-2 focus-visible:ring-ring',
                 item.muted && 'text-muted-foreground',
               )}
               onClick={() => setOpen(false)}

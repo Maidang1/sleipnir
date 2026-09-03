@@ -1,9 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 import {
   AppWindow,
   Columns2,
-  Command,
-  Download,
   HardDrive,
   Image as ImageIcon,
   Keyboard,
@@ -15,99 +13,80 @@ import {
   Zap,
 } from 'lucide-react'
 import { Accordion } from '@/components/accordion'
+import { BootTerminal } from '@/components/boot-terminal'
 import { DownloadMenu } from '@/components/download-menu'
+import { DownloadTargets } from '@/components/download-targets'
 import { InstallCommand } from '@/components/install-command'
+import { SectionHeading } from '@/components/section-heading'
+import { StatusBar } from '@/components/status-bar'
+import { TerminalWindow } from '@/components/terminal-window'
 import { fetchLatestRelease, GITHUB_URL, type LatestRelease } from '@/lib/release'
 
 const HIGHLIGHTS = [
-  { icon: Zap, label: 'GPU rendering' },
-  { icon: Columns2, label: 'Tabs, splits & zoom' },
-  { icon: AppWindow, label: 'Multi-window' },
-  { icon: Palette, label: 'Adaptive themes' },
-  { icon: ImageIcon, label: 'Smart paste' },
-  { icon: Search, label: 'Find & palette' },
-  { icon: HardDrive, label: 'Session restore' },
-  { icon: Link2, label: 'Path links' },
+  { icon: Zap, label: 'gpu rendering' },
+  { icon: Columns2, label: 'tabs & splits' },
+  { icon: AppWindow, label: 'multi-window' },
+  { icon: Palette, label: 'adaptive themes' },
+  { icon: ImageIcon, label: 'smart paste' },
+  { icon: Search, label: 'find & palette' },
+  { icon: HardDrive, label: 'session restore' },
+  { icon: Link2, label: 'path links' },
 ]
 
 const FEATURES = [
   {
-    icon: Zap,
-    title: 'Native down to the frame',
-    body: 'Rust and GPUI, the GPU framework behind Zed. Metal on macOS, Direct3D 11 on Windows, and Vulkan on Linux. Smooth scrollback, ease-in-out cursor blink, and redraw under heavy output. No Electron tax.',
+    title: 'native down to the frame',
+    body: 'Rust and GPUI, the GPU framework behind Zed. Metal on macOS, Direct3D 11 on Windows, Vulkan on Linux. Smooth scrollback, ease-in-out cursor blink, redraw under heavy output. No Electron tax.',
   },
   {
-    icon: Columns2,
-    title: 'Tabs, splits & pane zoom',
-    body: 'Default chrome is a top tab strip showing the last two folders of the cwd. The side rail instead shows title, branch, and dirty +N −M. Split right or down, jump tabs with ⌘1–9 / Ctrl+Shift+1–9, and move focus with ⌘⌥ / Ctrl+Alt+Arrow. Zoom a pane with ⌘⇧Enter / Ctrl+Shift+Enter; inactive splits dim so focus stays clear.',
+    title: 'tabs, splits & pane zoom',
+    body: 'Top tab strip shows the last two folders of the cwd; the side rail shows title, branch, and dirty +N −M. Split right or down, jump tabs with ⌘1–9 / Ctrl+Shift+1–9, zoom a pane with ⌘⇧Enter. Inactive splits dim so focus stays clear.',
   },
   {
-    icon: AppWindow,
-    title: 'Multi-window & font zoom',
-    body: '⌘N or Ctrl+Shift+N opens an independent window with its own tabs and shells. Resize the grid with ⌘+ or Ctrl+Shift++ (and − / 0). Window-scoped, not written to settings.',
+    title: 'multi-window & font zoom',
+    body: '⌘N or Ctrl+Shift+N opens an independent window with its own tabs and shells. Resize the grid with ⌘+ / − / 0. Window-scoped, never written to settings.',
   },
   {
-    icon: Palette,
-    title: 'Themes that follow you',
+    title: 'themes that follow you',
     body: 'Catppuccin, Tokyo Night, Nord, Gruvbox, Solarized, GitHub Dark/Light. Set theme to auto and match system appearance.',
   },
   {
-    icon: ImageIcon,
-    title: 'Paste that understands the file manager',
-    body: 'A screenshot on the clipboard becomes a quoted temp path. File-manager selections paste as quoted paths. Use ⌃⌘V or Ctrl+Alt+V to force text-only.',
+    title: 'paste that understands files',
+    body: 'A screenshot on the clipboard becomes a quoted temp path. File-manager selections paste as quoted paths. ⌃⌘V or Ctrl+Alt+V forces text-only.',
   },
   {
-    icon: Keyboard,
-    title: 'Keyboard first',
-    body: 'Command palette (⌘⇧K / Ctrl+Shift+P), vi mode, configurable key bindings, find in scrollback, and close confirm when a job is running.',
+    title: 'keyboard first',
+    body: 'Command palette (⌘⇧K / Ctrl+Shift+P), vi mode, configurable key bindings, find in scrollback, and close confirm while a job is running.',
   },
   {
-    icon: Link2,
-    title: 'Paths, links & shell markers',
-    body: '⌘-click or Ctrl-click paths to open them in the default app. Optional system or visual bell. Jump previous/next shell prompt when OSC 133 markers are present.',
+    title: 'paths, links & shell markers',
+    body: '⌘-click paths to open them in the default app. Optional system or visual bell. Jump previous/next shell prompt when OSC 133 markers are present.',
   },
   {
-    icon: Maximize2,
-    title: 'Daily extras without bloat',
-    body: 'Run Ledger (⌘⇧L / Ctrl+Shift+L) remembers redacted command runs. Quick Terminal, Quick Select, optional content opacity, and a desktop notification when a long command finishes while you are in another app.',
+    title: 'daily extras without bloat',
+    body: 'Run Ledger (⌘⇧L) remembers redacted command runs. Quick Terminal, Quick Select, optional content opacity, and a desktop notification when a long command finishes in another app.',
   },
   {
-    icon: RefreshCw,
-    title: 'Quietly current',
-    body: 'Check for updates when you want (⌘⇧U / Ctrl+Shift+U). Downloads verify against a published SHA-256 sidecar. macOS can update in place; Windows and Linux open Releases for a manual install. Session layout restores on launch.',
+    title: 'quietly current',
+    body: 'Check for updates when you want (⌘⇧U). Downloads verify against a published SHA-256 sidecar. macOS updates in place; Windows and Linux open Releases. Session layout restores on launch.',
   },
 ]
 
 const FAQ = [
   {
     q: 'Is this another Electron app?',
-    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS, Direct3D 11 on Windows, and Vulkan on Linux—not a browser engine.',
+    a: 'No. Sleipnir is a native binary rendered by GPUI (the same stack as Zed). The window is drawn by Metal on macOS, Direct3D 11 on Windows, and Vulkan on Linux, not a browser engine.',
   },
   {
     q: 'Where does config live?',
     a: (
       <>
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
-          ~/.config/sleipnir/settings.json
-        </code>
-        {' '}
-        on macOS and Linux, or{' '}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
-          %APPDATA%\sleipnir\settings.json
-        </code>
-        {' '}
-        on Windows. Terminal keys are Zed-compatible; hot-reload with ⌘⇧R / Ctrl+Shift+R.
-        Session layout restores from{' '}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
-          session.json
-        </code>{' '}
-        in the same folder. See the repo{' '}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
-          docs/settings.example.json
-        </code>{' '}
-        for keys like <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">confirm_close</code>,{' '}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">path_links</code>, and{' '}
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">background_opacity</code>.
+        <Chip>~/.config/sleipnir/settings.json</Chip> on macOS and Linux, or{' '}
+        <Chip>%APPDATA%\sleipnir\settings.json</Chip> on Windows. Terminal keys are
+        Zed-compatible; hot-reload with ⌘⇧R / Ctrl+Shift+R. Session layout restores from{' '}
+        <Chip>session.json</Chip> in the same folder. See the repo{' '}
+        <Chip>docs/settings.example.json</Chip> for keys like <Chip>confirm_close</Chip>,{' '}
+        <Chip>path_links</Chip>, and <Chip>background_opacity</Chip>.
       </>
     ),
   },
@@ -133,11 +112,11 @@ const FAQ = [
   },
 ]
 
-function SectionLabel({ children }: { children: ReactNode }) {
+function Chip({ children }: { children: string }) {
   return (
-    <div className="font-mono text-[11px] tracking-[0.14em] text-muted-foreground/80 uppercase">
+    <code className="rounded-[2px] border border-border bg-muted px-1 py-0.5 font-mono text-[11.5px] text-ansi-cyan">
       {children}
-    </div>
+    </code>
   )
 }
 
@@ -160,174 +139,207 @@ export default function App() {
   }, [])
 
   return (
-    <div className="min-h-dvh">
-      <div className="mx-auto w-full max-w-[1100px] border-border/70 md:border-x">
-        {/* Header */}
-        <header className="flex h-16 items-center justify-between px-5 md:px-10">
-          <a href="/" className="flex items-center gap-2.5">
-            <img
-              src="/app-icon.png"
-              alt=""
-              className="size-8 rounded-[6px]"
-              width={32}
-              height={32}
-            />
-            <span className="text-[15px] font-semibold tracking-tight">Sleipnir</span>
-          </a>
-          <div className="flex items-center gap-5">
-            <a
-              href={GITHUB_URL}
-              target="_blank"
-              rel="noreferrer"
-              aria-label="GitHub"
-              className="rounded-full text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
-            >
-              <GitHubIcon className="size-6" />
-            </a>
-            <DownloadMenu release={release} size="sm" align="end" />
-          </div>
-        </header>
-
-        <main>
-          {/* Hero */}
-          <section className="px-5 pt-14 pb-14 md:px-10 md:pt-24">
-            <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
-              <Command className="size-3.5" />
-              Built on GPUI · macOS · Windows · Linux
-            </div>
-            <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.4rem] md:leading-[1.04]">
-              A fast native terminal for macOS, Windows, and Linux.
-            </h1>
-            <p className="mt-5 max-w-[38rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-              GPU-rendered through GPUI. Side tab rail, splits, multi-window,
-              adaptive themes, Run Ledger, and session restore.
-            </p>
-            <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
-              <DownloadMenu
-                release={release}
-                size="lg"
-                align="start"
-                showIcon
-                className="h-10 px-4"
-              />
-              {release && (
-                <span className="font-mono text-xs text-muted-foreground">
-                  v{release.version}
-                </span>
-              )}
-            </div>
-            <InstallCommand className="mt-4" />
-
-            <div className="mt-16">
-              <SectionLabel>What you get</SectionLabel>
-              <div className="mt-4 flex flex-wrap items-center gap-x-7 gap-y-4">
-                {HIGHLIGHTS.map((h) => (
-                  <div
-                    key={h.label}
-                    className="flex items-center gap-2 text-muted-foreground/80"
-                  >
-                    <h.icon className="size-[18px]" strokeWidth={1.75} />
-                    <span className="text-sm">{h.label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          {/* Product screenshot */}
-          <section>
-            <img
-              src="/app-screenshot.jpg"
-              alt="Sleipnir running Claude Code and lazygit side by side"
-              width={2000}
-              height={1146}
-              className="block h-auto w-full outline outline-1 outline-black/10 dark:outline-white/10"
-            />
-          </section>
-
-          {/* Features */}
-          <section className="border-t border-border">
-            <div className="px-5 pt-14 md:px-10">
-              <SectionLabel>Why native</SectionLabel>
-            </div>
-            <div className="mt-8 grid grid-cols-1 gap-px border-t border-border bg-border/70 sm:grid-cols-2 lg:grid-cols-3">
-              {FEATURES.map((f) => (
-                <div key={f.title} className="bg-background p-6 md:p-8">
-                  <div className="flex items-center gap-2.5">
-                    <f.icon className="size-4 text-muted-foreground" />
-                    <h3 className="text-sm font-medium">{f.title}</h3>
-                  </div>
-                  <p className="mt-2.5 text-sm leading-relaxed text-muted-foreground">
-                    {f.body}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {/* Download */}
-          <section id="download" className="border-t border-border px-5 py-16 md:px-10 md:py-20">
-            <SectionLabel>Download</SectionLabel>
-            <h2 className="mt-3 text-2xl font-semibold tracking-tight">Get Sleipnir</h2>
-            <p className="mt-2 max-w-lg text-sm text-muted-foreground">
-              Free and open source. Use the one-line installer below, or choose
-              a macOS, Windows, or Linux package for your architecture.
-            </p>
-            <InstallCommand className="mt-6" />
-            <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
-              <DownloadMenu
-                release={release}
-                size="lg"
-                align="start"
-                showIcon
-                className="h-10 px-4"
-              />
-              {release && (
-                <span className="font-mono text-xs text-muted-foreground">
-                  v{release.version}
-                </span>
-              )}
-              <a
-                href={GITHUB_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg px-3 text-sm text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
-              >
-                <Download className="size-4 opacity-0" aria-hidden />
-                Source on GitHub
-              </a>
-            </div>
-          </section>
-
-          {/* FAQ */}
-          <section className="border-t border-border px-5 py-16 md:px-10">
-            <SectionLabel>Questions</SectionLabel>
-            <div className="mt-6 max-w-2xl">
-              <Accordion items={FAQ} />
-            </div>
-          </section>
-        </main>
-
-        <footer className="flex items-center gap-2 border-t border-border px-5 py-10 text-xs text-muted-foreground md:px-10">
+    <div id="top" className="min-h-dvh pb-9">
+      {/* Title bar: the page itself is a Sleipnir window */}
+      <header className="sticky top-0 z-40 flex h-11 items-center gap-3 border-b border-border bg-background/95 px-4 md:px-6">
+        <div className="flex items-center gap-1.5" aria-hidden>
+          <span className="size-2.5 rounded-full bg-ansi-red/80" />
+          <span className="size-2.5 rounded-full bg-ansi-amber/80" />
+          <span className="size-2.5 rounded-full bg-ansi-green/80" />
+        </div>
+        <a
+          href="#top"
+          className="flex items-center gap-2 rounded-[2px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <img
             src="/app-icon.png"
             alt=""
-            className="size-4 rounded-[4px] opacity-80 grayscale"
-            width={16}
-            height={16}
+            className="size-5 rounded-[4px]"
+            width={20}
+            height={20}
           />
-          <span>© {new Date().getFullYear()} Sleipnir</span>
-          <span className="text-border">·</span>
+          <span className="font-mono text-[12px] text-muted-foreground">
+            <span className="text-foreground">sleipnir</span>
+            <span className="hidden sm:inline"> — website — zsh</span>
+          </span>
+        </a>
+        <div className="ml-auto flex items-center gap-2">
           <a
             href={GITHUB_URL}
             target="_blank"
             rel="noreferrer"
-            className="hover:text-foreground"
+            aria-label="GitHub"
+            className="flex size-8 items-center justify-center rounded-[2px] text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           >
-            GitHub
+            <GitHubIcon className="size-4.5" />
           </a>
-        </footer>
-      </div>
+          <DownloadMenu release={release} size="sm" align="end" />
+        </div>
+      </header>
+
+      <main className="mx-auto w-full max-w-[1200px]">
+        {/* Hero: pitch on the left, a live session on the right */}
+        <section className="grid grid-cols-1 items-center gap-12 px-5 pt-14 pb-16 md:px-8 md:pt-20 lg:grid-cols-[1.02fr_1fr]">
+          <div className="min-w-0">
+            <p className="font-mono text-[12px] tracking-[0.08em] text-ansi-dimgreen">
+              <span className="text-muted-foreground">&gt;</span> gpu-native terminal
+              emulator
+            </p>
+            <h1 className="mt-5 font-mono text-[1.3rem] leading-[1.16] font-semibold tracking-[-0.022em] text-balance sm:text-[1.9rem] lg:text-[2.2rem]">
+              A fast, native terminal{' '}
+              <span className="text-ansi-green text-glow mt-1 block">
+                for mac, windows &amp; linux.
+                <span className="block-cursor" aria-hidden />
+              </span>
+            </h1>
+            <p className="mt-6 max-w-[34rem] font-mono text-[13.5px] leading-relaxed text-pretty text-muted-foreground">
+              Rust + GPUI, the stack behind Zed. Tabs, splits, multi-window,
+              adaptive themes, Run Ledger, and session restore. No account, no
+              cloud, no Electron.
+            </p>
+            <div className="mt-8 flex flex-wrap items-center gap-3">
+              <DownloadMenu
+                release={release}
+                size="lg"
+                align="start"
+                showIcon
+                className="h-10 px-4"
+              />
+              <a
+                href={GITHUB_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-10 items-center gap-1.5 rounded-[2px] border border-input px-4 font-mono text-sm text-muted-foreground outline-none transition-colors hover:border-ansi-green/50 hover:bg-accent hover:text-ansi-green focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <GitHubIcon className="size-4" />
+                source
+              </a>
+            </div>
+            <InstallCommand className="mt-6" />
+          </div>
+          <TerminalWindow title="sleipnir — zsh" crt className="min-w-0">
+            <BootTerminal />
+          </TerminalWindow>
+        </section>
+
+        {/* Capability strip, laid out like panes */}
+        <section className="px-5 md:px-8">
+          <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-4">
+            {HIGHLIGHTS.map((h) => (
+              <div
+                key={h.label}
+                className="group flex items-center gap-2.5 bg-background px-4 py-3.5 transition-colors hover:bg-card"
+              >
+                <h.icon
+                  className="size-4 shrink-0 text-ansi-dimgreen transition-colors group-hover:text-ansi-green"
+                  strokeWidth={1.75}
+                  aria-hidden
+                />
+                <span className="truncate font-mono text-[12px] text-muted-foreground transition-colors group-hover:text-foreground">
+                  {h.label}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* The product, framed as the product */}
+        <section className="px-5 pt-20 md:px-8">
+          <SectionHeading index="00" name="session" meta="claude · codex · kimi · grok" />
+          <TerminalWindow
+            title="agents — 4 panes"
+            className="mt-6"
+            bodyClassName="p-0 md:p-0"
+          >
+            <img
+              src="/app-screenshot.jpg"
+              alt="Sleipnir with four split panes running Claude Code, OpenAI Codex, Kimi Code, and Grok Build"
+              width={3456}
+              height={1980}
+              loading="lazy"
+              className="block h-auto w-full"
+            />
+          </TerminalWindow>
+        </section>
+
+        {/* Features as a split-pane grid */}
+        <section id="features" className="scroll-mt-16 px-5 pt-20 md:px-8">
+          <SectionHeading index="01" name="features" meta="9 entries" />
+          <div className="mt-6 grid grid-cols-1 gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-2 lg:grid-cols-3">
+            {FEATURES.map((f, i) => (
+              <article
+                key={f.title}
+                className="group bg-background p-6 transition-colors hover:bg-card"
+              >
+                <div className="flex items-baseline gap-2.5">
+                  <span className="font-mono text-[11px] text-ansi-amber tabular-nums">
+                    [{String(i + 1).padStart(2, '0')}]
+                  </span>
+                  <h3 className="font-mono text-[13.5px] font-semibold tracking-tight text-foreground transition-colors group-hover:text-ansi-green">
+                    {f.title}
+                  </h3>
+                </div>
+                <p className="mt-3 font-mono text-[12px] leading-[1.75] text-muted-foreground">
+                  {f.body}
+                </p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        {/* Download: one-liner plus the target matrix */}
+        <section id="download" className="scroll-mt-16 px-5 pt-20 md:px-8">
+          <SectionHeading
+            index="02"
+            name="download"
+            meta={release ? `latest: v${release.version}` : 'latest: …'}
+          />
+          <div className="mt-6 grid grid-cols-1 gap-8 lg:grid-cols-[1fr_1.1fr]">
+            <div>
+              <p className="max-w-md font-mono text-[12.5px] leading-relaxed text-muted-foreground">
+                Free and open source. The installer detects macOS or Linux,
+                verifies SHA-256, and drops the binary in place. Windows builds
+                ship from GitHub Releases.
+              </p>
+              <InstallCommand className="mt-6" />
+            </div>
+            <DownloadTargets release={release} />
+          </div>
+        </section>
+
+        {/* FAQ, man-page style */}
+        <section id="faq" className="scroll-mt-16 px-5 pt-20 pb-24 md:px-8">
+          <SectionHeading index="03" name="faq" meta="man sleipnir" />
+          <div className="mt-6 max-w-3xl border-t border-border">
+            <Accordion items={FAQ} />
+          </div>
+        </section>
+      </main>
+
+      <footer className="mx-auto flex w-full max-w-[1200px] items-center gap-2 border-t border-border px-5 py-6 font-mono text-[11px] text-muted-foreground md:px-8">
+        <img
+          src="/app-icon.png"
+          alt=""
+          className="size-4 rounded-[3px] opacity-80"
+          width={16}
+          height={16}
+        />
+        <span>© {new Date().getFullYear()} sleipnir</span>
+        <span className="text-border">·</span>
+        <span>apache-2.0</span>
+        <span className="text-border">·</span>
+        <a
+          href={GITHUB_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
+        >
+          github
+        </a>
+        <span className="ml-auto hidden sm:inline">exit 0</span>
+      </footer>
+
+      <StatusBar version={release?.version ?? null} />
     </div>
   )
 }
