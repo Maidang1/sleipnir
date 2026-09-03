@@ -338,15 +338,15 @@ mod tests {
     #[test]
     fn connect_claim_is_exclusive_and_released() {
         let mut connecting: BTreeSet<String> = BTreeSet::new();
-        assert!(connecting.insert("failed-run".into()), "first claim wins");
+        assert!(connecting.insert("demo".into()), "first claim wins");
         assert!(
-            !connecting.insert("failed-run".into()),
+            !connecting.insert("demo".into()),
             "second claim must lose while the first is in flight"
         );
         assert!(connecting.insert("other".into()), "claims are per plugin");
-        connecting.remove("failed-run");
+        connecting.remove("demo");
         assert!(
-            connecting.insert("failed-run".into()),
+            connecting.insert("demo".into()),
             "a released claim must be retryable after a failed launch"
         );
     }

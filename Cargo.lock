@@ -5889,13 +5889,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sleipnir-plugin-failed-run"
-version = "0.1.0"
-dependencies = [
- "sleipnir-plugin",
-]
-
-[[package]]
 name = "sleipnir-update-helper"
 version = "0.1.0"
 dependencies = [

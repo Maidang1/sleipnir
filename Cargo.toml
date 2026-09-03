@@ -18,7 +18,6 @@ members = [
     "crates/plugin_grants",
     "crates/atomic_write",
     "crates/sleipnir_plugin_sdk",
-    "crates/sleipnir_plugin_failed_run",
     "crates/sleipnir_plugin_disk3d",
     "crates/sleipnir_widget",
     "crates/row_geometry",

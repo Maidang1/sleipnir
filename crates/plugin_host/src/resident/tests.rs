@@ -888,8 +888,8 @@ fn declared_capabilities_include_plugin_level_v2_permissions() {
     // Ready.requests is checked against this set. If plugin.json cannot
     // name subscribe_events / render_block, a v2 plugin cannot load.
     let manifest = crate::PluginManifest {
-        id: "failed-run".into(),
-        name: "Failed Run".into(),
+        id: "demo".into(),
+        name: "Demo".into(),
         version: "1".into(),
         api_version: crate::PLUGIN_API_VERSION,
         description: String::new(),

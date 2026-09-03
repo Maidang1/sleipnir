@@ -67,13 +67,13 @@ plugin still needs at least one command.
 
 ```json
 {
-  "id": "failed-run",
-  "name": "Failed Run",
+  "id": "my-plugin",
+  "name": "My Plugin",
   "version": "0.1.0",
   "api_version": 2,
   "enabled": true,
   "lifecycle": "resident",
-  "binary": "./sleipnir-plugin-failed-run",
+  "binary": "./my-plugin",
   "permissions": ["subscribe_events", "render_block", "read_cwd"]
 }
 ```
@@ -105,12 +105,12 @@ use sleipnir_plugin::{
     HostEvent, RenderTarget, col, text, badge, btn, Tone,
 };
 
-struct FailedRun;
-impl Plugin for FailedRun {
+struct MyPlugin;
+impl Plugin for MyPlugin {
     fn manifest(&self) -> Manifest {
         Manifest {
-            id: "failed-run".into(),
-            name: "Failed Run".into(),
+            id: "my-plugin".into(),
+            name: "My Plugin".into(),
             version: "0.1.0".into(),
             description: String::new(),
             lifecycle: Lifecycle::Resident,
@@ -145,7 +145,7 @@ impl Plugin for FailedRun {
         if action == "retry" { /* send a new Render for the same Block */ let _ = (arg, ctx); }
     }
 }
-fn main() { run(FailedRun); }
+fn main() { run(MyPlugin); }
 ```
 
 Widget builders (`col`, `row`, `text`, `badge`, `btn`, `code`, `bar`, `spark`,
@@ -155,11 +155,10 @@ hex, no RGB.
 `Context::render` is a push: it can be sent at any time, not only as a reply.
 `Context::call` issues a `HostCall` and waits for the matching `Reply`.
 
-See `crates/sleipnir_plugin_failed_run` for a complete, runnable Block example,
-and `crates/sleipnir_plugin_disk3d` for a Panel example that renders a 3D
-disk-usage chart (a software rasteriser whose framebuffer is a `col` of `text`
-rows — the closed widget set is enough for that, since one Unicode scalar is one
-cell and `wrap_text` honours `\n`).
+See `crates/sleipnir_plugin_disk3d` for a complete, runnable Panel example
+that renders a 3D disk-usage chart (a software rasteriser whose framebuffer is
+a `col` of `text` rows — the closed widget set is enough for that, since one
+Unicode scalar is one cell and `wrap_text` honours `\n`).
 
 ## Render targets
 
@@ -256,26 +255,21 @@ and offers a kill switch. A non-zero running count is always shown in chrome.
 - Reload Settings re-reads manifests, permission policy, and restarts granted
   residents that are not already live.
 
-## Install and verify the example plugin
+## Install a plugin
 
-`crates/sleipnir_plugin_failed_run` is a workspace member. It is **not** a
-dependency of the terminal binary. It subscribes to run events and, when a
-command exits non-zero, draws a Block in scrollback with the redacted command,
-the exit code, the duration, and a **Retry** button. Pressing Retry re-renders
-the same Block with a visibly different tree (the full Render → click → Action
-→ re-Render loop).
-
-Plugins are off by default. Exact steps:
+Plugins are off by default. A plugin installs as one directory per plugin under
+the plugin root, containing `plugin.json` and the binary it names. Example with
+a locally authored plugin:
 
 ```sh
-# 1. Build the example (and the app)
-cargo build -p sleipnir-plugin-failed-run
+# 1. Build the plugin (and the app)
+cargo build -p <plugin-package>
 cargo build -p sleipnir
 
 # 2. Install into the default plugin directory
-mkdir -p ~/.config/sleipnir/plugins/failed-run
-cp target/debug/sleipnir-plugin-failed-run ~/.config/sleipnir/plugins/failed-run/
-cp crates/sleipnir_plugin_failed_run/plugin.json ~/.config/sleipnir/plugins/failed-run/
+mkdir -p ~/.config/sleipnir/plugins/<id>
+cp target/debug/<plugin-binary> ~/.config/sleipnir/plugins/<id>/
+cp path/to/plugin.json ~/.config/sleipnir/plugins/<id>/
 
 # 3. Enable plugins in settings.json (create the file if needed)
 #    ~/.config/sleipnir/settings.json
@@ -284,16 +278,12 @@ cp crates/sleipnir_plugin_failed_run/plugin.json ~/.config/sleipnir/plugins/fail
 
 Then:
 
-1. Start Sleipnir. A consent prompt lists `subscribe_events`, `render_block`,
-   `read_cwd`, and `resident`. Approve it. Deny writes nothing and the plugin
-   will not start.
-2. In a pane, run a command that fails, e.g. `false` or `exit 1`.
-3. A Block appears under that run: a red `failed` badge, the redacted command,
-   the exit code, the duration, and **Retry**.
-4. Click **Retry**. The Block updates in place (`queued`, the button is gone).
-   The plugin does not re-execute the command — the point is to see the round
-   trip.
+1. Start Sleipnir (or Reload Settings). A consent prompt lists the plugin's
+   requested capabilities in plain language. Approve it. Deny writes nothing
+   and the plugin will not start.
+2. Confirm the plugin is live in the Plugin Monitor (command palette: "Plugin
+   Monitor").
 
 If the prompt does not appear, confirm `plugins.enabled` is `true` and Reload
-Settings. If the Block does not appear, confirm the binary path in that
-`plugin.json` matches the copied executable and that you approved consent.
+Settings. If the plugin does not start, confirm the binary path in that
+`plugin.json` matches the installed executable and that you approved consent.

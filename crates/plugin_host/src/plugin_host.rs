@@ -523,14 +523,14 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         write_plugin(
             temp.path(),
-            "failed-run",
+            "demo-resident",
             r#"{
-                "id":"failed-run",
-                "name":"Failed Run",
+                "id":"demo-resident",
+                "name":"Demo Resident",
                 "version":"0.1.0",
                 "api_version":2,
                 "lifecycle":"resident",
-                "binary":"./sleipnir-plugin-failed-run",
+                "binary":"./demo-resident",
                 "permissions":["subscribe_events","render_block","read_cwd"]
             }"#,
         );
