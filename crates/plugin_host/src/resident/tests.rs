@@ -259,18 +259,21 @@ fn version_outside_window_is_rejected() {
 }
 
 #[test]
-fn version_n_minus_1_is_accepted() {
-    // Wire-level N/N-1 window (ADR-0016 §8): a plugin built one protocol
-    // version behind still handshakes. The window exists for the next bump.
+fn version_from_the_removed_v1_dialect_is_rejected() {
+    // The v1 dialect is gone: its frames carry no correlation ids, so a v1
+    // handshake must be refused, not accepted into a session that cannot
+    // interoperate. The N/N-1 window (ADR-0016 §8) reopens when v3 lands and
+    // v2 stays implemented.
     let env = Env::new();
     let plugin = env.spawn_plugin(|ep| {
         let _ = ep.handshake(&ready(1, vec![Capability::ReadCwd]));
         serve_until_eof(ep);
     });
-    env.sup
-        .connect(&spec())
-        .expect("plugin one version behind is in the N/N-1 window");
-    env.sup.shutdown("demo");
+    let err = env.sup.connect(&spec()).unwrap_err();
+    assert!(
+        matches!(err, SessionError::VersionMismatch { plugin } if plugin == 1),
+        "v1 wire must be rejected: {err:?}"
+    );
     let _ = plugin.join();
 }
 
@@ -858,7 +861,7 @@ fn declared_capabilities_include_resident_from_lifecycle() {
         id: "x".into(),
         name: "X".into(),
         version: "1".into(),
-        api_version: crate::PLUGIN_API_VERSION_V2,
+        api_version: crate::PLUGIN_API_VERSION,
         description: String::new(),
         enabled: true,
         lifecycle: PluginLifecycle::Resident,
@@ -888,7 +891,7 @@ fn declared_capabilities_include_plugin_level_v2_permissions() {
         id: "failed-run".into(),
         name: "Failed Run".into(),
         version: "1".into(),
-        api_version: crate::PLUGIN_API_VERSION_V2,
+        api_version: crate::PLUGIN_API_VERSION,
         description: String::new(),
         enabled: true,
         lifecycle: PluginLifecycle::Resident,

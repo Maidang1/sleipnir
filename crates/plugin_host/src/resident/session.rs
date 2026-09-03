@@ -599,8 +599,9 @@ impl Drop for Session {
 }
 
 fn validate_ready(spec: &LaunchSpec, ready: &ReadyInfo) -> Result<(), SessionError> {
-    // N / N-1 window, not equality (ADR-0016 §8): a plugin built against
-    // the previous protocol version keeps working across a host bump.
+    // ADR-0016 §8's window covers only dialects the host still implements.
+    // v1 was removed, so today this is equality with v2::PROTOCOL_VERSION;
+    // it widens to N-1 when a v3 lands and v2 stays implemented.
     if !v2::versions_compatible(v2::PROTOCOL_VERSION, ready.protocol_version) {
         return Err(SessionError::VersionMismatch {
             plugin: ready.protocol_version,

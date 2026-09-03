@@ -716,19 +716,10 @@ impl AppShell {
         plugin: plugin_host::LoadedPluginCommand,
         cx: &mut Context<Self>,
     ) {
-        // All catalog commands speak the v2 multiplexed dialect; the v1
-        // per-invocation path was removed with protocol v1.
-        self.invoke_v2_command(plugin, cx);
-    }
-    pub(super) fn invoke_v2_command(
-        &mut self,
-        plugin: plugin_host::LoadedPluginCommand,
-        cx: &mut Context<Self>,
-    ) {
         let Some(view) = self.active_view(cx) else {
             return;
         };
-        let context = crate::plugin_runtime::build_context(&plugin, &view, cx);
+        let invoke_ctx = crate::plugin_runtime::build_context(&plugin, &view, cx);
         let Some(loaded) = crate::plugin_runtime::PluginRuntime::plugins(cx)
             .into_iter()
             .find(|p| p.manifest.id == plugin.plugin_id)
@@ -748,29 +739,12 @@ impl AppShell {
         };
         let command_id = plugin.command.id.clone();
         let qualified_id = plugin.qualified_id();
-        let invoke_ctx = plugin_protocol::v2::InvokeContext {
-            cwd: context.cwd,
-            title: context.title,
-            selection: context.selection,
-            visible_screen: context.visible_screen,
-        };
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { sup.invoke(&spec, &command_id, invoke_ctx) })
                 .await;
             this.update(cx, |_this, cx| match result {
-                Ok(output) => {
-                    let routed = match output {
-                        plugin_protocol::v2::Output::Ignore => plugin_host::PluginRunOutput::Ignored,
-                        plugin_protocol::v2::Output::Insert { text } => {
-                            plugin_host::PluginRunOutput::Insert(text)
-                        }
-                        plugin_protocol::v2::Output::Copy { text } => {
-                            plugin_host::PluginRunOutput::Copy(text)
-                        }
-                    };
-                    crate::plugin_runtime::apply_output(routed, &view, cx);
-                }
+                Ok(output) => crate::plugin_runtime::apply_output(output, &view, cx),
                 Err(err) => log::warn!("plugin {qualified_id} failed: {err}"),
             })
             .ok();

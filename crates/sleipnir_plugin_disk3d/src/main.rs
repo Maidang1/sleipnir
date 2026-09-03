@@ -24,7 +24,7 @@
 
 use std::path::PathBuf;
 
-use sleipnir_plugin::v2::{
+use sleipnir_plugin::{
     BlockId, Capability, Context, EventFilter, EventKind, HostEvent, Invoke, Lifecycle, Manifest,
     Output, PaneKey, Plugin, RenderTarget, run,
 };
@@ -124,7 +124,7 @@ impl Plugin for Disk3d {
             version: "0.1.0".into(),
             description: "Shows where disk space went as a rotatable 3D chart.".into(),
             lifecycle: Lifecycle::Resident,
-            commands: vec![sleipnir_plugin::v2::CommandSpec {
+            commands: vec![sleipnir_plugin::CommandSpec {
                 id: "open".into(),
                 title: "Disk 3D: Chart This Directory".into(),
                 description: "Open a 3D disk-usage chart for the working directory.".into(),

@@ -36,10 +36,16 @@ use uuid::Uuid;
 /// The current protocol version.
 pub const PROTOCOL_VERSION: u32 = 2;
 
+/// The oldest dialect this host can actually speak.
+///
 /// ADR-0016 §8: an external ecosystem cannot survive `host == plugin`, which
-/// breaks every plugin on every host release. The host accepts the current and
-/// previous versions, so the window becomes effective at the next version bump.
-pub const MIN_SUPPORTED_VERSION: u32 = PROTOCOL_VERSION - 1;
+/// breaks every plugin on every host release — the host should accept N and
+/// N-1. But the window may only cover dialects that remain *implemented*.
+/// v1 was removed, so today the window is exactly `{2}`; accepting `1` would
+/// green-light a handshake whose first framed message (v1 carries no
+/// correlation ids) cannot interoperate. When v3 lands and v2 stays
+/// implemented, this becomes `PROTOCOL_VERSION - 1`.
+pub const MIN_SUPPORTED_VERSION: u32 = PROTOCOL_VERSION;
 
 /// Correlates a request with its reply. Unique within a session per direction.
 pub type MessageId = u64;
@@ -59,9 +65,19 @@ pub struct Anchor {
     pub column: usize,
 }
 
-/// True when the host can speak to a plugin claiming `plugin`.
+/// True when the host can speak to a plugin claiming `plugin`. The accepted
+/// range is anchored on the dialects actually implemented
+/// ([`MIN_SUPPORTED_VERSION`]), not on arithmetic.
 pub fn versions_compatible(host: u32, plugin: u32) -> bool {
-    plugin <= host && plugin >= host.saturating_sub(1)
+    (MIN_SUPPORTED_VERSION..=host).contains(&plugin)
+}
+
+/// The plugin-side mirror: a plugin may talk to a host claiming `host` when
+/// the host is the plugin's own version or one ahead — the host's N/N-1
+/// window (ADR-0016 §8) then still covers this dialect. Anything further
+/// ahead has dropped it; anything behind predates it.
+pub fn host_compatible(host: u32, plugin: u32) -> bool {
+    (plugin..=plugin + 1).contains(&host)
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +410,7 @@ pub enum Tone {
     Err,
 }
 
-/// The closed v1 widget set (ADR-0017).
+/// The closed widget set (ADR-0017).
 ///
 /// An unknown `t` deserializes to `Unknown` rather than failing the tree, so a
 /// plugin built against a newer host degrades to a placeholder instead of
@@ -543,7 +559,7 @@ pub enum PluginMessage {
         id: MessageId,
         message: String,
     },
-    /// Whole-tree replacement (ADR-0017). No patch protocol in v1: bounded trees
+    /// Whole-tree replacement (ADR-0017). No patch protocol: bounded trees
     /// make replacement affordable, and a patch format would be a second
     /// permanent contract with its own consistency failure modes.
     Render {
@@ -638,13 +654,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compatibility_window_accepts_current_and_previous() {
+    fn compatibility_window_tracks_implemented_dialects() {
         // ADR-0016 §8: `host == plugin` would break every plugin on every host
-        // release once there is an external ecosystem.
+        // release — but only dialects the host still implements may pass. The
+        // v1 dialect was removed, so today the window is exactly `{2}`.
         assert!(versions_compatible(2, 2));
-        assert!(versions_compatible(2, 1));
+        assert!(!versions_compatible(2, 1), "v1 dialect was removed");
         assert!(!versions_compatible(2, 3), "never accept a future plugin");
-        assert!(!versions_compatible(3, 1), "N-2 is outside the window");
+    }
+
+    #[test]
+    fn plugin_accepts_host_within_one_version_ahead() {
+        // The host's N/N-1 window means a host one version ahead still speaks
+        // this dialect; two ahead has dropped it.
+        assert!(host_compatible(2, 2));
+        assert!(host_compatible(3, 2), "host N+1 still covers plugin N");
+        assert!(!host_compatible(4, 2), "host N+2 has dropped plugin N");
+        assert!(!host_compatible(1, 2), "a v1 host cannot speak v2 frames");
     }
 
 

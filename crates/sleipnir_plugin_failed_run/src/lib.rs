@@ -1,9 +1,9 @@
 //! Decision logic for the failed-run example plugin.
 //!
 //! Kept as a lib so the Block tree can be tested without speaking the wire
-//! protocol. `main` is a thin [`sleipnir_plugin::v2::run`] wrapper.
+//! protocol. `main` is a thin [`sleipnir_plugin::run`] wrapper.
 
-use sleipnir_plugin::v2::{Tone, Widget, badge, btn, col, row, text};
+use sleipnir_plugin::{Tone, Widget, badge, btn, col, row, text};
 
 /// First tree: redacted command, exit, duration, Retry button.
 ///
@@ -52,7 +52,7 @@ pub fn retried_tree(command: &str, exit_code: i32, duration_ms: u64) -> Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sleipnir_plugin::v2::Widget;
+    use sleipnir_plugin::Widget;
 
     #[test]
     fn failure_tree_has_a_retry_button() {

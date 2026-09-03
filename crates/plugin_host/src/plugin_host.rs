@@ -28,21 +28,17 @@ use std::path::{Path, PathBuf};
 pub mod resident;
 
 /// The only manifest / protocol version this host speaks (ADR-0016).
-pub const PLUGIN_API_VERSION_V2: u32 = plugin_protocol::v2::PROTOCOL_VERSION;
+pub const PLUGIN_API_VERSION: u32 = plugin_protocol::v2::PROTOCOL_VERSION;
 const MANIFEST_FILE: &str = "plugin.json";
-
-/// True when `plugin.json` declares the v2 `api_version`.
-pub fn api_version_supported(version: u32) -> bool {
-    version == PLUGIN_API_VERSION_V2
-}
 
 /// Permission is the user-facing capability name; it maps 1:1 to the v2 wire
 /// `Capability`. Kept as its own type so settings/schema stay in this crate.
 ///
-/// The v1 seven are snapshots taken when the user asked. The v2 additions are
-/// categorically stronger (ADR-0016 §4) and exist so `plugin.json` can declare
-/// them for pre-launch audit — the whole point of keeping the file
-/// (ADR-0015). They are never implied by the v1 set.
+/// The snapshot reads are taken when the user asked. The observation,
+/// rendering, and host-call additions are categorically stronger (ADR-0016
+/// §4) and exist so `plugin.json` can declare them for pre-launch audit —
+/// the whole point of keeping the file (ADR-0015). They are never implied
+/// by the snapshot set.
 #[derive(
     Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
 )]
@@ -154,16 +150,6 @@ pub struct PluginCommand {
     pub timeout_secs: Option<u64>,
 }
 
-/// Context the host offers a command. Fields are populated by the caller only
-/// when the command holds the matching permission (enforced in the UI adapter).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PluginContext {
-    pub cwd: Option<String>,
-    pub title: Option<String>,
-    pub selection: Option<String>,
-    pub visible_screen: Option<String>,
-}
-
 /// One discovered plugin, whether or not it contributes palette commands.
 ///
 /// v2 residents can be command-less (they live on events and `Render`). The
@@ -203,14 +189,6 @@ pub struct PluginCatalog {
     pub plugins: Vec<LoadedPlugin>,
     pub commands: Vec<LoadedPluginCommand>,
     pub diagnostics: Vec<String>,
-}
-
-/// Result of an invocation, routed by the UI adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PluginRunOutput {
-    Ignored,
-    Insert(String),
-    Copy(String),
 }
 
 #[derive(Debug)]
@@ -347,9 +325,9 @@ fn load_manifest(path: &Path) -> Result<PluginManifest, PluginError> {
 }
 
 fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginError> {
-    if !api_version_supported(manifest.api_version) {
+    if manifest.api_version != PLUGIN_API_VERSION {
         return Err(PluginError::InvalidManifest(format!(
-            "unsupported api_version {} (expected {PLUGIN_API_VERSION_V2}; v1 support was removed)",
+            "unsupported api_version {} (expected {PLUGIN_API_VERSION}; v1 support was removed)",
             manifest.api_version
         )));
     }
@@ -564,7 +542,7 @@ mod tests {
             "a command-less resident has no palette entries"
         );
         let plugin = &catalog.plugins[0];
-        assert_eq!(plugin.manifest.api_version, PLUGIN_API_VERSION_V2);
+        assert_eq!(plugin.manifest.api_version, PLUGIN_API_VERSION);
         assert_eq!(plugin.manifest.lifecycle, PluginLifecycle::Resident);
         assert!(
             plugin

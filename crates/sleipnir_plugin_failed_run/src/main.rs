@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use sleipnir_plugin::v2::{
+use sleipnir_plugin::{
     Capability, Context, EventFilter, EventKind, HostEvent, Lifecycle, Manifest, Plugin,
     RenderTarget, RunId, run,
 };
@@ -103,7 +103,7 @@ impl Plugin for FailedRun {
 
     fn on_action(
         &mut self,
-        _block_id: sleipnir_plugin::v2::BlockId,
+        _block_id: sleipnir_plugin::BlockId,
         action: &str,
         arg: Option<&str>,
         ctx: &mut Context<'_>,

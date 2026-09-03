@@ -13,7 +13,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Write};
 
-use plugin_protocol::v2::{self, HostMessage, MessageId, PluginMessage, versions_compatible};
+use plugin_protocol::v2::{self, HostMessage, MessageId, PluginMessage, host_compatible};
 use uuid::Uuid;
 
 pub use crate::widgets::{
@@ -322,7 +322,7 @@ fn handshake<P: Plugin, R: BufRead, W: Write>(plugin: &mut P, io: &mut Io<R, W>)
             "expected hello as first message",
         ));
     };
-    if !versions_compatible(protocol_version, v2::PROTOCOL_VERSION) {
+    if !host_compatible(protocol_version, v2::PROTOCOL_VERSION) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(

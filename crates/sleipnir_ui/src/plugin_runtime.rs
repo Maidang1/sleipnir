@@ -7,10 +7,9 @@ use plugin_host::resident::{
     SupervisorConfig, SystemClock,
 };
 use plugin_host::{
-    LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginContext, PluginLifecycle,
-    PluginRunOutput,
+    LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginLifecycle,
 };
-use plugin_protocol::v2::{Capability, HostEvent};
+use plugin_protocol::v2::{Capability, HostEvent, InvokeContext, Output};
 use sleipnir_settings::TerminalSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -92,10 +91,10 @@ pub fn build_context(
     plugin: &LoadedPluginCommand,
     view: &gpui::Entity<TermView>,
     cx: &App,
-) -> PluginContext {
+) -> InvokeContext {
     let permissions = &plugin.command.permissions;
     let view = view.read(cx);
-    PluginContext {
+    InvokeContext {
         cwd: permissions
             .contains(&Permission::ReadCwd)
             .then(|| view.working_directory(cx))
@@ -114,15 +113,15 @@ pub fn build_context(
     }
 }
 
-pub fn apply_output(output: PluginRunOutput, view: &gpui::Entity<TermView>, cx: &mut App) {
+pub fn apply_output(output: Output, view: &gpui::Entity<TermView>, cx: &mut App) {
     match output {
-        PluginRunOutput::Ignored => {}
-        PluginRunOutput::Insert(text) => {
+        Output::Ignore => {}
+        Output::Insert { text } => {
             if !text.is_empty() {
                 view.update(cx, |view, cx| view.input_bytes(text.into_bytes(), cx));
             }
         }
-        PluginRunOutput::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
+        Output::Copy { text } => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
     }
 }
 

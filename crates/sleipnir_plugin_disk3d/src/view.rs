@@ -6,7 +6,7 @@
 use plugin_protocol::v2::{
     MAX_WIDGET_NODES, SceneBar, SceneCamera, SceneData, Tone, Widget, measure,
 };
-use sleipnir_plugin::v2::{badge, btn, col, row, sep, text};
+use sleipnir_plugin::{badge, btn, col, row, sep, text};
 
 use crate::raster::{Camera, Scene, default_light};
 use crate::scan::{Entry, Scan, human_bytes};

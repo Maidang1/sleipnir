@@ -15,7 +15,7 @@ stores no provider credentials.
 plugin_protocol   shared wire types (v2)
       ▲
       ├── sleipnir-plugin (SDK)
-      │     └── v2::Plugin + v2::run()  resident, events, Render, HostCall
+      │     └── Plugin + run()  resident, events, Render, HostCall
       │         ▼ compiled into
       │   an independent plugin binary
       ▼
@@ -25,8 +25,9 @@ plugin_host (supervisor)  ── discovers plugin.json, launches the binary,
 
 Protocol **v2** is the only supported dialect. Manifests must declare
 `api_version: 2`; v1 manifests are rejected at load time. The wire-level
-N / N-1 acceptance window (ADR-0016 §8) is retained so a host bump to v3 will
-not break v2 plugins.
+acceptance window (ADR-0016 §8) covers only dialects the host still
+implements, so today it is exactly `{2}`; it widens to N-1 when a v3 lands
+and v2 stays implemented, so that bump will not break v2 plugins.
 
 ## Enable plugins
 
@@ -93,13 +94,13 @@ Plugin and command IDs use lowercase ASCII letters, digits, `-`, and `_`.
 
 ## Writing a plugin (Rust SDK)
 
-A resident, event-driven, rendering plugin implements `v2::Plugin` and calls
-`v2::run`. The SDK multiplexes events, actions, host-call replies and
+A resident, event-driven, rendering plugin implements `Plugin` and calls
+`run`. The SDK multiplexes events, actions, host-call replies and
 invocations, correlating by `id`, and never deadlocks a `HostCall` against an
 intervening event.
 
 ```rust
-use sleipnir_plugin::v2::{
+use sleipnir_plugin::{
     run, Plugin, Context, Manifest, Lifecycle, Capability, EventFilter, EventKind,
     HostEvent, RenderTarget, col, text, badge, btn, Tone,
 };
@@ -140,7 +141,7 @@ impl Plugin for FailedRun {
                 .child(btn("Retry", "retry").arg(run_id.to_string())),
         );
     }
-    fn on_action(&mut self, _id: sleipnir_plugin::v2::BlockId, action: &str, arg: Option<&str>, ctx: &mut Context<'_>) {
+    fn on_action(&mut self, _id: sleipnir_plugin::BlockId, action: &str, arg: Option<&str>, ctx: &mut Context<'_>) {
         if action == "retry" { /* send a new Render for the same Block */ let _ = (arg, ctx); }
     }
 }
