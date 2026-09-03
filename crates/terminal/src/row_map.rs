@@ -270,8 +270,7 @@ mod tests {
             let absolute_line_delta = viewport.apply_pixel_delta(delta_px, &g);
 
             assert_eq!(
-                absolute_line_delta,
-                expected_display_offset_delta,
+                absolute_line_delta, expected_display_offset_delta,
                 "pixel delta {delta_px} must retain the legacy Scroll::Delta sign"
             );
         }

@@ -8,9 +8,9 @@ mod find;
 mod layout;
 mod palette;
 mod panels;
+mod persist;
 mod plugin_paint;
 mod plugins;
-mod persist;
 mod settings;
 mod tabs;
 mod update;
@@ -390,8 +390,6 @@ struct CloseConfirmState {
     message: SharedString,
     kind: ConfirmKind,
 }
-
-
 
 impl Focusable for AppShell {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
@@ -867,22 +865,6 @@ impl AppShell {
         crate::attention_chrome::refresh(cx);
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     fn apply_pane_closed(&self, pane: PaneKey, cx: &mut App) {
         self.apply_run_event(RunEvent::PaneClosed { pane, at_ms: 0 }, cx);
     }
@@ -942,7 +924,6 @@ impl AppShell {
         cx.notify();
     }
 
-
     pub(crate) fn plugin_badges_for_tab(
         &self,
         tab_panes: &[crate::pane_tree::PaneKey],
@@ -960,7 +941,6 @@ impl AppShell {
                 self.plugin_chrome.palette_entries(),
             ));
     }
-
 
     /// Re-read settings from disk, dropping any in-session font override.
     fn reload_settings(&mut self, cx: &mut Context<Self>) {
@@ -1469,12 +1449,6 @@ impl AppShell {
         cx.notify();
     }
 
-
-
-
-
-
-
     fn on_send_selection(
         &mut self,
         _: &SendSelection,
@@ -1510,13 +1484,6 @@ impl AppShell {
         }
         cx.notify();
     }
-
-
-
-
-
-
-
 
     fn send_selection_to_pty(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.active_view(cx) else {
@@ -1763,7 +1730,6 @@ impl AppShell {
 
     // ── find in scrollback (M10) ────────────────────────────────────────────
 }
-
 
 fn tree_contains(tree: &PaneNode, id: PaneId) -> bool {
     tree.contains_leaf(id)

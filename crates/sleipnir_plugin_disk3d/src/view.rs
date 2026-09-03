@@ -150,7 +150,14 @@ pub fn build_scene(view: &View) -> Scene {
         let x = x0 + bar.gx as f32 * BAR_PITCH;
         let z = z0 + bar.gz as f32 * BAR_PITCH;
         scene.floor_tick(x, z);
-        scene.bar(x, z, BAR_HALF, bar.height * MAX_BAR_HEIGHT, light, bar.selected);
+        scene.bar(
+            x,
+            z,
+            BAR_HALF,
+            bar.height * MAX_BAR_HEIGHT,
+            light,
+            bar.selected,
+        );
     }
     scene
 }
@@ -336,9 +343,7 @@ fn legend(view: &View) -> Widget {
                 .child(text(human_bytes(entry.bytes)).tone(Tone::Accent))
                 .child(text(format!("{:.1}%", share * 100.0)).tone(Tone::Dim)),
         )
-        .child(Widget::Bar {
-            v: share as f32,
-        })
+        .child(Widget::Bar { v: share as f32 })
         .child(
             text(format!(
                 "bar {} of {}  ·  yaw {:.0}°  pitch {:.0}°  zoom {:.1}x",
@@ -350,7 +355,8 @@ fn legend(view: &View) -> Widget {
             ))
             .tone(Tone::Dim),
         )
-        .into()}
+        .into()
+}
 
 /// `btn` is the only interactive node in the schema, so every camera control is
 /// a button. No key handling exists for plugin surfaces.
@@ -657,7 +663,8 @@ mod tests {
     #[test]
     fn every_control_is_present() {
         let tree = render(&sample_view(), 80, 24);
-        for label in ["◀", "▶", "▲", "▼", "+", "-", "Next bar", "Spin", "Rescan"] {            assert!(find_text(&tree, label), "missing control {label}");
+        for label in ["◀", "▶", "▲", "▼", "+", "-", "Next bar", "Spin", "Rescan"] {
+            assert!(find_text(&tree, label), "missing control {label}");
         }
     }
 

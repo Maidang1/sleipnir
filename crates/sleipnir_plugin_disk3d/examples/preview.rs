@@ -12,7 +12,11 @@ fn flatten(w: &Widget, out: &mut Vec<String>) {
         Widget::Btn { s, .. } => out.push(format!("<{s}>")),
         Widget::Bar { v } => {
             let n = (v * 20.0).round().max(0.0) as usize;
-            out.push(format!("[{}{}]", "#".repeat(n.min(20)), "-".repeat(20 - n.min(20))));
+            out.push(format!(
+                "[{}{}]",
+                "#".repeat(n.min(20)),
+                "-".repeat(20 - n.min(20))
+            ));
         }
         Widget::Sep => out.push("─".repeat(60)),
         Widget::Col { children, .. } => children.iter().for_each(|c| flatten(c, out)),

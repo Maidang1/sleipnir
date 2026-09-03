@@ -19,7 +19,7 @@ use plugin_protocol::v2::{
     self, Capability, EventFilter, HostCall, HostMessage, MessageId, PluginMessage, RenderTarget,
     Widget,
 };
-use plugin_protocol::{InvokeContext, Manifest, Output};
+use plugin_protocol::v2::{InvokeContext, Manifest, Output};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
@@ -599,8 +599,8 @@ impl Drop for Session {
 }
 
 fn validate_ready(spec: &LaunchSpec, ready: &ReadyInfo) -> Result<(), SessionError> {
-    // N / N-1 window, not equality. v1's versions_compatible would reject a
-    // v1 plugin talking to a v2 host, which is the compatibility window.
+    // N / N-1 window, not equality (ADR-0016 §8): a plugin built against
+    // the previous protocol version keeps working across a host bump.
     if !v2::versions_compatible(v2::PROTOCOL_VERSION, ready.protocol_version) {
         return Err(SessionError::VersionMismatch {
             plugin: ready.protocol_version,
@@ -617,13 +617,12 @@ fn validate_ready(spec: &LaunchSpec, ready: &ReadyInfo) -> Result<(), SessionErr
             return Err(SessionError::CapabilityExceeded { capability: *cap });
         }
     }
-    // Command-level capabilities in Ready.manifest are v1 types; they still
-    // cannot exceed what plugin.json declared.
+    // Command-level capabilities in Ready.manifest still cannot exceed what
+    // plugin.json declared.
     for command in &ready.manifest.commands {
         for cap in &command.capabilities {
-            let v2_cap = v2::Capability::from(*cap);
-            if !spec.declared_capabilities.contains(&v2_cap) {
-                return Err(SessionError::CapabilityExceeded { capability: v2_cap });
+            if !spec.declared_capabilities.contains(cap) {
+                return Err(SessionError::CapabilityExceeded { capability: *cap });
             }
         }
     }

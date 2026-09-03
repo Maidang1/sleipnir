@@ -5930,7 +5930,6 @@ dependencies = [
  "dirs",
  "gpui",
  "log",
- "plugin_host",
  "schemars",
  "serde",
  "serde_json",

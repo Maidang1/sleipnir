@@ -7,7 +7,7 @@ use plugin_protocol::v2::{
     self, Capability, EventFilter, EventKind, HostCall, HostEvent, HostMessage, PluginMessage,
     RenderTarget, Widget,
 };
-use plugin_protocol::{CommandSpec, InvokeContext, Lifecycle, Manifest, Output};
+use plugin_protocol::v2::{CommandSpec, InvokeContext, Lifecycle, Manifest, Output};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -108,7 +108,7 @@ fn ready(version: u32, requests: Vec<Capability>) -> PluginMessage {
                 title: "Run".into(),
                 description: String::new(),
                 keywords: vec![],
-                capabilities: vec![plugin_protocol::Capability::ReadCwd],
+                capabilities: vec![plugin_protocol::v2::Capability::ReadCwd],
             }],
         },
         requests,
@@ -260,6 +260,8 @@ fn version_outside_window_is_rejected() {
 
 #[test]
 fn version_n_minus_1_is_accepted() {
+    // Wire-level N/N-1 window (ADR-0016 §8): a plugin built one protocol
+    // version behind still handshakes. The window exists for the next bump.
     let env = Env::new();
     let plugin = env.spawn_plugin(|ep| {
         let _ = ep.handshake(&ready(1, vec![Capability::ReadCwd]));
@@ -267,7 +269,7 @@ fn version_n_minus_1_is_accepted() {
     });
     env.sup
         .connect(&spec())
-        .expect("v1 plugin in the N/N-1 window");
+        .expect("plugin one version behind is in the N/N-1 window");
     env.sup.shutdown("demo");
     let _ = plugin.join();
 }
@@ -856,7 +858,7 @@ fn declared_capabilities_include_resident_from_lifecycle() {
         id: "x".into(),
         name: "X".into(),
         version: "1".into(),
-        api_version: crate::PLUGIN_API_VERSION,
+        api_version: crate::PLUGIN_API_VERSION_V2,
         description: String::new(),
         enabled: true,
         lifecycle: PluginLifecycle::Resident,

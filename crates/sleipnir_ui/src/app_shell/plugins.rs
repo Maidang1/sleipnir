@@ -459,7 +459,12 @@ impl AppShell {
     /// keeps the plugin-owned legend in sync. Per the no-loopback rule the plugin
     /// answers `camera` by resending chrome only, never the scene, so this cannot
     /// bounce back and fight the drag.
-    pub(super) fn push_panel_camera(&mut self, pane_key: PaneKey, force: bool, cx: &mut Context<Self>) {
+    pub(super) fn push_panel_camera(
+        &mut self,
+        pane_key: PaneKey,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
         const THROTTLE_MS: u64 = 40;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -711,38 +716,9 @@ impl AppShell {
         plugin: plugin_host::LoadedPluginCommand,
         cx: &mut Context<Self>,
     ) {
-        // v2 and resident sessions speak the multiplexed dialect; the v1
-        // per-invocation path cannot carry Event / Render / Call.
-        if plugin.api_version >= plugin_host::PLUGIN_API_VERSION_V2
-            || plugin.lifecycle == plugin_host::PluginLifecycle::Resident
-        {
-            self.invoke_v2_command(plugin, cx);
-            return;
-        }
-        let Some(view) = self.active_view(cx) else {
-            return;
-        };
-        let context = crate::plugin_runtime::build_context(&plugin, &view, cx);
-        let allowed = crate::plugin_runtime::allowed_permissions(cx);
-        let qualified_id = plugin.qualified_id();
-        log::info!(
-            "plugin: invoking {qualified_id} (selection={} bytes, cwd={:?})",
-            context.selection.as_deref().map(str::len).unwrap_or(0),
-            context.cwd,
-        );
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(
-                    async move { plugin_host::run_command(&plugin, &context, &allowed) },
-                )
-                .await;
-            this.update(cx, |_this, cx| match result {
-                Ok(output) => crate::plugin_runtime::apply_output(output, &view, cx),
-                Err(err) => log::warn!("plugin {qualified_id} failed: {err}"),
-            })
-            .ok();
-        })
-        .detach();
+        // All catalog commands speak the v2 multiplexed dialect; the v1
+        // per-invocation path was removed with protocol v1.
+        self.invoke_v2_command(plugin, cx);
     }
     pub(super) fn invoke_v2_command(
         &mut self,
@@ -772,7 +748,7 @@ impl AppShell {
         };
         let command_id = plugin.command.id.clone();
         let qualified_id = plugin.qualified_id();
-        let invoke_ctx = plugin_protocol::InvokeContext {
+        let invoke_ctx = plugin_protocol::v2::InvokeContext {
             cwd: context.cwd,
             title: context.title,
             selection: context.selection,
@@ -785,11 +761,11 @@ impl AppShell {
             this.update(cx, |_this, cx| match result {
                 Ok(output) => {
                     let routed = match output {
-                        plugin_protocol::Output::Ignore => plugin_host::PluginRunOutput::Ignored,
-                        plugin_protocol::Output::Insert { text } => {
+                        plugin_protocol::v2::Output::Ignore => plugin_host::PluginRunOutput::Ignored,
+                        plugin_protocol::v2::Output::Insert { text } => {
                             plugin_host::PluginRunOutput::Insert(text)
                         }
-                        plugin_protocol::Output::Copy { text } => {
+                        plugin_protocol::v2::Output::Copy { text } => {
                             plugin_host::PluginRunOutput::Copy(text)
                         }
                     };

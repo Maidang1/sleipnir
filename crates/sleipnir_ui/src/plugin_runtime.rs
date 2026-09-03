@@ -60,7 +60,7 @@ impl PluginRuntime {
             log::warn!("plugin: {diagnostic}");
         }
         log::info!(
-            "plugin: enabled={} loaded {} plugin(s), {} command(s): {:?} (allowed_permissions={:?})",
+            "plugin: enabled={} loaded {} plugin(s), {} command(s): {:?}",
             settings.plugins.enabled,
             catalog.plugins.len(),
             catalog.commands.len(),
@@ -69,7 +69,6 @@ impl PluginRuntime {
                 .iter()
                 .map(plugin_host::LoadedPluginCommand::qualified_id)
                 .collect::<Vec<_>>(),
-            settings.plugins.allowed_permissions,
         );
         cx.global_mut::<PluginRuntime>().catalog = catalog;
     }
@@ -87,15 +86,6 @@ impl PluginRuntime {
         }
         cx.global::<PluginRuntime>().catalog.plugins.clone()
     }
-}
-
-pub fn allowed_permissions(cx: &App) -> BTreeSet<Permission> {
-    TerminalSettings::get_global(cx)
-        .plugins
-        .allowed_permissions
-        .iter()
-        .copied()
-        .collect()
 }
 
 pub fn build_context(
@@ -137,7 +127,7 @@ pub fn apply_output(output: PluginRunOutput, view: &gpui::Entity<TermView>, cx: 
 }
 
 /// Capabilities this command is asking for. `Resident` is implied by the
-/// manifest lifecycle, not by the v1 permission set.
+/// manifest lifecycle.
 pub fn requested_capabilities(plugin: &LoadedPluginCommand) -> Vec<Capability> {
     let mut caps: Vec<_> = plugin
         .command

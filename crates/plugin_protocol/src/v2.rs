@@ -1,19 +1,16 @@
-//! Protocol v2 draft (ADR-0016): bidirectional, multiplexed plugin RPC.
+//! Protocol v2 (ADR-0016): bidirectional, multiplexed plugin RPC.
 //!
-//! v1 (the parent module) is request/response only: the host sends `Invoke` and
-//! the plugin answers `Invoked`. v2 keeps that exchange and adds three things
-//! that ADR-0016 requires:
+//! v2 is the only supported dialect. It provides:
 //!
 //! 1. **Correlation ids.** A resident plugin can have several events, actions
 //!    and host calls in flight at once. Every message carries an `id` so a reply
-//!    can be paired with its cause. This is the least visible and most easily
-//!    omitted part of the v1 → v2 move.
+//!    can be paired with its cause.
 //! 2. **Host → plugin pushes** (`Event`, `Action`) so a plugin can observe the
 //!    facts layer and receive widget interactions.
 //! 3. **Plugin → host pushes** (`Render`, `Call`) so a plugin can draw and can
 //!    initiate host actions.
 //!
-//! ## Session shape (v2)
+//! ## Session shape
 //!
 //! ```text
 //! host   ── Hello ──▶ plugin
@@ -29,19 +26,19 @@
 //! host   ── Shutdown ──▶ plugin
 //! ```
 //!
-//! Pure types, as in v1: no I/O, no process handling. Transport is unchanged —
-//! line-delimited JSON, tagged unions, `snake_case`, `#[serde(default)]` on
-//! additions so later fields stay backward compatible.
+//! Pure types: no I/O, no process handling. Transport is line-delimited JSON,
+//! tagged unions, `snake_case`, `#[serde(default)]` on additions so later
+//! fields stay backward compatible.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Bumped from v1's `1`.
+/// The current protocol version.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// ADR-0016 §8: an external ecosystem cannot survive `host == plugin`, which
 /// breaks every plugin on every host release. The host accepts the current and
-/// previous versions.
+/// previous versions, so the window becomes effective at the next version bump.
 pub const MIN_SUPPORTED_VERSION: u32 = PROTOCOL_VERSION - 1;
 
 /// Correlates a request with its reply. Unique within a session per direction.
@@ -71,16 +68,15 @@ pub fn versions_compatible(host: u32, plugin: u32) -> bool {
 // Capabilities
 // ---------------------------------------------------------------------------
 
-/// v1's seven permissions plus the v2 additions.
-///
-/// The v1 set is all "read one snapshot, when the user asked for it". The v2
-/// additions are categorically stronger and are **never implied** by the v1 set
-/// (ADR-0016 §4). `SubscribeEvents` in particular moves a plugin from "runs when
-/// you pick it" to "watches every command you run".
+/// The snapshot reads (`Read*`, `WriteTerminal`, `Clipboard`, `Network`) are
+/// all "read one snapshot, when the user asked for it". The observation and
+/// rendering additions are categorically stronger and are **never implied** by
+/// the snapshot set (ADR-0016 §4). `SubscribeEvents` in particular moves a
+/// plugin from "runs when you pick it" to "watches every command you run".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
-    // v1 — unchanged.
+    // Snapshot reads and clipboard/terminal writes.
     ReadSelection,
     ReadVisibleScreen,
     ReadCwd,
@@ -89,7 +85,7 @@ pub enum Capability {
     Clipboard,
     Network,
 
-    // v2 — each a tier above the above.
+    // Observation, rendering, and host calls — each a tier above the above.
     /// The process keeps running between invocations.
     Resident,
     /// Continuous observation. Narrowable with `EventFilter`.
@@ -102,40 +98,6 @@ pub enum Capability {
     HostCallListPanes,
     HostCallOpenPane,
     HostCallDrawScene,
-}
-
-impl Capability {
-    /// Whether this capability was available in v1. Used by the host to decide
-    /// which consent path applies during the compatibility window.
-    pub fn is_v1(self) -> bool {
-        matches!(
-            self,
-            Self::ReadSelection
-                | Self::ReadVisibleScreen
-                | Self::ReadCwd
-                | Self::ReadTitle
-                | Self::WriteTerminal
-                | Self::Clipboard
-                | Self::Network
-        )
-    }
-}
-
-/// The v1 ↔ v2 correspondence lives here and only here; the host and the
-/// session both derive their mappings from it (the enums themselves stay
-/// distinct per ADR-0015).
-impl From<super::Capability> for Capability {
-    fn from(cap: super::Capability) -> Self {
-        match cap {
-            super::Capability::ReadSelection => Self::ReadSelection,
-            super::Capability::ReadVisibleScreen => Self::ReadVisibleScreen,
-            super::Capability::ReadCwd => Self::ReadCwd,
-            super::Capability::ReadTitle => Self::ReadTitle,
-            super::Capability::WriteTerminal => Self::WriteTerminal,
-            super::Capability::Clipboard => Self::Clipboard,
-            super::Capability::Network => Self::Network,
-        }
-    }
 }
 
 /// Narrows an event subscription. An empty field means "no filter".
@@ -596,10 +558,80 @@ pub enum PluginMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Carried over from v1, unchanged in shape
+// Shared manifest / invocation types
 // ---------------------------------------------------------------------------
 
-pub use super::{CommandSpec, InvokeContext, Lifecycle, Manifest, Output};
+/// How a plugin wants to be run, declared by the plugin itself (both in its
+/// `plugin.json` for pre-launch auditing and in its `Ready` handshake).
+///
+/// - `OnDemand`: launched per invocation, then shut down. Cheapest and
+///   strictest — no process lingers. Right for stateless transformers.
+/// - `Resident`: launched once and kept connected across invocations. For
+///   plugins that hold state or pay a heavy startup cost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    #[default]
+    OnDemand,
+    Resident,
+}
+
+/// How a plugin wants its `Invoked` payload routed by the host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "route", rename_all = "snake_case")]
+pub enum Output {
+    /// Discard.
+    Ignore,
+    /// Insert into the active pane (types into the PTY). Requires WriteTerminal.
+    Insert { text: String },
+    /// Copy to the clipboard. Requires Clipboard.
+    Copy { text: String },
+}
+
+/// One command a plugin contributes, declared in its `Ready` manifest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// Capabilities this command needs. Must be a subset of the plugin's
+    /// requested set.
+    #[serde(default)]
+    pub capabilities: Vec<Capability>,
+}
+
+/// The plugin's self-description, sent once in `Ready`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Manifest {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    /// How the plugin wants to be supervised. Mirrors the `plugin.json` value;
+    /// the host trusts `plugin.json` for launch decisions and cross-checks this.
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
+    pub commands: Vec<CommandSpec>,
+}
+
+/// Context handed to the plugin with an `Invoke`. A field is present only when
+/// the command holds the matching capability *and* the user granted it, so the
+/// plugin never receives data it was not authorized to read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvokeContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_screen: Option<String>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -615,13 +647,6 @@ mod tests {
         assert!(!versions_compatible(3, 1), "N-2 is outside the window");
     }
 
-    #[test]
-    fn v2_capabilities_are_not_implied_by_v1() {
-        assert!(Capability::ReadSelection.is_v1());
-        assert!(!Capability::SubscribeEvents.is_v1());
-        assert!(!Capability::Resident.is_v1());
-        assert!(!Capability::RenderBlock.is_v1());
-    }
 
     #[test]
     fn correlation_id_round_trips() {
@@ -780,10 +805,7 @@ mod tests {
                 ],
             },
         };
-        assert_eq!(
-            call.required_capability(),
-            Capability::HostCallDrawScene
-        );
+        assert_eq!(call.required_capability(), Capability::HostCallDrawScene);
         let line = serde_json::to_string(&call).unwrap();
         assert!(line.contains(r#""call":"draw_scene""#));
         assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
@@ -794,7 +816,10 @@ mod tests {
         let result = HostCallResult::SceneOk;
         let line = serde_json::to_string(&result).unwrap();
         assert!(line.contains(r#""result":"scene_ok""#));
-        assert_eq!(serde_json::from_str::<HostCallResult>(&line).unwrap(), result);
+        assert_eq!(
+            serde_json::from_str::<HostCallResult>(&line).unwrap(),
+            result
+        );
     }
 
     #[test]

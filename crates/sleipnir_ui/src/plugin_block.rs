@@ -434,7 +434,11 @@ mod tests {
         // The Block anchored inside the removed region is gone from both, and
         // the survivor sits at its shifted line in both.
         assert_eq!(reg.iter().count(), 1, "registry dropped the doomed Block");
-        assert_eq!(geom.blocks().count(), 1, "geometry agrees with the registry");
+        assert_eq!(
+            geom.blocks().count(),
+            1,
+            "geometry agrees with the registry"
+        );
         let survivor = reg.iter().next().unwrap();
         assert_eq!(survivor.anchor.line, 4, "9 - 5");
         assert_eq!(

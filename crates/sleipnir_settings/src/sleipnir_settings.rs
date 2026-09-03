@@ -13,7 +13,6 @@ pub use themes::{
 
 use collections::HashMap;
 use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels, px};
-use plugin_host::Permission;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap as StdHashMap;
@@ -209,8 +208,6 @@ pub struct PluginSettings {
     pub enabled: bool,
     /// Extra plugin roots layered after the platform config directory.
     pub directories: Vec<PathBuf>,
-    /// Permissions that installed plugin commands may exercise.
-    pub allowed_permissions: Vec<Permission>,
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -1139,12 +1136,11 @@ mod tests {
     }
 
     #[test]
-    fn plugins_are_default_off_and_permissions_parse() {
+    fn plugins_are_default_off_and_directories_parse() {
         let raw = r#"{
   "plugins": {
     "enabled": true,
-    "directories": ["/opt/sleipnir-plugins"],
-    "allowed_permissions": ["read_visible_screen", "write_terminal"]
+    "directories": ["/opt/sleipnir-plugins"]
   }
 }"#;
         let file: SettingsFile = serde_json::from_str(raw).expect("parse plugins");
@@ -1152,10 +1148,6 @@ mod tests {
         assert!(!settings.plugins.enabled);
         merge_file(&mut settings, file);
         assert!(settings.plugins.enabled);
-        assert_eq!(
-            settings.plugins.allowed_permissions,
-            vec![Permission::ReadVisibleScreen, Permission::WriteTerminal]
-        );
         assert_eq!(
             settings.plugins.directories,
             vec![PathBuf::from("/opt/sleipnir-plugins")]

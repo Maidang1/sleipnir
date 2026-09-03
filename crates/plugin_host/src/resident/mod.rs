@@ -1,27 +1,24 @@
 //! Resident plugin supervisor (ADR-0016).
 //!
-//! v1 supervises a plugin as a single request/response pair and then kills it.
-//! That is the right default, and [`crate::run_command`] still does it. It is
-//! the wrong foundation for residency: a process that lives across invocations
-//! can fill an unread stderr pipe, can interleave `Render`/`Call` with
-//! `Invoked`, and can crash while callers wait. Those are harmless
-//! per-invocation; they are fatal if the process is kept around.
+//! All plugin sessions — resident or per-invocation — are supervised here. A
+//! process that lives across invocations can fill an unread stderr pipe, can
+//! interleave `Render`/`Call` with `Invoked`, and can crash while callers wait.
+//! Those are harmless per-invocation; they are fatal if the process is kept
+//! around.
 //!
-//! This module is the load-bearing fix. The host gains the supervisory duties
-//! ADR-0016 names: connection caching, liveness accounting, event fan-out with
-//! **backpressure**, and per-plugin teardown. A wedged, crashing, spamming, or
-//! malicious plugin must never stall or unwind the terminal (ADR-0015: process
-//! isolation is non-negotiable).
+//! This module owns the supervisory duties ADR-0016 names: connection caching,
+//! liveness accounting, event fan-out with **backpressure**, and per-plugin
+//! teardown. A wedged, crashing, spamming, or malicious plugin must never stall
+//! or unwind the terminal (ADR-0015: process isolation is non-negotiable).
 //!
-//! Two v1 defects this supervisor exists to close:
+//! Two failure modes this supervisor exists to close:
 //!
-//! 1. **stderr deadlock.** v1 sets `stderr(Stdio::piped())` and never reads it.
-//!    A resident plugin that logs will fill the ~64KB pipe and block on write.
-//!    Stderr is drained on its own thread into a bounded ring.
-//! 2. **strict request/response.** v1 `drive()` writes one message and blocks
-//!    for exactly one reply. v2 is asynchronous and out-of-order. A reader
-//!    thread plus a `MessageId → waiter` map routes `Invoked` to the right
-//!    caller and `Render`/`Call` to inbound handlers.
+//! 1. **stderr deadlock.** A plugin's stderr is drained on its own thread into
+//!    a bounded ring; otherwise a chatty plugin fills the ~64KB pipe and blocks
+//!    on write.
+//! 2. **out-of-order messaging.** v2 is asynchronous: a reader thread plus a
+//!    `MessageId → waiter` map routes `Invoked` to the right caller and
+//!    `Render`/`Call` to inbound handlers.
 //!
 //! The transport is a trait so the supervisor is unit-testable without
 //! spawning binaries. Nearly all tests use the in-memory impl and a manual

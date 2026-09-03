@@ -128,7 +128,10 @@ pub fn scan(root: &Path) -> Scan {
     // Name is the tiebreak so equal sizes cannot reorder between scans and make
     // the chart flicker.
     entries.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
-    let total_bytes = entries.iter().map(|e| e.bytes).fold(0u64, u64::saturating_add);
+    let total_bytes = entries
+        .iter()
+        .map(|e| e.bytes)
+        .fold(0u64, u64::saturating_add);
     let entries = fold_tail(entries);
 
     Scan {

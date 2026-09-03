@@ -1,9 +1,8 @@
 //! Per-plugin consent, bound to binary identity (ADR-0016 §5–§6).
 //!
-//! `plugins.allowed_permissions` is one allowlist shared by every plugin. That
-//! cannot express per-plugin consent: a grant has to name one plugin *and* the
-//! bytes that were approved. Grants therefore live in their own file
-//! (`plugin-grants.json`), not in `settings.json` (which is hand-edited).
+//! A grant has to name one plugin *and* the bytes that were approved. Grants
+//! therefore live in their own file (`plugin-grants.json`), not in
+//! `settings.json` (which is hand-edited).
 //!
 //! **`binary_hash` is the load-bearing field.** If the binary changes, the grant
 //! is void and consent is asked again. Without that, a benign plugin can
@@ -126,10 +125,10 @@ impl std::fmt::Display for BinaryHash {
 /// now on disk.
 ///
 /// Hash is checked first: a changed binary voids every previously approved
-/// permission, even when the requested set is a subset of the old grant. v2
-/// capabilities (`Resident`, `SubscribeEvents`, `Render*`, `HostCall*`) are
-/// never implied by v1 ones — membership is exact; [`Capability::is_v1`] is a
-/// classifier, not a promotion rule.
+/// permission, even when the requested set is a subset of the old grant.
+/// Observation / render / host-call capabilities (`Resident`, `SubscribeEvents`,
+/// `Render*`, `HostCall*`) are never implied by the snapshot reads — membership
+/// is exact (ADR-0016 §4).
 pub fn check(
     request: &[Capability],
     record: Option<&GrantRecord>,
@@ -179,7 +178,10 @@ pub fn hash_binary(path: &Path) -> io::Result<BinaryHash> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(BinaryHash(format!("sha256:{}", hex_encode(&hasher.finalize()))))
+    Ok(BinaryHash(format!(
+        "sha256:{}",
+        hex_encode(&hasher.finalize())
+    )))
 }
 
 /// RFC3339 UTC timestamp for [`GrantRecord::granted_at`]. This crate owns the
@@ -335,7 +337,10 @@ mod tests {
     fn exact_match_is_allowed() {
         let request = [Capability::ReadCwd, Capability::Network];
         let stored = record(HASH_A, &request);
-        assert_eq!(check(&request, Some(&stored), &bh(HASH_A)), Decision::Allowed);
+        assert_eq!(
+            check(&request, Some(&stored), &bh(HASH_A)),
+            Decision::Allowed
+        );
     }
 
     #[test]
@@ -345,7 +350,8 @@ mod tests {
         // is irrelevant once the bytes changed.
         let request = [Capability::ReadCwd, Capability::Network];
         let stored = record(HASH_A, &request);
-        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), &bh(HASH_B))
+        let Decision::NeedsConsent { reason, missing } =
+            check(&request, Some(&stored), &bh(HASH_B))
         else {
             panic!("expected NeedsConsent");
         };
@@ -357,7 +363,8 @@ mod tests {
     fn hash_mismatch_takes_priority_over_new_capabilities() {
         let stored = record(HASH_A, &[Capability::ReadCwd]);
         let request = [Capability::ReadCwd, Capability::SubscribeEvents];
-        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), &bh(HASH_B))
+        let Decision::NeedsConsent { reason, missing } =
+            check(&request, Some(&stored), &bh(HASH_B))
         else {
             panic!("expected NeedsConsent");
         };
@@ -373,7 +380,8 @@ mod tests {
             Capability::Network,
             Capability::Clipboard,
         ];
-        let Decision::NeedsConsent { reason, missing } = check(&request, Some(&stored), &bh(HASH_A))
+        let Decision::NeedsConsent { reason, missing } =
+            check(&request, Some(&stored), &bh(HASH_A))
         else {
             panic!("expected NeedsConsent");
         };
@@ -392,20 +400,17 @@ mod tests {
             ],
         );
         let request = [Capability::ReadCwd, Capability::Clipboard];
-        assert_eq!(check(&request, Some(&stored), &bh(HASH_A)), Decision::Allowed);
+        assert_eq!(
+            check(&request, Some(&stored), &bh(HASH_A)),
+            Decision::Allowed
+        );
     }
 
     #[test]
-    fn v2_capabilities_are_never_implied_by_v1() {
+    fn observation_capabilities_are_never_implied_by_snapshot_reads() {
         // ADR-0016 §4: SubscribeEvents is continuous observation, not "more
-        // ReadCwd". is_v1() classifies; it does not promote.
-        assert!(Capability::ReadCwd.is_v1());
-        assert!(!Capability::SubscribeEvents.is_v1());
-        assert!(!Capability::Resident.is_v1());
-        assert!(!Capability::RenderBlock.is_v1());
-        assert!(!Capability::HostCallNotify.is_v1());
-
-        let v1 = [
+        // ReadCwd". Grant membership is exact; nothing promotes.
+        let snapshots = [
             Capability::ReadSelection,
             Capability::ReadVisibleScreen,
             Capability::ReadCwd,
@@ -414,7 +419,7 @@ mod tests {
             Capability::Clipboard,
             Capability::Network,
         ];
-        let stored = record(HASH_A, &v1);
+        let stored = record(HASH_A, &snapshots);
         for cap in [
             Capability::Resident,
             Capability::SubscribeEvents,
@@ -427,9 +432,10 @@ mod tests {
             Capability::HostCallOpenPane,
             Capability::HostCallDrawScene,
         ] {
-            let Decision::NeedsConsent { reason, missing } = check(&[cap], Some(&stored), &bh(HASH_A))
+            let Decision::NeedsConsent { reason, missing } =
+                check(&[cap], Some(&stored), &bh(HASH_A))
             else {
-                panic!("{cap:?} must not be implied by the v1 set");
+                panic!("{cap:?} must not be implied by the snapshot-read set");
             };
             assert_eq!(reason, ConsentReason::NewCapabilities);
             assert_eq!(missing, [cap]);

@@ -183,12 +183,42 @@ impl Scene {
         let (y0, y1) = (0.0, h);
         // Wound so cross(e1, e2) points outward.
         let faces = [
-            [v3(x0, y1, z0), v3(x1, y1, z0), v3(x1, y1, z1), v3(x0, y1, z1)], // top
-            [v3(x0, y0, z1), v3(x1, y0, z1), v3(x1, y1, z1), v3(x0, y1, z1)], // front (+z)
-            [v3(x1, y0, z0), v3(x0, y0, z0), v3(x0, y1, z0), v3(x1, y1, z0)], // back (-z)
-            [v3(x1, y0, z1), v3(x1, y0, z0), v3(x1, y1, z0), v3(x1, y1, z1)], // right (+x)
-            [v3(x0, y0, z0), v3(x0, y0, z1), v3(x0, y1, z1), v3(x0, y1, z0)], // left (-x)
-            [v3(x0, y0, z0), v3(x1, y0, z0), v3(x1, y0, z1), v3(x0, y0, z1)], // bottom
+            [
+                v3(x0, y1, z0),
+                v3(x1, y1, z0),
+                v3(x1, y1, z1),
+                v3(x0, y1, z1),
+            ], // top
+            [
+                v3(x0, y0, z1),
+                v3(x1, y0, z1),
+                v3(x1, y1, z1),
+                v3(x0, y1, z1),
+            ], // front (+z)
+            [
+                v3(x1, y0, z0),
+                v3(x0, y0, z0),
+                v3(x0, y1, z0),
+                v3(x1, y1, z0),
+            ], // back (-z)
+            [
+                v3(x1, y0, z1),
+                v3(x1, y0, z0),
+                v3(x1, y1, z0),
+                v3(x1, y1, z1),
+            ], // right (+x)
+            [
+                v3(x0, y0, z0),
+                v3(x0, y0, z1),
+                v3(x0, y1, z1),
+                v3(x0, y1, z0),
+            ], // left (-x)
+            [
+                v3(x0, y0, z0),
+                v3(x1, y0, z0),
+                v3(x1, y0, z1),
+                v3(x0, y0, z1),
+            ], // bottom
         ];
         for verts in faces {
             let glyph = if selected {

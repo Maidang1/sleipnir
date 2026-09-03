@@ -5,11 +5,10 @@
 //! tab/pane state without widening it to the crate.
 
 use gpui::{
-    AppContext as _, Bounds, ClickEvent, Context, ElementId, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
-    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, WindowControlArea, canvas, deferred, div, point,
-    prelude::FluentBuilder as _, px,
+    AppContext as _, Bounds, ClickEvent, Context, ElementId, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, MouseMoveEvent, ParentElement as _, Pixels, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, canvas, deferred, div,
+    point, prelude::FluentBuilder as _, px,
 };
 
 use super::{AppShell, DragState, PaneDrag, TabDragPreview};
@@ -566,11 +565,4 @@ impl AppShell {
             }
         }
     }
-
-
 }
-
-
-
-
-

@@ -415,11 +415,9 @@ impl AppShell {
                                         .text_color(tokens.fg_muted)
                                         .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
                                         .child("×")
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, _, cx| {
-                                                this.close_plugin_monitor(cx);
-                                            },
-                                        )),
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.close_plugin_monitor(cx);
+                                        })),
                                 ),
                         ),
                 )

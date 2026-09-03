@@ -19,13 +19,43 @@ use uuid::Uuid;
 pub use crate::widgets::{
     Btn, Col, Row, Text, badge, bar, btn, code, code_lang, col, row, sep, spark, text,
 };
-pub use crate::{Invoke, Output};
 pub use plugin_protocol::v2::{
-    BlockId, Capability, EventFilter, EventKind, HostCall, HostCallResult, HostEvent,
-    PROTOCOL_VERSION, PaneInfo, PaneKey, RenderTarget, RunId, SceneBar, SceneCamera, SceneData,
-    Tone, Widget,
+    BlockId, Capability, CommandSpec, EventFilter, EventKind, HostCall, HostCallResult, HostEvent,
+    InvokeContext, Lifecycle, Manifest, PROTOCOL_VERSION, PaneInfo, PaneKey, RenderTarget, RunId,
+    SceneBar, SceneCamera, SceneData, Tone, Widget,
 };
-pub use plugin_protocol::{CommandSpec, InvokeContext, Lifecycle, Manifest};
+use plugin_protocol::v2::Output as WireOutput;
+
+/// One command invocation delivered to the plugin.
+pub struct Invoke {
+    pub command_id: String,
+    pub context: InvokeContext,
+}
+
+/// How the plugin wants its result routed. A thin, ergonomic wrapper over the
+/// wire [`WireOutput`].
+pub enum Output {
+    Ignore,
+    Insert(String),
+    Copy(String),
+}
+
+impl Output {
+    pub fn insert(text: impl Into<String>) -> Self {
+        Self::Insert(text.into())
+    }
+    pub fn copy(text: impl Into<String>) -> Self {
+        Self::Copy(text.into())
+    }
+
+    pub(crate) fn into_wire(self) -> WireOutput {
+        match self {
+            Output::Ignore => WireOutput::Ignore,
+            Output::Insert(text) => WireOutput::Insert { text },
+            Output::Copy(text) => WireOutput::Copy { text },
+        }
+    }
+}
 
 /// The trait a v2 plugin implements.
 ///
@@ -347,7 +377,7 @@ fn dispatch<P: Plugin>(plugin: &mut P, io: &mut dyn SessionIo, msg: HostMessage)
             ) {
                 Ok(output) => io.write_plugin(&PluginMessage::Invoked {
                     id,
-                    output: crate::Output::into_wire(output),
+                    output: output.into_wire(),
                 })?,
                 Err(message) => io.write_plugin(&PluginMessage::Failed { id, message })?,
             }
@@ -414,8 +444,8 @@ fn read_host_line_strict(reader: &mut impl BufRead) -> io::Result<Option<HostMes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plugin_protocol::v2::{EventKind, HostCall};
-    use plugin_protocol::{CommandSpec, InvokeContext, Output as ProtoOutput};
+    use plugin_protocol::v2::Output as ProtoOutput;
+    use plugin_protocol::v2::{CommandSpec, EventKind, HostCall, InvokeContext};
     use std::cell::RefCell;
     use std::rc::Rc;
 

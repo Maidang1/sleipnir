@@ -1,10 +1,9 @@
 //! Registry of live connections, idle eviction, crash backoff.
 //!
 //! Connection caching is the whole point of residency: `Lifecycle::Resident`
-//! reuses a handshake; `OnDemand` still tears down after one invoke so v1
-//! semantics stay available through this supervisor. A crash-looping plugin is
-//! not restarted forever — backoff doubles up to a ceiling, then the plugin
-//! is disabled.
+//! reuses a handshake; `OnDemand` still tears down after one invoke. A
+//! crash-looping plugin is not restarted forever — backoff doubles up to a
+//! ceiling, then the plugin is disabled.
 
 use super::session::Session;
 use super::transport::Launcher;
@@ -14,7 +13,7 @@ use super::{
 };
 use crate::PluginLifecycle;
 use plugin_protocol::v2::{self, MessageId};
-use plugin_protocol::{InvokeContext, Output};
+use plugin_protocol::v2::{InvokeContext, Output};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

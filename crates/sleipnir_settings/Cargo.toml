@@ -20,4 +20,3 @@ collections.workspace = true
 log.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
-plugin_host.workspace = true

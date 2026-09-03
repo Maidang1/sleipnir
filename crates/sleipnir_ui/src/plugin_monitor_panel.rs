@@ -111,10 +111,7 @@ fn row_from_snapshot(
         inbound_dropped: snap.inbound_dropped,
         malformed_lines: snap.malformed_lines,
         events_dropped: snap.events_dropped,
-        host_calls_dropped: dropped_counts
-            .get(&snap.plugin_id)
-            .copied()
-            .unwrap_or(0),
+        host_calls_dropped: dropped_counts.get(&snap.plugin_id).copied().unwrap_or(0),
         stderr: snap.stderr.clone(),
     }
 }
@@ -409,13 +406,7 @@ mod tests {
         ];
         let mut dropped = BTreeMap::new();
         dropped.insert("spammer".to_string(), 5);
-        let rows = rows_from_snapshots(
-            &snapshots,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &dropped,
-            0,
-        );
+        let rows = rows_from_snapshots(&snapshots, &BTreeMap::new(), &BTreeMap::new(), &dropped, 0);
         let ids: Vec<_> = rows.iter().map(|r| r.plugin_id.as_str()).collect();
         assert_eq!(ids, ["spammer", "zeta"]);
         assert_eq!(rows[0].host_calls_dropped, 5);
@@ -581,13 +572,11 @@ mod tests {
             ),
             Decision::Allowed
         );
-        let Decision::NeedsConsent { reason, missing } =
-            plugin_grants::check(
-                &[Capability::ReadCwd],
-                Some(&record),
-                &plugin_grants::BinaryHash::from_raw("sha256:bbbb".into()),
-            )
-        else {
+        let Decision::NeedsConsent { reason, missing } = plugin_grants::check(
+            &[Capability::ReadCwd],
+            Some(&record),
+            &plugin_grants::BinaryHash::from_raw("sha256:bbbb".into()),
+        ) else {
             panic!("hash mismatch must ask again");
         };
         assert_eq!(reason, ConsentReason::BinaryChanged);

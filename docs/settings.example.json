@@ -17,15 +17,7 @@
   "show_tombstone": true,
   "plugins": {
     "enabled": false,
-    "directories": [],
-    "allowed_permissions": [
-      "read_selection",
-      "read_visible_screen",
-      "read_cwd",
-      "read_title",
-      "write_terminal",
-      "clipboard"
-    ]
+    "directories": []
   },
   "custom_theme": {
     "background": "#0d1117",

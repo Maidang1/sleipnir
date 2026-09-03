@@ -3,8 +3,8 @@
 //! A `Call` is a plugin asking the host to do something the control surface
 //! already exposes locally (ADR-0011): notify, read a pane, list panes, open a
 //! pane. v2 adds no new power — it changes *who* may ask, which is why each
-//! verb is a separately granted capability and is **never implied** by a v1
-//! read permission.
+//! verb is a separately granted capability and is **never implied** by a
+//! snapshot-read permission.
 //!
 //! Every `Call` id must produce exactly one `Reply`. A silent drop (denied,
 //! missing pane, rate limit, dead plugin) would leave a resident plugin
@@ -247,8 +247,9 @@ pub fn filter_listed_panes(
         .collect()
 }
 
-/// Classify a ReadScreen target. v1 `read_visible_screen` is not consulted
-/// here — the caller already required [`Capability::HostCallReadScreen`].
+/// Classify a ReadScreen target. The caller already required
+/// [`Capability::HostCallReadScreen`]; no snapshot-read permission is
+/// consulted here.
 pub fn read_screen_access(
     pane: PaneKey,
     terminal_keys: &BTreeSet<PaneKey>,
@@ -337,7 +338,7 @@ mod tests {
             CallPlan::Reply(HostCallResult::Error { message }) => {
                 assert!(message.contains("HostCallReadScreen") || message.contains("not granted"));
             }
-            other => panic!("v1 read_visible_screen must not imply ReadScreen: {other:?}"),
+            other => panic!("read_visible_screen must not imply ReadScreen: {other:?}"),
         }
     }
 
