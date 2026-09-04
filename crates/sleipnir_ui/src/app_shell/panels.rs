@@ -619,45 +619,28 @@ impl AppShell {
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        use crate::chrome::history_search::{filter_history, parse_history_file};
-        let text = std::env::var("HISTFILE")
-            .ok()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .or_else(|| {
-                dirs::home_dir().and_then(|h| {
-                    std::fs::read_to_string(h.join(".zsh_history"))
-                        .ok()
-                        .or_else(|| std::fs::read_to_string(h.join(".bash_history")).ok())
-                })
-            })
-            .or_else(|| {
-                dirs::data_dir().and_then(|d| {
-                    std::fs::read_to_string(
-                        d.join("Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"),
-                    )
-                    .ok()
-                })
-            })
-            .unwrap_or_default();
-        let hits = parse_history_file(&text);
+        use crate::chrome::history_search::{filter_history, load_history_hits};
+        let hits = load_history_hits();
         let shown = filter_history(&hits, &self.history_query, 20);
+        let selected = self.history_selected.min(shown.len().saturating_sub(1));
         let mut list = div().flex().flex_col().gap_1().px_3().pb_3();
         for (i, hit) in shown.iter().enumerate() {
-            let cmd = hit.command.clone();
+            let is_sel = i == selected;
             list = list.child(
                 div()
                     .id(("hist", i))
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(4.0))
                     .text_xs()
                     .text_color(tokens.fg)
                     .cursor_pointer()
+                    .when(is_sel, |el| el.bg(tokens.hover))
+                    .hover(|el| el.bg(tokens.hover))
                     .child(hit.command.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(view) = this.active_view(cx) {
-                            view.update(cx, |v, cx| v.input_bytes(cmd.clone().into_bytes(), cx));
-                        }
-                        this.mode.close(OverlayKind::History);
-                        this.history_query.clear();
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.history_selected = i;
+                        this.run_history_selection(window, cx);
                     })),
             );
         }
@@ -677,11 +660,16 @@ impl AppShell {
                 .occlude()
                 .child(
                     div()
+                        .relative()
                         .px_3()
                         .py_2()
                         .text_xs()
                         .text_color(tokens.fg_muted)
-                        .child(format!("History · {}", self.history_query)),
+                        .child(format!("History · {}|", self.history_query))
+                        .child(self.query_input_canvas(
+                            crate::app_shell::query::QuerySurface::History,
+                            cx,
+                        )),
                 )
                 .child(list),
         )

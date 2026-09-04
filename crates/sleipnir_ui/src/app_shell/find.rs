@@ -13,12 +13,14 @@ use super::{AppShell, Find, FindNext, FindPrev};
 use crate::chrome::ChromeTokens;
 
 impl AppShell {
-    pub(super) fn on_find(&mut self, _: &Find, _window: &mut Window, cx: &mut Context<Self>) {
-        self.open_find(cx);
+    pub(super) fn on_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find(window, cx);
     }
 
-    pub(crate) fn open_find(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mode.open_find();
+        // Focus the shell so the find query box's IME input handler activates.
+        window.focus(&self.focus_handle, cx);
         cx.notify();
         // Re-run search if query already present.
         if !self.find_query.is_empty() {
@@ -29,6 +31,7 @@ impl AppShell {
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode.find_open {
             self.mode.close_find();
+            self.find_marked = None;
             self.find_debounce_gen = self.find_debounce_gen.wrapping_add(1);
             self.clear_find_matches(cx);
             self.focus_active(window, cx);
@@ -68,7 +71,7 @@ impl AppShell {
         }
     }
 
-    fn debounce_find(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn debounce_find(&mut self, cx: &mut Context<Self>) {
         self.find_debounce_gen = self.find_debounce_gen.wrapping_add(1);
         let generation = self.find_debounce_gen;
         cx.spawn(async move |this, cx| {
@@ -285,6 +288,7 @@ impl AppShell {
             )
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .px_2()
@@ -293,7 +297,11 @@ impl AppShell {
                     .bg(tokens.hover)
                     .text_sm()
                     .text_color(query_color)
-                    .child(query_display),
+                    .child(query_display)
+                    .child(self.query_input_canvas(
+                        crate::app_shell::query::QuerySurface::Find,
+                        cx,
+                    )),
             )
             .child(
                 div()

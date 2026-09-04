@@ -7,8 +7,7 @@ pub struct HistoryHit {
 }
 
 /// Parse bash/zsh-style history text (ignores `: ts:0;` prefixes).
-pub fn parse_history_file(text: &str) -> Vec<HistoryHit> {
-    let mut out = Vec::new();
+pub fn parse_history_file(text: &str) -> Vec<HistoryHit> {    let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for raw in text.lines().rev() {
         let line = raw.trim();
@@ -34,6 +33,32 @@ fn strip_zsh_extended(line: &str) -> &str {
         }
     }
     line
+}
+
+/// Load the user's shell history hits: $HISTFILE, then ~/.zsh_history,
+/// ~/.bash_history, then the PowerShell history on Windows. Empty when none
+/// is readable.
+pub fn load_history_hits() -> Vec<HistoryHit> {
+    let text = std::env::var("HISTFILE")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .or_else(|| {
+            dirs::home_dir().and_then(|h| {
+                std::fs::read_to_string(h.join(".zsh_history"))
+                    .ok()
+                    .or_else(|| std::fs::read_to_string(h.join(".bash_history")).ok())
+            })
+        })
+        .or_else(|| {
+            dirs::data_dir().and_then(|d| {
+                std::fs::read_to_string(
+                    d.join("Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"),
+                )
+                .ok()
+            })
+        })
+        .unwrap_or_default();
+    parse_history_file(&text)
 }
 
 /// Case-insensitive subsequence match. Empty query returns the first `limit` items.

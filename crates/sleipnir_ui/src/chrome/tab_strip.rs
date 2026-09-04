@@ -36,6 +36,13 @@ impl AppShell {
         let groups = group_tabs(keys.into_iter().enumerate());
 
         let mut chips: Vec<gpui::AnyElement> = Vec::new();
+        // Drop-target bar is only meaningful while a drag is actually live;
+        // stale state from an aborted drag must never paint.
+        let drop_target = if cx.has_active_drag() {
+            self.tab_drop_target
+        } else {
+            None
+        };
         for (_key, indices) in groups {
             for ix in indices {
                 let Some(tab) = self.tabs.get(ix) else {
@@ -57,6 +64,7 @@ impl AppShell {
                     ix,
                     ix == active,
                     hovered == Some(tab.id),
+                    drop_target == Some(tab.id),
                     self.bell_flash_tabs.contains(&tab.id),
                     self.rename
                         .as_ref()
@@ -116,6 +124,7 @@ pub(crate) fn render_tab_chip(
     ix: usize,
     is_active: bool,
     is_hovered: bool,
+    is_drop_target: bool,
     is_bell: bool,
     rename_buffer: Option<String>,
     _badge: Option<Badge>,
@@ -222,12 +231,38 @@ pub(crate) fn render_tab_chip(
             }
         })
         .on_drop::<u64>(cx.listener(move |this, dragged: &u64, window, cx| {
+            this.tab_drop_target = None;
             this.reorder_tab(*dragged, tab_id, window, cx);
         }))
         .on_drop::<PaneDrag>(cx.listener(move |this, dragged: &PaneDrag, window, cx| {
+            this.tab_drop_target = None;
             let insert_at = this.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0);
             this.extract_pane_to_tab(dragged.pane_id, insert_at, window, cx);
         }))
+        .on_drag_move::<u64>(cx.listener(move |this, _, _, cx| {
+            if this.tab_drop_target != Some(tab_id) {
+                this.tab_drop_target = Some(tab_id);
+                cx.notify();
+            }
+        }))
+        .on_drag_move::<PaneDrag>(cx.listener(move |this, _, _, cx| {
+            if this.tab_drop_target != Some(tab_id) {
+                this.tab_drop_target = Some(tab_id);
+                cx.notify();
+            }
+        }))
+        .when(is_drop_target, |el| {
+            // Insertion bar on the chip's leading edge.
+            el.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.0))
+                    .bg(tokens.accent),
+            )
+        })
         .when_some(agent, |el, kind| el.child(render_agent_mark(kind)))
         .child(body)
         .children(plugin_badges.into_iter().map(|b| {

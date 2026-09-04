@@ -11,6 +11,7 @@ mod panels;
 mod persist;
 mod plugin_paint;
 mod plugins;
+mod query;
 mod settings;
 mod tabs;
 mod update;
@@ -315,6 +316,8 @@ pub struct AppShell {
     pub(crate) tab_scroll_handle: ScrollHandle,
     /// Tab id currently under the pointer (for hover close / hover fill).
     pub(crate) hovered_tab: Option<u64>,
+    /// Tab id a drag is hovering over, for the drop-target insertion bar.
+    pub(crate) tab_drop_target: Option<u64>,
     /// Pane rects from the last render, for keyboard neighbor navigation.
     pane_rects: Vec<PaneRect>,
     /// Content area bounds captured last frame (origin + size), for analytic
@@ -344,11 +347,15 @@ pub struct AppShell {
     theme_query: String,
     palette_query: String,
     palette_selected: usize,
+    /// IME composition range (UTF-16) inside `palette_query`, if composing.
+    palette_marked: Option<std::ops::Range<usize>>,
     palette_scroll: ScrollHandle,
     palette_recents: Vec<CommandId>,
     palette_items: Vec<CommandItem>,
     plugin_commands: Vec<plugin_host::LoadedPluginCommand>,
     find_query: String,
+    /// IME composition range (UTF-16) inside `find_query`, if composing.
+    find_marked: Option<std::ops::Range<usize>>,
     /// Monotonic generation used to discard stale debounce timers.
     find_debounce_gen: u64,
     /// Monotonic request id used to discard stale asynchronous search results.
@@ -375,6 +382,8 @@ pub struct AppShell {
     facts: PaneFactsState,
     history_query: String,
     history_selected: usize,
+    /// IME composition range (UTF-16) inside `history_query`, if composing.
+    history_marked: Option<std::ops::Range<usize>>,
     /// Git diff inspector (ADR-0012). Not a Pane.
     pub(crate) diff_view: Option<crate::diff::DiffView>,
     diff_gen: u64,
@@ -537,6 +546,7 @@ impl AppShell {
             should_move: false,
             tab_scroll_handle: ScrollHandle::new(),
             hovered_tab: None,
+            tab_drop_target: None,
             pane_rects: Vec::new(),
             content_bounds: None,
             drag: None,
@@ -557,11 +567,13 @@ impl AppShell {
             theme_query: String::new(),
             palette_query: String::new(),
             palette_selected: 0,
+            palette_marked: None,
             palette_scroll: ScrollHandle::new(),
             palette_recents: Vec::new(),
             palette_items,
             plugin_commands,
             find_query: String::new(),
+            find_marked: None,
             find_debounce_gen: 0,
             find_gen: 0,
             find_match_count: 0,
@@ -575,6 +587,7 @@ impl AppShell {
             broadcast: false,
             history_query: String::new(),
             history_selected: 0,
+            history_marked: None,
             diff_view: None,
             diff_gen: 0,
             facts: PaneFactsState::default(),
@@ -1509,12 +1522,86 @@ impl AppShell {
     }
 
     /// Toggle the history overlay, resetting the query when it closes.
-    fn toggle_history_search(&mut self, cx: &mut Context<Self>) {
+    fn toggle_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.mode.toggle(OverlayKind::History) {
             self.history_query.clear();
+            self.history_marked = None;
             self.history_selected = 0;
+            self.focus_active(window, cx);
+        } else {
+            // Focus the shell so the history query box's IME input handler
+            // activates and keystrokes stop leaking to the PTY underneath.
+            window.focus(&self.focus_handle, cx);
         }
         cx.notify();
+    }
+
+    /// Send the selected history hit to the active pane and close the overlay.
+    pub(crate) fn run_history_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let hits = crate::chrome::history_search::load_history_hits();
+        let shown = crate::chrome::history_search::filter_history(&hits, &self.history_query, 20);
+        let Some(hit) = shown.get(self.history_selected.min(shown.len().saturating_sub(1)))
+        else {
+            return;
+        };
+        let cmd = hit.command.clone();
+        if let Some(view) = self.active_view(cx) {
+            view.update(cx, |v, cx| v.input_bytes(cmd.into_bytes(), cx));
+        }
+        self.toggle_history_search(window, cx);
+    }
+
+    /// One keystroke while the history overlay is open. Always consumes the
+    /// key (non-platform) so nothing leaks to the PTY underneath.
+    pub(super) fn history_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.toggle_history_search(window, cx);
+            }
+            "enter" => {
+                self.run_history_selection(window, cx);
+            }
+            "up" | "down" => {
+                let hits = crate::chrome::history_search::load_history_hits();
+                let shown =
+                    crate::chrome::history_search::filter_history(&hits, &self.history_query, 20)
+                        .len();
+                if shown > 0 {
+                    if key == "up" {
+                        self.history_selected = if self.history_selected == 0 {
+                            shown - 1
+                        } else {
+                            self.history_selected - 1
+                        };
+                    } else {
+                        self.history_selected = (self.history_selected + 1) % shown;
+                    }
+                    cx.notify();
+                }
+            }
+            "backspace" => {
+                self.history_query.pop();
+                self.history_selected = 0;
+                cx.notify();
+            }
+            _ => {
+                if !event.keystroke.modifiers.platform
+                    && let Some(ch) = event.keystroke.key_char.as_ref()
+                    && !ch.is_empty()
+                    && !ch.chars().any(|c| c.is_control())
+                {
+                    self.history_query.push_str(ch);
+                    self.history_selected = 0;
+                    cx.notify();
+                }
+            }
+        }
     }
 
     fn send_selection_to_pty(&mut self, cx: &mut Context<Self>) {
@@ -1765,7 +1852,7 @@ impl AppShell {
         if self.mode.is(OverlayKind::Palette) {
             self.close_palette(window, cx);
         } else {
-            self.open_palette(cx);
+            self.open_palette(window, cx);
         }
     }
 
@@ -2060,6 +2147,13 @@ impl Render for AppShell {
                 }
                 if this.mode.is(OverlayKind::Palette) {
                     if this.palette_key_down(event, window, cx) {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this.mode.is(OverlayKind::History) {
+                    this.history_key_down(event, window, cx);
+                    if !event.keystroke.modifiers.platform {
                         cx.stop_propagation();
                     }
                     return;

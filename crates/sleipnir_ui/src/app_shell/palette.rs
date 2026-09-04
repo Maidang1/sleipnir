@@ -15,16 +15,21 @@ use crate::command_palette::{CommandId, filter_commands, prioritize_recents, rec
 use crate::ui_mode::OverlayKind;
 
 impl AppShell {
-    pub(super) fn open_palette(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mode.open(OverlayKind::Palette);
         self.palette_query.clear();
+        self.palette_marked = None;
         self.palette_selected = 0;
+        // The query box owns text input while open: focus the shell so the IME
+        // input handler registered by `query_input_canvas` becomes active.
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode.close(OverlayKind::Palette) {
             self.palette_query.clear();
+            self.palette_marked = None;
             self.palette_selected = 0;
             self.focus_active(window, cx);
             cx.notify();
@@ -226,13 +231,18 @@ impl AppShell {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
+                                .relative()
                                 .px_3()
                                 .py_2p5()
                                 .border_b_1()
                                 .border_color(tokens.border)
                                 .text_sm()
                                 .text_color(query_color)
-                                .child(query),
+                                .child(query)
+                                .child(self.query_input_canvas(
+                                    crate::app_shell::query::QuerySurface::Palette,
+                                    cx,
+                                )),
                         )
                         .child(list),
                 ),
