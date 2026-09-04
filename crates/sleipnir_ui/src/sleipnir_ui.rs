@@ -893,10 +893,6 @@ impl Render for TermView {
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
-        let display_offset = self
-            .terminal_entity()
-            .map(|terminal| terminal.read(cx).last_content().display_offset)
-            .unwrap_or(0);
         // Toast chrome: dark surface, lime border/dot (matches common terminal UX).
         let toast_bg = palette
             .background
@@ -1038,36 +1034,6 @@ impl Render for TermView {
                         ),
                 )
             })
-            .when(display_offset > 0, |el| {
-                el.child(
-                    div()
-                        .id("scroll-position-indicator")
-                        .absolute()
-                        .bottom(gpui::px(12.0))
-                        .right(gpui::px(12.0))
-                        .px_3()
-                        .py_1p5()
-                        .rounded(gpui::px(6.0))
-                        .bg(toast_bg)
-                        .border_1()
-                        .border_color(toast_border)
-                        .shadow_md()
-                        .text_size(gpui::px(12.0))
-                        .text_color(toast_fg)
-                        .font_family(sleipnir_settings::default_font_family())
-                        .occlude()
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.scroll_to_bottom(&ScrollToBottom, window, cx);
-                            }),
-                        )
-                        .child(scroll_position_label(
-                            display_offset,
-                            cfg!(target_os = "macos"),
-                        )),
-                )
-            })
     }
 }
 
@@ -1196,11 +1162,6 @@ fn handle_bell(window: &mut Window, cx: &mut Context<TermView>) {
             // Tab flash is applied by AppShell via TermViewEvent::Bell.
         }
     }
-}
-
-fn scroll_position_label(display_offset: usize, is_macos: bool) -> String {
-    let shortcut = if is_macos { "⌘End" } else { "Shift+End" };
-    format!("↑ {display_offset} lines · jump to bottom ({shortcut})")
 }
 
 /// Whether a keystroke is reserved for clipboard actions (Copy/Paste/PasteText).
@@ -1487,18 +1448,6 @@ mod tests {
         assert!(!is_clipboard_shortcut(&parse("ctrl-c")));
         // Windows ships Ctrl+V as paste; macOS leaves plain Ctrl+V for the PTY.
         assert_eq!(is_clipboard_shortcut(&parse("ctrl-v")), cfg!(windows));
-    }
-
-    #[test]
-    fn scroll_position_label_uses_platform_jump_shortcut() {
-        assert_eq!(
-            scroll_position_label(123, true),
-            "↑ 123 lines · jump to bottom (⌘End)"
-        );
-        assert_eq!(
-            scroll_position_label(7, false),
-            "↑ 7 lines · jump to bottom (Shift+End)"
-        );
     }
 
     #[test]
