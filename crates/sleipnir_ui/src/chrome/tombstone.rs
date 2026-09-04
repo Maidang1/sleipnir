@@ -53,11 +53,11 @@ pub fn tombstone_from_runs(
     let last = mine.iter().rev().copied().find(|run| speakable(run))?;
     let count = mine.len();
     let state_word = match last.state {
-        RunState::Failed => "失败",
-        RunState::Succeeded => "成功",
-        RunState::Running => "进行中",
-        RunState::Unknown => "未知",
-        RunState::Abandoned => "中断",
+        RunState::Failed => "failed",
+        RunState::Succeeded => "succeeded",
+        RunState::Running => "running",
+        RunState::Unknown => "unknown",
+        RunState::Abandoned => "interrupted",
     };
     let when = relative_wall(ended_at_unix_ms(last));
     let detail = match last.exit_code {
@@ -66,7 +66,7 @@ pub fn tombstone_from_runs(
     };
     Some(Tombstone {
         summary: format!(
-            "上次这里跑过 {count} 条命令，最后一条 `{}` {state_word}（{detail}）",
+            "Ran {count} commands here last session · last `{}` {state_word} ({detail})",
             last.command
         ),
     })
@@ -95,15 +95,13 @@ fn relative_wall(end_unix_ms: u64) -> String {
     let now = now_unix_ms();
     let ago = now.saturating_sub(end_unix_ms);
     if ago < MIN {
-        "刚刚".into()
+        "just now".into()
     } else if ago < HOUR {
-        format!("{} 分钟前", ago / MIN)
+        format!("{}m ago", ago / MIN)
     } else if ago < DAY {
-        format!("{} 小时前", ago / HOUR)
-    } else if ago < 2 * DAY {
-        "昨天".into()
+        format!("{}h ago", ago / HOUR)
     } else {
-        format!("{} 天前", ago / DAY)
+        format!("{}d ago", ago / DAY)
     }
 }
 
@@ -172,12 +170,12 @@ mod tests {
             tomb.summary
         );
         assert!(
-            tomb.summary.contains("失败"),
-            "expected 失败 in {}",
+            tomb.summary.contains("failed"),
+            "expected failed in {}",
             tomb.summary
         );
         assert!(
-            tomb.summary.contains("上次这里跑过 1 条命令"),
+            tomb.summary.contains("Ran 1 commands here last session"),
             "expected count in {}",
             tomb.summary
         );
@@ -192,17 +190,17 @@ mod tests {
         let running = display(then, pane, "sleep 999", RunState::Running, None, 9_000);
         let tomb = tombstone_from_runs(&[finished, running], pane, now).expect("tombstone");
         assert!(
-            tomb.summary.contains("`npm test` 失败"),
+            tomb.summary.contains("`npm test` failed"),
             "expected last speakable command, got {}",
             tomb.summary
         );
         assert!(
-            !tomb.summary.contains("进行中"),
-            "must not narrate Running as 上次: {}",
+            !tomb.summary.contains("running"),
+            "must not narrate Running as last: {}",
             tomb.summary
         );
         assert!(
-            tomb.summary.contains("上次这里跑过 2 条命令"),
+            tomb.summary.contains("Ran 2 commands here last session"),
             "count still includes the unspeakable run: {}",
             tomb.summary
         );
@@ -224,13 +222,13 @@ mod tests {
         );
         let tomb = tombstone_from_runs(&[finished, dummy], pane, now).expect("tombstone");
         assert!(
-            tomb.summary.contains("`npm test` 成功"),
+            tomb.summary.contains("`npm test` succeeded"),
             "expected last speakable command, got {}",
             tomb.summary
         );
         assert!(
             !tomb.summary.contains(UNRECOGNIZED_COMMAND),
-            "must not narrate the placeholder as 上次: {}",
+            "must not narrate the placeholder as last: {}",
             tomb.summary
         );
     }

@@ -647,13 +647,17 @@ impl TermElement {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
-                if e.pressed_button.is_some() && focus.is_focused(window) {
+                let is_focused = focus.is_focused(window);
+                if e.pressed_button.is_some() && is_focused {
                     // bounds filled by terminal from last content during drag
                     let bounds = terminal.read(cx).last_content().terminal_bounds.bounds;
                     terminal.update(cx, |terminal, cx| {
                         terminal.mouse_drag(e, bounds, cx);
                         cx.notify();
                     });
+                }
+                if e.pressed_button.is_none() && !is_focused {
+                    return;
                 }
                 terminal.update(cx, |terminal, cx| {
                     terminal.mouse_move(e, cx);
