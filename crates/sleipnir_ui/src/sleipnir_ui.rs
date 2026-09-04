@@ -38,9 +38,9 @@ pub use app_shell::{
     ExportScrollback, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
-    ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight, ToggleBroadcast,
-    ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger, open_sleipnir_window,
+    ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
+    ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
+    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger, open_sleipnir_window,
     try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
