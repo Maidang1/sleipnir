@@ -2624,10 +2624,15 @@ impl Terminal {
                     self.last_content.display_offset,
                 ))
                 .unwrap_or(0);
+                // RowGeometry's line axis points down-document (later lines =
+                // larger y), while a positive wheel delta means "scroll up"
+                // (toward history). Negate on the way in and back out so the
+                // geometry's document-start clamp means "top of scrollback";
+                // before this, the clamp at absolute line 0 swallowed
+                // scroll-down deltas and the viewport stuck at the top.
                 let absolute_line_delta =
-                    self.viewport.apply_pixel_delta(delta, &self.row_geometry);
-                // Wheel pixel deltas and display_offset deltas share a sign.
-                Some(absolute_line_delta)
+                    self.viewport.apply_pixel_delta(-delta, &self.row_geometry);
+                Some(-absolute_line_delta)
             }
             TouchPhase::Ended | TouchPhase::Cancelled => None,
         }

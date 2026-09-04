@@ -919,6 +919,94 @@ mod tests {
 
     use super::*;
 
+    /// One wheel `Moved` step exactly as `Terminal::determine_scroll_lines`
+    /// computes it: sync the viewport row from the grid's display_offset,
+    /// accumulate the pixel delta through RowGeometry, and spill whole rows
+    /// into the grid as `Scroll::Delta`.
+    #[cfg(test)]
+    pub(crate) fn wheel_step(
+        term: &mut AlacrittyTerm,
+        viewport: &mut row_geometry::ViewportPosition,
+        geom: &row_geometry::RowGeometry,
+        delta_px: f32,
+    ) -> i32 {
+        viewport.row = usize::try_from(crate::row_map::viewport_top_abs(
+            term.history_size() as i32,
+            term.grid().display_offset(),
+        ))
+        .unwrap_or(0);
+        // Mirrors Terminal::determine_scroll_lines: negate on the way into
+        // the geometry (whose line axis points down-document) and back out
+        // into the grid's Scroll::Delta sign convention.
+        let spilled = viewport.apply_pixel_delta(-delta_px, geom);
+        if spilled != 0 {
+            term.scroll_display(AlacScroll::Delta(-spilled));
+        }
+        spilled
+    }
+
+    #[test]
+    fn wheel_math_scrolls_up_and_back_down_to_bottom() {
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        for i in 0..300 {
+            for c in format!("line{i}").chars() {
+                term.input(c);
+            }
+            term.input('\r');
+            term.input('\n');
+        }
+        let line_height = 16.0f32;
+        let mut geom = row_geometry::RowGeometry::new(line_height);
+        geom.set_line_count((term.history_size() + term.screen_lines()) as i32);
+        assert!(
+            term.history_size() > 4,
+            "need real scrollback: history={}",
+            term.history_size()
+        );
+        let mut viewport = row_geometry::ViewportPosition::new(0);
+
+        assert_eq!(term.grid().display_offset(), 0);
+        // Scroll up five rows (positive pixel delta = up, Zed convention).
+        for _ in 0..5 {
+            wheel_step(&mut term, &mut viewport, &geom, line_height);
+        }
+        assert_eq!(
+            term.grid().display_offset(),
+            5,
+            "scroll up must move exactly one row per line-height delta"
+        );
+        // Scroll back down; must reach the bottom exactly.
+        for _ in 0..10 {
+            wheel_step(&mut term, &mut viewport, &geom, -line_height);
+        }
+        assert_eq!(
+            term.grid().display_offset(),
+            0,
+            "scroll down must return to the bottom"
+        );
+        // Scroll all the way to the top of the scrollback, overshooting.
+        let history = term.history_size();
+        for _ in 0..(history + 10) {
+            wheel_step(&mut term, &mut viewport, &geom, line_height);
+        }
+        assert_eq!(
+            term.grid().display_offset(),
+            history,
+            "overshoot must pin the viewport to the very top"
+        );
+        // From the absolute top, scrolling down must still work.
+        for _ in 0..(history + 10) {
+            wheel_step(&mut term, &mut viewport, &geom, -line_height);
+        }
+        assert_eq!(
+            term.grid().display_offset(),
+            0,
+            "scroll down from the very top of the scrollback must reach the bottom"
+        );
+    }
+
     #[test]
     fn terminal_hyperlink_from_alacritty_keeps_alacritty_storage() {
         let hyperlink = AlacHyperlink::new(Some("id"), "https://example.com".to_string());
