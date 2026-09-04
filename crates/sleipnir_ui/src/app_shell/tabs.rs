@@ -8,13 +8,22 @@ use gpui::{Context, Entity, Focusable as _, SharedString, Window};
 use std::path::PathBuf;
 
 use super::{
-    AppShell, RenameState, Tab, open_sleipnir_window_with_tab, rebase_detached_tab,
-    reorder_insert_index,
+    AppShell, CloseConfirmState, ClosedTab, ConfirmKind, RenameState, Tab,
+    open_sleipnir_window_with_tab, rebase_detached_tab, reorder_insert_index,
 };
 use crate::TermView;
 use crate::chrome::active_after_close;
 use crate::pane_tree::{PaneId, PaneNode};
 use crate::tab_convert::{extract_pane, merge_tab};
+
+const CLOSED_TAB_HISTORY_LIMIT: usize = 10;
+
+fn push_closed_tab(history: &mut Vec<ClosedTab>, closed: ClosedTab) {
+    if history.len() == CLOSED_TAB_HISTORY_LIMIT {
+        history.remove(0);
+    }
+    history.push(closed);
+}
 
 impl AppShell {
     pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -128,10 +137,59 @@ impl AppShell {
         }
     }
 
-    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_close_tab(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.close_confirm.is_some() {
+            return;
+        }
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let mut leaves = Vec::new();
+        self.tabs[index].tree.leaves(&mut leaves);
+        let first_busy = leaves
+            .into_iter()
+            .map(|(_, view)| view)
+            .find(|view| view.read(cx).looks_busy(cx));
+        let policy = sleipnir_settings::TerminalSettings::get_global(cx).confirm_close;
+        let needs_confirm = match policy {
+            sleipnir_settings::ConfirmClose::Never => false,
+            sleipnir_settings::ConfirmClose::Always => true,
+            sleipnir_settings::ConfirmClose::Dirty => first_busy.is_some(),
+        };
+        if needs_confirm {
+            let name =
+                first_busy.and_then(|view| view.read(cx).foreground_process_command_name(cx));
+            self.close_confirm = Some(CloseConfirmState {
+                message: crate::chrome::close_copy::close_confirm_message(name.as_deref()).into(),
+                kind: ConfirmKind::CloseTab(tab_id),
+            });
+            cx.notify();
+        } else {
+            self.close_tab_at(index, window, cx);
+        }
+    }
+
+    pub(crate) fn close_tab_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.tabs.len() {
             return;
         }
+        push_closed_tab(
+            &mut self.closed_tabs,
+            ClosedTab {
+                cwd: self.tabs[index].workspace_cwd(cx),
+                title: self.tabs[index].custom_title.clone(),
+            },
+        );
         // Drop any inline rename targeting the tab being removed.
         if let Some(state) = self.rename.as_ref() {
             if self.tabs[index].id == state.tab_id {
@@ -163,6 +221,19 @@ impl AppShell {
         }
         let idx = self.active.min(self.tabs.len() - 1);
         self.close_tab_at(idx, window, cx);
+    }
+
+    pub(crate) fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(closed) = self.closed_tabs.pop() else {
+            return;
+        };
+        self.add_tab_at(closed.cwd, window, cx);
+        if let Some(tab) = self.tabs.last_mut() {
+            tab.custom_title = closed.title;
+        }
+        self.sync_window_title(window, cx);
+        self.schedule_session_save(cx);
+        cx.notify();
     }
 
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -341,5 +412,34 @@ impl AppShell {
             // Panel (or empty): keep keys on the shell, never a leftover PTY.
             window.focus(&self.focus_handle, cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn closed_tab(index: usize) -> ClosedTab {
+        ClosedTab {
+            cwd: Some(PathBuf::from(format!("/tmp/{index}"))),
+            title: Some(format!("tab {index}").into()),
+        }
+    }
+
+    #[test]
+    fn closed_tab_history_keeps_ten_most_recent_tabs() {
+        let mut history = Vec::new();
+        for index in 0..12 {
+            push_closed_tab(&mut history, closed_tab(index));
+        }
+        assert_eq!(history.len(), CLOSED_TAB_HISTORY_LIMIT);
+        assert_eq!(
+            history.first().and_then(|tab| tab.title.as_deref()),
+            Some("tab 2")
+        );
+        assert_eq!(
+            history.last().and_then(|tab| tab.title.as_deref()),
+            Some("tab 11")
+        );
     }
 }

@@ -41,6 +41,7 @@ pub enum CommandId {
     ToggleHistorySearch,
     ToggleDiff,
     TogglePluginMonitor,
+    ReopenClosedTab,
     /// Runtime-discovered external plugin command index.
     Plugin(usize),
     /// Dynamic chrome contribution (RenderStatus Btn). Index into
@@ -85,6 +86,7 @@ impl CommandId {
             CommandId::ToggleHistorySearch => "toggle_history_search",
             CommandId::ToggleDiff => "toggle_diff",
             CommandId::TogglePluginMonitor => "toggle_plugin_monitor",
+            CommandId::ReopenClosedTab => "reopen_closed_tab",
             CommandId::Plugin(_) => "plugin",
             CommandId::PluginContribution(_) => "plugin_contribution",
         }
@@ -125,6 +127,7 @@ impl CommandId {
             "toggle_history_search" | "history_search" => Some(CommandId::ToggleHistorySearch),
             "toggle_diff" => Some(CommandId::ToggleDiff),
             "toggle_plugin_monitor" | "plugin_monitor" => Some(CommandId::TogglePluginMonitor),
+            "reopen_closed_tab" | "reopen_tab" => Some(CommandId::ReopenClosedTab),
             _ if s.trim().starts_with("plugin.") => None,
             _ => None,
         }
@@ -342,6 +345,12 @@ pub fn commands() -> Vec<CommandItem> {
             shortcut: display_shortcut("toggle_plugin_monitor").into(),
             keywords: "plugin monitor process kill".into(),
         },
+        CommandItem {
+            id: CommandId::ReopenClosedTab,
+            title: "Reopen Closed Tab".into(),
+            shortcut: display_shortcut("reopen_closed_tab").into(),
+            keywords: "reopen closed tab undo".into(),
+        },
     ]
 }
 
@@ -512,6 +521,24 @@ mod tests {
                     && i.keywords.as_ref().contains("plugin monitor process kill")),
             "Plugin Monitor must appear in the palette with the required keywords"
         );
+    }
+
+    #[test]
+    fn reopen_closed_tab_command_accepts_both_names() {
+        assert_eq!(
+            CommandId::from_str("reopen_closed_tab"),
+            Some(CommandId::ReopenClosedTab)
+        );
+        assert_eq!(
+            CommandId::from_str("reopen_tab"),
+            Some(CommandId::ReopenClosedTab)
+        );
+        let item = commands()
+            .into_iter()
+            .find(|item| item.id == CommandId::ReopenClosedTab)
+            .expect("Reopen Closed Tab command");
+        assert_eq!(item.title.as_ref(), "Reopen Closed Tab");
+        assert_eq!(item.keywords.as_ref(), "reopen closed tab undo");
     }
 
     #[test]

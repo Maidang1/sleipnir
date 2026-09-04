@@ -23,6 +23,7 @@ impl AppShell {
     ) {
         match id {
             CommandId::NewTab => self.add_tab(window, cx),
+            CommandId::ReopenClosedTab => self.reopen_closed_tab(window, cx),
             CommandId::ClosePane => self.request_close_active_pane(window, cx),
             CommandId::NextTab => self.next_tab(window, cx),
             CommandId::PrevTab => self.prev_tab(window, cx),

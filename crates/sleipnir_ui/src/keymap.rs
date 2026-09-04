@@ -34,6 +34,7 @@ pub enum BuiltinAction {
     ScrollToTop,
     ScrollToBottom,
     NewTab,
+    ReopenClosedTab,
     CloseTab,
     NewWindow,
     NextTab,
@@ -195,6 +196,7 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
             Terminal,
         ),
         b("cmd-t", BuiltinAction::NewTab, Both),
+        b("cmd-shift-t", BuiltinAction::ReopenClosedTab, Both),
         b("cmd-w", BuiltinAction::CloseTab, Both),
         b("cmd-n", BuiltinAction::NewWindow, Both),
         b("cmd-shift-]", BuiltinAction::NextTab, Both),
@@ -354,6 +356,8 @@ pub fn display_shortcut_for(id: &str, non_macos: bool) -> &'static str {
     match (id, non_macos) {
         ("new_tab", false) => "⌘T",
         ("new_tab", true) => "Ctrl+Shift+T",
+        ("reopen_closed_tab", false) => "⌘⇧T",
+        ("reopen_closed_tab", true) => "",
         ("close_tab", false) => "⌘W",
         ("close_tab", true) => "Ctrl+Shift+W",
         ("next_tab", _) => "⌃Tab",
@@ -545,6 +549,23 @@ mod tests {
                 "bare ctrl chord would steal a shell key: {k}"
             );
         }
+    }
+
+    #[test]
+    fn reopen_closed_tab_is_macos_only() {
+        let mac = builtin_bindings_for(true, false);
+        assert!(mac.iter().any(|binding| {
+            binding.key == "cmd-shift-t"
+                && binding.action == BuiltinAction::ReopenClosedTab
+                && binding.context == BindingContext::Both
+        }));
+        assert!(
+            !builtin_bindings_for(false, false)
+                .iter()
+                .any(|binding| binding.action == BuiltinAction::ReopenClosedTab)
+        );
+        assert_eq!(display_shortcut_for("reopen_closed_tab", false), "⌘⇧T");
+        assert_eq!(display_shortcut_for("reopen_closed_tab", true), "");
     }
 
     #[test]

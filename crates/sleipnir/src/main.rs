@@ -12,11 +12,11 @@ use sleipnir_ui::{
     CycleTheme, DecreaseFontSize, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen,
     NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab,
-    ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
-    ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
-    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger, builtin_bindings,
-    install_finder_services, last_window_close_quits, open_sleipnir_window, tmux_preset_bindings,
-    try_open_sleipnir_window,
+    ReloadSettings, ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown,
+    SplitRight, ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch,
+    TogglePaneFacts, TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger,
+    builtin_bindings, install_finder_services, last_window_close_quits, open_sleipnir_window,
+    tmux_preset_bindings, try_open_sleipnir_window,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -159,6 +159,7 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::ScrollToTop => KeyBinding::new(key, ScrollToTop, context),
         BuiltinAction::ScrollToBottom => KeyBinding::new(key, ScrollToBottom, context),
         BuiltinAction::NewTab => KeyBinding::new(key, NewTab, context),
+        BuiltinAction::ReopenClosedTab => KeyBinding::new(key, ReopenClosedTab, context),
         BuiltinAction::CloseTab => KeyBinding::new(key, CloseTab, context),
         BuiltinAction::NewWindow => KeyBinding::new(key, NewWindow, context),
         BuiltinAction::NextTab => KeyBinding::new(key, NextTab, context),
@@ -230,6 +231,9 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
     for ctx in contexts {
         let kb = match spec.action.as_str() {
             "new_tab" => KeyBinding::new(&spec.key, NewTab, Some(ctx)),
+            "reopen_closed_tab" | "reopen_tab" => {
+                KeyBinding::new(&spec.key, ReopenClosedTab, Some(ctx))
+            }
             "close_tab" | "close_pane" => KeyBinding::new(&spec.key, CloseTab, Some(ctx)),
             "next_tab" => KeyBinding::new(&spec.key, NextTab, Some(ctx)),
             "prev_tab" => KeyBinding::new(&spec.key, PrevTab, Some(ctx)),

@@ -50,6 +50,8 @@ actions!(
     [
         /// Open a new terminal tab.
         NewTab,
+        /// Reopen the most recently closed terminal tab.
+        ReopenClosedTab,
         /// Close the active pane (or the tab, if it is the last pane).
         CloseTab,
         /// Activate the next tab.
@@ -223,11 +225,22 @@ impl Tab {
     }
 }
 
-/// In-progress inline tab rename triggered by a right-click on a tab.
+/// In-progress inline tab rename triggered from a tab's context menu.
 #[derive(Clone)]
 pub(crate) struct RenameState {
     pub(crate) tab_id: u64,
     pub(crate) buffer: String,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TabMenuState {
+    pub(crate) tab_id: u64,
+    pub(crate) position: gpui::Point<gpui::Pixels>,
+}
+
+pub(crate) struct ClosedTab {
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) title: Option<SharedString>,
 }
 
 /// Top-level section inside the settings panel (WezTerm-style tabs).
@@ -317,6 +330,10 @@ pub struct AppShell {
     panel_camera_last_ms: u64,
     /// In-progress inline tab rename, if any.
     pub(crate) rename: Option<RenameState>,
+    /// Context menu opened for a tab chip.
+    pub(crate) tab_menu: Option<TabMenuState>,
+    /// Recently closed tabs, oldest first and capped at ten entries.
+    pub(crate) closed_tabs: Vec<ClosedTab>,
     /// Which modal overlay is showing, plus the transient find / quick-select
     /// modes. Replaces the old one-bool-per-overlay matrix, so illegal
     /// combinations are unrepresentable.
@@ -379,6 +396,7 @@ pub struct AppShell {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConfirmKind {
     ClosePane,
+    CloseTab(u64),
     #[cfg(target_os = "linux")]
     CloseWindow,
     ClearRunLedger,
@@ -521,6 +539,8 @@ impl AppShell {
             panel_drag: None,
             panel_camera_last_ms: 0,
             rename: None,
+            tab_menu: None,
+            closed_tabs: Vec::new(),
             mode: UiMode {
                 overlay: if has_update_outcome {
                     OverlayKind::Update
@@ -1414,9 +1434,14 @@ impl AppShell {
         let kind = self.close_confirm.take().map(|s| s.kind);
         match kind {
             Some(ConfirmKind::ClearRunLedger) => self.clear_run_ledger(cx),
+            Some(ConfirmKind::CloseTab(tab_id)) => {
+                if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
+                    self.close_tab_at(index, window, cx);
+                }
+            }
             #[cfg(target_os = "linux")]
             Some(ConfirmKind::CloseWindow) => self.finish_window_close(window, cx),
-            _ => self.close_active_pane(window, cx),
+            Some(ConfirmKind::ClosePane) | None => self.close_active_pane(window, cx),
         }
     }
 
@@ -1623,6 +1648,15 @@ impl AppShell {
 
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.add_tab(window, cx);
+    }
+
+    fn on_reopen_closed_tab(
+        &mut self,
+        _: &ReopenClosedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reopen_closed_tab(window, cx);
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1986,6 +2020,14 @@ impl Render for AppShell {
                     }
                     return;
                 }
+                if this.tab_menu.is_some() {
+                    if event.keystroke.key.as_str() == "escape" {
+                        this.tab_menu = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
                 if this.mode.is(OverlayKind::Update) {
                     if event.keystroke.key.as_str() == "escape" {
                         this.close_update(cx);
@@ -2090,6 +2132,7 @@ impl Render for AppShell {
                 },
             ))
             .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_reopen_closed_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_prev_tab))
@@ -2219,6 +2262,9 @@ impl Render for AppShell {
                                 )),
                         ),
                 )
+            })
+            .when(self.tab_menu.is_some(), |el| {
+                el.child(self.render_tab_menu(&tokens, window, cx))
             })
             .when(self.mode.is(OverlayKind::Settings), |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))

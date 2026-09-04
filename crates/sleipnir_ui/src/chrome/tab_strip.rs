@@ -2,13 +2,13 @@
 
 use gpui::{
     App, AppContext as _, Context, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px, svg,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    deferred, div, prelude::FluentBuilder as _, px, svg,
 };
 use run_ledger::Badge;
 use sleipnir_settings::{TerminalPalette, TerminalSettings};
 
-use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview};
+use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview, TabMenuState};
 use crate::chrome::agent::{self, AgentKind};
 use crate::chrome::workspace::{WorkspaceKey, group_tabs};
 use crate::chrome::{ChromeGeometry, ChromeTokens};
@@ -89,6 +89,28 @@ impl AppShell {
     }
 }
 
+pub(crate) struct TabPathPreview {
+    text: SharedString,
+}
+
+impl Render for TabPathPreview {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = TerminalPalette::get_global(cx);
+        let tokens = ChromeTokens::from_palette(&palette, window.is_window_active());
+        div()
+            .px_3()
+            .py_1()
+            .rounded(px(6.0))
+            .bg(tokens.hover)
+            .border_1()
+            .border_color(tokens.border)
+            .shadow_lg()
+            .text_sm()
+            .text_color(tokens.fg)
+            .child(self.text.clone())
+    }
+}
+
 pub(crate) fn render_tab_chip(
     tab: &Tab,
     ix: usize,
@@ -111,6 +133,11 @@ pub(crate) fn render_tab_chip(
         tab.path_label(cx)
     };
     let tab_id = tab.id;
+    let path: SharedString = tab
+        .workspace_cwd(cx)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "~".to_string())
+        .into();
     let is_renaming = rename_buffer.is_some();
     let bg = chip_background(is_active, is_hovered, is_bell, failed, tokens, palette);
     let fg = if is_active || is_bell || is_hovered || failed {
@@ -156,75 +183,206 @@ pub(crate) fn render_tab_chip(
         .when(is_bell, |el| el.border_1().border_color(tokens.accent));
     let chip = chip.min_w(geo.tab_min_width).max_w(geo.tab_max_width);
 
-    chip.on_hover(cx.listener(move |this, hovered, _, cx| {
-        if *hovered {
-            this.hovered_tab = Some(tab_id);
-        } else if this.hovered_tab == Some(tab_id) {
-            this.hovered_tab = None;
-        }
-        cx.notify();
-    }))
-    .on_mouse_down(
-        MouseButton::Right,
-        cx.listener(move |this, _, _, cx| {
-            this.begin_rename(tab_id, cx);
-        }),
-    )
-    .on_click(cx.listener(move |this, _, window, cx| {
-        if this.rename.as_ref().is_some_and(|s| s.tab_id == tab_id) {
-            return;
-        }
-        this.activate(ix, window, cx);
-    }))
-    .on_drag(tab_id, {
-        move |_dragged: &u64, _offset, _window, cx| {
-            let value = title.clone();
-            cx.new(move |_| TabDragPreview { title: value })
-        }
-    })
-    .on_drop::<u64>(cx.listener(move |this, dragged: &u64, window, cx| {
-        let Some(from) = this.tabs.iter().find(|t| t.id == *dragged) else {
-            return;
+    let chip = chip
+        .on_hover(cx.listener(move |this, hovered, _, cx| {
+            if *hovered {
+                this.hovered_tab = Some(tab_id);
+            } else if this.hovered_tab == Some(tab_id) {
+                this.hovered_tab = None;
+            }
+            cx.notify();
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                this.tab_menu = Some(TabMenuState {
+                    tab_id,
+                    position: event.position,
+                });
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |this, _, window, cx| {
+                this.request_close_tab(tab_id, window, cx);
+                cx.stop_propagation();
+            }),
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            if this.rename.as_ref().is_some_and(|s| s.tab_id == tab_id) {
+                return;
+            }
+            this.activate(ix, window, cx);
+        }))
+        .on_drag(tab_id, {
+            move |_dragged: &u64, _offset, _window, cx| {
+                let value = title.clone();
+                cx.new(move |_| TabDragPreview { title: value })
+            }
+        })
+        .on_drop::<u64>(cx.listener(move |this, dragged: &u64, window, cx| {
+            this.reorder_tab(*dragged, tab_id, window, cx);
+        }))
+        .on_drop::<PaneDrag>(cx.listener(move |this, dragged: &PaneDrag, window, cx| {
+            let insert_at = this.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0);
+            this.extract_pane_to_tab(dragged.pane_id, insert_at, window, cx);
+        }))
+        .when_some(agent, |el, kind| el.child(render_agent_mark(kind)))
+        .child(body)
+        .children(plugin_badges.into_iter().map(|b| {
+            let color = match b.tone {
+                plugin_protocol::v2::Tone::Ok => tokens.ok,
+                plugin_protocol::v2::Tone::Warn => tokens.warn,
+                plugin_protocol::v2::Tone::Err => tokens.err,
+                plugin_protocol::v2::Tone::Accent => tokens.accent,
+                plugin_protocol::v2::Tone::Dim => tokens.fg_muted,
+                plugin_protocol::v2::Tone::Fg => tokens.fg,
+            };
+            div()
+                .id(SharedString::from(format!(
+                    "plugin-tab-badge-{tab_id}-{}",
+                    b.plugin_id
+                )))
+                .flex_shrink_0()
+                .px_1()
+                .rounded(px(3.0))
+                .bg(tokens.surface)
+                .text_xs()
+                .text_color(color)
+                .child(format!("{}:{}", b.plugin_id, b.text))
+        }))
+        .when(is_hovered, |el| {
+            el.child(
+                div()
+                    .id(("tab-close", tab_id))
+                    .flex_shrink_0()
+                    .px_1()
+                    .rounded(px(3.0))
+                    .text_xs()
+                    .hover(|el| el.bg(tokens.hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.request_close_tab(tab_id, window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .child("✕"),
+            )
+        });
+
+    if is_renaming {
+        chip.into_any_element()
+    } else {
+        chip.tooltip(move |_window, cx| {
+            let text = path.clone();
+            cx.new(move |_| TabPathPreview { text }).into()
+        })
+        .into_any_element()
+    }
+}
+
+impl AppShell {
+    pub(crate) fn render_tab_menu(
+        &self,
+        tokens: &ChromeTokens,
+        _window: &mut Window,
+        cx: &mut Context<AppShell>,
+    ) -> impl IntoElement {
+        let state = self.tab_menu.expect("tab menu state checked by caller");
+        let row = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px_3()
+                .py_1()
+                .text_sm()
+                .text_color(tokens.fg)
+                .cursor_pointer()
+                .hover(|el| el.bg(tokens.hover))
+                .child(label)
         };
-        let Some(to) = this.tabs.iter().find(|t| t.id == tab_id) else {
-            return;
+
+        let close_menu = |this: &mut AppShell, cx: &mut Context<AppShell>| {
+            this.tab_menu = None;
+            cx.notify();
         };
-        let from_ws = WorkspaceKey::of(from.workspace_cwd(cx).as_deref());
-        let to_ws = WorkspaceKey::of(to.workspace_cwd(cx).as_deref());
-        if from_ws != to_ws {
-            return;
-        }
-        this.reorder_tab(*dragged, tab_id, window, cx);
-    }))
-    .on_drop::<PaneDrag>(cx.listener(move |this, dragged: &PaneDrag, window, cx| {
-        let insert_at = this.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0);
-        this.extract_pane_to_tab(dragged.pane_id, insert_at, window, cx);
-    }))
-    .when_some(agent, |el, kind| el.child(render_agent_mark(kind)))
-    .child(body)
-    .children(plugin_badges.into_iter().map(|b| {
-        let color = match b.tone {
-            plugin_protocol::v2::Tone::Ok => tokens.ok,
-            plugin_protocol::v2::Tone::Warn => tokens.warn,
-            plugin_protocol::v2::Tone::Err => tokens.err,
-            plugin_protocol::v2::Tone::Accent => tokens.accent,
-            plugin_protocol::v2::Tone::Dim => tokens.fg_muted,
-            plugin_protocol::v2::Tone::Fg => tokens.fg,
-        };
-        div()
-            .id(SharedString::from(format!(
-                "plugin-tab-badge-{tab_id}-{}",
-                b.plugin_id
-            )))
-            .flex_shrink_0()
-            .px_1()
-            .rounded(px(3.0))
-            .bg(tokens.surface)
-            .text_xs()
-            .text_color(color)
-            .child(format!("{}:{}", b.plugin_id, b.text))
-    }))
-    .into_any_element()
+
+        deferred(
+            div()
+                .id("tab-menu-overlay")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| close_menu(this, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| close_menu(this, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, _, cx| close_menu(this, cx)),
+                )
+                .child(
+                    div()
+                        .id("tab-menu-panel")
+                        .absolute()
+                        .left(state.position.x)
+                        .top(state.position.y)
+                        .min_w(px(160.0))
+                        .py_1()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(tokens.border)
+                        .bg(tokens.content_bg)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                        .child(row("tab-menu-rename", "Rename Tab").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.tab_menu = None;
+                                this.begin_rename(state.tab_id, cx);
+                                cx.stop_propagation();
+                            },
+                        )))
+                        .child(
+                            row("tab-menu-duplicate", "Duplicate Tab").on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    let cwd = this
+                                        .tabs
+                                        .iter()
+                                        .find(|tab| tab.id == state.tab_id)
+                                        .and_then(|tab| tab.workspace_cwd(cx));
+                                    this.tab_menu = None;
+                                    this.add_tab_at(cwd, window, cx);
+                                    cx.stop_propagation();
+                                },
+                            )),
+                        )
+                        .child(row("tab-menu-close", "Close Tab").on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.tab_menu = None;
+                                this.request_close_tab(state.tab_id, window, cx);
+                                cx.stop_propagation();
+                            },
+                        )))
+                        .child(row("tab-menu-close-others", "Close Other Tabs").on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.tab_menu = None;
+                                for index in (0..this.tabs.len()).rev() {
+                                    if this.tabs[index].id != state.tab_id {
+                                        this.close_tab_at(index, window, cx);
+                                    }
+                                }
+                                cx.stop_propagation();
+                            }),
+                        )),
+                ),
+        )
+    }
 }
 
 fn truncated_label(text: impl Into<gpui::SharedString>) -> impl IntoElement {
