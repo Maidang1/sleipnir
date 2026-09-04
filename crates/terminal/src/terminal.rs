@@ -2917,7 +2917,16 @@ fn accumulate_uniform_wheel(
     let new_offset = (*scroll_px / line_height) as i32;
 
     if viewport_height > px(0.) {
-        *scroll_px %= viewport_height;
+        // Wrap by whole lines only: keeps the accumulator bounded without
+        // shifting the sub-line phase. A raw viewport modulo would nudge
+        // fractional gestures whenever the viewport is not an exact
+        // multiple of the line height.
+        let lines_per_viewport = (viewport_height / line_height) as i32;
+        if lines_per_viewport > 0 {
+            let whole_lines = (*scroll_px / line_height) as i32;
+            let frac = *scroll_px - line_height * whole_lines as f32;
+            *scroll_px = line_height * whole_lines.rem_euclid(lines_per_viewport) as f32 + frac;
+        }
     } else {
         *scroll_px = px(0.);
     }
