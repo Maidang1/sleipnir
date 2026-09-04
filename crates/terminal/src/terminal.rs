@@ -2616,9 +2616,26 @@ impl Terminal {
                 None
             }
             TouchPhase::Moved => {
-                // Retain the sub-row remainder instead of discarding it with a
-                // modulo of the viewport height (ADR-0018 decision 2).
-                let delta = f32::from(e.delta.pixel_delta(line_height).y) * scroll_multiplier;
+                let delta = e.delta.pixel_delta(line_height).y * scroll_multiplier;
+
+                // Preserve the v0.4.1 path for an ordinary terminal. Applying
+                // the variable-height viewport to a uniform grid needlessly
+                // translates every glyph by `viewport.sub`; at the bottom the
+                // grid clamps Scroll::Delta while that remainder survives, so
+                // trackpad momentum repeatedly paints the screen at different
+                // sub-pixel positions and the text flickers.
+                if self.row_geometry.blocks().next().is_none() {
+                    self.viewport.sub = 0.0;
+                    return Some(accumulate_uniform_wheel(
+                        &mut self.scroll_px,
+                        delta,
+                        line_height,
+                        self.last_content.terminal_bounds.height(),
+                    ));
+                }
+
+                // Blocks have variable pixel heights, so retain their sub-row
+                // remainder (ADR-0018 decision 2).
                 self.viewport.row = usize::try_from(viewport_top_abs(
                     self.last_history_size as i32,
                     self.last_content.display_offset,
@@ -2626,12 +2643,10 @@ impl Terminal {
                 .unwrap_or(0);
                 // RowGeometry's line axis points down-document (later lines =
                 // larger y), while a positive wheel delta means "scroll up"
-                // (toward history). Negate on the way in and back out so the
-                // geometry's document-start clamp means "top of scrollback";
-                // before this, the clamp at absolute line 0 swallowed
-                // scroll-down deltas and the viewport stuck at the top.
-                let absolute_line_delta =
-                    self.viewport.apply_pixel_delta(-delta, &self.row_geometry);
+                // (toward history). Negate on the way in and back out.
+                let absolute_line_delta = self
+                    .viewport
+                    .apply_pixel_delta(-f32::from(delta), &self.row_geometry);
                 Some(-absolute_line_delta)
             }
             TouchPhase::Ended | TouchPhase::Cancelled => None,
@@ -2887,6 +2902,29 @@ fn foreground_process_command_from_argv(argv: &[String]) -> Option<String> {
 
 /// Pure busy predicate for close-confirm (M12).
 ///
+/// Accumulate wheel pixels using the stable v0.4.1 uniform-grid behavior.
+///
+/// This intentionally keeps the remainder out of `ViewportPosition::sub`:
+/// ordinary terminal rows are integer grid rows and must always paint flush.
+fn accumulate_uniform_wheel(
+    scroll_px: &mut Pixels,
+    delta: Pixels,
+    line_height: Pixels,
+    viewport_height: Pixels,
+) -> i32 {
+    let old_offset = (*scroll_px / line_height) as i32;
+    *scroll_px += delta;
+    let new_offset = (*scroll_px / line_height) as i32;
+
+    if viewport_height > px(0.) {
+        *scroll_px %= viewport_height;
+    } else {
+        *scroll_px = px(0.);
+    }
+
+    new_offset - old_offset
+}
+
 /// Returns true when the foreground process group id differs from the shell
 /// child pid (a non-shell job is running). Idle shell → foreground equals
 /// shell → not busy.
@@ -2918,7 +2956,8 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_looks_busy;
+    use super::{accumulate_uniform_wheel, terminal_looks_busy};
+    use gpui::px;
 
     /// Regression (ADR-0018 integration): `sync` holds the terminal lock across
     /// `process_terminal_event`, which is handed `term: &mut AlacrittyTerm`.
@@ -2956,6 +2995,23 @@ mod tests {
             body.contains("pointer_map_locked(term)"),
             "coordinates must still route through RowGeometry"
         );
+    }
+
+    /// Regression: v0.4.1 accumulated fractional uniform-grid wheel movement
+    /// without feeding it into the paint transform. Opposite fractional
+    /// gestures must cancel while dispatching the same whole-row movement.
+    #[test]
+    fn uniform_wheel_preserves_v0_4_1_accumulation() {
+        let line_height = px(16.0);
+        let viewport_height = px(640.0);
+        let mut scroll_px = px(0.0);
+
+        let up = accumulate_uniform_wheel(&mut scroll_px, px(21.0), line_height, viewport_height);
+        assert_eq!(up, 1);
+        let down =
+            accumulate_uniform_wheel(&mut scroll_px, px(-21.0), line_height, viewport_height);
+        assert_eq!(down, -1);
+        assert_eq!(scroll_px, px(0.0));
     }
 
     // M1: full integration tests disabled (Zed settings stack removed)
