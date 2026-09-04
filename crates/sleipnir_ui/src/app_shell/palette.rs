@@ -11,7 +11,7 @@ use gpui::{
 
 use super::AppShell;
 use crate::chrome::ChromeTokens;
-use crate::command_palette::{CommandId, filter_commands};
+use crate::command_palette::{CommandId, filter_commands, prioritize_recents, record_recent};
 use crate::ui_mode::OverlayKind;
 
 impl AppShell {
@@ -32,7 +32,11 @@ impl AppShell {
     }
 
     fn filtered_palette_indices(&self) -> Vec<usize> {
-        filter_commands(&self.palette_items, &self.palette_query)
+        let mut indices = filter_commands(&self.palette_items, &self.palette_query);
+        if self.palette_query.trim().is_empty() {
+            prioritize_recents(&self.palette_items, &mut indices, &self.palette_recents);
+        }
+        indices
     }
 
     /// Palette entry point: close the palette, then run the command through
@@ -40,6 +44,9 @@ impl AppShell {
     fn run_command(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         self.close_palette(window, cx);
         self.dispatch_command(id, window, cx);
+        if !matches!(id, CommandId::Plugin(_) | CommandId::PluginContribution(_)) {
+            record_recent(&mut self.palette_recents, id);
+        }
     }
 
     pub(super) fn palette_key_down(
@@ -73,6 +80,7 @@ impl AppShell {
                     } else {
                         self.palette_selected - 1
                     };
+                    self.palette_scroll.scroll_to_item(self.palette_selected);
                     cx.notify();
                 }
                 true
@@ -81,6 +89,7 @@ impl AppShell {
                 let hits = self.filtered_palette_indices();
                 if !hits.is_empty() {
                     self.palette_selected = (self.palette_selected + 1) % hits.len();
+                    self.palette_scroll.scroll_to_item(self.palette_selected);
                     cx.notify();
                 }
                 true
@@ -89,6 +98,14 @@ impl AppShell {
                 self.palette_query.pop();
                 self.palette_selected = 0;
                 cx.notify();
+                true
+            }
+            "v" if event.keystroke.modifiers.platform && !event.keystroke.modifiers.alt => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.palette_query.push_str(&text.replace(['\n', '\r'], ""));
+                    self.palette_selected = 0;
+                    cx.notify();
+                }
                 true
             }
             _ => {
@@ -129,6 +146,7 @@ impl AppShell {
             .w_full()
             .max_h(px(320.0))
             .overflow_y_scroll()
+            .track_scroll(&self.palette_scroll)
             .py_1();
 
         if hits.is_empty() {
@@ -159,6 +177,12 @@ impl AppShell {
                         .cursor_pointer()
                         .when(is_sel, |el| el.bg(tokens.hover))
                         .hover(|el| el.bg(tokens.hover))
+                        .on_hover(cx.listener(move |this, hovered, _, cx| {
+                            if *hovered {
+                                this.palette_selected = row_i;
+                                cx.notify();
+                            }
+                        }))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.run_command(id, window, cx);
                         }))

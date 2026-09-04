@@ -1,6 +1,6 @@
 //! Lightweight command palette (M9).
 //!
-//! Fixed catalog of actions with fuzzy substring filter. Key bindings remain
+//! Fixed catalog of actions with fuzzy subsequence filtering. Key bindings remain
 //! in `main.rs`; the palette is a discoverability surface, not a keymap editor.
 
 use gpui::SharedString;
@@ -389,8 +389,8 @@ pub fn contribution_items(
         .collect()
 }
 
-/// Case-insensitive substring filter over title + keywords.
-/// Returns indices into `items` in catalog order.
+/// Case-insensitive fuzzy filter over title + keywords.
+/// Returns indices ranked by match tier, preserving catalog order within tiers.
 pub fn filter_commands(items: &[CommandItem], query: &str) -> Vec<usize> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -402,23 +402,48 @@ pub fn filter_commands(items: &[CommandItem], query: &str) -> Vec<usize> {
         .filter_map(|(i, item)| {
             let title = item.title.to_lowercase();
             let keys = item.keywords.to_lowercase();
-            let hay = format!("{title} {keys}");
-            if !hay.contains(&q) {
-                return None;
-            }
-            // Prefer title prefix, then title contains, then keywords.
             let score = if title.starts_with(&q) {
                 0
-            } else if title.contains(&q) {
+            } else if subsequence(&title, &q) {
                 1
-            } else {
+            } else if keys.contains(&q) {
                 2
+            } else if subsequence(&keys, &q) {
+                3
+            } else {
+                return None;
             };
             Some((score, i))
         })
         .collect();
     scored.sort_by_key(|(score, i)| (*score, *i));
     scored.into_iter().map(|(_, i)| i).collect()
+}
+
+fn subsequence(hay: &str, needle: &str) -> bool {
+    let mut chars = hay.chars();
+    needle
+        .chars()
+        .all(|needle_char| chars.any(|hay_char| hay_char == needle_char))
+}
+
+pub(crate) fn record_recent(recents: &mut Vec<CommandId>, id: CommandId) {
+    recents.retain(|recent| *recent != id);
+    recents.insert(0, id);
+    recents.truncate(8);
+}
+
+pub(crate) fn prioritize_recents(
+    items: &[CommandItem],
+    indices: &mut [usize],
+    recents: &[CommandId],
+) {
+    indices.sort_by_key(|&index| {
+        recents
+            .iter()
+            .position(|id| *id == items[index].id)
+            .map_or((1, index), |recent| (0, recent))
+    });
 }
 
 #[cfg(test)]
@@ -433,11 +458,70 @@ mod tests {
     }
 
     #[test]
-    fn filter_finds_split() {
+    fn filter_finds_title_subsequences_case_insensitively() {
         let items = commands();
-        let hits = filter_commands(&items, "split");
-        assert!(hits.len() >= 2);
+        let hits = filter_commands(&items, "SpRt");
         assert!(hits.iter().any(|&i| items[i].id == CommandId::SplitRight));
+    }
+
+    #[test]
+    fn filter_ranks_match_tiers_stably() {
+        let item = |id, title: &'static str, keywords: &'static str| CommandItem {
+            id,
+            title: title.into(),
+            shortcut: "".into(),
+            keywords: keywords.into(),
+        };
+        let items = vec![
+            item(CommandId::NewTab, "Alpha One", "none"),
+            item(CommandId::ClosePane, "X Alpha", "none"),
+            item(CommandId::NextTab, "Other", "alpha exact"),
+            item(CommandId::PrevTab, "Other Two", "a-l-p-h-a"),
+            item(CommandId::SplitRight, "Alpha Two", "none"),
+        ];
+
+        assert_eq!(filter_commands(&items, "alpha"), vec![0, 4, 1, 2, 3]);
+    }
+
+    #[test]
+    fn recents_are_prioritized_in_recency_order_then_catalog_order() {
+        let items = commands();
+        let mut indices: Vec<_> = (0..items.len()).collect();
+        prioritize_recents(&items, &mut indices, &[CommandId::Find, CommandId::NewTab]);
+
+        assert_eq!(items[indices[0]].id, CommandId::Find);
+        assert_eq!(items[indices[1]].id, CommandId::NewTab);
+        assert_eq!(items[indices[2]].id, CommandId::ClosePane);
+    }
+
+    #[test]
+    fn recording_recent_commands_deduplicates_and_caps_at_eight() {
+        let mut recents = vec![
+            CommandId::NewTab,
+            CommandId::ClosePane,
+            CommandId::NextTab,
+            CommandId::PrevTab,
+            CommandId::SplitRight,
+            CommandId::SplitDown,
+            CommandId::OpenSettings,
+            CommandId::ReloadSettings,
+        ];
+
+        record_recent(&mut recents, CommandId::NextTab);
+        assert_eq!(recents[0], CommandId::NextTab);
+        assert_eq!(recents.len(), 8);
+        assert_eq!(
+            recents
+                .iter()
+                .filter(|id| **id == CommandId::NextTab)
+                .count(),
+            1
+        );
+
+        record_recent(&mut recents, CommandId::CycleTheme);
+        assert_eq!(recents[0], CommandId::CycleTheme);
+        assert_eq!(recents.len(), 8);
+        assert!(!recents.contains(&CommandId::ReloadSettings));
     }
 
     #[test]

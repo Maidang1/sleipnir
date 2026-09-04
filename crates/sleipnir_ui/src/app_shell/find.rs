@@ -29,6 +29,7 @@ impl AppShell {
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode.find_open {
             self.mode.close_find();
+            self.find_debounce_gen = self.find_debounce_gen.wrapping_add(1);
             self.clear_find_matches(cx);
             self.focus_active(window, cx);
             cx.notify();
@@ -67,7 +68,26 @@ impl AppShell {
         }
     }
 
+    fn debounce_find(&mut self, cx: &mut Context<Self>) {
+        self.find_debounce_gen = self.find_debounce_gen.wrapping_add(1);
+        let generation = self.find_debounce_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(120))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.find_debounce_gen == generation && this.mode.find_open {
+                    this.run_find(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn run_find(&mut self, cx: &mut Context<Self>) {
+        // An immediate search (for example Enter) supersedes pending debounce timers.
+        self.find_debounce_gen = self.find_debounce_gen.wrapping_add(1);
         let query = self.find_query.clone();
         if query.is_empty() {
             self.clear_find_matches(cx);
@@ -181,29 +201,37 @@ impl AppShell {
             }
             "backspace" => {
                 self.find_query.pop();
-                self.run_find(cx);
+                self.debounce_find(cx);
                 true
             }
             // ⌥⌘C toggles match-case; ⌥⌘R toggles regex (macOS find-bar convention).
             "c" if event.keystroke.modifiers.alt && event.keystroke.modifiers.platform => {
                 self.find_match_case = !self.find_match_case;
-                self.run_find(cx);
+                self.debounce_find(cx);
                 true
             }
             "r" if event.keystroke.modifiers.alt && event.keystroke.modifiers.platform => {
                 self.find_regex = !self.find_regex;
-                self.run_find(cx);
+                self.debounce_find(cx);
                 true
             }
+            "v" if event.keystroke.modifiers.platform && !event.keystroke.modifiers.alt => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.find_query.push_str(&text.replace(['\n', '\r'], ""));
+                    self.debounce_find(cx);
+                }
+                true
+            }
+            _ if event.keystroke.modifiers.platform => true,
             _ => {
                 if let Some(ch) = event.keystroke.key_char.as_ref() {
                     if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
                         self.find_query.push_str(ch);
-                        self.run_find(cx);
+                        self.debounce_find(cx);
                     }
                 }
                 // Swallow non-platform keys so they don't go to the PTY.
-                !event.keystroke.modifiers.platform
+                true
             }
         }
     }
@@ -284,7 +312,7 @@ impl AppShell {
                     })
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.find_match_case = !this.find_match_case;
-                        this.run_find(cx);
+                        this.debounce_find(cx);
                     }))
                     .child(SharedString::from("Aa")),
             )
@@ -305,7 +333,7 @@ impl AppShell {
                     })
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.find_regex = !this.find_regex;
-                        this.run_find(cx);
+                        this.debounce_find(cx);
                     }))
                     .child(SharedString::from(".*")),
             )
