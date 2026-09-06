@@ -899,6 +899,7 @@ impl TerminalBuilder {
                 last_mouse: None,
                 mouse_down_position: None,
                 matches: Vec::new(),
+                active_match: None,
                 selection_head: None,
                 frozen_selection: None,
                 scroll_px: px(0.),
@@ -1063,6 +1064,9 @@ pub struct Terminal {
     /// apply a drag threshold before starting a selection (see #58970).
     mouse_down_position: Option<GpuiPoint<Pixels>>,
     pub matches: Vec<Range>,
+    /// The match the find UI currently points at, so paint can distinguish it
+    /// from the other highlights. Cleared together with `matches`.
+    pub active_match: Option<Range>,
     pub last_content: Content,
     pub selection_head: Option<Point>,
     /// Frozen "select all" range that survives alacritty's internal selection
@@ -1377,10 +1381,28 @@ impl Terminal {
         } = hyperlink;
         let prev_hovered_word = self.last_content.last_hovered_word.take();
         let match_line = range.start().line;
-        let working_directory = self.cwd_at_line(match_line, history_size);
 
-        let target = if is_url {
-            if let Some(path) = maybe_url_or_path.strip_prefix("file://") {
+        let target = self.hyperlink_target(&maybe_url_or_path, is_url, match_line, history_size);
+
+        if open {
+            cx.emit(Event::Open(target));
+        } else {
+            self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, target, cx);
+        }
+    }
+
+    /// Convert a resolved hyperlink into the navigation target the shell opens,
+    /// shared by click-open and the terminal context menu.
+    fn hyperlink_target(
+        &self,
+        text: &str,
+        is_url: bool,
+        match_line: i32,
+        history_size: usize,
+    ) -> MaybeNavigationTarget {
+        let working_directory = self.cwd_at_line(match_line, history_size);
+        if is_url {
+            if let Some(path) = text.strip_prefix("file://") {
                 let decoded_path = urlencoding::decode(path)
                     .map(|decoded| decoded.into_owned())
                     .unwrap_or(path.to_owned());
@@ -1390,20 +1412,25 @@ impl Terminal {
                     working_directory,
                 })
             } else {
-                MaybeNavigationTarget::Url(maybe_url_or_path.clone())
+                MaybeNavigationTarget::Url(text.to_owned())
             }
         } else {
             MaybeNavigationTarget::PathLike(PathLikeTarget {
-                maybe_path: maybe_url_or_path.clone(),
+                maybe_path: text.to_owned(),
                 working_directory,
             })
-        };
-
-        if open {
-            cx.emit(Event::Open(target));
-        } else {
-            self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, target, cx);
         }
+    }
+
+    /// The hyperlink under a window-relative pixel position, resolved the same
+    /// way a click-open would be. Backs the terminal context menu's "Open Link".
+    pub fn link_target_at(&mut self, position: GpuiPoint<Pixels>) -> Option<MaybeNavigationTarget> {
+        let local = position - self.last_content.terminal_bounds.bounds.origin;
+        let point = self.pointer_map().grid_point(local);
+        let hyperlink = self.find_hyperlink_at_point(point)?;
+        let history_size = self.history_size();
+        let line = hyperlink.range.start().line;
+        Some(self.hyperlink_target(&hyperlink.text, hyperlink.is_url, line, history_size))
     }
 
     fn find_hyperlink_at_point(&mut self, point: Point) -> Option<HyperlinkMatch> {
@@ -1819,8 +1846,15 @@ impl Terminal {
     //- Activate match on terminal (scrolling and selection)
     //- Editor search snapping behavior
 
+    /// Drop all search highlights, including the active-match marker.
+    pub fn clear_matches(&mut self) {
+        self.matches.clear();
+        self.active_match = None;
+    }
+
     pub fn activate_match(&mut self, index: usize) {
         if let Some(search_match) = self.matches.get(index).cloned() {
+            self.active_match = Some(search_match);
             self.set_selection(Some(Selection::simple_range(search_match)));
             if self.vi_mode_enabled {
                 self.events
@@ -2302,8 +2336,11 @@ impl Terminal {
     }
 
     fn schedule_find_hyperlink(&mut self, modifiers: Modifiers, position: GpuiPoint<Pixels>) {
+        // Hover detection runs without a modifier so users can discover that
+        // links exist; opening still honors click semantics. The modifier is
+        // kept in the signature because callers pass event state through.
+        let _ = modifiers;
         if self.selection_phase == SelectionPhase::Selecting
-            || !modifiers.secondary()
             || !self.last_content.terminal_bounds.bounds.contains(&position)
         {
             self.last_content.last_hovered_word = None;
@@ -2350,11 +2387,20 @@ impl Terminal {
                 }
             }
 
+            // A drag only belongs to the terminal when it began with a left
+            // mouse-down on the terminal itself. Modal overlays (settings,
+            // palette, …) swallow mouse_down via stop_propagation, but
+            // TermElement's window-level mouse listener still forwards drag
+            // moves from above the overlay — without this gate, dragging over
+            // an open menu starts a selection from a stale anchor behind it.
+            let Some(mouse_down_position) = self.mouse_down_position else {
+                return;
+            };
+
             // Ignore tiny pointer movements so that a click that jitters by a
             // pixel or two (e.g. the window-focusing click) does not begin a
             // selection. Mirrors the drag threshold used by gpui's `div`.
             if self.selection_phase != SelectionPhase::Selecting
-                && let Some(mouse_down_position) = self.mouse_down_position
                 && (e.position - mouse_down_position).magnitude() <= SELECTION_DRAG_THRESHOLD
             {
                 return;
@@ -2496,6 +2542,15 @@ impl Terminal {
                     if let Some(selection) = selection {
                         self.events
                             .push_back(InternalEvent::SetSelection(Some(selection)));
+                    }
+                }
+                MouseButton::Middle => {
+                    // X11-style middle-click paste (normal mouse mode only;
+                    // mouse-reporting apps already received the button above).
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        if !text.is_empty() {
+                            self.paste(&text);
+                        }
                     }
                 }
                 _ => {}
@@ -2984,12 +3039,17 @@ mod tests {
         let start = src
             .find("fn process_terminal_event(")
             .expect("process_terminal_event exists");
-        // The next `fn` at the same indentation ends the body.
+        // The next `fn` at the same indentation ends the body. Anything the
+        // mouse path adds between process_terminal_event and pointer_map
+        // (e.g. link_target_at) is out of scope: it never runs under the
+        // held lock.
         let body_start = start + "fn process_terminal_event(".len();
-        let end = src[body_start..]
-            .find("\n    pub(crate) fn pointer_map(")
+        let end = ["\n    fn ", "\n    pub fn ", "\n    pub(crate) fn "]
+            .iter()
+            .filter_map(|needle| src[body_start..].find(needle))
             .map(|off| body_start + off)
-            .expect("pointer_map follows process_terminal_event");
+            .min()
+            .expect("another method follows process_terminal_event");
         let body = &src[start..end];
         assert!(
             !body.contains("self.pointer_map()"),
@@ -3003,8 +3063,7 @@ mod tests {
         assert!(
             body.contains("pointer_map_locked(term)"),
             "coordinates must still route through RowGeometry"
-        );
-    }
+        );    }
 
     /// Regression: v0.4.1 accumulated fractional uniform-grid wheel movement
     /// without feeding it into the paint transform. Opposite fractional
@@ -3039,5 +3098,35 @@ mod tests {
         // e.g. shell pid 100, `sleep` in pgid 200.
         assert!(terminal_looks_busy(Some(200), 100));
         assert!(terminal_looks_busy(Some(1), 2));
+    }
+
+    /// Regression: modal overlays (settings, palette, …) swallow mouse_down
+    /// via stop_propagation, but TermElement's window-level listener still
+    /// forwards drag moves from above the overlay. `mouse_drag` must bail
+    /// when no terminal mouse-down anchors the drag, otherwise dragging over
+    /// an open menu starts a selection from a stale anchor behind it.
+    ///
+    /// A runtime test needs a full gpui window, so this inspects the source:
+    /// `mouse_drag` must gate on `mouse_down_position` before entering
+    /// `SelectionPhase::Selecting`.
+    #[test]
+    fn mouse_drag_requires_a_terminal_mouse_down() {
+        let src = include_str!("terminal.rs");
+        let start = src.find("fn mouse_drag(").expect("mouse_drag exists");
+        let end = src[start..]
+            .find("fn drag_line_delta(")
+            .map(|off| start + off)
+            .expect("drag_line_delta follows mouse_drag");
+        let body = &src[start..end];
+        let gate = body
+            .find("let Some(mouse_down_position) = self.mouse_down_position else")
+            .expect("mouse_drag must bail when mouse_down_position is None");
+        let selecting = body
+            .find("self.selection_phase = SelectionPhase::Selecting")
+            .expect("mouse_drag enters Selecting");
+        assert!(
+            gate < selecting,
+            "the mouse_down_position gate must precede SelectionPhase::Selecting"
+        );
     }
 }

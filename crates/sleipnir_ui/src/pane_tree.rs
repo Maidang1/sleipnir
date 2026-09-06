@@ -265,6 +265,27 @@ impl PaneNode {
         }
     }
 
+    /// The leaf that should receive focus when `target` closes: the sibling
+    /// subtree's first leaf when `target` is a direct child of a split, found
+    /// by recursion deeper in the tree otherwise. `None` when `target` is not
+    /// in this tree or closing it would empty the tab.
+    pub fn close_successor_id(&self, target: PaneId) -> Option<PaneId> {
+        match self {
+            PaneNode::Leaf { .. } => None,
+            PaneNode::Split { first, second, .. } => {
+                if first.is_leaf(target) {
+                    Some(second.first_leaf_id())
+                } else if second.is_leaf(target) {
+                    Some(first.first_leaf_id())
+                } else {
+                    first
+                        .close_successor_id(target)
+                        .or_else(|| second.close_successor_id(target))
+                }
+            }
+        }
+    }
+
     /// Whether this subtree contains a leaf with `id`.
     pub fn contains_leaf(&self, id: PaneId) -> bool {
         match self {

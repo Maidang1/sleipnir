@@ -370,11 +370,21 @@ impl Element for TermElement {
                 // no separate selection overlay layer.
 
                 // Search highlights (M10): paint under selection, above cell bg.
+                // The match the find bar points at gets the cursor color so the
+                // "n/m" counter stays locatable even after a click clears the
+                // selection that `activate_match` also installs.
                 let search_matches = terminal.read(cx).matches.clone();
+                let active_match = terminal.read(cx).active_match;
                 let match_color = palette.selection.opacity(0.35);
+                let active_match_color = palette.cursor.opacity(0.55);
                 let mut search_rects = Vec::new();
                 for m in search_matches {
-                    search_rects.extend(range_rects(m, content.display_offset, match_color));
+                    let color = if Some(m) == active_match {
+                        active_match_color
+                    } else {
+                        match_color
+                    };
+                    search_rects.extend(range_rects(m, content.display_offset, color));
                 }
 
                 // URL / path hover underline (M11).
@@ -621,6 +631,17 @@ impl TermElement {
                     if button == MouseButton::Left && try_gutter_click(&terminal, e, cx) {
                         return;
                     }
+                    if button == MouseButton::Right {
+                        // In normal mode a right-click opens the context menu
+                        // instead of reaching the terminal (mouse-reporting
+                        // apps keep receiving the button).
+                        let in_mouse_mode = terminal.read(cx).mouse_mode(e.modifiers.shift);
+                        if !in_mouse_mode {
+                            let link = terminal.update(cx, |t, _| t.link_target_at(e.position));
+                            view.update(cx, |v, cx| v.open_context_menu(e.position, link, cx));
+                            return;
+                        }
+                    }
                     terminal.update(cx, |terminal, cx| {
                         terminal.mouse_down(e, cx);
                         cx.notify();
@@ -784,18 +805,22 @@ fn try_block_click(
     let cell_w = f32::from(content.terminal_bounds.cell_width);
     let line_h = f32::from(content.terminal_bounds.line_height);
     let pos = crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
+    // Only consume the click when it actually lands on a button. The rest of
+    // a block's area must stay available for text selection and click-to-move.
     let Some(surface) = view.read(cx).blocks().get(id).cloned() else {
-        return true;
+        return false;
+    };
+    let Some(laid) = surface.laid.as_ref() else {
+        return false;
+    };
+    let Some(hit) = crate::plugin_block::action_at(laid, pos.col, pos.row) else {
+        return false;
     };
     if surface.stale {
+        // Dead block UI: its buttons render but must not fire.
         return true;
     }
-    let Some(laid) = surface.laid.as_ref() else {
-        return true;
-    };
-    if let Some(hit) = crate::plugin_block::action_at(laid, pos.col, pos.row) {
-        crate::plugin_runtime::push_action(&surface.plugin_id, id, hit.action, hit.arg, cx);
-    }
+    crate::plugin_runtime::push_action(&surface.plugin_id, id, hit.action, hit.arg, cx);
     true
 }
 

@@ -19,6 +19,9 @@ impl AppShell {
         self.sync_ledger_focus(window, cx);
         self.sync_window_title(window, cx);
         self.tab_scroll_handle.scroll_to_item(self.active);
+        // The find bar searched the previously active pane; re-run it so the
+        // count and highlights describe the pane that is on screen now.
+        self.refresh_find_for_active_pane(cx);
         self.schedule_session_save(cx);
         cx.notify();
     }
