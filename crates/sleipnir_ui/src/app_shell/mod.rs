@@ -361,6 +361,10 @@ pub struct AppShell {
     settings_section: SettingsSection,
     /// Type-to-filter query for the theme picker (empty = all).
     theme_query: String,
+    /// Keyboard-selected row in the settings theme picker.
+    settings_theme_selected: usize,
+    /// Scroll handle for the theme picker list (arrow keys scroll-follow).
+    settings_theme_scroll: ScrollHandle,
     palette_query: String,
     palette_selected: usize,
     /// IME composition range (UTF-16) inside `palette_query`, if composing.
@@ -585,6 +589,8 @@ impl AppShell {
             },
             settings_section: SettingsSection::Theme,
             theme_query: String::new(),
+            settings_theme_selected: 0,
+            settings_theme_scroll: ScrollHandle::new(),
             palette_query: String::new(),
             palette_selected: 0,
             palette_marked: None,
@@ -2268,6 +2274,11 @@ impl Render for AppShell {
                     // active; escape clears the filter before closing.
                     if this.settings_section == SettingsSection::Theme {
                         match event.keystroke.key.as_str() {
+                            "up" | "arrowup" | "down" | "arrowdown" | "enter" => {
+                                this.settings_theme_key_down(event.keystroke.key.as_str(), cx);
+                                cx.stop_propagation();
+                                return;
+                            }
                             "escape" => {
                                 if !this.theme_query.is_empty() {
                                     this.theme_query.clear();
@@ -2280,6 +2291,8 @@ impl Render for AppShell {
                             }
                             "backspace" => {
                                 this.theme_query.pop();
+                                this.settings_theme_selected = 0;
+                                this.settings_theme_scroll.scroll_to_item(0);
                                 cx.notify();
                                 cx.stop_propagation();
                                 return;
@@ -2291,6 +2304,8 @@ impl Render for AppShell {
                                     && !ch.chars().any(|c| c.is_control())
                                 {
                                     this.theme_query.push_str(ch);
+                                    this.settings_theme_selected = 0;
+                                    this.settings_theme_scroll.scroll_to_item(0);
                                     cx.notify();
                                 }
                             }
