@@ -11,8 +11,10 @@ use gpui::{
 
 use super::AppShell;
 use crate::chrome::ChromeTokens;
+use crate::chrome::pixel;
 use crate::command_palette::{CommandId, filter_commands, prioritize_recents, record_recent};
 use crate::ui_mode::OverlayKind;
+use sleipnir_settings::UiStyle;
 
 impl AppShell {
     pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -132,6 +134,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let hits = self.filtered_palette_indices();
+        let style = pixel::active_style(cx);
         let selected = self.palette_selected.min(hits.len().saturating_sub(1));
         let query: SharedString = if self.palette_query.is_empty() {
             "Type a command…".into()
@@ -223,18 +226,26 @@ impl AppShell {
                         .id("palette-panel")
                         .w(px(480.0))
                         .max_w(relative(0.9))
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(tokens.border)
-                        .bg(tokens.content_bg)
-                        .shadow_lg()
+                        .relative()
+                        .when(style == UiStyle::Default, |el| {
+                            el.rounded(px(10.0))
+                                .border_1()
+                                .border_color(tokens.border)
+                                .bg(tokens.content_bg)
+                                .shadow_lg()
+                        })
+                        .when(style == UiStyle::Pixel, |el| {
+                            el.shadow(pixel::hard_shadow(style)).child(
+                                pixel::pixel_panel_bg(tokens.content_bg, tokens.border),
+                            )
+                        })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
                                 .relative()
                                 .px_3()
                                 .py_2p5()
-                                .border_b_1()
+                                .border_b(pixel::border_width(style, px(1.0)))
                                 .border_color(tokens.border)
                                 .text_sm()
                                 .text_color(query_color)

@@ -6,6 +6,7 @@
 
 use super::{AppShell, ConfirmKind, TogglePaneFacts};
 use crate::chrome::ChromeTokens;
+use crate::chrome::pixel;
 use crate::run_ledger_global::RunLedgerGlobal;
 use crate::ui_mode::{OverlayKind, PANE_FACTS_MAX_AGE, PaneFactsState};
 use gpui::{
@@ -13,6 +14,7 @@ use gpui::{
     IntoElement, MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, deferred, div, prelude::FluentBuilder as _, px,
 };
+use sleipnir_settings::UiStyle;
 
 impl AppShell {
     pub(super) fn render_pane_facts(
@@ -434,6 +436,7 @@ impl AppShell {
             approve_label, capability_label, consent_copy, deny_label, tier_badge,
         };
         let prompt = self.plugin_consent.as_ref().map(|p| p.prompt.clone());
+        let style = pixel::active_style(cx);
         let (title, lead, warning, caps, tier) = match prompt.as_ref() {
             Some(prompt) => {
                 let copy = consent_copy(prompt);
@@ -468,15 +471,27 @@ impl AppShell {
         let panel = div()
             .id("plugin-consent-panel")
             .w(px(420.0))
-            .rounded(px(10.0))
-            .bg(tokens.content_bg)
-            .border_1()
-            .border_color(if warning {
-                tokens.accent
-            } else {
-                tokens.border
+            .relative()
+            .when(style == UiStyle::Default, |el| {
+                el.rounded(px(10.0))
+                    .bg(tokens.content_bg)
+                    .border_1()
+                    .border_color(if warning {
+                        tokens.accent
+                    } else {
+                        tokens.border
+                    })
+                    .shadow_lg()
             })
-            .shadow_lg()
+            .when(style == UiStyle::Pixel, |el| {
+                el.shadow(pixel::hard_shadow(style)).child(
+                    pixel::pixel_panel_bg(tokens.content_bg, if warning {
+                        tokens.accent
+                    } else {
+                        tokens.border
+                    }),
+                )
+            })
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -523,7 +538,7 @@ impl AppShell {
                             .id("plugin-consent-approve")
                             .px_3()
                             .py_1p5()
-                            .rounded(px(6.0))
+                            .rounded(pixel::radius(style, px(6.0)))
                             .cursor_pointer()
                             .hover(|el| el.bg(tokens.hover))
                             .text_size(px(13.0))
@@ -538,7 +553,7 @@ impl AppShell {
                             .id("plugin-consent-deny")
                             .px_3()
                             .py_1p5()
-                            .rounded(px(6.0))
+                            .rounded(pixel::radius(style, px(6.0)))
                             .bg(tokens.accent)
                             .cursor_pointer()
                             .text_size(px(13.0))
@@ -680,6 +695,7 @@ impl AppShell {
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let confirm_style = pixel::active_style(cx);
         let (title, message, ok_label) = match self.close_confirm.as_ref() {
             Some(s) if s.kind == ConfirmKind::ClearRunLedger => {
                 ("Clear Run Ledger?", s.message.clone(), "Clear")
@@ -695,11 +711,19 @@ impl AppShell {
         let panel = div()
             .id("close-confirm-panel")
             .w(px(360.0))
-            .rounded(px(10.0))
-            .bg(tokens.content_bg)
-            .border_1()
-            .border_color(tokens.border)
-            .shadow_lg()
+            .relative()
+            .when(confirm_style == UiStyle::Default, |el| {
+                el.rounded(px(10.0))
+                    .bg(tokens.content_bg)
+                    .border_1()
+                    .border_color(tokens.border)
+                    .shadow_lg()
+            })
+            .when(confirm_style == UiStyle::Pixel, |el| {
+                el.shadow(pixel::hard_shadow(confirm_style)).child(
+                    pixel::pixel_panel_bg(tokens.content_bg, tokens.border),
+                )
+            })
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -738,7 +762,7 @@ impl AppShell {
                             .id("close-confirm-cancel")
                             .px_3()
                             .py_1p5()
-                            .rounded(px(6.0))
+                            .rounded(pixel::radius(confirm_style, px(6.0)))
                             .cursor_pointer()
                             .hover(|el| el.bg(tokens.hover))
                             .text_size(px(13.0))
@@ -753,7 +777,7 @@ impl AppShell {
                             .id("close-confirm-ok")
                             .px_3()
                             .py_1p5()
-                            .rounded(px(6.0))
+                            .rounded(pixel::radius(confirm_style, px(6.0)))
                             .bg(tokens.accent)
                             .cursor_pointer()
                             .text_size(px(13.0))

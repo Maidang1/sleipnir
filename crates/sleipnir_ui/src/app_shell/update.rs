@@ -6,13 +6,15 @@
 use gpui::{
     AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    deferred, div, px,
+    deferred, div, prelude::FluentBuilder as _, px,
 };
 
 use super::{AppShell, CheckForUpdates};
 use crate::chrome::ChromeTokens;
+use crate::chrome::pixel;
 use crate::ui_mode::OverlayKind;
 use crate::{AvailableUpdate, UpdateModel, UpdateUiState};
+use sleipnir_settings::UiStyle;
 
 impl AppShell {
     pub(super) fn on_check_for_updates(
@@ -199,11 +201,17 @@ impl AppShell {
         } else {
             (tokens.hover, tokens.fg)
         };
+        let style = pixel::active_style(cx);
         div()
             .id(id)
             .px_3()
             .py_1p5()
-            .rounded_md()
+            .rounded(pixel::radius(style, px(6.0)))
+            .when(style == UiStyle::Pixel, |el| {
+                el.border_2()
+                    .border_color(tokens.border)
+                    .shadow(pixel::button_shadow(style))
+            })
             .bg(bg)
             .text_color(fg)
             .text_size(px(13.0))
@@ -220,6 +228,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let current = release_channel::AppVersion::global(cx).to_string();
+        let ui_style = pixel::active_style(cx);
 
         // Headline + detail + action buttons per state.
         let (headline, detail, buttons): (SharedString, SharedString, Vec<gpui::AnyElement>) =
@@ -393,10 +402,18 @@ impl AppShell {
             .flex()
             .flex_col()
             .gap_3()
-            .rounded(px(12.0))
-            .bg(tokens.surface)
-            .border_1()
-            .border_color(tokens.border)
+            .relative()
+            .when(ui_style == UiStyle::Default, |el| {
+                el.rounded(px(12.0))
+                    .bg(tokens.surface)
+                    .border_1()
+                    .border_color(tokens.border)
+            })
+            .when(ui_style == UiStyle::Pixel, |el| {
+                el.shadow(pixel::hard_shadow(ui_style)).child(
+                    pixel::pixel_panel_bg(tokens.surface, tokens.border),
+                )
+            })
             .text_color(tokens.fg)
             .px_5()
             .py_4()
