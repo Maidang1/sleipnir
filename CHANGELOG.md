@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- New `ui_style` setting (`"default"` | `"pixel"`). `"pixel"` reskins all chrome with pixel-art geometry: square tabs and window corners, 2px borders, hard offset shadows, staircase-corner floating panels, and blocky toggles/buttons. Colors still follow the active theme; text rendering is unchanged.
+
 ## 0.4.1
 
 ### Improvements
