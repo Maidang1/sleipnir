@@ -9,6 +9,7 @@ mod geometry;
 pub(crate) mod git_status;
 pub(crate) mod history_search;
 pub(crate) mod pane_facts;
+pub(crate) mod pixel;
 pub(crate) mod send_context;
 mod tab_strip;
 pub(crate) mod workspace;
