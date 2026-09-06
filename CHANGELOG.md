@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+### Features
+- New built-in themes: Nocturne Violet and Monokai Pro.
+
+### Changes
+- Removed session persistence (`session.json`): every window (startup, ⌘N, Dock reopen, quick terminal, drag-out) now starts with a single fresh tab, so windows no longer inherit or overwrite each other's tab strips, and closing the terminal restores nothing on next launch. The `restore_session` setting is removed and ignored if present in `settings.json`.
+
 ## 0.5.0
 
 ### Features
