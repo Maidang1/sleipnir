@@ -12,6 +12,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Write};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use plugin_protocol::v2::{self, HostMessage, MessageId, PluginMessage, host_compatible};
 use uuid::Uuid;
@@ -19,12 +21,12 @@ use uuid::Uuid;
 pub use crate::widgets::{
     Btn, Col, Row, Text, badge, bar, btn, code, code_lang, col, row, sep, spark, text,
 };
+use plugin_protocol::v2::Output as WireOutput;
 pub use plugin_protocol::v2::{
     BlockId, Capability, CommandSpec, EventFilter, EventKind, HostCall, HostCallResult, HostEvent,
     InvokeContext, Lifecycle, Manifest, PROTOCOL_VERSION, PaneInfo, PaneKey, RenderTarget, RunId,
     SceneBar, SceneCamera, SceneData, Tone, Widget,
 };
-use plugin_protocol::v2::Output as WireOutput;
 
 /// One command invocation delivered to the plugin.
 pub struct Invoke {
@@ -132,10 +134,17 @@ impl Context<'_> {
         })
     }
 
-    /// Plugin-initiated host call. Correlated by `id`. Intervening events are
-    /// queued, not dropped, and are dispatched when this returns — so a call
-    /// cannot deadlock the session against a host that sends an event first.
+    /// Plugin-initiated host call with a 30-second reply deadline. Intervening
+    /// events are queued and dispatched when this returns. Queue overflow
+    /// ends the session rather than growing memory without a bound.
     pub fn call(&mut self, call: HostCall) -> HostCallResult {
+        self.call_with_timeout(call, Duration::from_secs(30))
+    }
+
+    pub fn call_with_timeout(&mut self, call: HostCall, timeout: Duration) -> HostCallResult {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
         let id = self.io.next_id();
         if let Err(err) = self.io.write_plugin(&PluginMessage::Call { id, call }) {
             return HostCallResult::Error {
@@ -151,7 +160,7 @@ impl Context<'_> {
             if let Some(result) = self.io.take_unmatched(id) {
                 return result;
             }
-            match self.io.read_host() {
+            match self.io.read_host_until(Some(deadline)) {
                 Ok(Some(HostMessage::Reply { id: rid, result })) if rid == id => {
                     return result;
                 }
@@ -196,7 +205,7 @@ impl Context<'_> {
 
 trait SessionIo {
     fn write_plugin(&mut self, msg: &PluginMessage) -> io::Result<()>;
-    fn read_host(&mut self) -> io::Result<Option<HostMessage>>;
+    fn read_host_until(&mut self, deadline: Option<Instant>) -> io::Result<Option<HostMessage>>;
     fn next_id(&mut self) -> MessageId;
     fn take_unmatched(&mut self, id: MessageId) -> Option<HostCallResult>;
     fn store_unmatched(&mut self, id: MessageId, result: HostCallResult);
@@ -207,8 +216,8 @@ trait SessionIo {
     fn instance_id(&self) -> Uuid;
 }
 
-struct Io<R, W> {
-    reader: R,
+struct Io<W> {
+    reader: mpsc::Receiver<io::Result<Option<HostMessage>>>,
     writer: W,
     next_id: MessageId,
     unmatched: HashMap<MessageId, HostCallResult>,
@@ -218,13 +227,36 @@ struct Io<R, W> {
     instance_id: Uuid,
 }
 
-impl<R: BufRead, W: Write> SessionIo for Io<R, W> {
+impl<W: Write> SessionIo for Io<W> {
     fn write_plugin(&mut self, msg: &PluginMessage) -> io::Result<()> {
         write_msg(&mut self.writer, msg)
     }
 
-    fn read_host(&mut self) -> io::Result<Option<HostMessage>> {
-        read_host_line(&mut self.reader)
+    fn read_host_until(&mut self, deadline: Option<Instant>) -> io::Result<Option<HostMessage>> {
+        let received = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "host call timed out",
+                    ));
+                }
+                self.reader.recv_timeout(remaining)
+            }
+            None => self
+                .reader
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match received {
+            Ok(message) => message,
+            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "host call timed out",
+            )),
+        }
     }
 
     fn next_id(&mut self) -> MessageId {
@@ -238,11 +270,17 @@ impl<R: BufRead, W: Write> SessionIo for Io<R, W> {
     }
 
     fn store_unmatched(&mut self, id: MessageId, result: HostCallResult) {
-        self.unmatched.insert(id, result);
+        if id >= self.next_id && self.unmatched.len() < 64 {
+            self.unmatched.insert(id, result);
+        }
     }
 
     fn queue(&mut self, msg: HostMessage) {
-        self.queued.push_back(msg);
+        if self.queued.len() >= 64 {
+            self.shutdown = true;
+        } else {
+            self.queued.push_back(msg);
+        }
     }
 
     fn set_shutdown(&mut self) {
@@ -262,12 +300,12 @@ impl<R: BufRead, W: Write> SessionIo for Io<R, W> {
     }
 }
 
-impl<R: BufRead, W: Write> Io<R, W> {
+impl<W: Write> Io<W> {
     fn next_msg(&mut self) -> io::Result<Option<HostMessage>> {
         if let Some(msg) = self.queued.pop_front() {
             return Ok(Some(msg));
         }
-        self.read_host()
+        self.read_host_until(None)
     }
 }
 
@@ -276,17 +314,39 @@ impl<R: BufRead, W: Write> Io<R, W> {
 pub fn run<P: Plugin>(plugin: P) {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    if let Err(err) = serve(plugin, stdin.lock(), stdout.lock()) {
+    if let Err(err) = serve(plugin, std::io::BufReader::new(stdin), stdout.lock()) {
         eprintln!("sleipnir-plugin: {err}");
         std::process::exit(1);
     }
 }
 
-/// Testable core of [`run`]. Never panics on host input: malformed lines after
-/// handshake are skipped; a bad first line fails the handshake.
-pub fn serve<P: Plugin>(mut plugin: P, reader: impl BufRead, writer: impl Write) -> io::Result<()> {
+/// Testable core of [`run`]. The owned reader runs on a separate thread so
+/// reply deadlines do not depend on the host writing another line. Malformed
+/// lines after handshake are skipped; a bad first line fails the handshake.
+pub fn serve<P: Plugin>(
+    mut plugin: P,
+    mut reader: impl BufRead + Send + 'static,
+    writer: impl Write,
+) -> io::Result<()> {
+    let (sender, receiver) = mpsc::sync_channel(64);
+    std::thread::Builder::new()
+        .name("plugin-host-reader".into())
+        .spawn(move || {
+            let first = read_host_line_strict(&mut reader);
+            let finished = !matches!(&first, Ok(Some(_)));
+            if sender.send(first).is_err() || finished {
+                return;
+            }
+            loop {
+                let message = read_host_line(&mut reader);
+                let finished = !matches!(&message, Ok(Some(_)));
+                if sender.send(message).is_err() || finished {
+                    return;
+                }
+            }
+        })?;
     let mut io = Io {
-        reader,
+        reader: receiver,
         writer,
         next_id: 1,
         unmatched: HashMap::new(),
@@ -307,8 +367,8 @@ pub fn serve<P: Plugin>(mut plugin: P, reader: impl BufRead, writer: impl Write)
     Ok(())
 }
 
-fn handshake<P: Plugin, R: BufRead, W: Write>(plugin: &mut P, io: &mut Io<R, W>) -> io::Result<()> {
-    let Some(first) = read_host_line_strict(&mut io.reader)? else {
+fn handshake<P: Plugin, W: Write>(plugin: &mut P, io: &mut Io<W>) -> io::Result<()> {
+    let Some(first) = io.read_host_until(None)? else {
         return Ok(());
     };
     let HostMessage::Hello {
@@ -444,6 +504,55 @@ fn read_host_line_strict(reader: &mut impl BufRead) -> io::Result<Option<HostMes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_host_reply_times_out_without_waiting_for_eof() {
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let mut session = Io {
+            reader: receiver,
+            writer: Vec::new(),
+            next_id: 1,
+            unmatched: HashMap::new(),
+            queued: VecDeque::new(),
+            shutdown: false,
+            granted: vec![Capability::HostCallListPanes],
+            instance_id: Uuid::nil(),
+        };
+        let result = Context { io: &mut session }
+            .call_with_timeout(HostCall::ListPanes, Duration::from_millis(10));
+        assert!(
+            matches!(result, HostCallResult::Error { message } if message.contains("timed out"))
+        );
+        assert!(!session.shutdown);
+        session.store_unmatched(1, HostCallResult::Ok);
+        assert!(session.unmatched.is_empty());
+    }
+
+    #[test]
+    fn queued_events_do_not_extend_a_host_call_deadline() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Ok(Some(HostMessage::Event {
+                id: 1,
+                event: HostEvent::PaneFocused { pane: Uuid::nil() },
+            })))
+            .unwrap();
+        let mut session = Io {
+            reader: receiver,
+            writer: Vec::new(),
+            next_id: 1,
+            unmatched: HashMap::new(),
+            queued: VecDeque::new(),
+            shutdown: false,
+            granted: Vec::new(),
+            instance_id: Uuid::nil(),
+        };
+        let result =
+            Context { io: &mut session }.call_with_timeout(HostCall::ListPanes, Duration::ZERO);
+        assert!(
+            matches!(result, HostCallResult::Error { message } if message.contains("timed out"))
+        );
+    }
     use plugin_protocol::v2::Output as ProtoOutput;
     use plugin_protocol::v2::{CommandSpec, EventKind, HostCall, InvokeContext};
     use std::cell::RefCell;

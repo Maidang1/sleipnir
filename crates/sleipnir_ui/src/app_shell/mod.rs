@@ -414,16 +414,10 @@ pub struct AppShell {
     _session_save_task: Option<Task<()>>,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
-    /// Drives `Supervisor::tick` (idle eviction, crash-count reset, dead
-    /// reaping); without it those branches would never run in production.
-    _supervisor_tick_task: Option<Task<()>>,
     /// Last-seen pane facts for plugin events. Polled, never per-frame.
     plugin_watch: crate::plugin_event_watch::PluginEventWatch,
     /// Host-owned plugin Panel surfaces (ADR-0017). Keyed by pane_key.
     plugin_panels: crate::plugin_panel::PanelRegistry,
-    /// Per-plugin HostCall rate limiter (ADR-0016 §3). UI-side so a resident
-    /// plugin cannot spam Notify / OpenPane; drops are shown on the Monitor.
-    plugin_calls: crate::plugin_host_calls::HostCallLimiter,
     /// Chrome contributions (ADR-0017 status mount).
     plugin_chrome: crate::plugin_chrome::ChromeRegistry,
 }
@@ -620,10 +614,8 @@ impl AppShell {
             facts: PaneFactsState::default(),
             _session_save_task: None,
             _quit_subscription: None,
-            _supervisor_tick_task: None,
             plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
             plugin_panels: crate::plugin_panel::PanelRegistry::new(),
-            plugin_calls: crate::plugin_host_calls::HostCallLimiter::new(),
             plugin_chrome: crate::plugin_chrome::ChromeRegistry::new(),
         };
         // Seed the current system appearance and follow future changes so the
@@ -650,22 +642,6 @@ impl AppShell {
         // Resident plugins need a live session to receive events. This is
         // where first-run consent is asked; a grant is never implied.
         shell.start_resident_plugins(cx);
-        // Supervisor housekeeping — idle eviction, crash-count reset after
-        // `stable_after`, dead-session reaping — only happens on tick. Drive
-        // it on a slow timer; the checks are cheap (a lock and a map scan).
-        shell._supervisor_tick_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                if this
-                    .update(cx, |_, cx| crate::plugin_runtime::tick(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }));
         shell
     }
 
@@ -2099,7 +2075,7 @@ impl Render for AppShell {
         self.sync_ledger_focus(window, cx);
         self.refresh_pane_facts_if_stale(cx);
         self.poll_plugin_events(cx);
-        self.poll_plugin_inbound(window, cx);
+        self.sync_plugin_surfaces(cx);
         // Navigating away from the consent overlay is a deny: never grant
         // because a different surface took the keyboard.
         if !self.mode.is(OverlayKind::PluginConsent) {

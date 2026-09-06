@@ -27,6 +27,7 @@ struct Health {
 }
 
 struct Inner {
+    closed: bool,
     live: HashMap<String, Arc<Session>>,
     health: HashMap<String, Health>,
 }
@@ -51,6 +52,7 @@ impl Supervisor {
             inner: Mutex::new(Inner {
                 live: HashMap::new(),
                 health: HashMap::new(),
+                closed: false,
             }),
             plugin_locks: Mutex::new(HashMap::new()),
             launcher,
@@ -68,10 +70,15 @@ impl Supervisor {
         let plug_lock = self.plugin_lock(&spec.plugin_id);
         let _guard = mutex_lock(&plug_lock);
 
+        if mutex_lock(&self.inner).closed {
+            return Err(SessionError::Disconnected);
+        }
+
         if spec.lifecycle == PluginLifecycle::Resident {
             if let Some(existing) = self.live_if_usable(&spec.plugin_id) {
                 return Ok(existing);
             }
+            self.reap_dead(&spec.plugin_id);
         } else {
             self.drop_live(&spec.plugin_id);
         }
@@ -94,8 +101,14 @@ impl Supervisor {
             }
         };
 
+        let mut inner = mutex_lock(&self.inner);
+        if inner.closed {
+            drop(inner);
+            session.teardown(self.config.shutdown_grace);
+            return Err(SessionError::Disconnected);
+        }
         if spec.lifecycle == PluginLifecycle::Resident {
-            mutex_lock(&self.inner)
+            inner
                 .live
                 .insert(spec.plugin_id.clone(), Arc::clone(&session));
         }
@@ -215,6 +228,17 @@ impl Supervisor {
         out
     }
 
+    pub fn live_instances(&self) -> Vec<(String, uuid::Uuid)> {
+        let mut instances: Vec<_> = mutex_lock(&self.inner)
+            .live
+            .values()
+            .filter(|session| !session.is_dead() && !session.is_shutting_down())
+            .map(|session| (session.plugin_id.clone(), session.instance_id()))
+            .collect();
+        instances.sort();
+        instances
+    }
+
     /// Reap dead sessions, apply backoff, evict idle residents. The host
     /// should call this on a timer; tests call it after advancing the clock.
     pub fn tick(&self) {
@@ -266,6 +290,7 @@ impl Supervisor {
     }
 
     pub fn shutdown_all(&self) {
+        self.close();
         let sessions: Vec<Arc<Session>> = {
             let mut inner = mutex_lock(&self.inner);
             inner.live.drain().map(|(_, s)| s).collect()
@@ -273,6 +298,20 @@ impl Supervisor {
         for session in sessions {
             session.teardown(self.config.shutdown_grace);
         }
+    }
+
+    pub fn close(&self) {
+        let mut inner = mutex_lock(&self.inner);
+        inner.closed = true;
+        for session in inner.live.values() {
+            session.cancel();
+        }
+    }
+
+    pub fn disconnect(&self, plugin_id: &str) -> Option<Arc<Session>> {
+        let session = self.drop_live(plugin_id)?;
+        session.cancel();
+        Some(session)
     }
 
     fn plugin_lock(&self, id: &str) -> Arc<Mutex<()>> {
@@ -284,12 +323,7 @@ impl Supervisor {
 
     fn live_if_usable(&self, id: &str) -> Option<Arc<Session>> {
         let session = mutex_lock(&self.inner).live.get(id).cloned()?;
-        if session.is_dead() {
-            self.reap_dead(id);
-            None
-        } else {
-            Some(session)
-        }
+        (!session.is_dead() && !session.is_shutting_down()).then_some(session)
     }
 
     fn require_live(&self, id: &str) -> Result<Arc<Session>, SessionError> {

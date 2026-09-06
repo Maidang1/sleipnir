@@ -43,7 +43,9 @@ Plugins are off by default. In `settings.json`:
 ```
 
 `plugins.enabled` is the master switch: when it is `false`, manifests are not
-read and nothing is launched. Reload Settings refreshes the catalog.
+read and nothing is launched. Reload Settings refreshes the catalog; disabling
+plugins also cancels the previous runtime and shuts its residents down in the
+background. Results and consent prompts from the previous runtime are ignored.
 
 Discovery root (next to `settings.json`):
 
@@ -98,6 +100,12 @@ A resident, event-driven, rendering plugin implements `Plugin` and calls
 `run`. The SDK multiplexes events, actions, host-call replies and
 invocations, correlating by `id`, and never deadlocks a `HostCall` against an
 intervening event.
+
+`Context::call` waits up to 30 seconds for a reply. Use
+`Context::call_with_timeout` to choose another reply deadline; timeout returns
+`HostCallResult::Error` and does not imply that a host action was undone.
+The SDK uses a bounded reader queue. Custom `serve` callers must pass an owned
+`BufRead + Send + 'static` reader, such as an owned `Cursor` or `BufReader`.
 
 ```rust
 use sleipnir_plugin::{
@@ -252,8 +260,19 @@ and offers a kill switch. A non-zero running count is always shown in chrome.
 - Per-invocation timeout is capped to 1–300 seconds (default 30); a wedged
   on-demand plugin is killed and reaped. A wedged resident is isolated from the
   UI thread (bounded queues, stderr drain) and can be killed from the Monitor.
-- Reload Settings re-reads manifests, permission policy, and restarts granted
-  residents that are not already live.
+- Reload Settings preserves sessions when the catalog, binary hashes, and grants
+  are unchanged. Changes retire the previous runtime and restart granted
+  residents; shutdown and process reaping run off the UI thread.
+- Terminal and clipboard outputs are checked against the session's grants before
+  delivery, including on-demand invocations.
+- Inbound render updates for the same target may coalesce within a call-free
+  batch. An overflowing host call receives an error reply; if the reply cannot be
+  queued, the connection closes instead of silently losing the request.
+- One application-wide dispatcher routes Block and existing Panel messages to
+  their owning window. New panels use the active shell window (or the first shell
+  window when none is active); status updates go to all open shell windows.
+  Missing call targets receive an error reply, and host-call limits are shared
+  across windows.
 
 ## Install a plugin
 

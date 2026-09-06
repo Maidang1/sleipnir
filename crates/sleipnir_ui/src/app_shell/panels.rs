@@ -262,7 +262,7 @@ impl AppShell {
             &snapshots,
             &names,
             &tiers,
-            self.plugin_calls.dropped_counts(),
+            &crate::plugin_runtime::dropped_calls(cx),
             now,
         );
 

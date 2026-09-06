@@ -121,7 +121,8 @@ pub struct SupervisorConfig {
     /// Host → plugin write queue. Full → [`SessionError::Backpressure`], never
     /// unbounded growth, never a blocking UI caller.
     pub write_queue_capacity: usize,
-    /// Plugin → host `Render`/`Call` queue. Full → drop, never stall the reader.
+    /// Plugin → host queue. Excess renders are dropped; excess calls receive
+    /// an error reply without blocking the reader.
     pub inbound_queue_capacity: usize,
     /// Consecutive crashes after which the plugin is not restarted.
     pub max_restarts: u32,
@@ -247,6 +248,7 @@ pub enum SessionError {
     Protocol(String),
     VersionMismatch { plugin: u32 },
     CapabilityExceeded { capability: Capability },
+    CapabilityDenied { capability: Capability },
     PluginFailed(String),
     Timeout(Duration),
     Backpressure,
@@ -267,6 +269,9 @@ impl std::fmt::Display for SessionError {
             ),
             Self::CapabilityExceeded { capability } => {
                 write!(f, "plugin requested undeclared capability {capability:?}")
+            }
+            Self::CapabilityDenied { capability } => {
+                write!(f, "plugin lacks grant for {capability:?}")
             }
             Self::PluginFailed(m) => write!(f, "plugin reported failure: {m}"),
             Self::Timeout(d) => write!(f, "plugin timed out after {}ms", d.as_millis()),

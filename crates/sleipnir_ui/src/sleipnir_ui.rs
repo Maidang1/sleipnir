@@ -15,6 +15,7 @@ mod pane_tree;
 mod panel_scene_paint;
 mod plugin_block;
 mod plugin_chrome;
+mod plugin_dispatch;
 mod plugin_event_watch;
 mod plugin_host_calls;
 mod plugin_monitor_panel;

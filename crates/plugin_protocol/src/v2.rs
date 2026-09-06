@@ -604,6 +604,16 @@ pub enum Output {
     Copy { text: String },
 }
 
+impl Output {
+    pub fn required_capability(&self) -> Option<Capability> {
+        match self {
+            Self::Ignore => None,
+            Self::Insert { .. } => Some(Capability::WriteTerminal),
+            Self::Copy { .. } => Some(Capability::Clipboard),
+        }
+    }
+}
+
 /// One command a plugin contributes, declared in its `Ready` manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {

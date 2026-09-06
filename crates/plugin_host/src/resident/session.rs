@@ -6,8 +6,8 @@
 //! - host writes go through a bounded queue; a plugin that will not read
 //!   surfaces [`SessionError::Backpressure`] instead of growing memory or
 //!   stalling the caller.
-//! - inbound `Render`/`Call` share a bounded queue; overflow is dropped, never
-//!   allowed to block the reader (which would stop draining stdout).
+//! - inbound renders coalesce within a call-free batch; excess calls receive
+//!   an error reply. An undeliverable reply disconnects the session.
 //! - every waiter has a timeout; plugin death fails every pending waiter.
 //! - no panic on plugin input: malformed JSON, unknown ids, duplicates, and
 //!   oversized frames are errors.
@@ -112,6 +112,7 @@ pub struct Session {
     last_activity_ms: AtomicU64,
     pub(crate) restart_count: u32,
     process: Mutex<Box<dyn PluginProcess>>,
+    pid: Option<u32>,
     shutdown: AtomicBool,
     dead: AtomicBool,
     handshake: Mutex<HandshakeSlot>,
@@ -192,6 +193,7 @@ impl Session {
             started_at_ms: now,
             last_activity_ms: AtomicU64::new(now),
             restart_count,
+            pid: spawned.process.pid(),
             process: Mutex::new(spawned.process),
             shutdown: AtomicBool::new(false),
             dead: AtomicBool::new(false),
@@ -384,9 +386,16 @@ impl Session {
         Ok(id)
     }
 
-    pub fn reply(&self, id: MessageId, result: v2::HostCallResult) -> Result<(), SessionError> {
+    pub fn reply(
+        self: &Arc<Self>,
+        id: MessageId,
+        result: v2::HostCallResult,
+    ) -> Result<(), SessionError> {
         self.ensure_live()?;
-        self.enqueue_msg(&HostMessage::Reply { id, result })?;
+        if let Err(error) = self.enqueue_msg(&HostMessage::Reply { id, result }) {
+            self.disconnect();
+            return Err(error);
+        }
         self.touch();
         Ok(())
     }
@@ -406,7 +415,7 @@ impl Session {
         ConnectionSnapshot {
             plugin_id: self.plugin_id.clone(),
             instance_id: self.instance_id,
-            pid: mutex_lock(&self.process).pid(),
+            pid: self.pid,
             started_at_ms: self.started_at_ms,
             last_activity_ms: self.last_activity_ms.load(Ordering::SeqCst),
             in_flight: mutex_lock(&self.pending).len(),
@@ -424,6 +433,12 @@ impl Session {
     /// leak a process.
     pub fn request_shutdown(&self) -> Result<(), SessionError> {
         self.enqueue(WriteCmd::Shutdown)
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.dead.store(true, Ordering::SeqCst);
+        self.fail_handshake(SessionError::Disconnected);
+        self.fail_waiters(SessionError::Disconnected);
     }
 
     /// Shutdown, grace, kill, reap, join. Idempotent. Pending waiters get
@@ -497,6 +512,14 @@ impl Session {
     }
 
     fn complete_waiter(&self, id: MessageId, result: Result<Output, SessionError>) {
+        let result = result.and_then(|output| {
+            if let Some(capability) = output.required_capability() {
+                if !self.has_grant(capability) {
+                    return Err(SessionError::CapabilityDenied { capability });
+                }
+            }
+            Ok(output)
+        });
         let waiter = mutex_lock(&self.pending).remove(&id);
         match waiter {
             Some(waiter) => {
@@ -510,17 +533,39 @@ impl Session {
         }
     }
 
-    fn push_inbound(&self, msg: Inbound) {
+    fn push_inbound(self: &Arc<Self>, msg: Inbound) {
         let mut q = mutex_lock(&self.inbound);
+        if let Inbound::Render { target, .. } = &msg {
+            let start = q
+                .iter()
+                .rposition(|queued| matches!(queued, Inbound::Call { .. }))
+                .map_or(0, |index| index + 1);
+            if let Some(index) = q.iter().skip(start).position(|queued| {
+                matches!(queued, Inbound::Render { target: existing, .. } if existing == target)
+            }) {
+                q[start + index] = msg;
+                self.touch();
+                return;
+            }
+        }
         if q.len() >= self.inbound_cap {
             self.inbound_dropped.fetch_add(1, Ordering::Relaxed);
+            drop(q);
+            if let Inbound::Call { id, .. } = msg {
+                let _ = self.reply(
+                    id,
+                    v2::HostCallResult::Error {
+                        message: "host inbound queue is full; retry later".into(),
+                    },
+                );
+            }
             return;
         }
         q.push_back(msg);
         self.touch();
     }
 
-    fn on_line(&self, line: &str) {
+    fn on_line(self: &Arc<Self>, line: &str) {
         let msg: PluginMessage = match serde_json::from_str(line) {
             Ok(msg) => msg,
             Err(err) => {
@@ -533,7 +578,7 @@ impl Session {
         self.route(msg);
     }
 
-    fn route(&self, msg: PluginMessage) {
+    fn route(self: &Arc<Self>, msg: PluginMessage) {
         match msg {
             PluginMessage::Ready {
                 protocol_version,
@@ -571,6 +616,16 @@ impl Session {
         self.dead.store(true, Ordering::SeqCst);
         self.fail_handshake(SessionError::Disconnected);
         self.fail_waiters(SessionError::Disconnected);
+    }
+
+    fn disconnect(self: &Arc<Self>) {
+        if self.dead.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.fail_handshake(SessionError::Disconnected);
+        self.fail_waiters(SessionError::Disconnected);
+        let session = Arc::clone(self);
+        std::thread::spawn(move || session.teardown(Duration::ZERO));
     }
 
     fn on_oversized(&self) {

@@ -399,6 +399,333 @@ fn unsolicited_call_is_routed() {
 }
 
 #[test]
+fn invocation_outputs_require_grants_for_both_lifecycles() {
+    for lifecycle in [PluginLifecycle::Resident, PluginLifecycle::OnDemand] {
+        for (output, capability) in [
+            (
+                Output::Insert {
+                    text: "command\n".into(),
+                },
+                Capability::WriteTerminal,
+            ),
+            (
+                Output::Copy {
+                    text: "clipboard".into(),
+                },
+                Capability::Clipboard,
+            ),
+        ] {
+            for allowed in [false, true] {
+                let env = Env::new();
+                let mut launch = spec();
+                launch.lifecycle = lifecycle;
+                launch.declared_capabilities.insert(capability);
+                if allowed {
+                    launch.granted.push(capability);
+                }
+                let response = output.clone();
+                let plugin = env.spawn_plugin(move |endpoint| {
+                    endpoint.handshake(&good_ready()).unwrap();
+                    let HostMessage::Invoke { id, .. } = endpoint.recv().unwrap() else {
+                        panic!("expected invocation");
+                    };
+                    endpoint
+                        .send(&PluginMessage::Invoked {
+                            id,
+                            output: response,
+                        })
+                        .unwrap();
+                    serve_until_eof(endpoint);
+                });
+                let result = env.sup.invoke(&launch, "run", InvokeContext::default());
+                env.sup.shutdown("demo");
+                plugin.join().unwrap();
+                if allowed {
+                    assert_eq!(result.unwrap(), output);
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "ungranted {capability:?} output was accepted"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn inbound_overflow_replies_to_calls_instead_of_dropping_them() {
+    let mut config = SupervisorConfig::for_tests();
+    config.inbound_queue_capacity = 1;
+    let env = Env::with_config(config);
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let plugin = env.spawn_plugin(move |endpoint| {
+        endpoint.handshake(&good_ready()).unwrap();
+        let HostMessage::Invoke { id, .. } = endpoint.recv().unwrap() else {
+            panic!("expected invocation");
+        };
+        for call_id in [11, 12] {
+            endpoint
+                .send(&PluginMessage::Call {
+                    id: call_id,
+                    call: HostCall::ListPanes,
+                })
+                .unwrap();
+        }
+        endpoint.send(&invoked(id)).unwrap();
+        while let Ok(message) = endpoint.recv() {
+            if matches!(message, HostMessage::Shutdown) {
+                break;
+            }
+            reply_tx.send(message).unwrap();
+        }
+    });
+    env.sup
+        .invoke(&spec(), "run", InvokeContext::default())
+        .unwrap();
+    let reply = reply_rx.recv_timeout(Duration::from_secs(2));
+    let inbound = env.sup.drain_inbound("demo");
+    env.sup.shutdown("demo");
+    plugin.join().unwrap();
+    assert!(matches!(
+        reply,
+        Ok(HostMessage::Reply {
+            id: 12,
+            result: v2::HostCallResult::Error { .. }
+        })
+    ));
+    assert!(matches!(inbound.as_slice(), [Inbound::Call { id: 11, .. }]));
+}
+
+#[test]
+fn render_bursts_keep_the_latest_tree_for_each_target() {
+    let mut config = SupervisorConfig::for_tests();
+    config.inbound_queue_capacity = 1;
+    let env = Env::with_config(config);
+    let plugin = env.spawn_plugin(|endpoint| {
+        endpoint.handshake(&good_ready()).unwrap();
+        let HostMessage::Invoke { id, .. } = endpoint.recv().unwrap() else {
+            panic!("expected invocation");
+        };
+        for render_id in [11, 12, 13] {
+            endpoint
+                .send(&PluginMessage::Render {
+                    id: render_id,
+                    target: RenderTarget::Status,
+                    tree: Widget::Sep,
+                })
+                .unwrap();
+        }
+        endpoint.send(&invoked(id)).unwrap();
+        serve_until_eof(endpoint);
+    });
+    env.sup
+        .invoke(&spec(), "run", InvokeContext::default())
+        .unwrap();
+    let inbound = env.sup.drain_inbound("demo");
+    env.sup.shutdown("demo");
+    plugin.join().unwrap();
+    assert!(matches!(
+        inbound.as_slice(),
+        [Inbound::Render { id: 13, .. }]
+    ));
+}
+
+#[test]
+fn closing_supervisor_revokes_live_and_future_connections() {
+    let env = Env::new();
+    let plugin = env.spawn_plugin(handshake_and_echo);
+    let session = env.sup.connect(&spec()).unwrap();
+    env.sup.close();
+    assert!(session.is_dead());
+    assert!(!env.sup.has_grant("demo", Capability::ReadCwd));
+    assert!(matches!(
+        env.sup.connect(&spec()),
+        Err(SessionError::Disconnected)
+    ));
+    env.sup.shutdown_all();
+    plugin.join().unwrap();
+}
+
+#[test]
+fn closing_supervisor_cancels_a_handshake_already_in_flight() {
+    let env = Env::new();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finish_tx, finish_rx) = mpsc::channel();
+    let plugin = env.spawn_plugin(move |endpoint| {
+        assert!(matches!(
+            endpoint.recv().unwrap(),
+            HostMessage::Hello { .. }
+        ));
+        started_tx.send(()).unwrap();
+        finish_rx.recv().unwrap();
+        endpoint.send(&good_ready()).unwrap();
+        serve_until_eof(endpoint);
+    });
+    thread::scope(|scope| {
+        let connecting = scope.spawn(|| env.sup.connect(&spec()));
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        env.sup.close();
+        finish_tx.send(()).unwrap();
+        assert!(matches!(
+            connecting.join().unwrap(),
+            Err(SessionError::Disconnected)
+        ));
+    });
+    assert!(env.sup.snapshots().is_empty());
+    plugin.join().unwrap();
+}
+
+#[test]
+fn monitor_and_grant_reads_do_not_wait_for_process_teardown() {
+    struct SlowProcess {
+        inner: Box<dyn PluginProcess>,
+        entered: mpsc::Sender<()>,
+        release: Option<mpsc::Receiver<()>>,
+    }
+    impl PluginProcess for SlowProcess {
+        fn pid(&self) -> Option<u32> {
+            self.inner.pid()
+        }
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.inner.kill()
+        }
+        fn wait_timeout(&mut self, timeout: Duration) -> bool {
+            if !timeout.is_zero() {
+                if let Some(release) = self.release.take() {
+                    self.entered.send(()).unwrap();
+                    release.recv().unwrap();
+                }
+            }
+            self.inner.wait_timeout(timeout)
+        }
+    }
+    struct SlowLauncher {
+        inner: MemoryLauncher,
+        entered: mpsc::Sender<()>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+    impl Launcher for SlowLauncher {
+        fn launch(&self, launch: &LaunchSpec) -> Result<Spawned, SessionError> {
+            let mut spawned = self.inner.launch(launch)?;
+            spawned.process = Box::new(SlowProcess {
+                inner: spawned.process,
+                entered: self.entered.clone(),
+                release: mutex_lock(&self.release).take(),
+            });
+            Ok(spawned)
+        }
+    }
+    let (memory, endpoints) = MemoryLauncher::pair();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let launcher = SlowLauncher {
+        inner: memory,
+        entered: entered_tx,
+        release: Mutex::new(Some(release_rx)),
+    };
+    let mut config = SupervisorConfig::for_tests();
+    config.idle = Duration::ZERO;
+    config.shutdown_grace = Duration::from_secs(1);
+    let supervisor = Supervisor::new(
+        config,
+        Arc::new(launcher),
+        Arc::new(ManualClock::new(1_000)),
+    );
+    let plugin = thread::spawn(move || handshake_and_echo(&mut endpoints.recv().unwrap()));
+    supervisor.connect(&spec()).unwrap();
+    thread::scope(|scope| {
+        let cleanup = scope.spawn(|| supervisor.tick());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (monitor_tx, monitor_rx) = mpsc::channel();
+        let supervisor = &supervisor;
+        scope.spawn(move || {
+            let snapshots = supervisor.snapshots();
+            let granted = supervisor.has_grant("demo", Capability::ReadCwd);
+            monitor_tx.send((snapshots, granted)).unwrap();
+        });
+        let observed = monitor_rx.recv_timeout(Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        cleanup.join().unwrap();
+        let (snapshots, granted) = observed.expect("UI reads must not wait for process exit");
+        assert!(!granted);
+        assert_eq!(snapshots[0].state, ConnectionState::ShuttingDown);
+    });
+    plugin.join().unwrap();
+}
+
+#[test]
+fn render_coalescing_does_not_cross_a_host_call() {
+    let env = Env::new();
+    let plugin = env.spawn_plugin(|endpoint| {
+        endpoint.handshake(&good_ready()).unwrap();
+        let HostMessage::Invoke { id, .. } = endpoint.recv().unwrap() else {
+            panic!("expected invocation");
+        };
+        endpoint
+            .send(&PluginMessage::Render {
+                id: 11,
+                target: RenderTarget::Status,
+                tree: Widget::Sep,
+            })
+            .unwrap();
+        endpoint
+            .send(&PluginMessage::Call {
+                id: 12,
+                call: HostCall::ListPanes,
+            })
+            .unwrap();
+        endpoint
+            .send(&PluginMessage::Render {
+                id: 13,
+                target: RenderTarget::Status,
+                tree: Widget::Sep,
+            })
+            .unwrap();
+        endpoint.send(&invoked(id)).unwrap();
+        serve_until_eof(endpoint);
+    });
+    env.sup
+        .invoke(&spec(), "run", InvokeContext::default())
+        .unwrap();
+    let inbound = env.sup.drain_inbound("demo");
+    env.sup.shutdown("demo");
+    plugin.join().unwrap();
+    assert!(matches!(
+        inbound.as_slice(),
+        [
+            Inbound::Render { id: 11, .. },
+            Inbound::Call { id: 12, .. },
+            Inbound::Render { id: 13, .. }
+        ]
+    ));
+}
+
+#[test]
+fn undeliverable_replies_disconnect_instead_of_leaving_calls_waiting() {
+    let env = Env::with_pipe_cap(SupervisorConfig::for_tests(), 1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let plugin = env.spawn_plugin(move |endpoint| {
+        endpoint.handshake(&good_ready()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    let session = env.sup.connect(&spec()).unwrap();
+    let mut backpressured = false;
+    for id in 1..100 {
+        if session.reply(id, v2::HostCallResult::Ok).is_err() {
+            backpressured = true;
+            break;
+        }
+    }
+    let disconnected = session.is_dead();
+    release_tx.send(()).unwrap();
+    env.sup.shutdown("demo");
+    plugin.join().unwrap();
+    assert!(backpressured);
+    assert!(disconnected);
+}
+
+#[test]
 fn reply_to_unknown_id_is_ignored() {
     let env = Env::new();
     let plugin = env.spawn_plugin(|ep| {

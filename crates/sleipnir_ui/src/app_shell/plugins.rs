@@ -16,6 +16,7 @@ pub(super) struct PluginConsentPending {
     kind: PluginConsentKind,
     hash: plugin_grants::BinaryHash,
     request: Vec<plugin_protocol::v2::Capability>,
+    supervisor: std::sync::Arc<plugin_host::resident::Supervisor>,
 }
 pub(super) enum PluginConsentKind {
     Command(plugin_host::LoadedPluginCommand),
@@ -25,6 +26,9 @@ pub(super) enum PluginConsentKind {
 impl AppShell {
     pub(super) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
+        if !TerminalSettings::get_global(cx).plugins.enabled {
+            return;
+        }
         if !self
             .plugin_watch
             .due(std::time::Instant::now(), std::time::Duration::from_secs(1))
@@ -80,32 +84,39 @@ impl AppShell {
         })
         .detach();
     }
-    pub(super) fn poll_plugin_inbound(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use plugin_host::resident::{ConnectionState, Inbound};
+    pub(crate) fn apply_plugin_inbound(
+        &mut self,
+        plugin_id: &str,
+        message: plugin_host::resident::Inbound,
+        live_panes: &[(PaneKey, Entity<TermView>)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use plugin_host::resident::Inbound;
         use plugin_protocol::v2::RenderTarget;
-        let inbound = crate::plugin_runtime::drain_all_inbound(cx);
-        for (plugin_id, msg) in inbound {
-            match msg {
-                Inbound::Render {
-                    target: RenderTarget::Panel { pane },
-                    tree,
-                    ..
-                } => self.apply_panel_render(&plugin_id, pane, tree, window, cx),
-                Inbound::Render {
-                    target: RenderTarget::Status,
-                    tree,
-                    ..
-                } => self.apply_chrome_status(&plugin_id, tree, cx),
-                Inbound::Render {
-                    target: RenderTarget::Block { anchor },
-                    tree,
-                    ..
-                } => self.apply_block_render(&plugin_id, anchor, tree, cx),
-                Inbound::Call { id, call } => {
-                    self.handle_host_call(&plugin_id, id, call, window, cx)
-                }
+        match message {
+            Inbound::Render {
+                target: RenderTarget::Panel { pane },
+                tree,
+                ..
+            } => self.apply_panel_render(plugin_id, pane, tree, window, cx),
+            Inbound::Render {
+                target: RenderTarget::Status,
+                tree,
+                ..
+            } => self.apply_chrome_status(plugin_id, tree, cx),
+            Inbound::Render {
+                target: RenderTarget::Block { anchor },
+                tree,
+                ..
+            } => self.apply_block_render(plugin_id, anchor, tree, cx),
+            Inbound::Call { id, call } => {
+                self.handle_host_call(plugin_id, id, call, live_panes, window, cx)
             }
         }
+    }
+    pub(crate) fn sync_plugin_surfaces(&mut self, cx: &mut Context<Self>) {
+        use plugin_host::resident::ConnectionState;
         let snapshots = crate::plugin_runtime::snapshots(cx);
         let live: std::collections::BTreeSet<String> = snapshots
             .into_iter()
@@ -294,11 +305,12 @@ impl AppShell {
         plugin_id: &str,
         id: plugin_protocol::v2::MessageId,
         call: plugin_protocol::v2::HostCall,
+        live_panes: &[(PaneKey, Entity<TermView>)],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use crate::plugin_host_calls::{
-            CallPlan, cap_screen, error_result, filter_listed_panes, plan_call, read_screen_access,
+            CallPlan, cap_screen, error_result, filter_listed_panes, read_screen_access,
         };
         use plugin_protocol::v2::{Capability, HostCallResult, PaneInfo};
         let granted: Vec<Capability> = [
@@ -315,7 +327,7 @@ impl AppShell {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let plan = plan_call(plugin_id, &call, &granted, &mut self.plugin_calls, now_ms);
+        let plan = crate::plugin_runtime::plan_host_call(plugin_id, &call, &granted, now_ms, cx);
         let result = match plan {
             CallPlan::Reply(result) => result,
             CallPlan::Notify { title, body } => {
@@ -323,10 +335,9 @@ impl AppShell {
                 HostCallResult::Ok
             }
             CallPlan::ListPanes => {
-                let live = crate::control_surface::live_terminal_panes(cx);
                 let mut terminals = std::collections::BTreeSet::new();
                 let mut infos = Vec::new();
-                for (pane, view) in &live {
+                for (pane, view) in live_panes {
                     terminals.insert(*pane);
                     infos.push(PaneInfo {
                         pane: *pane,
@@ -343,15 +354,14 @@ impl AppShell {
                 }
             }
             CallPlan::ReadScreen { pane } => {
-                let live = crate::control_surface::live_terminal_panes(cx);
                 let mut terminals = std::collections::BTreeSet::new();
-                for (key, _) in &live {
+                for (key, _) in live_panes {
                     terminals.insert(*key);
                 }
                 let (_, panels) = self.terminal_and_panel_keys();
                 match read_screen_access(pane, &terminals, &panels) {
                     Err(message) => error_result(message),
-                    Ok(()) => match live.into_iter().find(|(key, _)| *key == pane) {
+                    Ok(()) => match live_panes.iter().find(|(key, _)| *key == pane) {
                         Some((_, view)) => HostCallResult::Screen {
                             text: cap_screen(view.read(cx).visible_screen_text(cx)),
                         },
@@ -503,7 +513,7 @@ impl AppShell {
             cx,
         );
     }
-    pub(super) fn terminal_and_panel_keys(
+    pub(crate) fn terminal_and_panel_keys(
         &self,
     ) -> (
         std::collections::BTreeSet<PaneKey>,
@@ -612,6 +622,10 @@ impl AppShell {
             return;
         };
         self.mode.close(OverlayKind::PluginConsent);
+        if !crate::plugin_runtime::is_current(&pending.supervisor, cx) {
+            cx.notify();
+            return;
+        }
         let plugin_id = match &pending.kind {
             PluginConsentKind::Command(plugin) => plugin.plugin_id.clone(),
             PluginConsentKind::Resident(plugin) => plugin.manifest.id.clone(),
@@ -647,6 +661,9 @@ impl AppShell {
         plugin: plugin_host::LoadedPluginCommand,
         cx: &mut Context<Self>,
     ) {
+        if !crate::plugin_runtime::PluginRuntime::commands(cx).contains(&plugin) {
+            return;
+        }
         let request = crate::plugin_runtime::requested_capabilities(&plugin);
         let Some(hash) = crate::plugin_runtime::plugin_binary_hash(&plugin) else {
             log::warn!(
@@ -693,6 +710,8 @@ impl AppShell {
                     .unwrap_or_default();
                 let tier = record.map(|r| r.tier).unwrap_or(plugin_grants::Tier::Local);
                 self.plugin_consent = Some(PluginConsentPending {
+                    supervisor: crate::plugin_runtime::supervisor(cx)
+                        .expect("plugin runtime initialized"),
                     prompt: crate::plugin_monitor_panel::consent_prompt(
                         plugin_id,
                         plugin_name,
@@ -739,13 +758,22 @@ impl AppShell {
         };
         let command_id = plugin.command.id.clone();
         let qualified_id = plugin.qualified_id();
+        let granted = spec.granted.clone();
         cx.spawn(async move |this, cx| {
+            let invocation_supervisor = std::sync::Arc::clone(&sup);
             let result = cx
-                .background_spawn(async move { sup.invoke(&spec, &command_id, invoke_ctx) })
+                .background_spawn(async move {
+                    invocation_supervisor.invoke(&spec, &command_id, invoke_ctx)
+                })
                 .await;
-            this.update(cx, |_this, cx| match result {
-                Ok(output) => crate::plugin_runtime::apply_output(output, &view, cx),
-                Err(err) => log::warn!("plugin {qualified_id} failed: {err}"),
+            this.update(cx, |_this, cx| {
+                if !crate::plugin_runtime::is_current(&sup, cx) {
+                    return;
+                }
+                match result {
+                    Ok(output) => crate::plugin_runtime::apply_output(output, &granted, &view, cx),
+                    Err(err) => log::warn!("plugin {qualified_id} failed: {err}"),
+                }
             })
             .ok();
         })
@@ -812,16 +840,18 @@ impl AppShell {
             return;
         }
         log::info!("plugin: starting resident {id}");
-        cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { sup.connect(&spec) }).await;
-            this.update(cx, |_this, cx| {
+        cx.spawn(async move |_this, cx| {
+            let connecting_supervisor = std::sync::Arc::clone(&sup);
+            let result = cx
+                .background_spawn(async move { connecting_supervisor.connect(&spec) })
+                .await;
+            cx.update(|cx| {
                 if let Err(err) = result {
                     log::warn!("plugin {id} failed to start: {err}");
                 }
                 // Release on both paths: a failed launch must stay retryable.
-                crate::plugin_runtime::finish_connect(&id, cx);
-            })
-            .ok();
+                crate::plugin_runtime::finish_connect(&id, &sup, cx);
+            });
         })
         .detach();
     }

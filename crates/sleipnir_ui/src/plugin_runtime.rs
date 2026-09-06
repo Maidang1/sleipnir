@@ -1,21 +1,26 @@
 //! UI adapter for manifest-based external command plugins.
 
-use gpui::{App, BorrowAppContext as _, Global};
+use gpui::{App, BorrowAppContext as _, Global, Task};
 use plugin_grants::{GrantRecord, GrantsFile, Tier};
 use plugin_host::resident::{
     BroadcastReport, ConnectionSnapshot, ConnectionState, LaunchSpec, ProcessLauncher, Supervisor,
     SupervisorConfig, SystemClock,
 };
-use plugin_host::{
-    LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginLifecycle,
-};
+use plugin_host::{LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginLifecycle};
 use plugin_protocol::v2::{Capability, HostEvent, InvokeContext, Output};
 use sleipnir_settings::TerminalSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::TermView;
+
+type CatalogRevision = Vec<(
+    LoadedPlugin,
+    Option<plugin_grants::BinaryHash>,
+    Option<GrantRecord>,
+)>;
 
 pub struct PluginRuntime {
     catalog: PluginCatalog,
@@ -28,6 +33,10 @@ pub struct PluginRuntime {
     /// construction) therefore both pass that check and both launch the same
     /// resident process. This set closes that window synchronously.
     connecting: BTreeSet<String>,
+    revision: CatalogRevision,
+    calls: crate::plugin_host_calls::HostCallLimiter,
+    _pump: Task<()>,
+    _housekeeping: Task<()>,
 }
 
 impl Global for PluginRuntime {}
@@ -38,14 +47,40 @@ impl PluginRuntime {
             cx.set_global(PluginRuntime {
                 catalog: PluginCatalog::default(),
                 connecting: BTreeSet::new(),
+                revision: Vec::new(),
+                calls: crate::plugin_host_calls::HostCallLimiter::new(),
+                _pump: Task::ready(()),
+                _housekeeping: Task::ready(()),
                 supervisor: Arc::new(Supervisor::new(
                     SupervisorConfig::default(),
                     Arc::new(ProcessLauncher),
                     Arc::new(SystemClock::new()),
                 )),
             });
+            Self::reload(cx);
+            let pump = cx.spawn(async move |cx| {
+                let mut dispatcher = crate::plugin_dispatch::PluginDispatcher::default();
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    cx.update(|cx| dispatcher.pump(cx));
+                }
+            });
+            let housekeeping = cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if let Some(supervisor) = cx.update(|cx| supervisor(cx)) {
+                        cx.background_executor()
+                            .spawn(async move { supervisor.tick() })
+                            .await;
+                    }
+                }
+            });
+            let runtime = cx.global_mut::<PluginRuntime>();
+            runtime._pump = pump;
+            runtime._housekeeping = housekeeping;
         }
-        Self::reload(cx);
     }
 
     pub fn reload(cx: &mut App) {
@@ -69,7 +104,50 @@ impl PluginRuntime {
                 .map(plugin_host::LoadedPluginCommand::qualified_id)
                 .collect::<Vec<_>>(),
         );
-        cx.global_mut::<PluginRuntime>().catalog = catalog;
+        let grants = grants();
+        let revision = catalog
+            .plugins
+            .iter()
+            .map(|plugin| {
+                (
+                    plugin.clone(),
+                    loaded_plugin_hash(plugin),
+                    grants.grants.get(plugin.id()).cloned(),
+                )
+            })
+            .collect();
+        let retired = cx
+            .global_mut::<PluginRuntime>()
+            .replace_catalog(catalog, revision);
+        if let Some(retired) = retired {
+            cx.background_executor()
+                .spawn(async move { retired.shutdown_all() })
+                .detach();
+        }
+    }
+
+    fn replace_catalog(
+        &mut self,
+        catalog: PluginCatalog,
+        revision: CatalogRevision,
+    ) -> Option<Arc<Supervisor>> {
+        self.catalog = catalog;
+        if self.revision == revision {
+            return None;
+        }
+        self.revision = revision;
+        self.connecting.clear();
+        self.calls = crate::plugin_host_calls::HostCallLimiter::new();
+        let retired = std::mem::replace(
+            &mut self.supervisor,
+            Arc::new(Supervisor::new(
+                SupervisorConfig::default(),
+                Arc::new(ProcessLauncher),
+                Arc::new(SystemClock::new()),
+            )),
+        );
+        retired.close();
+        Some(retired)
     }
 
     pub fn commands(cx: &App) -> Vec<LoadedPluginCommand> {
@@ -113,7 +191,19 @@ pub fn build_context(
     }
 }
 
-pub fn apply_output(output: Output, view: &gpui::Entity<TermView>, cx: &mut App) {
+pub fn apply_output(
+    output: Output,
+    granted: &[Capability],
+    view: &gpui::Entity<TermView>,
+    cx: &mut App,
+) {
+    if output
+        .required_capability()
+        .is_some_and(|capability| !granted.contains(&capability))
+    {
+        log::warn!("plugin output denied: missing grant");
+        return;
+    }
     match output {
         Output::Ignore => {}
         Output::Insert { text } => {
@@ -186,14 +276,9 @@ pub fn supervisor(cx: &App) -> Option<Arc<Supervisor>> {
         .map(|rt| Arc::clone(&rt.supervisor))
 }
 
-/// Drive the resident supervisor's housekeeping: reap dead sessions, apply
-/// crash backoff, reset crash counters past `stable_after`, evict idle
-/// residents. The shell calls this on a timer; without it `idle` and
-/// `stable_after` would be decorative.
-pub fn tick(cx: &App) {
-    if let Some(rt) = cx.try_global::<PluginRuntime>() {
-        rt.supervisor.tick();
-    }
+pub fn is_current(supervisor: &Arc<Supervisor>, cx: &App) -> bool {
+    cx.try_global::<PluginRuntime>()
+        .is_some_and(|runtime| Arc::ptr_eq(&runtime.supervisor, supervisor))
 }
 
 pub fn is_plugin_live(plugin_id: &str, cx: &App) -> bool {
@@ -214,8 +299,8 @@ pub fn begin_connect(plugin_id: &str, cx: &mut App) -> bool {
 
 /// Release a claim taken by [`begin_connect`], on success or failure. A failed
 /// launch must be retryable, so this is called on both paths.
-pub fn finish_connect(plugin_id: &str, cx: &mut App) {
-    if cx.has_global::<PluginRuntime>() {
+pub fn finish_connect(plugin_id: &str, supervisor: &Arc<Supervisor>, cx: &mut App) {
+    if is_current(supervisor, cx) {
         cx.update_global(|rt: &mut PluginRuntime, _| rt.connecting.remove(plugin_id));
     }
 }
@@ -249,7 +334,12 @@ pub fn snapshots(cx: &App) -> Vec<ConnectionSnapshot> {
 
 pub fn kill_plugin(plugin_id: &str, cx: &App) {
     if let Some(rt) = cx.try_global::<PluginRuntime>() {
-        rt.supervisor.shutdown(plugin_id);
+        if let Some(session) = rt.supervisor.disconnect(plugin_id) {
+            let grace = rt.supervisor.config().shutdown_grace;
+            cx.background_executor()
+                .spawn(async move { session.teardown(grace) })
+                .detach();
+        }
     }
 }
 
@@ -260,15 +350,29 @@ pub fn broadcast_event(event: HostEvent, cx: &App) -> BroadcastReport {
         .unwrap_or_default()
 }
 
-pub fn drain_all_inbound(cx: &App) -> Vec<(String, plugin_host::resident::Inbound)> {
-    cx.try_global::<PluginRuntime>()
-        .map(|rt| rt.supervisor.drain_all_inbound())
-        .unwrap_or_default()
-}
-
 pub fn has_grant(plugin_id: &str, cap: Capability, cx: &App) -> bool {
     cx.try_global::<PluginRuntime>()
         .is_some_and(|rt| rt.supervisor.has_grant(plugin_id, cap))
+}
+
+pub fn plan_host_call(
+    plugin_id: &str,
+    call: &plugin_protocol::v2::HostCall,
+    granted: &[Capability],
+    now_ms: u64,
+    cx: &mut App,
+) -> crate::plugin_host_calls::CallPlan {
+    crate::plugin_host_calls::plan_call(
+        plugin_id,
+        call,
+        granted,
+        &mut cx.global_mut::<PluginRuntime>().calls,
+        now_ms,
+    )
+}
+
+pub fn dropped_calls(cx: &App) -> BTreeMap<String, u64> {
+    cx.global::<PluginRuntime>().calls.dropped_counts().clone()
 }
 
 pub fn push_action(
@@ -329,6 +433,81 @@ pub fn save_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_with_plugin() -> PluginRuntime {
+        let plugin = LoadedPlugin {
+            manifest: serde_json::from_str(r#"{"id":"demo","name":"Demo","version":"1","api_version":2,"lifecycle":"resident","binary":"./demo"}"#).unwrap(),
+            directory: PathBuf::from("demo"),
+        };
+        PluginRuntime {
+            catalog: PluginCatalog {
+                plugins: vec![plugin.clone()],
+                ..PluginCatalog::default()
+            },
+            supervisor: Arc::new(Supervisor::new(
+                SupervisorConfig::for_tests(),
+                Arc::new(ProcessLauncher),
+                Arc::new(SystemClock::new()),
+            )),
+            connecting: BTreeSet::from(["demo".into()]),
+            revision: vec![(
+                plugin,
+                Some(plugin_grants::BinaryHash::from_raw(
+                    "sha256:original".into(),
+                )),
+                None,
+            )],
+            calls: crate::plugin_host_calls::HostCallLimiter::new(),
+            _pump: Task::ready(()),
+            _housekeeping: Task::ready(()),
+        }
+    }
+
+    #[test]
+    fn disabling_plugins_retires_the_supervisor_and_pending_launches() {
+        let mut runtime = runtime_with_plugin();
+        let launch = launch_spec(&runtime.catalog.plugins[0], vec![]);
+        let previous = Arc::clone(&runtime.supervisor);
+        let retired = runtime
+            .replace_catalog(PluginCatalog::default(), Vec::new())
+            .unwrap();
+        assert!(Arc::ptr_eq(&previous, &retired));
+        assert!(!Arc::ptr_eq(&previous, &runtime.supervisor));
+        assert!(runtime.connecting.is_empty());
+        assert!(runtime.catalog.plugins.is_empty());
+        assert!(matches!(
+            previous.connect(&launch),
+            Err(plugin_host::resident::SessionError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn unchanged_reload_preserves_sessions_but_binary_and_grant_changes_retire_them() {
+        let mut runtime = runtime_with_plugin();
+        let catalog = runtime.catalog.clone();
+        let revision = runtime.revision.clone();
+        let previous = Arc::clone(&runtime.supervisor);
+        assert!(
+            runtime
+                .replace_catalog(catalog.clone(), revision.clone())
+                .is_none()
+        );
+        assert!(Arc::ptr_eq(&previous, &runtime.supervisor));
+        let mut changed = revision;
+        changed[0].1 = Some(plugin_grants::BinaryHash::from_raw("sha256:updated".into()));
+        assert!(
+            runtime
+                .replace_catalog(catalog.clone(), changed.clone())
+                .is_some()
+        );
+        changed[0].2 = Some(GrantRecord {
+            granted: BTreeSet::from([Capability::Resident]),
+            binary_hash: "sha256:updated".into(),
+            granted_at: String::new(),
+            tier: Tier::Local,
+        });
+        assert!(runtime.replace_catalog(catalog, changed).is_some());
+    }
 
     /// Regression: `connect_resident` logs and then spawns the real connect, so
     /// `is_plugin_live` still reports false until that task lands. Two
