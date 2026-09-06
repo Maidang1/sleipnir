@@ -23,6 +23,8 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use crate::chrome::pane_facts::localhost_copy;
+        let style = pixel::active_style(cx);
+        let border_w = pixel::border_width(style, px(1.0));
         let facts = self
             .active_pane_key()
             .and_then(|pane| self.facts.facts_for(pane))
@@ -112,7 +114,7 @@ impl AppShell {
                 .flex()
                 .flex_col()
                 .bg(tokens.surface)
-                .border_l_1()
+                .border_l(border_w)
                 .border_color(tokens.border)
                 .occlude()
                 .child(
@@ -154,6 +156,8 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use crate::run_ledger_panel::{can_jump, group_label, row_summary, rows_from_runs};
+        let style = pixel::active_style(cx);
+        let border_w = pixel::border_width(style, px(1.0));
         let ledger = cx.try_global::<RunLedgerGlobal>();
         let (rows, launch) = match ledger {
             Some(g) => (rows_from_runs(&g.snapshot()), g.launch_id()),
@@ -219,7 +223,7 @@ impl AppShell {
                 .flex()
                 .flex_col()
                 .bg(tokens.surface)
-                .border_l_1()
+                .border_l(border_w)
                 .border_color(tokens.border)
                 .occlude()
                 .child(
@@ -244,6 +248,8 @@ impl AppShell {
             format_activity, format_pid, format_uptime, live_plugin_count, rows_from_snapshots,
             running_indicator_label, state_label, tier_badge,
         };
+        let style = pixel::active_style(cx);
+        let border_w = pixel::border_width(style, px(1.0));
         let snapshots = crate::plugin_runtime::snapshots(cx);
         let names = crate::plugin_runtime::catalog_names(cx);
         let tiers = crate::plugin_runtime::grant_tiers();
@@ -289,9 +295,9 @@ impl AppShell {
                 .flex_col()
                 .gap_1()
                 .p_2()
-                .rounded(px(6.0))
+                .rounded(pixel::radius(style, px(6.0)))
                 .bg(tokens.content_bg)
-                .border_1()
+                .border(border_w)
                 .border_color(tokens.border)
                 .child(
                     div()
@@ -343,7 +349,7 @@ impl AppShell {
                     .id(("plugin-kill", i))
                     .px_2()
                     .py_1()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_xs()
@@ -367,7 +373,7 @@ impl AppShell {
                 .flex()
                 .flex_col()
                 .bg(tokens.surface)
-                .border_l_1()
+                .border_l(border_w)
                 .border_color(tokens.border)
                 .occlude()
                 .child(
@@ -412,7 +418,7 @@ impl AppShell {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded(px(4.0))
+                                        .rounded(pixel::radius(style, px(4.0)))
                                         .cursor_pointer()
                                         .text_color(tokens.fg_muted)
                                         .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
@@ -635,6 +641,8 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use crate::chrome::history_search::{filter_history, load_history_hits};
+        let style = pixel::active_style(cx);
+        let border_w = pixel::border_width(style, px(1.0));
         let hits = load_history_hits();
         let shown = filter_history(&hits, &self.history_query, 20);
         let selected = self.history_selected.min(shown.len().saturating_sub(1));
@@ -646,7 +654,7 @@ impl AppShell {
                     .id(("hist", i))
                     .px_2()
                     .py_0p5()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .text_xs()
                     .text_color(tokens.fg)
                     .cursor_pointer()
@@ -669,9 +677,9 @@ impl AppShell {
                 .mx_auto()
                 .w(px(420.0))
                 .bg(tokens.surface)
-                .border_1()
+                .border(border_w)
                 .border_color(tokens.border)
-                .rounded(px(8.0))
+                .rounded(pixel::radius(style, px(8.0)))
                 .occlude()
                 .child(
                     div()

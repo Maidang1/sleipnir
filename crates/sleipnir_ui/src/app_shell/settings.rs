@@ -528,7 +528,7 @@ impl AppShell {
                             .px(px(7.0))
                             .py(px(2.0))
                             .bg(tokens.surface)
-                            .border_1()
+                            .border(border_w)
                             .border_color(tokens.border)
                             .text_size(px(11.0))
                             .font_weight(gpui::FontWeight::MEDIUM)

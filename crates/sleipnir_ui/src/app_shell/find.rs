@@ -11,6 +11,7 @@ use gpui::{
 
 use super::{AppShell, Find, FindNext, FindPrev};
 use crate::chrome::ChromeTokens;
+use crate::chrome::pixel;
 
 impl AppShell {
     pub(super) fn on_find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
@@ -45,11 +46,27 @@ impl AppShell {
         self.find_gen = self.find_gen.wrapping_add(1);
         if let Some(view) = self.active_view(cx) {
             if let Some(term) = view.read(cx).terminal_entity().cloned() {
-                term.update(cx, |t, _| t.matches.clear());
+                term.update(cx, |t, _| t.clear_matches());
             }
         }
         self.find_match_count = 0;
         self.find_active_index = 0;
+    }
+
+    /// Re-run the search if the active pane changed since the last run so the
+    /// count and highlights describe the pane actually on screen. Called from
+    /// `commit_workspace` (tab switches and pane focus moves).
+    pub(crate) fn refresh_find_for_active_pane(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.find_open || self.find_query.is_empty() {
+            return;
+        }
+        let Some(view) = self.active_view(cx) else {
+            return;
+        };
+        if Some(view.entity_id()) == self.find_searched_term {
+            return;
+        }
+        self.run_find(cx);
     }
 
     /// Resolve the raw query into the regex handed to alacritty's search.
@@ -88,7 +105,7 @@ impl AppShell {
         .detach();
     }
 
-    fn run_find(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn run_find(&mut self, cx: &mut Context<Self>) {
         // An immediate search (for example Enter) supersedes pending debounce timers.
         self.find_debounce_gen = self.find_debounce_gen.wrapping_add(1);
         let query = self.find_query.clone();
@@ -108,6 +125,9 @@ impl AppShell {
         let Some(term) = view.read(cx).terminal_entity().cloned() else {
             return;
         };
+        // Remember which pane this search targeted so a workspace commit can
+        // re-run it when the active pane changes (tab switch, focus move).
+        self.find_searched_term = Some(term.entity_id());
         self.find_gen = self.find_gen.wrapping_add(1);
         let generation = self.find_gen;
         let task = term.update(cx, |t, cx| t.find_matches(search, cx));
@@ -262,6 +282,7 @@ impl AppShell {
             format!("{}/{}", self.find_active_index + 1, self.find_match_count).into()
         };
         // Legible on-accent foreground for the active toggle buttons.
+        let style = pixel::active_style(cx);
         let on_accent = if tokens.accent.l < 0.5 {
             Hsla::white()
         } else {
@@ -278,7 +299,7 @@ impl AppShell {
             .items_center()
             .gap_2()
             .bg(tokens.content_bg)
-            .border_b_1()
+            .border_b(pixel::border_width(style, px(1.0)))
             .border_color(tokens.border)
             .child(
                 div()
@@ -293,7 +314,7 @@ impl AppShell {
                     .min_w_0()
                     .px_2()
                     .py_1()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .bg(tokens.hover)
                     .text_sm()
                     .text_color(query_color)
@@ -308,7 +329,7 @@ impl AppShell {
                     .id("find-match-case")
                     .px_2()
                     .py_0p5()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .when(self.find_match_case, |el| el.bg(tokens.accent))
@@ -329,7 +350,7 @@ impl AppShell {
                     .id("find-regex")
                     .px_2()
                     .py_0p5()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .when(self.find_regex, |el| el.bg(tokens.accent))
@@ -357,7 +378,7 @@ impl AppShell {
                     .id("find-prev")
                     .px_2()
                     .py_0p5()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_sm()
@@ -372,7 +393,7 @@ impl AppShell {
                     .id("find-next")
                     .px_2()
                     .py_0p5()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_sm()
@@ -387,7 +408,7 @@ impl AppShell {
                     .id("find-close")
                     .px_2()
                     .py_0p5()
-                    .rounded(px(4.0))
+                    .rounded(pixel::radius(style, px(4.0)))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_sm()

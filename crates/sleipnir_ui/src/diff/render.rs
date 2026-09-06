@@ -7,11 +7,12 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
     Window, canvas, deferred, div, fill, list, point, prelude::FluentBuilder as _, px, size,
 };
-use sleipnir_settings::TerminalPalette;
+use sleipnir_settings::{TerminalPalette, UiStyle};
 
 use super::{Cell, DiffView, DisplayRow, LineKind, TreeEntry, file_index_at, row_height};
 use crate::app_shell::AppShell;
 use crate::chrome::ChromeTokens;
+use crate::chrome::pixel;
 use diff_core::FileStatus;
 
 impl AppShell {
@@ -23,6 +24,8 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity();
+        let style = pixel::active_style(cx);
+        let border_w = pixel::border_width(style, px(1.0));
         let font_size = self
             .font_size_override
             .or(sleipnir_settings::TerminalSettings::get_global(cx).font_size)
@@ -52,7 +55,7 @@ impl AppShell {
                 .gap_3()
                 .px_3()
                 .py_2()
-                .border_b_1()
+                .border_b(border_w)
                 .border_color(tokens.border)
                 .child(
                     div()
@@ -65,15 +68,15 @@ impl AppShell {
                 .child(div().flex_1())
                 .child(self.render_mode_chip(tokens, cx))
                 .child(self.render_minimap_chip(tokens, cx))
-                .child(header_chip("diff-refresh", "Refresh", tokens).on_click(
+                .child(header_chip("diff-refresh", "Refresh", tokens, style).on_click(
                     cx.listener(|this, _, window, cx| this.refresh_diff(true, window, cx)),
                 ))
                 .child(
-                    header_chip("diff-send", "Send to pane", tokens)
+                    header_chip("diff-send", "Send to pane", tokens, style)
                         .on_click(cx.listener(|this, _, _, cx| this.send_open_diff_to_pty(cx))),
                 )
                 .child(
-                    header_chip("diff-close", "Close", tokens)
+                    header_chip("diff-close", "Close", tokens, style)
                         .on_click(cx.listener(|this, _, window, cx| this.close_diff(window, cx))),
                 );
 
@@ -106,6 +109,7 @@ impl AppShell {
                                 &list_tokens,
                                 &list_palette,
                                 &list_entity,
+                                style,
                             )
                         })
                         .unwrap_or_else(|| div().into_any_element())
@@ -162,10 +166,17 @@ impl AppShell {
                         .h(gpui::relative(0.88))
                         .flex()
                         .flex_col()
-                        .bg(tokens.content_bg)
-                        .border_1()
-                        .border_color(tokens.border)
-                        .rounded(px(10.0))
+                        .when(style == UiStyle::Default, |el| {
+                            el.bg(tokens.content_bg)
+                                .border_1()
+                                .border_color(tokens.border)
+                                .rounded(px(10.0))
+                        })
+                        .when(style == UiStyle::Pixel, |el| {
+                            el.shadow(pixel::hard_shadow(style)).child(
+                                pixel::pixel_panel_bg(tokens.content_bg, tokens.border),
+                            )
+                        })
                         .overflow_hidden()
                         .font_family(family)
                         .text_size(font_size)
@@ -197,6 +208,7 @@ impl AppShell {
             "diff-minimap",
             if on { "Minimap" } else { "Minimap off" },
             tokens,
+            pixel::active_style(cx),
         )
         .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_minimap(cx)))
     }
@@ -219,7 +231,7 @@ impl AppShell {
             .h_full()
             .flex_shrink_0()
             .bg(tokens.surface)
-            .border_l_1()
+            .border_l(pixel::border_width(pixel::active_style(_cx), px(1.0)))
             .border_color(tokens.border)
             .child(
                 canvas(
@@ -282,7 +294,7 @@ impl AppShell {
             Some(DiffView::Ready(session)) => session.mode.label(),
             _ => "Split",
         };
-        header_chip("diff-mode", label, tokens)
+        header_chip("diff-mode", label, tokens, pixel::active_style(cx))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_mode(cx)))
     }
 
@@ -322,7 +334,7 @@ impl AppShell {
             .flex()
             .flex_col()
             .bg(tokens.surface)
-            .border_r_1()
+            .border_r(pixel::border_width(pixel::active_style(cx), px(1.0)))
             .border_color(tokens.border)
             .child(
                 div()
@@ -345,12 +357,13 @@ fn header_chip(
     id: &'static str,
     label: &'static str,
     tokens: &ChromeTokens,
+    style: UiStyle,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .px_2()
         .py_1()
-        .rounded(px(4.0))
+        .rounded(pixel::radius(style, px(4.0)))
         .text_xs()
         .text_color(tokens.fg_muted)
         .cursor_pointer()
@@ -378,6 +391,7 @@ fn render_row(
     tokens: &ChromeTokens,
     palette: &TerminalPalette,
     entity: &Entity<AppShell>,
+    style: UiStyle,
 ) -> gpui::AnyElement {
     let base = div()
         .id(("diff-row", ix))
@@ -473,8 +487,8 @@ fn render_row(
                     .w(px(6.0))
                     .flex_shrink_0()
                     .bg(tokens.surface)
-                    .border_l_1()
-                    .border_r_1()
+                    .border_l(pixel::border_width(style, px(1.0)))
+                    .border_r(pixel::border_width(style, px(1.0)))
                     .border_color(tokens.border),
             )
             .child(render_split_cell(right.as_ref(), tokens, palette))

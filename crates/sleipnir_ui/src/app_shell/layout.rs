@@ -14,6 +14,7 @@ use gpui::{
 use super::{AppShell, DragState, PaneDrag, TabDragPreview};
 use crate::LeafContent;
 use crate::chrome::ChromeTokens;
+use crate::chrome::pixel;
 use crate::pane_tree::{
     Branch, MIN_RATIO, PaneId, PaneKey, PaneNode, PaneRect, SplitAxis, SplitPath,
 };
@@ -209,6 +210,8 @@ impl AppShell {
         let active_pane = tab.active_pane;
         let tab_id = tab.id;
         let zoomed = tab.zoomed_pane;
+        let style = pixel::active_style(cx);
+        let border_w = pixel::border_width(style, px(1.0));
 
         // Gather every leaf (terminals and panels) in tree order.
         let mut leaves = Vec::new();
@@ -242,7 +245,7 @@ impl AppShell {
                             .right(px(8.0))
                             .px_2()
                             .py_0p5()
-                            .rounded(px(4.0))
+                            .rounded(pixel::radius(style, px(4.0)))
                             .bg(tokens.accent.opacity(0.85))
                             .text_size(px(11.0))
                             .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
@@ -373,9 +376,9 @@ impl AppShell {
                         el.child(self.pane_extract_grip(pane_id, cx))
                     });
                 if !is_active {
-                    pane = pane.border_1().border_color(tokens.border);
+                    pane = pane.border(border_w).border_color(tokens.border);
                 } else {
-                    pane = pane.border_1().border_color(tokens.accent);
+                    pane = pane.border(border_w).border_color(tokens.accent);
                 }
                 pane = pane.on_mouse_down(
                     MouseButton::Left,
@@ -427,7 +430,7 @@ impl AppShell {
             if !is_active {
                 // Unfocused split dim (M13): dark overlay ~20% + muted border.
                 // Overlay also receives clicks so focusing still works.
-                pane = pane.border_1().border_color(tokens.border).child(
+                pane = pane.border(border_w).border_color(tokens.border).child(
                     div()
                         .id(("pane-dim", pane_id))
                         .absolute()
@@ -449,7 +452,7 @@ impl AppShell {
                         ),
                 );
             } else {
-                pane = pane.border_1().border_color(tokens.accent);
+                pane = pane.border(border_w).border_color(tokens.accent);
             }
             container = container.child(pane);
         }
