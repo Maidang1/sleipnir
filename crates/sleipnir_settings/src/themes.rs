@@ -27,6 +27,10 @@ pub enum ThemeName {
     Dracula,
     /// Atom One Dark (canvas `#282c34`).
     OneDark,
+    /// Nocturne Violet (canvas `#151020`).
+    NocturneViolet,
+    /// Monokai Pro (canvas `#2d2a2e`).
+    MonokaiPro,
     /// A user-defined palette from `custom_theme` (not cycled).
     Custom,
 }
@@ -47,6 +51,8 @@ impl ThemeName {
         ThemeName::GithubLight,
         ThemeName::Dracula,
         ThemeName::OneDark,
+        ThemeName::NocturneViolet,
+        ThemeName::MonokaiPro,
     ];
 
     /// Snake_case settings key (`"mocha"`, `"tokyo_night"`, …).
@@ -65,6 +71,8 @@ impl ThemeName {
             ThemeName::GithubLight => "github_light",
             ThemeName::Dracula => "dracula",
             ThemeName::OneDark => "one_dark",
+            ThemeName::NocturneViolet => "nocturne_violet",
+            ThemeName::MonokaiPro => "monokai_pro",
             ThemeName::Custom => "custom",
         }
     }
@@ -85,6 +93,8 @@ impl ThemeName {
             ThemeName::GithubLight => "GitHub Light",
             ThemeName::Dracula => "Dracula",
             ThemeName::OneDark => "One Dark",
+            ThemeName::NocturneViolet => "Nocturne Violet",
+            ThemeName::MonokaiPro => "Monokai Pro",
             ThemeName::Custom => "Custom",
         }
     }
@@ -184,6 +194,8 @@ pub fn palette_for_theme(name: ThemeName, appearance: Appearance) -> TerminalPal
         ThemeName::GithubLight => github_light(),
         ThemeName::Dracula => dracula(),
         ThemeName::OneDark => one_dark(),
+        ThemeName::NocturneViolet => nocturne_violet(),
+        ThemeName::MonokaiPro => monokai_pro(),
         // Custom palettes are resolved by `resolve_palette` before this; the
         // fallback keeps the match total and gives a sane palette if misused.
         ThemeName::Custom => mocha(),
@@ -658,6 +670,87 @@ fn one_dark() -> TerminalPalette {
             hex(0xc678dd),
             hex(0x56b6c2),
             hex(0xabb2bf),
+        ],
+    }
+}
+
+/// Nocturne Violet — a purple-forward dark theme (canvas `#151020`).
+fn nocturne_violet() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::NocturneViolet,
+        background: hex(0x151020),
+        foreground: hex(0xd9d2e8),
+        bright_foreground: hex(0xf4f0fb),
+        cursor: hex(0xb98df7),
+        selection: hex(0x3b2d5e),
+        ansi: [
+            hex(0x221832), // black
+            hex(0xe06c92), // red
+            hex(0xa0cfa8), // green
+            hex(0xe0b76e), // yellow
+            hex(0x93a4f5), // blue
+            hex(0xcf9bf0), // magenta
+            hex(0x8ad4cc), // cyan
+            hex(0xcdc4e0), // white
+            hex(0x75649a), // bright black
+            hex(0xf58bab), // bright red
+            hex(0xb2e3ba), // bright green
+            hex(0xf0ce8e), // bright yellow
+            hex(0xaab8f9), // bright blue
+            hex(0xdcb6f7), // bright magenta
+            hex(0xa2e8df), // bright cyan
+            hex(0xf4f0fb), // bright white
+        ],
+        dim: [
+            hex(0x221832),
+            hex(0xe06c92),
+            hex(0xa0cfa8),
+            hex(0xe0b76e),
+            hex(0x93a4f5),
+            hex(0xcf9bf0),
+            hex(0x8ad4cc),
+            hex(0xcdc4e0),
+        ],
+    }
+}
+
+/// Monokai Pro — the official terminal palette from the VS Code extension
+/// (canvas `#2d2a2e`; note the signature orange occupies the blue slot).
+fn monokai_pro() -> TerminalPalette {
+    TerminalPalette {
+        name: ThemeName::MonokaiPro,
+        background: hex(0x2d2a2e),
+        foreground: hex(0xfcfcfa),
+        bright_foreground: hex(0xfcfcfa),
+        cursor: hex(0xfcfcfa),
+        selection: hex(0x4c494c),
+        ansi: [
+            hex(0x403e41), // black
+            hex(0xff6188), // red
+            hex(0xa9dc76), // green
+            hex(0xffd866), // yellow
+            hex(0xfc9867), // blue (orange in Monokai Pro)
+            hex(0xab9df2), // magenta
+            hex(0x78dce8), // cyan
+            hex(0xfcfcfa), // white
+            hex(0x727072), // bright black
+            hex(0xff6188), // bright red
+            hex(0xa9dc76), // bright green
+            hex(0xffd866), // bright yellow
+            hex(0xfc9867), // bright blue
+            hex(0xab9df2), // bright magenta
+            hex(0x78dce8), // bright cyan
+            hex(0xfcfcfa), // bright white
+        ],
+        dim: [
+            hex(0x403e41),
+            hex(0xff6188),
+            hex(0xa9dc76),
+            hex(0xffd866),
+            hex(0xfc9867),
+            hex(0xab9df2),
+            hex(0x78dce8),
+            hex(0xfcfcfa),
         ],
     }
 }

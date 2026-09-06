@@ -163,6 +163,8 @@ mod tests {
             ThemeName::GruvboxDark,
             ThemeName::GithubDark,
             ThemeName::GithubLight,
+            ThemeName::NocturneViolet,
+            ThemeName::MonokaiPro,
         ] {
             let p = palette_for_theme(name, Appearance::Dark);
             let t = ChromeTokens::from_palette(&p, true);

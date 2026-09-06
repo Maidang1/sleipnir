@@ -1,4 +1,30 @@
 {
+  "monokai-pro": {
+    "background": "#2d2a2e",
+    "foreground": "#fcfcfa",
+    "bright_foreground": "#fcfcfa",
+    "cursor": "#fcfcfa",
+    "selection": "#4c494c",
+    "ansi": [
+      "#403e41", "#ff6188", "#a9dc76", "#ffd866",
+      "#fc9867", "#ab9df2", "#78dce8", "#fcfcfa",
+      "#727072", "#ff6188", "#a9dc76", "#ffd866",
+      "#fc9867", "#ab9df2", "#78dce8", "#fcfcfa"
+    ]
+  },
+  "nocturne-violet": {
+    "background": "#151020",
+    "foreground": "#d9d2e8",
+    "bright_foreground": "#f4f0fb",
+    "cursor": "#b98df7",
+    "selection": "#3b2d5e",
+    "ansi": [
+      "#221832", "#e06c92", "#a0cfa8", "#e0b76e",
+      "#93a4f5", "#cf9bf0", "#8ad4cc", "#cdc4e0",
+      "#75649a", "#f58bab", "#b2e3ba", "#f0ce8e",
+      "#aab8f9", "#dcb6f7", "#a2e8df", "#f4f0fb"
+    ]
+  },
   "kanagawa": {
     "background": "#1f1f28",
     "foreground": "#dcd7ba",
