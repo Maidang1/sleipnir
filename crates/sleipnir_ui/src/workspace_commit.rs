@@ -2,8 +2,8 @@
 //!
 //! Every structural change to tabs/panes commits through this boundary,
 //! guaranteeing that focus restoration, window title updates, tab scroll,
-//! session saving debounce, ledger focus sync, and UI notifications
-//! never get forgotten or desynchronized across different operations.
+//! ledger focus sync, and UI notifications never get forgotten or
+//! desynchronized across different operations.
 
 use crate::app_shell::AppShell;
 use gpui::{Context, Window};
@@ -22,7 +22,6 @@ impl AppShell {
         // The find bar searched the previously active pane; re-run it so the
         // count and highlights describe the pane that is on screen now.
         self.refresh_find_for_active_pane(cx);
-        self.schedule_session_save(cx);
         cx.notify();
     }
 }

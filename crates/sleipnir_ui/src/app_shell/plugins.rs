@@ -23,6 +23,24 @@ pub(super) enum PluginConsentKind {
     Resident(plugin_host::LoadedPlugin),
 }
 
+/// Validate that a cwd string points at an existing directory; otherwise fall
+/// back to its parent, then home. `None` when even home is unavailable.
+fn resolve_cwd(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+            .filter(|p| p.is_dir())
+            .map(|p| p.to_path_buf())
+            .or_else(dirs::home_dir)
+    }
+}
+
 impl AppShell {
     pub(super) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
@@ -542,12 +560,11 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> plugin_protocol::v2::HostCallResult {
         use crate::plugin_host_calls::error_result;
-        use crate::session::resolve_cwd;
         use plugin_protocol::v2::HostCallResult;
         let cwd = match cwd.as_deref() {
             None => None,
             Some(raw) => {
-                let resolved = resolve_cwd(Some(raw));
+                let resolved = resolve_cwd(raw);
                 if resolved.is_none() {
                     return error_result(format!("cwd not found: {raw}"));
                 }

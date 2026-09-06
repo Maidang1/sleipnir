@@ -518,7 +518,6 @@ impl AppShell {
                     cx.listener(|this, _, _, cx| {
                         this.drag = None;
                         this.set_all_blocks_frozen(false, cx);
-                        this.schedule_session_save(cx);
                         cx.notify();
                     }),
                 );

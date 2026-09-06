@@ -5,7 +5,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub type RunId = Uuid;
-/// Identifies one Pane across restarts; persisted in `session.json`.
+/// Identifies one Pane within a process launch.
 pub type PaneKey = Uuid;
 /// Identifies one process launch; jumping is only valid within the current one.
 pub type LaunchId = Uuid;

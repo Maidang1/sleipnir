@@ -24,7 +24,6 @@ mod plugin_runtime;
 mod plugin_surface;
 mod run_ledger_global;
 mod run_ledger_panel;
-mod session;
 mod tab_convert;
 mod term_element;
 mod ui_mode;
@@ -56,7 +55,6 @@ pub use pane_tree::{
     SplitPath, neighbor,
 };
 pub use run_ledger_global::RunLedgerGlobal;
-pub use session::{SessionFile, SessionNode, SessionTab, load_session, save_session, session_path};
 pub use term_element::TermElement;
 pub use update_model::{AvailableUpdate, UpdateModel, UpdateUiState};
 

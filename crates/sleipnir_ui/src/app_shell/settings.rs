@@ -409,14 +409,13 @@ impl AppShell {
         )
     }
 
-    /// General section: session restore, ligatures, and pointers for advanced config.
+    /// General section: ligatures, copy-on-select, and pointers for advanced config.
     fn render_settings_general_section(
         &self,
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let settings = TerminalSettings::get_global(cx);
-        let restore = settings.restore_session;
         let ligatures = settings.font_ligatures;
         let style = settings.ui_style;
         let border_w = pixel::border_width(style, px(1.0));
@@ -430,44 +429,6 @@ impl AppShell {
             .flex_col()
             .gap(px(20.0))
             .w_full()
-            // ── Application group ─────────────────────────────────────────
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(tokens.fg_muted)
-                            .pl(px(2.0))
-                            .child("# APPLICATION"),
-                    )
-                    .child(
-                        div()
-                            .bg(card_bg)
-                            .border(border_w)
-                            .border_color(tokens.border)
-                            .overflow_hidden()
-                            .child(self.settings_toggle_row(
-                                "restore-session",
-                                "Restore session on launch",
-                                "Reopen tabs, splits, and working directories from the last quit",
-                                restore,
-                                tokens,
-                                cx,
-                                |this, cx| {
-                                    let next = !TerminalSettings::get_global(cx).restore_session;
-                                    TerminalSettings::set_restore_session(next, cx);
-                                    if next {
-                                        this.schedule_session_save(cx);
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                    ),
-            )
             // ── Terminal group ────────────────────────────────────────────
             .child(
                 div()

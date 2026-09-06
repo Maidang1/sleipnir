@@ -7,7 +7,7 @@
 //! the degenerate tree.
 //!
 //! Panel is the first widget mount point because it reuses this tree: splits,
-//! focus, zoom, tabs and session restore come free, and no Block coordinate
+//! focus, zoom and tabs come free, and no Block coordinate
 //! math is involved. A Panel is **not** a PTY. Helpers that collect
 //! [`TermView`]s skip Panel leaves so broadcast, resize, the control surface
 //! and the run ledger keep meaning "the terminal panes".
@@ -19,7 +19,7 @@ use crate::TermView;
 
 /// Stable identity for a leaf pane within a tab.
 pub type PaneId = u64;
-/// Stable identity for a Pane across restarts; persisted in `session.json`.
+/// Stable identity for a Pane within a process launch.
 pub type PaneKey = Uuid;
 
 /// Split orientation.

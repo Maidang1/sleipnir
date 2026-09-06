@@ -170,8 +170,6 @@ pub struct TerminalSettings {
     pub ui_style: UiStyle,
     /// User-defined inline palette; when set, it overrides `theme`.
     pub custom_theme: Option<CustomPalette>,
-    /// Restore tabs/splits/cwd from the last session on launch (M8).
-    pub restore_session: bool,
     /// Enable OpenType ligatures (`calt`) when the font supports them (M10).
     pub font_ligatures: bool,
     /// Optional key binding overrides loaded from settings (M9).
@@ -308,7 +306,6 @@ impl Default for TerminalSettings {
             theme: ThemeSetting::Builtin(ThemeName::Mocha),
             ui_style: UiStyle::Default,
             custom_theme: None,
-            restore_session: true,
             font_ligatures: false,
             key_bindings: Vec::new(),
             confirm_close: ConfirmClose::Dirty,
@@ -389,18 +386,6 @@ impl TerminalSettings {
             log::warn!("failed to persist theme={:?}: {err}", theme.as_str());
         } else {
             log::info!("theme -> {} (persisted)", theme.as_str());
-        }
-    }
-
-    /// Toggle session restore and persist to settings.json.
-    pub fn set_restore_session(enabled: bool, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.restore_session = enabled;
-        apply_loaded(settings, cx);
-        if let Err(err) = persist_bool_key("restore_session", enabled) {
-            log::warn!("failed to persist restore_session={enabled}: {err}");
-        } else {
-            log::info!("restore_session -> {enabled} (persisted)");
         }
     }
 
@@ -517,9 +502,6 @@ struct SettingsFile {
     /// User-defined palette (hex colors); overrides `theme` when present.
     #[serde(default)]
     custom_theme: Option<CustomPalette>,
-    /// Restore last session (tabs/splits/cwd) on launch. Default true.
-    #[serde(default)]
-    restore_session: Option<bool>,
     /// Extra key bindings layered on top of the built-in map.
     #[serde(default)]
     key_bindings: Option<Vec<KeyBindingSpec>>,
@@ -664,9 +646,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(custom) = file.custom_theme {
         settings.custom_theme = Some(custom);
     }
-    if let Some(v) = file.restore_session {
-        settings.restore_session = v;
-    }
     if let Some(bindings) = file.key_bindings {
         settings.key_bindings = bindings;
     }
@@ -806,7 +785,6 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         theme: Some("mocha".into()),
         ui_style: Some(UiStyle::Default),
         custom_theme: None,
-        restore_session: Some(true),
         key_bindings: None,
         confirm_close: Some(ConfirmClose::Dirty),
         path_links: Some(true),
@@ -906,14 +884,6 @@ fn persist_theme(theme: &ThemeSetting) -> anyhow::Result<()> {
     write_settings_json(&json)
 }
 
-fn persist_bool_key(key: &str, value: bool) -> anyhow::Result<()> {
-    let raw = read_settings_raw()?;
-    let json = merge_settings_json(raw.as_deref(), |doc| {
-        doc[key] = serde_json::Value::Bool(value);
-    });
-    write_settings_json(&json)
-}
-
 fn persist_terminal_bool(key: &str, value: bool) -> anyhow::Result<()> {
     let raw = read_settings_raw()?;
     let json = merge_settings_json(raw.as_deref(), |doc| {
@@ -980,13 +950,13 @@ mod tests {
     "background": "#0d1117",
     "foreground": "#e6edf3"
   },
-  "restore_session": true
+  "path_links": true
 }"##;
         let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::Nord));
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "nord");
         assert!(v.get("custom_theme").is_none());
-        assert_eq!(v["restore_session"], serde_json::Value::Bool(true));
+        assert_eq!(v["path_links"], serde_json::Value::Bool(true));
     }
 
     #[test]
@@ -1055,7 +1025,7 @@ mod tests {
     fn merge_settings_preserves_and_sets_bools() {
         let raw = r#"{ "theme": "mocha", "terminal": { "font_size": 14 } }"#;
         let out = merge_settings_json(Some(raw), |v| {
-            v["restore_session"] = serde_json::Value::Bool(false);
+            v["inject_osc133"] = serde_json::Value::Bool(false);
             if !v["terminal"].is_object() {
                 v["terminal"] = serde_json::json!({});
             }
@@ -1063,7 +1033,7 @@ mod tests {
         });
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "mocha");
-        assert_eq!(v["restore_session"], false);
+        assert_eq!(v["inject_osc133"], false);
         assert_eq!(v["terminal"]["font_size"], 14);
         assert_eq!(v["terminal"]["font_ligatures"], true);
     }

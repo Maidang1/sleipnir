@@ -68,7 +68,6 @@ Common options include:
 
 - `theme` / `custom_theme`
 - `ui_style` (`"default"` | `"pixel"` — pixel-art chrome: square corners, 2px borders, hard shadows, staircase panels)
-- `restore_session`
 - `confirm_close`
 - `key_bindings`
 - `terminal.bell`

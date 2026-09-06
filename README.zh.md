@@ -69,7 +69,6 @@ cargo build --release -p sleipnir
 
 - `theme` / `custom_theme`
 - `ui_style`（`"default"` | `"pixel"`——像素风界面：直角、2px 边框、硬投影、阶梯切角面板）
-- `restore_session`
 - `confirm_close`
 - `key_bindings`
 - `terminal.bell`

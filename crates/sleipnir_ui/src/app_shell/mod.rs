@@ -8,7 +8,6 @@ mod find;
 mod layout;
 mod palette;
 mod panels;
-mod persist;
 mod plugin_paint;
 mod plugins;
 mod query;
@@ -20,7 +19,7 @@ mod update;
 use gpui::{
     App, AppContext as _, BorrowAppContext, Bounds, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels,
-    Point, Render, ScrollHandle, SharedString, Styled as _, Task, TitlebarOptions, Window,
+    Point, Render, ScrollHandle, SharedString, Styled as _, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div,
     prelude::FluentBuilder as _, px, size,
 };
@@ -32,10 +31,9 @@ use crate::chrome::pixel;
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::command_palette::{CommandId, CommandItem, commands as palette_commands};
 use crate::pane_tree::{
-    CloseOutcome, Direction, PaneId, PaneNode, PaneRect, SplitAxis, SplitPath, neighbor,
+    CloseOutcome, Direction, PaneId, PaneRect, SplitAxis, SplitPath, neighbor,
 };
 use crate::run_ledger_global::RunLedgerGlobal;
-use crate::session::{SessionAxis, SessionNode};
 pub(crate) use crate::tab_convert::Tab;
 use crate::ui_mode::{OverlayKind, PaneFactsState, UiMode};
 use crate::{TermView, UpdateModel, UpdateUiState};
@@ -410,8 +408,6 @@ pub struct AppShell {
     /// Git diff inspector (ADR-0012). Not a Pane.
     pub(crate) diff_view: Option<crate::diff::DiffView>,
     diff_gen: u64,
-    /// Debounced session save task.
-    _session_save_task: Option<Task<()>>,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
     /// Last-seen pane facts for plugin events. Polled, never per-frame.
@@ -612,7 +608,6 @@ impl AppShell {
             diff_view: None,
             diff_gen: 0,
             facts: PaneFactsState::default(),
-            _session_save_task: None,
             _quit_subscription: None,
             plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
             plugin_panels: crate::plugin_panel::PanelRegistry::new(),
@@ -632,10 +627,9 @@ impl AppShell {
         crate::control_surface::init(cx);
         crate::attention_chrome::refresh(cx);
 
-        // Persist session on quit (M8) and flush the Run Ledger.
+        // Flush pane-close events and the Run Ledger on quit.
         shell._quit_subscription = Some(cx.on_app_quit(|this, cx| {
             this.emit_all_panes_closed(cx);
-            this.persist_session_now(cx);
             RunLedgerGlobal::flush_now_in(cx);
             async {}
         }));
@@ -645,19 +639,11 @@ impl AppShell {
         shell
     }
 
+    /// Every window starts fresh with a single empty tab; sessions are not
+    /// persisted, so a window's tab strip is always its own.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut shell = Self::construct(window, cx);
-        let restore = TerminalSettings::get_global(cx).restore_session;
-        let restored = if restore {
-            shell.try_restore_session(window, cx)
-        } else {
-            false
-        };
-        if !restored {
-            shell.add_tab(window, cx);
-        } else {
-            shell.sync_ledger_focus(window, cx);
-        }
+        shell.add_tab(window, cx);
         shell
     }
 
@@ -1460,7 +1446,6 @@ impl AppShell {
     #[cfg(target_os = "linux")]
     fn finish_window_close(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.emit_all_panes_closed(cx);
-        self.persist_session_now(cx);
         RunLedgerGlobal::flush_now_in(cx);
         window.remove_window();
     }
@@ -1885,10 +1870,6 @@ impl AppShell {
     // ── find in scrollback (M10) ────────────────────────────────────────────
 }
 
-fn tree_contains(tree: &PaneNode, id: PaneId) -> bool {
-    tree.contains_leaf(id)
-}
-
 /// Wrap a camera yaw into `[0, 2π)` so the host-driven camera stays finite over
 /// a long drag; mirrors the plugin's own `wrap_angle`.
 fn wrap_camera_angle(a: f32) -> f32 {
@@ -1960,7 +1941,6 @@ mod tests {
         let body = method.split("\n    }").next().expect("finalizer body");
         for required in [
             "emit_all_panes_closed(cx)",
-            "persist_session_now(cx)",
             "RunLedgerGlobal::flush_now_in(cx)",
             "window.remove_window()",
         ] {
@@ -2032,41 +2012,6 @@ mod tests {
         assert_eq!(ids.tab_id, 1);
         assert_eq!(ids.next_id, 2);
         assert_eq!(ids.next_pane_id, 2);
-    }
-}
-
-fn snapshot_tree(node: &PaneNode, cx: &App) -> SessionNode {
-    match node {
-        PaneNode::Leaf {
-            id,
-            pane_key,
-            content: crate::LeafContent::Terminal(view),
-        } => SessionNode::Leaf {
-            id: *id,
-            cwd: view
-                .read(cx)
-                .working_directory(cx)
-                .map(|p| p.to_string_lossy().into_owned()),
-            pane_key: Some(*pane_key),
-        },
-        PaneNode::Leaf { id, pane_key, .. } => SessionNode::Panel {
-            id: *id,
-            pane_key: Some(*pane_key),
-        },
-        PaneNode::Split {
-            axis,
-            ratio,
-            first,
-            second,
-        } => SessionNode::Split {
-            axis: match axis {
-                SplitAxis::Horizontal => SessionAxis::Horizontal,
-                SplitAxis::Vertical => SessionAxis::Vertical,
-            },
-            ratio: *ratio,
-            first: Box::new(snapshot_tree(first, cx)),
-            second: Box::new(snapshot_tree(second, cx)),
-        },
     }
 }
 

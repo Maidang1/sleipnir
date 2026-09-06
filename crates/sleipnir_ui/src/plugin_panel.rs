@@ -16,7 +16,6 @@ use uuid::Uuid;
 
 use crate::pane_tree::PaneKey;
 use crate::plugin_surface::{StaleRegistry, Surface};
-use crate::session::SessionNode;
 
 /// A 3D scene sent by a plugin, projected and painted host-side in the panel.
 /// Mirrors [`plugin_protocol::v2::SceneData`]; the host stores it verbatim and
@@ -215,35 +214,6 @@ pub fn tab_close_policy(terminals_remaining: usize) -> TabClosePolicy {
     }
 }
 
-/// Drop plugin panels from a persisted tree so restore cannot spawn a shell
-/// in their place. A panel is not a terminal; resurrecting it as one would
-/// silently give the user a PTY where a plugin used to draw.
-pub fn drop_session_panels(node: SessionNode) -> Option<SessionNode> {
-    match node {
-        SessionNode::Panel { .. } => None,
-        SessionNode::Leaf { .. } => Some(node),
-        SessionNode::Split {
-            axis,
-            ratio,
-            first,
-            second,
-        } => {
-            let first = drop_session_panels(*first);
-            let second = drop_session_panels(*second);
-            match (first, second) {
-                (Some(a), Some(b)) => Some(SessionNode::Split {
-                    axis,
-                    ratio,
-                    first: Box::new(a),
-                    second: Box::new(b),
-                }),
-                (Some(only), None) | (None, Some(only)) => Some(only),
-                (None, None) => None,
-            }
-        }
-    }
-}
-
 /// Columns that fit in `pixel_width` given the terminal's cell width.
 pub fn cols_from_pixels(pixel_width: f32, cell_width: f32) -> u16 {
     if !pixel_width.is_finite() || !cell_width.is_finite() || cell_width <= 0.0 {
@@ -283,7 +253,6 @@ pub fn cell_from_pixels(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::SessionAxis;
     use plugin_protocol::v2::Tone;
     use sleipnir_widget::LaidOutKind;
 
@@ -407,40 +376,6 @@ mod tests {
     fn last_terminal_closes_the_tab() {
         assert_eq!(tab_close_policy(0), TabClosePolicy::CloseTab);
         assert_eq!(tab_close_policy(1), TabClosePolicy::KeepTab);
-    }
-
-    #[test]
-    fn restore_drops_panels_and_keeps_terminals() {
-        let tree = SessionNode::Split {
-            axis: SessionAxis::Horizontal,
-            ratio: 0.5,
-            first: Box::new(SessionNode::Leaf {
-                id: 1,
-                cwd: Some("/tmp".into()),
-                pane_key: Some(key(1)),
-            }),
-            second: Box::new(SessionNode::Panel {
-                id: 2,
-                pane_key: Some(key(2)),
-            }),
-        };
-        let kept = drop_session_panels(tree).unwrap();
-        match kept {
-            SessionNode::Leaf { id, cwd, .. } => {
-                assert_eq!(id, 1);
-                assert_eq!(cwd.as_deref(), Some("/tmp"));
-            }
-            other => panic!("panel must not restore as a terminal: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn restore_of_panel_only_tree_is_empty() {
-        let tree = SessionNode::Panel {
-            id: 1,
-            pane_key: Some(key(1)),
-        };
-        assert!(drop_session_panels(tree).is_none());
     }
 
     #[test]

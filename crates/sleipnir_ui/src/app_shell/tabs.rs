@@ -80,7 +80,6 @@ impl AppShell {
                 };
             }
             self.sync_window_title(window, cx);
-            self.schedule_session_save(cx);
             cx.notify();
         }
     }
@@ -232,7 +231,6 @@ impl AppShell {
             tab.custom_title = closed.title;
         }
         self.sync_window_title(window, cx);
-        self.schedule_session_save(cx);
         cx.notify();
     }
 

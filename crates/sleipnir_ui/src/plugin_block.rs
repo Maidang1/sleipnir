@@ -367,13 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn blocks_are_not_in_the_session_shape() {
-        // A Block is process-local. SessionNode has Panel / Leaf / Split, no
-        // Block variant, so restore cannot resurrect one.
-        let src = include_str!("session.rs");
+    fn blocks_are_not_in_the_pane_tree() {
+        // A Block is process-local. PaneNode has Panel / Terminal leaves and
+        // splits, no Block variant, so a block can never be snapshotted.
+        let src = include_str!("pane_tree.rs");
         assert!(
             !src.contains("Block {"),
-            "session restore must not grow a Block variant"
+            "pane tree must not grow a Block variant"
         );
     }
 

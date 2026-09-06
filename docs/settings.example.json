@@ -1,7 +1,6 @@
 {
   "theme": "auto",
   "ui_style": "default",
-  "restore_session": true,
   "confirm_close": "dirty",
   "path_links": true,
   "background_opacity": 1.0,

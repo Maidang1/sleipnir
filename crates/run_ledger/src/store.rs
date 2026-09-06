@@ -22,7 +22,7 @@ pub struct RunsFile {
     pub runs: Vec<Run>,
 }
 
-/// Alongside `session.json`.
+/// Lives in the config directory.
 pub fn default_runs_path(config_dir: &Path) -> PathBuf {
     config_dir.join("runs.json")
 }
