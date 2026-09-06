@@ -1,9 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 ### Features
 - New `ui_style` setting (`"default"` | `"pixel"`). `"pixel"` reskins all chrome with pixel-art geometry: square tabs and window corners, 2px borders, hard offset shadows, staircase-corner floating panels, and blocky toggles/buttons. Colors still follow the active theme; text rendering is unchanged.
+- Theme picker supports full keyboard navigation with scroll-follow.
+
+### Plugin Security & Reliability
+- Terminal and clipboard outputs from plugins are checked against the session's granted capabilities before delivery, including on-demand invocations.
+- Plugin host calls now have a reply deadline: `Context::call` waits up to 30 seconds and `Context::call_with_timeout` allows a custom deadline; a timeout returns `HostCallResult::Error`.
+- One application-wide dispatcher routes plugin Block and Panel messages to their owning window; missing call targets receive an error reply and host-call limits are shared across windows.
+- Reload Settings preserves resident plugin sessions when the catalog, binary hashes, and grants are unchanged; disabling plugins shuts the previous runtime down in the background.
+- An overflowing host call receives an error reply instead of being silently dropped; if the reply cannot be queued, the connection closes.
 
 ## 0.4.1
 
