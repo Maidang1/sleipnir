@@ -14,6 +14,7 @@ mod plugins;
 mod query;
 mod settings;
 mod tabs;
+mod terminal_menu;
 mod update;
 
 use gpui::{
@@ -24,9 +25,10 @@ use gpui::{
     prelude::FluentBuilder as _, px, size,
 };
 use run_ledger::{PaneKey, RunEvent};
-use sleipnir_settings::{Appearance, ConfirmClose, TerminalPalette, TerminalSettings};
+use sleipnir_settings::{Appearance, ConfirmClose, TerminalPalette, TerminalSettings, UiStyle};
 use std::path::PathBuf;
 
+use crate::chrome::pixel;
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::command_palette::{CommandId, CommandItem, commands as palette_commands};
 use crate::pane_tree::{
@@ -152,14 +154,18 @@ impl Render for TabDragPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
         let tokens = ChromeTokens::from_palette(&palette, window.is_window_active());
+        let style = pixel::active_style(cx);
         div()
             .px_3()
             .py_1()
-            .rounded(px(6.0))
+            .rounded(pixel::radius(style, px(6.0)))
             .bg(tokens.hover)
-            .border_1()
+            .border(pixel::border_width(style, px(1.0)))
             .border_color(tokens.border)
-            .shadow_lg()
+            .when(style == UiStyle::Default, |el| el.shadow_lg())
+            .when(style == UiStyle::Pixel, |el| {
+                el.shadow(pixel::hard_shadow(style))
+            })
             .text_sm()
             .text_color(tokens.fg)
             .child(self.title.clone())
@@ -237,6 +243,15 @@ pub(crate) struct RenameState {
 pub(crate) struct TabMenuState {
     pub(crate) tab_id: u64,
     pub(crate) position: gpui::Point<gpui::Pixels>,
+    /// Keyboard-highlighted row (↑/↓ in the capture key handler).
+    pub(crate) selected: usize,
+}
+
+/// Right-click menu state for a terminal pane (normal mouse mode).
+pub(crate) struct TerminalMenuState {
+    pub(crate) position: gpui::Point<gpui::Pixels>,
+    pub(crate) link: Option<terminal::MaybeNavigationTarget>,
+    pub(crate) selected: usize,
 }
 
 pub(crate) struct ClosedTab {
@@ -335,6 +350,7 @@ pub struct AppShell {
     pub(crate) rename: Option<RenameState>,
     /// Context menu opened for a tab chip.
     pub(crate) tab_menu: Option<TabMenuState>,
+    pub(crate) terminal_menu: Option<TerminalMenuState>,
     /// Recently closed tabs, oldest first and capped at ten entries.
     pub(crate) closed_tabs: Vec<ClosedTab>,
     /// Which modal overlay is showing, plus the transient find / quick-select
@@ -362,6 +378,9 @@ pub struct AppShell {
     find_gen: u64,
     find_match_count: usize,
     find_active_index: usize,
+    /// Terminal pane the running/last find targeted, so a workspace commit
+    /// can re-run the search when the active pane changes.
+    find_searched_term: Option<gpui::EntityId>,
     /// Regex mode: treat the query as a raw regex instead of a literal (⌥⌘R).
     find_regex: bool,
     /// Match case (⌥⌘C). Off = case-insensitive; on = case-sensitive.
@@ -554,6 +573,7 @@ impl AppShell {
             panel_camera_last_ms: 0,
             rename: None,
             tab_menu: None,
+            terminal_menu: None,
             closed_tabs: Vec::new(),
             mode: UiMode {
                 overlay: if has_update_outcome {
@@ -578,6 +598,7 @@ impl AppShell {
             find_gen: 0,
             find_match_count: 0,
             find_active_index: 0,
+            find_searched_term: None,
             find_regex: false,
             find_match_case: false,
             font_size_override: None,
@@ -807,6 +828,14 @@ impl AppShell {
                         if let Some(pane) = this.pane_key_for_view(view) {
                             this.jump_to_gutter(pane, *line, window, cx);
                         }
+                    }
+                    crate::TermViewEvent::ContextMenu { position, link } => {
+                        this.terminal_menu = Some(TerminalMenuState {
+                            position: *position,
+                            link: link.clone(),
+                            selected: 0,
+                        });
+                        cx.notify();
                     }
                     crate::TermViewEvent::UserTyped => {}
                 }
@@ -1154,13 +1183,17 @@ impl AppShell {
             Ok(()) => {
                 log::info!("exported scrollback to {}", path.display());
                 crate::open_existing_path(&path);
+                view.update(cx, |v, cx| v.show_toast("scrollback exported", cx));
             }
-            Err(err) => log::error!("export scrollback failed: {err:#}"),
+            Err(err) => {
+                log::error!("export scrollback failed: {err:#}");
+                view.update(cx, |v, cx| v.show_toast("export scrollback failed", cx));
+            }
         }
     }
 
     /// The active pane's `TermView`, if any.
-    fn active_view(&self, _cx: &App) -> Option<Entity<TermView>> {
+    pub(crate) fn active_view(&self, _cx: &App) -> Option<Entity<TermView>> {
         self.active_terminal(_cx)
             .or_else(|| self.first_terminal(_cx))
     }
@@ -1181,6 +1214,12 @@ impl AppShell {
         let mut leaves = Vec::new();
         tab.tree.leaves(&mut leaves);
         leaves.first().map(|(_, v)| (*v).clone())
+    }
+
+    /// The active pane's terminal entity, for menu actions (copy/paste/clear).
+    pub(crate) fn active_terminal_entity(&self, cx: &App) -> Option<Entity<terminal::Terminal>> {
+        let view = self.active_view(cx)?;
+        view.read(cx).terminal_entity().cloned()
     }
 
     /// The active pane's working directory, when its PTY reports one. New tabs
@@ -1261,6 +1300,9 @@ impl AppShell {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
+        // Focus the sibling that survives the close, not blindly the first
+        // leaf: closing a right-hand pane should not jump focus across the tab.
+        let successor = tab.tree.close_successor_id(target);
         let outcome = tab.tree.close(target);
         match outcome {
             CloseOutcome::TreeEmpty => {
@@ -1280,10 +1322,12 @@ impl AppShell {
                     self.plugin_panels.remove(pane);
                     self.apply_pane_closed(pane, cx);
                 }
-                // Surviving subtree: focus its first leaf (the collapsed sibling
-                // when the closed pane was a direct child of a split).
+                // Surviving subtree: focus its sibling of the closed pane when
+                // known, else the first leaf as a fallback.
                 if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.active_pane = tab.tree.first_leaf_id();
+                    tab.active_pane = successor
+                        .filter(|id| tab.tree.contains_leaf(*id))
+                        .unwrap_or_else(|| tab.tree.first_leaf_id());
                 }
                 self.commit_workspace(window, cx);
             }
@@ -2059,7 +2103,12 @@ impl Render for AppShell {
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
         let fullscreen = window.is_fullscreen();
-        let geo = ChromeGeometry::for_window(cfg!(not(target_os = "macos")), fullscreen);
+        let ui_style = TerminalSettings::get_global(cx).ui_style;
+        let geo = ChromeGeometry::for_window_styled(
+            cfg!(not(target_os = "macos")),
+            fullscreen,
+            matches!(ui_style, sleipnir_settings::UiStyle::Pixel),
+        );
         let leading = geo.leading_pad;
         let chrome_h = geo.height;
         let banner_top = chrome_h;
@@ -2114,11 +2163,61 @@ impl Render for AppShell {
                     }
                     return;
                 }
-                if this.tab_menu.is_some() {
-                    if event.keystroke.key.as_str() == "escape" {
-                        this.tab_menu = None;
-                        cx.notify();
-                        cx.stop_propagation();
+                if this.tab_menu.is_some() || this.terminal_menu.is_some() {
+                    let key = event.keystroke.key.as_str();
+                    match key {
+                        "escape" => {
+                            this.tab_menu = None;
+                            this.terminal_menu = None;
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                        "down" | "up" if !event.keystroke.modifiers.platform => {
+                            let count = if this.tab_menu.is_some() {
+                                AppShell::TAB_MENU_ITEM_COUNT
+                            } else {
+                                this.terminal_menu_items().len()
+                            };
+                            let selected = this
+                                .tab_menu
+                                .as_ref()
+                                .map(|m| m.selected)
+                                .or_else(|| this.terminal_menu.as_ref().map(|m| m.selected))
+                                .unwrap_or(0);
+                            let next = if key == "down" {
+                                (selected + 1) % count.max(1)
+                            } else {
+                                (selected + count.max(1) - 1) % count.max(1)
+                            };
+                            if let Some(menu) = this.tab_menu.as_mut() {
+                                menu.selected = next;
+                            } else if let Some(menu) = this.terminal_menu.as_mut() {
+                                menu.selected = next;
+                            }
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                        "enter" => {
+                            let selected = this
+                                .tab_menu
+                                .as_ref()
+                                .map(|m| m.selected)
+                                .or_else(|| this.terminal_menu.as_ref().map(|m| m.selected))
+                                .unwrap_or(0);
+                            if this.tab_menu.is_some() {
+                                this.run_tab_menu_item(selected, window, cx);
+                            } else if let Some(item) =
+                                this.terminal_menu_items().get(selected).copied()
+                            {
+                                this.run_terminal_menu_item(item, window, cx);
+                            }
+                            cx.stop_propagation();
+                        }
+                        _ => {
+                            if !event.keystroke.modifiers.platform {
+                                cx.stop_propagation();
+                            }
+                        }
                     }
                     return;
                 }
@@ -2329,7 +2428,7 @@ impl Render for AppShell {
                             div()
                                 .px_3()
                                 .py_1()
-                                .rounded(px(6.0))
+                                .rounded(pixel::radius(ui_style, px(6.0)))
                                 .bg(tokens.accent.opacity(0.9))
                                 .text_size(px(12.0))
                                 .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
@@ -2351,9 +2450,9 @@ impl Render for AppShell {
                             div()
                                 .px_3()
                                 .py_1()
-                                .rounded(px(6.0))
+                                .rounded(pixel::radius(ui_style, px(6.0)))
                                 .bg(tokens.surface)
-                                .border_1()
+                                .border(pixel::border_width(ui_style, px(1.0)))
                                 .border_color(tokens.accent)
                                 .text_size(px(12.0))
                                 .text_color(tokens.fg)
@@ -2366,6 +2465,9 @@ impl Render for AppShell {
             })
             .when(self.tab_menu.is_some(), |el| {
                 el.child(self.render_tab_menu(&tokens, window, cx))
+            })
+            .when(self.terminal_menu.is_some(), |el| {
+                el.child(self.render_terminal_menu(&tokens, window, cx))
             })
             .when(self.mode.is(OverlayKind::Settings), |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))

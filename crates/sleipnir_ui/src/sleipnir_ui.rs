@@ -68,7 +68,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, rgb,
 };
 use sleipnir_settings::{
-    NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
+    NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings, UiStyle,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,6 +99,12 @@ pub enum TermViewEvent {
     RequestOpenSettings,
     /// Terminal BEL — shell may flash tab chrome (visual bell).
     Bell,
+    /// Right-click on the terminal in normal mode. The shell shows the
+    /// context menu; `link` is the resolved target when the click is on one.
+    ContextMenu {
+        position: gpui::Point<Pixels>,
+        link: Option<terminal::MaybeNavigationTarget>,
+    },
     /// A command started in this pane (Run Ledger).
     RunStarted {
         command: String,
@@ -164,6 +170,8 @@ const ONSCREEN_WINDOW: Duration = Duration::from_millis(250);
 const OFFSCREEN_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 struct CopyToast {
+    /// Message shown in the toast bubble.
+    message: SharedString,
     /// Hide task; dropping it cancels a previous toast.
     _hide: Task<()>,
 }
@@ -494,9 +502,15 @@ impl TermView {
                 Event::Open(target) => {
                     open_navigation_target(target, cx);
                 }
-                // Ignore OSC 9 / OSC 777 desktop notification requests from
-                // shell hooks and terminal applications.
-                Event::Notify(_) => {}
+                // OSC 9 / OSC 777: surfaced as an in-app toast instead of a
+                // system notification (system toasts were removed in 0.4.1
+                // because shell exit hooks spammed them; the toast stays in
+                // the window and replaces itself, so hook bursts stay quiet).
+                Event::Notify(message) => {
+                    if !message.trim().is_empty() {
+                        this.show_toast(message, cx);
+                    }
+                }
                 Event::RunStarted {
                     command,
                     cwd,
@@ -609,6 +623,23 @@ impl TermView {
 
     /// Show a brief bottom toast after text lands on the clipboard.
     fn show_copy_toast(&mut self, cx: &mut Context<Self>) {
+        self.show_toast("copied to clipboard", cx);
+    }
+
+    /// Right-click in normal mode: hand the menu request to the shell.
+    pub(crate) fn open_context_menu(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        link: Option<terminal::MaybeNavigationTarget>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(TermViewEvent::ContextMenu { position, link });
+        cx.notify();
+    }
+
+    /// Show a brief bottom toast with an arbitrary message. A new toast
+    /// replaces the previous one, so a burst of messages stays at one bubble.
+    pub(crate) fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         let hide = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(1600))
@@ -619,7 +650,10 @@ impl TermView {
             })
             .ok();
         });
-        self.copy_toast = Some(CopyToast { _hide: hide });
+        self.copy_toast = Some(CopyToast {
+            message: message.into(),
+            _hide: hide,
+        });
         cx.notify();
     }
 
@@ -869,6 +903,7 @@ struct LinkPreview {
 impl Render for LinkPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
+        let style = chrome::pixel::active_style(cx);
         let bg = palette
             .background
             .blend(gpui::Hsla::black().opacity(0.4))
@@ -876,7 +911,7 @@ impl Render for LinkPreview {
         div()
             .px_2()
             .py_1()
-            .rounded(gpui::px(4.0))
+            .rounded(chrome::pixel::radius(style, gpui::px(4.0)))
             .bg(bg)
             .text_color(palette.foreground)
             .text_size(gpui::px(12.0))
@@ -893,6 +928,12 @@ impl Render for TermView {
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
+        let toast_style = TerminalSettings::get_global(cx).ui_style;
+        let toast_message = self
+            .copy_toast
+            .as_ref()
+            .map(|t| t.message.clone())
+            .unwrap_or_else(|| "copied to clipboard".into());
         // Toast chrome: dark surface, lime border/dot (matches common terminal UX).
         let toast_bg = palette
             .background
@@ -1008,8 +1049,8 @@ impl Render for TermView {
                         .right_0()
                         .flex()
                         .justify_center()
-                        // Don't steal mouse from the terminal under the toast.
-                        .occlude()
+                        // No `.occlude()`: the bubble must stay transparent to
+                        // mouse so the terminal under it keeps working.
                         .child(
                             div()
                                 .flex()
@@ -1018,18 +1059,29 @@ impl Render for TermView {
                                 .gap_2()
                                 .px_3()
                                 .py_1p5()
-                                .rounded(gpui::px(6.0))
+                                .rounded(chrome::pixel::radius(toast_style, gpui::px(6.0)))
                                 .bg(toast_bg)
-                                .border_1()
+                                .border(chrome::pixel::border_width(toast_style, gpui::px(1.0)))
                                 .border_color(toast_border)
-                                .shadow_md()
-                                .child(div().size(gpui::px(7.0)).rounded_full().bg(toast_dot))
+                                .when(toast_style == UiStyle::Default, |el| el.shadow_md())
+                                .when(toast_style == UiStyle::Pixel, |el| {
+                                    el.shadow(chrome::pixel::hard_shadow(toast_style))
+                                })
+                                .child(
+                                    div()
+                                        .size(gpui::px(7.0))
+                                        .rounded(chrome::pixel::radius(
+                                            toast_style,
+                                            gpui::px(3.5),
+                                        ))
+                                        .bg(toast_dot),
+                                )
                                 .child(
                                     div()
                                         .text_size(gpui::px(12.0))
                                         .text_color(toast_fg)
                                         .font_family(sleipnir_settings::default_font_family())
-                                        .child("copied to clipboard"),
+                                        .child(toast_message),
                                 ),
                         ),
                 )
@@ -1181,7 +1233,7 @@ fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
 }
 
 /// Open web URLs, and path-like targets when `path_links` is enabled (M12).
-fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
+pub(crate) fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
     match target {
         MaybeNavigationTarget::Url(url) if is_web_url(url) => {
             log::info!("opening url: {url}");

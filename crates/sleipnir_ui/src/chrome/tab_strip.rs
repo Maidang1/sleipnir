@@ -1,15 +1,16 @@
 //! Tab strip / shared tab-chip rendering.
 
 use gpui::{
-    App, AppContext as _, Context, InteractiveElement as _, IntoElement, MouseButton,
+    App, AppContext as _, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     deferred, div, prelude::FluentBuilder as _, px, svg,
 };
 use run_ledger::Badge;
-use sleipnir_settings::{TerminalPalette, TerminalSettings};
+use sleipnir_settings::{TerminalPalette, TerminalSettings, UiStyle};
 
 use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview, TabMenuState};
 use crate::chrome::agent::{self, AgentKind};
+use crate::chrome::pixel;
 use crate::chrome::workspace::{WorkspaceKey, group_tabs};
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::run_ledger_global::RunLedgerGlobal;
@@ -105,14 +106,18 @@ impl Render for TabPathPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
         let tokens = ChromeTokens::from_palette(&palette, window.is_window_active());
+        let style = pixel::active_style(cx);
         div()
             .px_3()
             .py_1()
-            .rounded(px(6.0))
+            .rounded(pixel::radius(style, px(6.0)))
             .bg(tokens.hover)
-            .border_1()
+            .border(pixel::border_width(style, px(1.0)))
             .border_color(tokens.border)
-            .shadow_lg()
+            .when(style == UiStyle::Default, |el| el.shadow_lg())
+            .when(style == UiStyle::Pixel, |el| {
+                el.shadow(pixel::hard_shadow(style))
+            })
             .text_sm()
             .text_color(tokens.fg)
             .child(self.text.clone())
@@ -148,6 +153,7 @@ pub(crate) fn render_tab_chip(
         .unwrap_or_else(|| "~".to_string())
         .into();
     let is_renaming = rename_buffer.is_some();
+    let style = pixel::active_style(cx);
     let bg = chip_background(is_active, is_hovered, is_bell, failed, tokens, palette);
     let fg = if is_active || is_bell || is_hovered || failed {
         tokens.fg
@@ -188,8 +194,14 @@ pub(crate) fn render_tab_chip(
         .text_sm()
         .cursor_pointer()
         .overflow_hidden()
-        .when(is_renaming, |el| el.border_1().border_color(tokens.accent))
-        .when(is_bell, |el| el.border_1().border_color(tokens.accent));
+        .when(is_renaming, |el| {
+            el.border(pixel::border_width(style, px(1.0)))
+                .border_color(tokens.accent)
+        })
+        .when(is_bell, |el| {
+            el.border(pixel::border_width(style, px(1.0)))
+                .border_color(tokens.accent)
+        });
     let chip = chip.min_w(geo.tab_min_width).max_w(geo.tab_max_width);
 
     let chip = chip
@@ -207,6 +219,7 @@ pub(crate) fn render_tab_chip(
                 this.tab_menu = Some(TabMenuState {
                     tab_id,
                     position: event.position,
+                    selected: 0,
                 });
                 cx.notify();
             }),
@@ -281,7 +294,7 @@ pub(crate) fn render_tab_chip(
                 )))
                 .flex_shrink_0()
                 .px_1()
-                .rounded(px(3.0))
+                .rounded(pixel::radius(style, px(3.0)))
                 .bg(tokens.surface)
                 .text_xs()
                 .text_color(color)
@@ -293,7 +306,7 @@ pub(crate) fn render_tab_chip(
                     .id(("tab-close", tab_id))
                     .flex_shrink_0()
                     .px_1()
-                    .rounded(px(3.0))
+                    .rounded(pixel::radius(style, px(3.0)))
                     .text_xs()
                     .hover(|el| el.bg(tokens.hover))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -316,29 +329,120 @@ pub(crate) fn render_tab_chip(
 }
 
 impl AppShell {
+    /// Rows in the tab context menu; the capture key handler wraps on this.
+    pub(crate) const TAB_MENU_ITEM_COUNT: usize = 6;
+
+    /// Execute the tab context menu row at `item`:
+    /// 0 Rename · 1 Duplicate · 2 Copy Path · 3 Close · 4 Close to the Right · 5 Close Others.
+    /// Closes go through `request_close_tab` so busy panes still confirm.
+    pub(crate) fn run_tab_menu_item(
+        &mut self,
+        item: usize,
+        window: &mut Window,
+        cx: &mut Context<AppShell>,
+    ) {
+        let Some(state) = self.tab_menu else {
+            return;
+        };
+        let cwd = self
+            .tabs
+            .iter()
+            .find(|t| t.id == state.tab_id)
+            .and_then(|t| t.workspace_cwd(cx));
+        self.tab_menu = None;
+        match item {
+            0 => self.begin_rename(state.tab_id, cx),
+            1 => self.add_tab_at(cwd, window, cx),
+            2 => {
+                if let Some(cwd) = cwd {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                        cwd.display().to_string(),
+                    ));
+                    if let Some(view) = self.active_view(cx) {
+                        view.update(cx, |v, cx| v.show_toast("path copied", cx));
+                    }
+                }
+            }
+            3 => self.request_close_tab(state.tab_id, window, cx),
+            4 => {
+                let ids: Vec<u64> = self
+                    .tabs
+                    .iter()
+                    .skip_while(|t| t.id != state.tab_id)
+                    .skip(1)
+                    .map(|t| t.id)
+                    .collect();
+                for id in ids {
+                    self.request_close_tab(id, window, cx);
+                }
+            }
+            5 => {
+                let ids: Vec<u64> = self
+                    .tabs
+                    .iter()
+                    .map(|t| t.id)
+                    .filter(|id| *id != state.tab_id)
+                    .collect();
+                for id in ids {
+                    self.request_close_tab(id, window, cx);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
     pub(crate) fn render_tab_menu(
         &self,
         tokens: &ChromeTokens,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<AppShell>,
     ) -> impl IntoElement {
         let state = self.tab_menu.expect("tab menu state checked by caller");
-        let row = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .px_3()
-                .py_1()
-                .text_sm()
-                .text_color(tokens.fg)
-                .cursor_pointer()
-                .hover(|el| el.bg(tokens.hover))
-                .child(label)
-        };
+        let style = pixel::active_style(cx);
+        const ITEMS: [&str; AppShell::TAB_MENU_ITEM_COUNT] = [
+            "Rename Tab",
+            "Duplicate Tab",
+            "Copy Path",
+            "Close Tab",
+            "Close Tabs to the Right",
+            "Close Other Tabs",
+        ];
+
+        // Keep the panel inside the window: menus opened near an edge would
+        // otherwise render off-screen.
+        let viewport = window.viewport_size();
+        let menu_w = px(190.0);
+        let menu_h = px(AppShell::TAB_MENU_ITEM_COUNT as f32 * 28.0 + 12.0);
+        let x = state.position.x.min((viewport.width - menu_w).max(px(0.0)));
+        let y = state.position.y.min((viewport.height - menu_h).max(px(0.0)));
 
         let close_menu = |this: &mut AppShell, cx: &mut Context<AppShell>| {
             this.tab_menu = None;
             cx.notify();
         };
+
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for (index, label) in ITEMS.iter().enumerate() {
+            let is_selected = index == state.selected;
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("tab-menu-item-{index}")))
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(tokens.fg)
+                    .cursor_pointer()
+                    .when(is_selected, |el| el.bg(tokens.hover))
+                    .hover(|el| el.bg(tokens.hover))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.run_tab_menu_item(index, window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(*label)
+                    .into_any_element(),
+            );
+        }
 
         deferred(
             div()
@@ -364,57 +468,22 @@ impl AppShell {
                     div()
                         .id("tab-menu-panel")
                         .absolute()
-                        .left(state.position.x)
-                        .top(state.position.y)
-                        .min_w(px(160.0))
+                        .left(x)
+                        .top(y)
+                        .min_w(menu_w)
                         .py_1()
-                        .rounded(px(6.0))
-                        .border_1()
+                        .rounded(pixel::radius(style, px(6.0)))
+                        .border(pixel::border_width(style, px(1.0)))
                         .border_color(tokens.border)
                         .bg(tokens.content_bg)
-                        .shadow_lg()
+                        .when(style == UiStyle::Default, |el| el.shadow_lg())
+                        .when(style == UiStyle::Pixel, |el| {
+                            el.shadow(pixel::hard_shadow(style))
+                        })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-                        .child(row("tab-menu-rename", "Rename Tab").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.tab_menu = None;
-                                this.begin_rename(state.tab_id, cx);
-                                cx.stop_propagation();
-                            },
-                        )))
-                        .child(
-                            row("tab-menu-duplicate", "Duplicate Tab").on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    let cwd = this
-                                        .tabs
-                                        .iter()
-                                        .find(|tab| tab.id == state.tab_id)
-                                        .and_then(|tab| tab.workspace_cwd(cx));
-                                    this.tab_menu = None;
-                                    this.add_tab_at(cwd, window, cx);
-                                    cx.stop_propagation();
-                                },
-                            )),
-                        )
-                        .child(row("tab-menu-close", "Close Tab").on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.tab_menu = None;
-                                this.request_close_tab(state.tab_id, window, cx);
-                                cx.stop_propagation();
-                            },
-                        )))
-                        .child(row("tab-menu-close-others", "Close Other Tabs").on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.tab_menu = None;
-                                for index in (0..this.tabs.len()).rev() {
-                                    if this.tabs[index].id != state.tab_id {
-                                        this.close_tab_at(index, window, cx);
-                                    }
-                                }
-                                cx.stop_propagation();
-                            }),
-                        )),
+                        .children(rows),
                 ),
         )
     }

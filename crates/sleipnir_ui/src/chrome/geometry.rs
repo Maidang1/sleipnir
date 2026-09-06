@@ -5,6 +5,7 @@ use gpui::{Pixels, Point, point, px};
 /// Local copy of Zed `ui::TRAFFIC_LIGHT_PADDING` spirit — do not depend on `ui`.
 ///
 /// Zed: 71 default; 78 when `macos_sdk_26_or_later` (requires package-local `build.rs`).
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChromeGeometry {
     pub height: Pixels,
     pub traffic_light_position: Point<Pixels>,
@@ -36,8 +37,7 @@ impl ChromeGeometry {
     }
 
     /// Chrome insets for the platform and current fullscreen state.
-    pub fn for_window(desktop_controls: bool, fullscreen: bool) -> Self {
-        Self {
+    pub fn for_window(desktop_controls: bool, fullscreen: bool) -> Self {        Self {
             height: px(32.0),
             traffic_light_position: point(px(12.0), px(8.0)),
             leading_pad: if fullscreen {
@@ -61,6 +61,17 @@ impl ChromeGeometry {
                 trailing_pad_for(desktop_controls)
             },
         }
+    }
+
+    /// Chrome insets for the platform, fullscreen state, and UI style.
+    /// Pixel mode squares the tab chips and the content clip radius.
+    pub fn for_window_styled(desktop_controls: bool, fullscreen: bool, pixel: bool) -> Self {
+        let mut geo = Self::for_window(desktop_controls, fullscreen);
+        if pixel {
+            geo.tab_radius = px(0.0);
+            geo.window_radius = px(0.0);
+        }
+        geo
     }
 
     /// Leading pad when the window is fullscreen.
@@ -96,6 +107,15 @@ pub fn trailing_pad_for(desktop_controls: bool) -> Pixels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_geometry_squares_tabs_and_window() {
+        let g = ChromeGeometry::for_window_styled(false, false, true);
+        assert_eq!(g.tab_radius, px(0.0));
+        assert_eq!(g.window_radius, px(0.0));
+        let d = ChromeGeometry::for_window_styled(false, false, false);
+        assert_eq!(d, ChromeGeometry::for_window(false, false));
+    }
 
     #[test]
     fn standard_geometry_is_coupled() {
