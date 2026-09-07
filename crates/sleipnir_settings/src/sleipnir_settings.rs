@@ -117,16 +117,19 @@ pub enum KeybindingPreset {
     Tmux,
 }
 
-/// Where the Run Ledger keeps its data.
+/// Whether the Run Ledger collects runs in memory for core chrome
+/// (tab red wash, Dock badge, run routing). Persistence is owned by the
+/// Run Ledger plugin: `Persist` is accepted for compatibility and behaves
+/// like `Memory` in core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunLedgerMode {
-    /// 不采集、无 UI、不读写 runs.json（文件保留）。
+    /// 不采集（runs.json 文件保留，由插件管理）。
     Off,
-    /// 采集并显示，但不读写 runs.json（磁盘文件原样保留）。
+    /// 采集到内存，核心不读写 runs.json。
     Memory,
     #[default]
-    /// 采集、显示、读写 runs.json。
+    /// 与 Memory 等价（兼容旧配置）；持久化由 Run Ledger 插件负责。
     Persist,
 }
 
@@ -189,10 +192,8 @@ pub struct TerminalSettings {
     /// Default true so the Run Ledger gets real command boundaries.
     /// Set false to restore detect-only behavior.
     pub inject_osc133: bool,
-    /// Whether the Run Ledger collects, shows, and persists runs.
+    /// Whether the Run Ledger collects runs in memory for core chrome.
     pub run_ledger: RunLedgerMode,
-    /// Retention window for persisted runs, in days.
-    pub run_ledger_retention_days: u64,
     /// Cap on persisted runs (oldest dropped first).
     pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
@@ -315,7 +316,6 @@ impl Default for TerminalSettings {
             notify_on_command_finish_mode: NotifyOnCommandFinish::Unfocused,
             inject_osc133: true,
             run_ledger: RunLedgerMode::Persist,
-            run_ledger_retention_days: 7,
             run_ledger_max_runs: 500,
             run_ledger_redact: true,
             agent_icons: true,
@@ -527,8 +527,6 @@ struct SettingsFile {
     #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
     run_ledger: Option<RunLedgerMode>,
     #[serde(default)]
-    run_ledger_retention_days: Option<u64>,
-    #[serde(default)]
     run_ledger_max_runs: Option<usize>,
     #[serde(default)]
     run_ledger_redact: Option<bool>,
@@ -578,7 +576,6 @@ struct TerminalSettingsFile {
     inject_osc133: Option<bool>,
     #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
     run_ledger: Option<RunLedgerMode>,
-    run_ledger_retention_days: Option<u64>,
     run_ledger_max_runs: Option<usize>,
     run_ledger_redact: Option<bool>,
 }
@@ -670,9 +667,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.run_ledger {
         settings.run_ledger = v;
     }
-    if let Some(v) = file.run_ledger_retention_days {
-        settings.run_ledger_retention_days = v;
-    }
     if let Some(v) = file.run_ledger_max_runs {
         settings.run_ledger_max_runs = v;
     }
@@ -761,9 +755,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = t.run_ledger {
         settings.run_ledger = v;
     }
-    if let Some(v) = t.run_ledger_retention_days {
-        settings.run_ledger_retention_days = v;
-    }
     if let Some(v) = t.run_ledger_max_runs {
         settings.run_ledger_max_runs = v;
     }
@@ -793,7 +784,6 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         notify_on_command_finish_mode: Some(NotifyOnCommandFinish::Unfocused),
         inject_osc133: Some(true),
         run_ledger: Some(RunLedgerMode::Persist),
-        run_ledger_retention_days: Some(7),
         run_ledger_max_runs: Some(500),
         run_ledger_redact: Some(true),
         agent_icons: Some(true),
@@ -1056,7 +1046,6 @@ mod tests {
     fn run_ledger_defaults_to_persist() {
         let s = TerminalSettings::default();
         assert_eq!(s.run_ledger, RunLedgerMode::Persist);
-        assert_eq!(s.run_ledger_retention_days, 7);
         assert_eq!(s.run_ledger_max_runs, 500);
         assert!(s.run_ledger_redact);
     }

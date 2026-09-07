@@ -59,7 +59,6 @@ pub enum BuiltinAction {
     JumpNextPrompt,
     ToggleQuickSelect,
     OpenQuickTerminal,
-    ToggleRunLedger,
     TogglePluginMonitor,
     ToggleHistorySearch,
     ToggleDiff,
@@ -223,7 +222,6 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
         b("cmd-shift-down", BuiltinAction::JumpNextPrompt, Both),
         b("cmd-shift-o", BuiltinAction::ToggleQuickSelect, Both),
         b("cmd-shift-n", BuiltinAction::OpenQuickTerminal, Both),
-        b("cmd-shift-l", BuiltinAction::ToggleRunLedger, Both),
         b("cmd-shift-;", BuiltinAction::ToggleHistorySearch, Both),
         b("cmd-alt-g", BuiltinAction::ToggleDiff, Both),
     ]
@@ -298,7 +296,6 @@ fn desktop_static_bindings() -> Vec<BuiltinBinding> {
         b("ctrl-shift-down", BuiltinAction::JumpNextPrompt, Both),
         b("ctrl-shift-o", BuiltinAction::ToggleQuickSelect, Both),
         b("ctrl-alt-n", BuiltinAction::OpenQuickTerminal, Both),
-        b("ctrl-shift-l", BuiltinAction::ToggleRunLedger, Both),
         b("ctrl-shift-;", BuiltinAction::ToggleHistorySearch, Both),
         b("ctrl-alt-shift-g", BuiltinAction::ToggleDiff, Both),
     ]
@@ -398,8 +395,6 @@ pub fn display_shortcut_for(id: &str, non_macos: bool) -> &'static str {
         ("toggle_quick_select", true) => "Ctrl+Shift+O",
         ("open_quick_terminal", false) => "⌘⇧N",
         ("open_quick_terminal", true) => "Ctrl+Alt+N",
-        ("toggle_run_ledger", false) => "⌘⇧L",
-        ("toggle_run_ledger", true) => "Ctrl+Shift+L",
         ("toggle_history_search", false) => "⌘⇧;",
         ("toggle_history_search", true) => "Ctrl+Shift+;",
         ("toggle_diff", false) => "⌥⌘G",
@@ -451,7 +446,6 @@ mod tests {
         assert!(keys.iter().any(|k| k == "ctrl-shift-v"));
         assert!(keys.iter().any(|k| k == "ctrl-,"));
         assert!(keys.iter().any(|k| k == "ctrl-shift-p"));
-        assert!(keys.iter().any(|k| k == "ctrl-shift-l"));
         assert!(keys.iter().any(|k| k == "ctrl-alt-shift-g"));
         // Tab activation lives on ctrl-shift-N so shell/TUI keep ctrl-1..9.
         assert!(keys.iter().any(|k| k == "ctrl-shift-1"));

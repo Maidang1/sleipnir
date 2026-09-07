@@ -13,7 +13,7 @@
 //! Pure decision logic. No gpui, no window, no process spawn. The shell
 //! executes the plan and always calls `reply`.
 
-use plugin_protocol::v2::{Capability, HostCall, HostCallResult, PaneInfo, SceneData};
+use plugin_protocol::v2::{Capability, HostCall, HostCallResult, PaneInfo, RunId, SceneData};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::pane_tree::PaneKey;
@@ -67,6 +67,9 @@ pub enum CallPlan {
     DrawScene {
         pane: PaneKey,
         scene: SceneData,
+    },
+    ScrollToRun {
+        run_id: RunId,
     },
 }
 
@@ -149,6 +152,7 @@ pub fn plan_call(
             },
             Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
         },
+        HostCall::ScrollToRun { run_id } => CallPlan::ScrollToRun { run_id: *run_id },
     }
 }
 
@@ -297,6 +301,7 @@ mod tests {
                 cwd: None,
                 command: None,
             },
+            HostCall::ScrollToRun { run_id: key(7) },
         ];
         for call in calls {
             let plan = plan_call("demo", &call, &[], &mut limiter, 0);
@@ -528,6 +533,10 @@ mod tests {
             .required_capability(),
             Capability::HostCallOpenPane
         );
+        assert_eq!(
+            HostCall::ScrollToRun { run_id: key(1) }.required_capability(),
+            Capability::HostCallScrollToRun
+        );
     }
 
     #[test]
@@ -650,6 +659,29 @@ mod tests {
             plan,
             CallPlan::Reply(HostCallResult::Error { .. })
         ));
+    }
+
+    #[test]
+    fn scroll_to_run_plans_when_granted_and_uses_the_default_rate_limiter() {
+        // Unlike DrawScene, ScrollToRun is not exempt from the anti-spam
+        // limiter: it steals the user's scroll position, an external effect.
+        let mut limiter = HostCallLimiter::new();
+        let granted = [Capability::HostCallScrollToRun];
+        let call = HostCall::ScrollToRun { run_id: key(9) };
+        for _ in 0..RATE_MAX_CALLS {
+            match plan_call("demo", &call, &granted, &mut limiter, 1_000) {
+                CallPlan::ScrollToRun { run_id } => assert_eq!(run_id, key(9)),
+                other => panic!("expected ScrollToRun within budget, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            plan_call("demo", &call, &granted, &mut limiter, 1_000),
+            CallPlan::Reply(HostCallResult::Error { .. })
+        ));
+        assert_eq!(
+            limiter.dropped_counts().get("demo").copied().unwrap_or(0),
+            1
+        );
     }
 
     #[test]

@@ -337,6 +337,7 @@ impl AppShell {
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
             Capability::HostCallDrawScene,
+            Capability::HostCallScrollToRun,
         ]
         .into_iter()
         .filter(|cap| crate::plugin_runtime::has_grant(plugin_id, *cap, cx))
@@ -399,6 +400,26 @@ impl AppShell {
                     HostCallResult::SceneOk
                 } else {
                     error_result("pane not found or not owned by this plugin")
+                }
+            }
+            CallPlan::ScrollToRun { run_id } => {
+                let pane = if cx.has_global::<RunLedgerGlobal>() {
+                    cx.global::<RunLedgerGlobal>()
+                        .snapshot()
+                        .into_iter()
+                        .find(|run| run.id == run_id)
+                        .map(|run| run.pane)
+                } else {
+                    None
+                };
+                match pane {
+                    // Same semantics as the ledger-panel row jump: an inferred
+                    // run has no anchor, so the pane is only focused.
+                    Some(pane) => {
+                        self.jump_to_ledger_row(pane, Some(run_id), window, cx);
+                        HostCallResult::Ok
+                    }
+                    None => error_result(format!("run {run_id} not found")),
                 }
             }
         };
@@ -890,6 +911,7 @@ pub(super) fn run_event_to_host(
                 pane: run.pane,
                 command: run.command.clone(),
                 cwd: cwd.clone().or_else(|| run.cwd.clone()),
+                inferred: run.inferred,
             })
         }
         RunEvent::Finished { pane, .. } => {
@@ -905,7 +927,7 @@ pub(super) fn run_event_to_host(
                 duration_ms: run.duration.as_millis() as u64,
             })
         }
-        RunEvent::PaneClosed { .. } => None,
+        RunEvent::PaneClosed { pane, .. } => Some(HostEvent::PaneClosed { pane: *pane }),
     }
 }
 
@@ -925,12 +947,44 @@ mod tests {
         );
         ledger.apply(event.clone());
         let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
-        let plugin_protocol::v2::HostEvent::RunStarted { command, .. } = host else {
+        let plugin_protocol::v2::HostEvent::RunStarted {
+            command, inferred, ..
+        } = host
+        else {
             panic!("expected RunStarted");
         };
         assert!(
             !command.contains("supersecret"),
             "plugins must never see the raw command line: {command}"
+        );
+        assert!(!inferred, "an OSC 133 run is precise, not inferred");
+    }
+
+    #[test]
+    fn inferred_run_started_event_marks_inferred() {
+        let mut ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        let pane = run_ledger::PaneKey::from_u128(2);
+        let event = run_ledger::RunEvent::started_inferred(pane, "make", None, 10);
+        ledger.apply(event.clone());
+        let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
+        assert!(
+            matches!(
+                host,
+                plugin_protocol::v2::HostEvent::RunStarted { inferred: true, .. }
+            ),
+            "a busy-probe guess must stay distinguishable: {host:?}"
+        );
+    }
+
+    #[test]
+    fn pane_closed_maps_to_a_host_event() {
+        let ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        let pane = run_ledger::PaneKey::from_u128(3);
+        let event = run_ledger::RunEvent::PaneClosed { pane, at_ms: 10 };
+        let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
+        assert_eq!(
+            host,
+            plugin_protocol::v2::HostEvent::PaneClosed { pane }
         );
     }
 }

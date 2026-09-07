@@ -63,6 +63,7 @@ pub enum Permission {
     HostCallListPanes,
     HostCallOpenPane,
     HostCallDrawScene,
+    HostCallScrollToRun,
 }
 
 impl Permission {
@@ -86,6 +87,7 @@ impl Permission {
             Self::HostCallListPanes => plugin_protocol::v2::Capability::HostCallListPanes,
             Self::HostCallOpenPane => plugin_protocol::v2::Capability::HostCallOpenPane,
             Self::HostCallDrawScene => plugin_protocol::v2::Capability::HostCallDrawScene,
+            Self::HostCallScrollToRun => plugin_protocol::v2::Capability::HostCallScrollToRun,
         }
     }
 }

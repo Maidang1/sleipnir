@@ -7,7 +7,6 @@
   "notify_on_command_finish_secs": 5,
   "notify_on_command_finish_mode": "unfocused",
   "run_ledger": "persist",
-  "run_ledger_retention_days": 7,
   "run_ledger_max_runs": 500,
   "run_ledger_redact": true,
   "agent_icons": true,

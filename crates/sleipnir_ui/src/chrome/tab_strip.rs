@@ -5,7 +5,6 @@ use gpui::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     deferred, div, prelude::FluentBuilder as _, px, svg,
 };
-use run_ledger::Badge;
 use sleipnir_settings::{TerminalPalette, TerminalSettings, UiStyle};
 
 use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview, TabMenuState};
@@ -49,12 +48,11 @@ impl AppShell {
                 let Some(tab) = self.tabs.get(ix) else {
                     continue;
                 };
-                let badge = tab_badge_for(tab, cx);
                 let keys = tab.tree.all_pane_keys();
                 let plugin_badges = self.plugin_badges_for_tab(&keys, ix == active);
                 // The Failed wash is the ledger's own verdict; plugin badges
                 // can never set or suppress it.
-                let failed = tab_has_failed_attention(badge);
+                let failed = tab_has_failed_attention(tab, cx);
                 let agent = if show_icons {
                     agent::identify_tab(tab, cx)
                 } else {
@@ -71,7 +69,6 @@ impl AppShell {
                         .as_ref()
                         .filter(|state| state.tab_id == tab.id)
                         .map(|state| state.buffer.clone()),
-                    badge,
                     plugin_badges,
                     failed,
                     agent,
@@ -132,7 +129,6 @@ pub(crate) fn render_tab_chip(
     is_drop_target: bool,
     is_bell: bool,
     rename_buffer: Option<String>,
-    _badge: Option<Badge>,
     plugin_badges: Vec<crate::plugin_chrome::PluginTabBadge>,
     failed: bool,
     agent: Option<AgentKind>,
@@ -508,16 +504,16 @@ fn render_agent_mark(kind: AgentKind) -> impl IntoElement {
         .text_color(kind.color)
 }
 
-pub(crate) fn tab_badge_for(tab: &crate::app_shell::Tab, cx: &App) -> Option<Badge> {
-    let ledger = cx.try_global::<RunLedgerGlobal>()?;
-    let keys = tab.tree.all_pane_keys();
-    ledger.badge_for(&keys, ledger.now_ms())
-}
-
 /// Failed Attention is a faint red wash on the chip, not a glyph.
 /// Running / succeeded never draw on the tab (no yellow dots).
-pub(crate) fn tab_has_failed_attention(badge: Option<Badge>) -> bool {
-    matches!(badge, Some(b) if b.kind == run_ledger::BadgeKind::Failed)
+pub(crate) fn tab_has_failed_attention(tab: &crate::app_shell::Tab, cx: &App) -> bool {
+    let Some(ledger) = cx.try_global::<RunLedgerGlobal>() else {
+        return false;
+    };
+    tab.tree
+        .all_pane_keys()
+        .into_iter()
+        .any(|pane| ledger.pane_has_failed_attention(pane))
 }
 
 fn chip_background(
@@ -550,23 +546,6 @@ fn chip_background(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use run_ledger::BadgeKind;
-
-    fn badge(kind: BadgeKind) -> Badge {
-        Badge {
-            kind,
-            count: 1,
-            elapsed_ms: 0,
-        }
-    }
-
-    #[test]
-    fn tab_chrome_washes_failed_and_hides_running_dots() {
-        assert!(tab_has_failed_attention(Some(badge(BadgeKind::Failed))));
-        assert!(!tab_has_failed_attention(Some(badge(BadgeKind::Running))));
-        assert!(!tab_has_failed_attention(Some(badge(BadgeKind::Succeeded))));
-        assert!(!tab_has_failed_attention(None));
-    }
 
     #[test]
     fn strip_selected_fill_is_a_whisper() {

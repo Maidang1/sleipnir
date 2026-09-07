@@ -201,6 +201,15 @@ impl Context<'_> {
             other => Err(format!("unexpected result: {other:?}")),
         }
     }
+
+    /// Scroll a pane back to the output anchor of `run_id` and focus it.
+    ///
+    /// An inferred run (a busy-probe guess, `HostEvent::RunStarted.inferred`)
+    /// has no scrollback anchor; the pane is focused instead. An unknown
+    /// `run_id` returns `HostCallResult::Error`.
+    pub fn scroll_to_run(&mut self, run_id: RunId) -> HostCallResult {
+        self.call(HostCall::ScrollToRun { run_id })
+    }
 }
 
 trait SessionIo {

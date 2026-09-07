@@ -8,15 +8,15 @@ use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    ActivateTab, BindingContext, BuiltinAction, CheckForUpdates, ClearRunLedger, CloseTab,
-    CycleTheme, DecreaseFontSize, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen,
-    NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab,
-    ReloadSettings, ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown,
-    SplitRight, ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch,
-    TogglePaneFacts, TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger,
-    builtin_bindings, install_finder_services, last_window_close_quits, open_sleipnir_window,
-    tmux_preset_bindings, try_open_sleipnir_window,
+    ActivateTab, BindingContext, BuiltinAction, CheckForUpdates, CloseTab, CycleTheme,
+    DecreaseFontSize, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
+    NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
+    ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
+    ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
+    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, builtin_bindings,
+    install_finder_services, last_window_close_quits, open_sleipnir_window, tmux_preset_bindings,
+    try_open_sleipnir_window,
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
@@ -184,7 +184,6 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::JumpNextPrompt => KeyBinding::new(key, JumpNextPrompt, context),
         BuiltinAction::ToggleQuickSelect => KeyBinding::new(key, ToggleQuickSelect, context),
         BuiltinAction::OpenQuickTerminal => KeyBinding::new(key, OpenQuickTerminal, context),
-        BuiltinAction::ToggleRunLedger => KeyBinding::new(key, ToggleRunLedger, context),
         BuiltinAction::TogglePluginMonitor => KeyBinding::new(key, TogglePluginMonitor, context),
         BuiltinAction::ToggleHistorySearch => KeyBinding::new(key, ToggleHistorySearch, context),
         BuiltinAction::ToggleDiff => KeyBinding::new(key, ToggleDiff, context),
@@ -273,8 +272,6 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "scroll_to_bottom" => KeyBinding::new(&spec.key, ScrollToBottom, Some(ctx)),
             "toggle_vi_mode" => KeyBinding::new(&spec.key, ToggleViMode, Some(ctx)),
             "show_character_palette" => KeyBinding::new(&spec.key, ShowCharacterPalette, Some(ctx)),
-            "clear_run_ledger" => KeyBinding::new(&spec.key, ClearRunLedger, Some(ctx)),
-            "toggle_run_ledger" => KeyBinding::new(&spec.key, ToggleRunLedger, Some(ctx)),
             "toggle_plugin_monitor" | "plugin_monitor" => {
                 KeyBinding::new(&spec.key, TogglePluginMonitor, Some(ctx))
             }

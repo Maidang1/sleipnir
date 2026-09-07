@@ -1,0 +1,20 @@
+{
+  "id": "runledger",
+  "name": "Run Ledger",
+  "version": "0.1.0",
+  "api_version": 2,
+  "enabled": true,
+  "lifecycle": "resident",
+  "binary": "./sleipnir-plugin-runledger",
+  "permissions": ["resident", "subscribe_events", "render_panel", "render_status", "host_call_scroll_to_run"],
+  "commands": [
+    {
+      "id": "open",
+      "title": "Run Ledger: Open panel",
+      "description": "Open the Run Ledger panel: every run, grouped, with a jump back to its output.",
+      "keywords": ["run", "ledger", "history", "commands"],
+      "permissions": [],
+      "timeout_secs": 15
+    }
+  ]
+}

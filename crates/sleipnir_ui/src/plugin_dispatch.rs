@@ -45,6 +45,14 @@ impl WindowRoutes {
                 call: HostCall::ReadScreen { pane } | HostCall::DrawScene { pane, .. },
                 ..
             } => self.panes.get(pane).copied(),
+            Inbound::Call {
+                call: HostCall::ScrollToRun { run_id },
+                ..
+            } => self
+                .runs
+                .get(run_id)
+                .and_then(|pane| self.panes.get(pane))
+                .copied(),
             Inbound::Call { .. } => self.preferred,
         };
         destination.into_iter().collect()
@@ -230,6 +238,20 @@ mod tests {
         };
         assert_eq!(routes.destinations(&message), vec![1]);
         routes.panes.remove(&Uuid::from_u128(2));
+        assert!(routes.destinations(&message).is_empty());
+    }
+
+    #[test]
+    fn scroll_to_run_routes_to_the_runs_window_and_missing_runs_do_not_fall_back() {
+        let mut routes = two_windows();
+        let message = Inbound::Call {
+            id: 1,
+            call: HostCall::ScrollToRun {
+                run_id: Uuid::from_u128(10),
+            },
+        };
+        assert_eq!(routes.destinations(&message), vec![1]);
+        routes.runs.remove(&Uuid::from_u128(10));
         assert!(routes.destinations(&message).is_empty());
     }
 

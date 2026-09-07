@@ -22,7 +22,6 @@ pub(crate) enum OverlayKind {
     Update,
     Palette,
     PaneFacts,
-    RunLedger,
     History,
     Diff,
     PluginMonitor,
@@ -236,8 +235,8 @@ mod tests {
     #[test]
     fn toggle_closes_only_the_matching_overlay() {
         let mut mode = UiMode::default();
-        assert!(mode.toggle(OverlayKind::RunLedger));
-        assert!(!mode.toggle(OverlayKind::RunLedger));
+        assert!(mode.toggle(OverlayKind::History));
+        assert!(!mode.toggle(OverlayKind::History));
         assert_eq!(mode.overlay, OverlayKind::None);
         assert!(!mode.close(OverlayKind::Diff));
     }
