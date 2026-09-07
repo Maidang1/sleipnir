@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.2
+
+### Fixes
+- Release pipeline: the GitHub Release is now published automatically once all platform assets are attached (it previously stayed a draft until published by hand, so download links and the install script 404'd), and a missing `SLEIPNIR_UPDATE_SIGNING_KEY` now skips manifest signing instead of failing the macOS job and blocking the Windows/Linux assets.
+- Updater is compile-time macOS-only: non-macOS builds can no longer reach the dmg matching/download/manifest-verification code paths; calling them bails with a pointer to the releases page.
+- Update dialog "Open Disk Image" uses the cross-platform opener (Linux `xdg-open`, Windows `cmd /C start`) instead of a bare `/usr/bin/open`.
+- Linux pane port listeners fall back to `/proc/net/tcp{,6}` when `lsof` is unavailable, so the listener list no longer silently empties on distributions without lsof.
+- Hide / Hide Others / Show All actions and key bindings are registered only on macOS (gpui's Windows implementations are no-op/`unimplemented!()`), and update health reporting no longer spins a background thread on non-macOS platforms.
+- Windows platform initialization failures now panic with actionable diagnostics (Direct3D 11 / driver / WARP hints) instead of a bare message.
+- `sleipnir_ui` build script now reads `CARGO_CFG_TARGET_OS`, fixing host/target confusion when cross-compiling.
+
+### Changes
+- Windows releases now include a portable `Sleipnir-<ver>-windows-x64.zip` alongside the bare exe; README documents the unsigned-build SmartScreen notice and per-platform update behavior.
+- CI runs `cargo test --workspace` on Windows and in the macOS release job; the Rust toolchain is derived from `rust-toolchain.toml` instead of being hardcoded per job.
+
 ## 0.6.1
 
 ### Features
