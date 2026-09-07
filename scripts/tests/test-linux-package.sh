@@ -149,7 +149,8 @@ for dependency in [
 windows = job("windows-check")
 if "gh release upload" in windows:
     raise SystemExit("windows-check must only upload an Actions artifact")
-require(windows, ["actions/upload-artifact@v4", "name: sleipnir-windows"], "windows-check")
+require(windows, ["actions/upload-artifact@v4", "name: sleipnir-windows",
+                  "cargo test --workspace"], "windows-check")
 
 upload = job("release-assets-upload")
 if "linux-release-upload:" in text:
@@ -158,14 +159,19 @@ require(upload, [
     "needs: [build-and-release, windows-check, linux-check]",
     "actions/download-artifact@v4", "name: sleipnir-windows",
     "pattern: sleipnir-linux-*", "merge-multiple: true",
-    'test "${#assets[@]}" -eq 10', 'gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}"',
+    'test "${#assets[@]}" -eq 12', 'gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}"',
     'gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}"',
-    "Upload exactly ten Windows and Linux release files",
+    "Upload exactly twelve Windows and Linux release files",
+    # The draft must be published automatically once all assets are attached;
+    # a draft left unpublished makes every download link 404.
+    'gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false',
     'isDraft', '!= "true"',
 ], "release-assets-upload")
 expected_upload_paths = [
     'build/release/Sleipnir-${VER}-windows-x64.exe',
     'build/release/Sleipnir-${VER}-windows-x64.exe.sha256',
+    'build/release/Sleipnir-${VER}-windows-x64.zip',
+    'build/release/Sleipnir-${VER}-windows-x64.zip.sha256',
     'build/release/Sleipnir-${VER}-linux-x86_64.tar.gz',
     'build/release/Sleipnir-${VER}-linux-x86_64.tar.gz.sha256',
     'build/release/sleipnir_${VER}_amd64.deb',
@@ -187,6 +193,10 @@ require(macos, [
     "--draft", "Linux x86_64", "Linux ARM64", "Ubuntu 22.04+",
     "In-place updates are macOS-only", "gh release view", "isDraft",
     "gh release edit", "gh release upload", '!= "true"',
+    "cargo test --workspace",
+    # A missing update-signing key must skip manifest signing, not fail the
+    # job and block the Windows/Linux assets that depend on it.
+    "HAS_UPDATE_SIGNING_KEY", 'has_manifest=true', 'has_manifest=false',
 ], "build-and-release")
 if "DRAFT_FLAG" in macos:
     raise SystemExit("release creation must not conditionally remove --draft")
@@ -211,6 +221,13 @@ for job_name, block in [
 
 if re.search(r"(?m)^\s+draft:\n", text) or re.search(r"(?m)^\s+draft:\s*(true|false)\s*$", text):
     raise SystemExit("workflow_dispatch must not offer a publish-without-evidence draft toggle")
+
+# dtolnay/rust-toolchain requires the toolchain input and does not read
+# rust-toolchain.toml itself, so the workflow must parse the channel from the
+# file rather than hardcode a version that can drift.
+if re.search(r'(?m)^\s+toolchain: [0-9]', text):
+    raise SystemExit("toolchain must come from rust-toolchain.toml, not a hardcoded version")
+require(text, ["steps.rust-toolchain-file.outputs.channel"], "toolchain pinning")
 PY
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sleipnir-package-test.XXXXXX")"
