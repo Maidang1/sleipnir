@@ -159,7 +159,115 @@ pub fn parse_lsof_listen(text: &str) -> Vec<(u32, String)> {
     out
 }
 
-/// Live process table + listen table (macOS: sysinfo + lsof).
+/// Parse /proc/net/tcp or /proc/net/tcp6 content into LISTEN `(port, inode)`
+/// pairs. Both files share the column layout:
+/// `sl local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid
+/// timeout inode ...` where `local_address` is `<hex-ip>:<hex-port>` and
+/// `st == "0A"` means LISTEN. The inode is kept so the socket can be
+/// attributed to a pid through `/proc/<pid>/fd` symlinks; without a pid the
+/// port would be dropped by the pane-tree filter in `build_pane_facts`.
+/// Malformed lines and non-LISTEN rows are skipped; anything unreadable
+/// yields an empty set rather than a panic.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn parse_proc_net_listen(text: &str) -> HashSet<(u16, u64)> {
+    let mut out = HashSet::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 10 || cols[3] != "0A" {
+            continue;
+        }
+        let Some((_, port_hex)) = cols[1].rsplit_once(':') else {
+            continue;
+        };
+        let Ok(port) = u16::from_str_radix(port_hex, 16) else {
+            continue;
+        };
+        let Ok(inode) = cols[9].parse::<u64>() else {
+            continue;
+        };
+        out.insert((port, inode));
+    }
+    out
+}
+
+/// `lsof -nP -iTCP -sTCP:LISTEN` → `(pid, addr)` rows; empty on any failure.
+#[cfg(not(windows))]
+fn lsof_listeners() -> Vec<(u32, String)> {
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => parse_lsof_listen(&String::from_utf8_lossy(&out.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// Linux listen table: prefer `lsof` (richer address strings); fall back to
+/// /proc when lsof is missing or fails — many distributions do not ship it.
+#[cfg(target_os = "linux")]
+fn linux_listeners() -> Vec<(u32, String)> {
+    let lsof = lsof_listeners();
+    if !lsof.is_empty() {
+        return lsof;
+    }
+    proc_net_listeners()
+}
+
+/// Listen table from /proc/net/tcp{,6} + /proc/<pid>/fd socket symlinks.
+/// Addresses are reported as `*:<port>` (matching lsof's wildcard form, which
+/// `localhost_copy` accepts) since /proc stores IPs as raw hex.
+#[cfg(target_os = "linux")]
+fn proc_net_listeners() -> Vec<(u32, String)> {
+    let mut rows = HashSet::new();
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            rows.extend(parse_proc_net_listen(&text));
+        }
+    }
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let port_by_inode: HashMap<u64, u16> = rows.into_iter().map(|(p, i)| (i, p)).collect();
+
+    let mut out = Vec::new();
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in proc_dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        let mut ports = HashSet::new();
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let target = target.to_string_lossy();
+            let Some(inode) = target
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if let Some(port) = port_by_inode.get(&inode) {
+                ports.insert(*port);
+            }
+        }
+        out.extend(ports.into_iter().map(|port| (pid, format!("*:{port}"))));
+    }
+    out
+}
+
+/// Live process table + listen table (macOS: sysinfo + lsof; Linux: sysinfo +
+/// lsof with a /proc fallback; Windows: sysinfo only).
 pub struct LiveProcReader;
 
 impl ProcReader for LiveProcReader {
@@ -196,17 +304,13 @@ impl ProcReader for LiveProcReader {
         {
             Vec::new()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
-            let output = std::process::Command::new("lsof")
-                .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    parse_lsof_listen(&String::from_utf8_lossy(&out.stdout))
-                }
-                _ => Vec::new(),
-            }
+            linux_listeners()
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            lsof_listeners()
         }
     }
 }
@@ -388,6 +492,51 @@ not-a-header
         let rows = parse_lsof_listen(text);
         assert!(rows.contains(&(4242, "127.0.0.1:3000".into())));
         assert!(rows.contains(&(99, "*:22".into())));
+    }
+
+    #[test]
+    fn parse_proc_net_listen_extracts_tcp_listen_ports() {
+        // Realistic /proc/net/tcp: header, one loopback LISTEN (0x0BB8 =
+        // 3000), one wildcard LISTEN (0x0016 = 22), one ESTABLISHED (st 01),
+        // and a truncated garbage line.
+        let text = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 123456 1 0000000000000000 100 0 0 10 0
+   1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 234567 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:9999 0100007F:1234 01 00000000:00000000 00:00000000 00000000  1000        0 345678 1 0000000000000000 20 4 30 10 -1
+   3: 0100007F:AAAA
+";
+        let rows = parse_proc_net_listen(text);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&(3000, 123456)));
+        assert!(rows.contains(&(22, 234567)));
+        // ESTABLISHED and malformed rows are skipped.
+        assert!(!rows.iter().any(|(port, _)| *port == 0x9999));
+        assert!(!rows.iter().any(|(port, _)| *port == 0xAAAA));
+    }
+
+    #[test]
+    fn parse_proc_net_listen_extracts_tcp6_listen_ports() {
+        // /proc/net/tcp6 uses 32-hex-digit addresses; 0x1F90 = 8080, and the
+        // loopback form 00000000000000000000000000000001 also parses.
+        let text = "\
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 456789 1 0000000000000000 100 0 0 10 0
+   1: 00000000000000000000000000000001:0050 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 567890 1 0000000000000000 100 0 0 10 0
+";
+        let rows = parse_proc_net_listen(text);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&(8080, 456789)));
+        assert!(rows.contains(&(80, 567890)));
+    }
+
+    #[test]
+    fn parse_proc_net_listen_empty_and_garbage_yield_empty() {
+        assert!(parse_proc_net_listen("").is_empty());
+        assert!(parse_proc_net_listen("not a proc file\n0A 0A 0A").is_empty());
+        // Header alone ("st" column is not "0A").
+        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+        assert!(parse_proc_net_listen(header).is_empty());
     }
 
     #[test]

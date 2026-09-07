@@ -6,7 +6,9 @@
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(macos_sdk_26_or_later)");
 
-    if !cfg!(target_os = "macos") {
+    // cfg!(target_os) in a build script evaluates the *host*; the target
+    // triple is only available through CARGO_CFG_* env vars.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
 

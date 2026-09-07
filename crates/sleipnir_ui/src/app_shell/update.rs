@@ -362,7 +362,10 @@ impl AppShell {
                         self.update_button("upd-manual-open", "Open Disk Image", tokens, false, cx, {
                             let artifact = artifact.clone();
                             move |_, _, _| {
-                                let _ = std::process::Command::new("/usr/bin/open").arg(&artifact).spawn();
+                                // Cross-platform opener (macOS `open`, Linux
+                                // `xdg-open`, Windows `cmd /C start`) — a bare
+                                // `/usr/bin/open` only exists on macOS.
+                                crate::open_existing_path(&artifact);
                             }
                         }).into_any_element(),
                         self.update_button("upd-ack-manual", "Close", tokens, true, cx, |this, _, cx| {

@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use crate::manifest::UpdateManifest;
 
 pub const REPO: &str = "Maidang1/sleipnir";
@@ -17,6 +18,11 @@ pub enum VersionPolicyError {
     InvalidReleaseIdentity,
 }
 
+/// Validate that `manifest` describes a strict upgrade over `current`.
+///
+/// Release identity is macOS-only (`Sleipnir-{version}-macos.dmg`), so this is
+/// compiled only on macOS.
+#[cfg(target_os = "macos")]
 pub fn validate_upgrade(
     current: &str,
     manifest: &UpdateManifest,
@@ -30,6 +36,7 @@ pub fn validate_upgrade(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub fn release_urls(manifest: &UpdateManifest) -> Result<ReleaseUrls, VersionPolicyError> {
     if manifest.tag != format!("v{}", manifest.version)
         || manifest.artifact != format!("Sleipnir-{}-macos.dmg", manifest.version)
@@ -48,7 +55,7 @@ pub fn release_urls(manifest: &UpdateManifest) -> Result<ReleaseUrls, VersionPol
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

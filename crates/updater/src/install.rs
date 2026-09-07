@@ -92,7 +92,7 @@ pub fn persist_prepared(path: &Path, transaction: &Transaction) -> Result<(), Tr
 pub fn updates_root() -> Result<PathBuf, String> {
     dirs::data_dir()
         .map(|path| path.join("Sleipnir/updates"))
-        .ok_or_else(|| "macOS application support directory is unavailable".to_string())
+        .ok_or_else(|| "application data directory is unavailable".to_string())
 }
 
 #[cfg(target_os = "macos")]

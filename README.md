@@ -35,7 +35,9 @@ curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/inst
 
 ### Windows
 
-Download the latest `Sleipnir-<ver>-windows-x64.exe` from [GitHub Releases](https://github.com/Maidang1/sleipnir/releases), then run it.
+Download the latest `Sleipnir-<ver>-windows-x64.exe` (portable binary) or `Sleipnir-<ver>-windows-x64.zip` (portable archive) from [GitHub Releases](https://github.com/Maidang1/sleipnir/releases), then run it.
+
+Windows builds are currently not code-signed, so SmartScreen may warn on first launch — click **More info → Run anyway** to proceed.
 
 ### Linux
 
@@ -44,6 +46,8 @@ curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/inst
 ```
 
 Linux releases include `.deb` packages and portable tarballs for x86_64 and ARM64.
+
+Updates work differently per platform: on macOS, **Check for Updates** upgrades the app in place; on Windows and Linux it opens the Releases page so you can download the latest build manually.
 
 ## Build from source
 

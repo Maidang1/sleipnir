@@ -8,6 +8,20 @@ pub fn application() -> gpui::Application {
     gpui::Application::with_platform(current_platform(false))
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_startup_diagnostic(source: &str) -> String {
+    // WindowsPlatform::new fails at OLE init, DXGI factory/adapter
+    // enumeration, D3D11CreateDevice (feature levels 11_1/11_0/10_1), the
+    // structured-buffer capability check, or DirectWrite setup — all of
+    // which trace back to OS version, GPU capability, or driver state.
+    format!(
+        "{source}\nWindows startup failed. Sleipnir requires Windows 10 version 1809 or \
+         newer and a Direct3D 11 compatible GPU (feature level 10.1+) with structured-buffer \
+         support. Update your graphics driver from the GPU vendor; in a VM or Remote Desktop \
+         session, enable GPU acceleration or fall back to the WARP software adapter."
+    )
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn linux_startup_diagnostic(source: &str) -> String {
     format!(
@@ -47,8 +61,9 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
     #[cfg(target_os = "windows")]
     {
         Rc::new(
-            gpui_windows::WindowsPlatform::new(headless)
-                .expect("failed to initialize Windows platform"),
+            gpui_windows::WindowsPlatform::new(headless).unwrap_or_else(|error| {
+                panic!("{}", windows_startup_diagnostic(&format!("{error:?}")))
+            }),
         )
     }
 
@@ -87,6 +102,17 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_startup_diagnostic_keeps_source_and_actionable_hints() {
+        let message =
+            windows_startup_diagnostic("Creating DirectX devices: D3D11CreateDevice failed");
+        assert!(message.contains("Creating DirectX devices"));
+        assert!(message.contains("Windows 10"));
+        assert!(message.contains("Direct3D 11"));
+        assert!(message.contains("graphics driver"));
+        assert!(message.contains("WARP"));
+    }
 
     #[test]
     fn linux_startup_diagnostic_keeps_source_and_actionable_hints() {

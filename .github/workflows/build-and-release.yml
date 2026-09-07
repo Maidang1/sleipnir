@@ -15,7 +15,6 @@ permissions:
 
 env:
   APP_NAME: Sleipnir
-  RUST_TOOLCHAIN: 1.95.0
   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || '692T845H5K' }}
 
 jobs:
@@ -30,7 +29,6 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Cache cargo build
@@ -60,7 +58,7 @@ jobs:
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Test
-        run: cargo test -p terminal -p sleipnir_ui -p sleipnir_settings -p updater -p sleipnir-update-helper -p sleipnir -p run_ledger -p sleipnir_ctl
+        run: cargo test --workspace
 
       - name: Release build
         run: cargo build --release -p sleipnir
@@ -79,13 +77,30 @@ jobs:
           ls -lh "${EXE}"
           echo "  sha256: ${HASH}"
 
-      - name: Upload sleipnir.exe
+      - name: Package portable zip
+        shell: bash
+        env:
+          VER: ${{ steps.version.outputs.version }}
+        run: |
+          EXE="build/Sleipnir-${VER}-windows-x64.exe"
+          ZIP="build/Sleipnir-${VER}-windows-x64.zip"
+          powershell.exe -NoProfile -Command \
+            "Compress-Archive -Path '${EXE}' -DestinationPath '${ZIP}' -Force"
+          HASH=$(powershell.exe -NoProfile -Command \
+            "(Get-FileHash -Algorithm SHA256 '${ZIP}').Hash.ToLower()")
+          echo "${HASH}" > "${ZIP}.sha256"
+          ls -lh "${ZIP}"
+          echo "  sha256: ${HASH}"
+
+      - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
         with:
           name: sleipnir-windows
           path: |
             build/Sleipnir-*-windows-x64.exe
             build/Sleipnir-*-windows-x64.exe.sha256
+            build/Sleipnir-*-windows-x64.zip
+            build/Sleipnir-*-windows-x64.zip.sha256
 
   linux-check:
     name: Linux ${{ matrix.artifact-suffix }} build, test & package
@@ -149,7 +164,6 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Cache cargo build
@@ -301,10 +315,11 @@ jobs:
   build-and-release:
     name: Build & Publish
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       HAS_SIGNING_CERT: ${{ secrets.CODE_SIGNING_CERT_P12 != '' }}
       HAS_NOTARIZATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
+      HAS_UPDATE_SIGNING_KEY: ${{ secrets.SLEIPNIR_UPDATE_SIGNING_KEY != '' }}
 
     steps:
       - name: Checkout
@@ -315,7 +330,6 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.95.0
           components: rustfmt, clippy
 
       - name: Cache cargo build
@@ -352,6 +366,9 @@ jobs:
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Test workspace
+        run: cargo test --workspace
 
       - name: Build release binaries
         run: cargo build --release -p sleipnir -p sleipnir-update-helper
@@ -429,27 +446,29 @@ jobs:
       - name: Verify transactional updater
         run: scripts/test-macos-update.sh
 
-      - name: SHA-256 sidecar and signed update manifest
+      - name: SHA-256 sidecar and update manifest
         env:
           SLEIPNIR_UPDATE_SIGNING_KEY: ${{ secrets.SLEIPNIR_UPDATE_SIGNING_KEY }}
         run: |
           VER="${{ steps.version.outputs.version }}"
-          if [[ -z "${SLEIPNIR_UPDATE_SIGNING_KEY}" ]]; then
-            echo "ERROR: SLEIPNIR_UPDATE_SIGNING_KEY is required for release publishing" >&2
-            exit 1
-          fi
           # Compute after any notarization/stapling so every verifier sees the
           # exact bytes uploaded to GitHub Releases.
           ( cd build && shasum -a 256 "Sleipnir-${VER}-macos.dmg" \
             | awk '{print $1}' > "Sleipnir-${VER}-macos.dmg.sha256" )
-          scripts/sign-update-manifest.py \
-            --version "${VER}" \
-            --dmg "build/Sleipnir-${VER}-macos.dmg" \
-            --output build/sleipnir-update-v1.json \
-            --signature build/sleipnir-update-v1.json.sig \
-            --public-key resources/update-signing-public.pem
-          test -s build/sleipnir-update-v1.json.sig
           echo "  sha256: $(cat build/Sleipnir-${VER}-macos.dmg.sha256)"
+          if [[ "${HAS_UPDATE_SIGNING_KEY}" == "true" ]]; then
+            scripts/sign-update-manifest.py \
+              --version "${VER}" \
+              --dmg "build/Sleipnir-${VER}-macos.dmg" \
+              --output build/sleipnir-update-v1.json \
+              --signature build/sleipnir-update-v1.json.sig \
+              --public-key resources/update-signing-public.pem
+            test -s build/sleipnir-update-v1.json.sig
+            echo "has_manifest=true" >> "$GITHUB_ENV"
+          else
+            echo "  SLEIPNIR_UPDATE_SIGNING_KEY not set — skipping signed update manifest"
+            echo "has_manifest=false" >> "$GITHUB_ENV"
+          fi
 
       - name: Create GitHub Release
         env:
@@ -461,7 +480,12 @@ jobs:
           SHA="build/Sleipnir-${VERSION}-macos.dmg.sha256"
           MANIFEST="build/sleipnir-update-v1.json"
           MANIFEST_SIGNATURE="build/sleipnir-update-v1.json.sig"
-          test -s "${MANIFEST}" && test -s "${MANIFEST_SIGNATURE}"
+
+          files=("${DMG}" "${SHA}")
+          if [[ "${has_manifest}" == "true" ]]; then
+            test -s "${MANIFEST}" && test -s "${MANIFEST_SIGNATURE}"
+            files+=("${MANIFEST}" "${MANIFEST_SIGNATURE}")
+          fi
 
           {
             echo "## Sleipnir v${VERSION}"
@@ -474,13 +498,13 @@ jobs:
             echo "> On first launch Gatekeeper will show \"Sleipnir is an unidentified developer\"."
             echo "> Right-click the app and choose **Open** to bypass."
             echo ""
-            echo "**Windows:** Download \`Sleipnir-${VERSION}-windows-x64.exe\` and run it."
-            echo "The Windows \`.exe\` is attached by the Windows job a few minutes after this release is created."
+            echo "**Windows:** Download \`Sleipnir-${VERSION}-windows-x64.exe\` or the portable \`Sleipnir-${VERSION}-windows-x64.zip\` and run it."
+            echo "The Windows build is not code-signed; SmartScreen may warn on first run."
+            echo "Windows and Linux assets are attached once all platform jobs finish."
             echo "In-place auto-update stays macOS-only; Check for Updates opens this page."
             echo ""
             echo "**Linux x86_64:** Download \`sleipnir_${VERSION}_amd64.deb\` or \`Sleipnir-${VERSION}-linux-x86_64.tar.gz\`."
             echo "**Linux ARM64:** Download \`sleipnir_${VERSION}_arm64.deb\` or \`Sleipnir-${VERSION}-linux-aarch64.tar.gz\`."
-            echo "Linux assets may appear after this release is created while the two native Linux jobs finish."
             echo "Ubuntu 22.04+ is supported with Vulkan on Wayland or X11. Other glibc 2.35+ desktop distributions are best effort."
             echo "In-place updates are macOS-only; Linux Check for Updates opens this release for manual installation."
             echo ""
@@ -492,6 +516,13 @@ jobs:
             echo "https://github.com/Maidang1/sleipnir"
           } > release-notes.md
 
+          if [[ "${has_manifest}" != "true" ]]; then
+            {
+              echo ""
+              echo "> Auto-update manifest was not signed for this build; in-place updates are unavailable."
+            } >> release-notes.md
+          fi
+
           if gh release view "${TAG}" >/dev/null 2>&1; then
             IS_DRAFT="$(gh release view "${TAG}" --json isDraft --jq '.isDraft')"
             if [[ "${IS_DRAFT}" != "true" ]]; then
@@ -501,16 +532,13 @@ jobs:
             gh release edit "${TAG}" \
               --title "Sleipnir v${VERSION}" \
               --notes-file release-notes.md
-            gh release upload "${TAG}" "${DMG}" "${SHA}" "${MANIFEST}" "${MANIFEST_SIGNATURE}" --clobber
+            gh release upload "${TAG}" "${files[@]}" --clobber
           else
             gh release create "${TAG}" \
               --draft \
               --title "Sleipnir v${VERSION}" \
               --notes-file release-notes.md \
-              "${DMG}" \
-              "${SHA}" \
-              "${MANIFEST}" \
-              "${MANIFEST_SIGNATURE}"
+              "${files[@]}"
           fi
 
           echo "Draft ready: $(gh release view "${TAG}" --json url --jq '.url')"
@@ -535,7 +563,7 @@ jobs:
           path: build/release
           merge-multiple: true
 
-      - name: Upload exactly ten Windows and Linux release files
+      - name: Upload exactly twelve Windows and Linux release files
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
@@ -552,9 +580,12 @@ jobs:
             exit 1
           fi
           TAG="v${VER}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
           assets=(
             "build/release/Sleipnir-${VER}-windows-x64.exe"
             "build/release/Sleipnir-${VER}-windows-x64.exe.sha256"
+            "build/release/Sleipnir-${VER}-windows-x64.zip"
+            "build/release/Sleipnir-${VER}-windows-x64.zip.sha256"
             "build/release/Sleipnir-${VER}-linux-x86_64.tar.gz"
             "build/release/Sleipnir-${VER}-linux-x86_64.tar.gz.sha256"
             "build/release/sleipnir_${VER}_amd64.deb"
@@ -564,7 +595,7 @@ jobs:
             "build/release/sleipnir_${VER}_arm64.deb"
             "build/release/sleipnir_${VER}_arm64.deb.sha256"
           )
-          test "${#assets[@]}" -eq 10
+          test "${#assets[@]}" -eq 12
           for asset in "${assets[@]}"; do
             test -f "${asset}"
           done
@@ -574,4 +605,11 @@ jobs:
             exit 1
           fi
           gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" "${assets[@]}" --clobber
-          echo "Uploaded exactly ten Windows and Linux assets to draft ${TAG}"
+          echo "Uploaded exactly twelve Windows and Linux assets to draft ${TAG}"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false
+          echo "Published release $(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"

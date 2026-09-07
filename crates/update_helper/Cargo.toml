@@ -10,10 +10,12 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 updater.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

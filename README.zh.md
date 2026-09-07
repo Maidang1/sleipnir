@@ -36,7 +36,9 @@ curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/inst
 
 ### Windows
 
-从 [GitHub Releases](https://github.com/Maidang1/sleipnir/releases) 下载最新的 `Sleipnir-<ver>-windows-x64.exe`，然后运行即可。
+从 [GitHub Releases](https://github.com/Maidang1/sleipnir/releases) 下载最新的 `Sleipnir-<ver>-windows-x64.exe`（便携二进制）或 `Sleipnir-<ver>-windows-x64.zip`（便携压缩包），然后运行即可。
+
+Windows 构建目前未做代码签名，首次运行可能出现 SmartScreen 提示 —— 点击「更多信息 → 仍要运行」即可继续。
 
 ### Linux
 
@@ -45,6 +47,8 @@ curl -fsSL https://raw.githubusercontent.com/Maidang1/sleipnir/main/scripts/inst
 ```
 
 Linux 发布版包含 x86_64 和 ARM64 的 `.deb` 安装包以及便携版压缩包。
+
+各平台的更新机制不同：macOS 上的「Check for Updates」会在应用内原地自动更新；Windows 和 Linux 上的「Check for Updates」会打开 Releases 页面，需要手动下载最新版本。
 
 ## 构建
 

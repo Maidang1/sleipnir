@@ -2,7 +2,9 @@
 
 mod app_menus;
 
-use app_menus::{Hide, HideOthers, Quit, ShowAll, app_menus};
+#[cfg(target_os = "macos")]
+use app_menus::ShowAll;
+use app_menus::{Hide, HideOthers, Quit, app_menus};
 use gpui::{App, KeyBinding};
 use gpui_platform::application;
 use release_channel::AppVersion;
@@ -51,9 +53,17 @@ fn main() {
 
         // App-menu actions (always available so validation enables the items).
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &Hide, cx| cx.hide());
-        cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
-        cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        // Hide / Hide Others / Show All are AppKit-only concepts: gpui's
+        // Windows `hide()` is a no-op and `hide_other_apps()` /
+        // `unhide_other_apps()` are `unimplemented!()`, while Linux just logs
+        // and ignores them. Only register the handlers on macOS, where the
+        // application menu exposes the items.
+        #[cfg(target_os = "macos")]
+        {
+            cx.on_action(|_: &Hide, cx| cx.hide());
+            cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+            cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+        }
         // AppShell's NewWindow handler dies with the last window; keep
         // New Window working while the process is still up.
         cx.on_action(|_: &NewWindow, cx| open_sleipnir_window(cx));
@@ -92,12 +102,20 @@ fn main() {
 
         let opened = try_open_sleipnir_window(cx).is_some();
         cx.activate(true);
+        // The health confirmation only matters for macOS in-place updates:
+        // `active.json` under updates_root() is never written on other
+        // platforms, where this would at best no-op and at worst spin a
+        // background thread for 10s against a leftover file.
+        #[cfg(target_os = "macos")]
         if opened {
             report_candidate_health();
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = opened;
     });
 }
 
+#[cfg(target_os = "macos")]
 fn report_candidate_health() {
     let Ok(root) = updater::install::updates_root() else {
         return;
@@ -129,6 +147,12 @@ fn report_candidate_health() {
 }
 
 fn key_bindings_for_builtin(spec: &sleipnir_ui::BuiltinBinding) -> Vec<KeyBinding> {
+    // Hide / Hide Others are macOS-only (see the on_action note above);
+    // never emit key bindings for them on Windows/Linux.
+    #[cfg(not(target_os = "macos"))]
+    if matches!(spec.action, BuiltinAction::Hide | BuiltinAction::HideOthers) {
+        return Vec::new();
+    }
     let contexts: Vec<Option<&str>> = match spec.context {
         BindingContext::Global => vec![None],
         BindingContext::Terminal => vec![Some("Terminal")],

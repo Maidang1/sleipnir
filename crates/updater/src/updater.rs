@@ -20,15 +20,18 @@ pub const REPO: &str = "Maidang1/sleipnir";
 /// URL opened as a manual-install fallback when in-place replacement fails.
 pub const RELEASES_PAGE: &str = "https://github.com/Maidang1/sleipnir/releases/latest";
 
+#[cfg(target_os = "macos")]
 const USER_AGENT: &str = "sleipnir-updater";
 
 /// Ed25519 release-signing public key. The matching private key is stored only
 /// in the GitHub Actions `SLEIPNIR_UPDATE_SIGNING_KEY` secret.
+#[cfg(target_os = "macos")]
 const UPDATE_PUBLIC_KEY: [u8; 32] = [
     0x6e, 0xfa, 0xce, 0x05, 0x7e, 0x12, 0xe6, 0xfe, 0x60, 0xe1, 0x44, 0x72, 0x62, 0x8b, 0x37, 0x5b,
     0x65, 0x0d, 0x61, 0xb7, 0xb5, 0x3d, 0xf6, 0xd7, 0xb9, 0x21, 0x75, 0x8c, 0x44, 0x6b, 0x18, 0x44,
 ];
 
+#[cfg(target_os = "macos")]
 fn download_small(url: &str, limit: u64) -> Result<Vec<u8>> {
     ureq::get(url)
         .header("User-Agent", USER_AGENT)
@@ -90,6 +93,10 @@ pub fn is_newer(current: &str, latest: &semver::Version) -> bool {
 
 /// Asset filename marker and file extension for the macOS release artifact.
 /// macOS ships `*-macos.dmg`; the SHA-256 sidecar is `<artifact>.sha256`.
+///
+/// In-place updates are macOS-only by design, so this exists only on macOS:
+/// other platforms cannot reach dmg matching at compile time.
+#[cfg(target_os = "macos")]
 pub fn platform_asset_markers() -> (&'static str, &'static str) {
     ("-macos", ".dmg")
 }
@@ -97,6 +104,7 @@ pub fn platform_asset_markers() -> (&'static str, &'static str) {
 /// Select the release artifact and its `.sha256` sidecar for the current OS.
 ///
 /// Returns `(artifact_url, sha256_url)`.
+#[cfg(target_os = "macos")]
 pub fn pick_asset(release: &Value) -> Result<(String, String)> {
     let (marker, extension) = platform_asset_markers();
     pick_asset_for(release, marker, extension)
@@ -139,6 +147,7 @@ pub fn pick_asset_for(release: &Value, marker: &str, extension: &str) -> Result<
 }
 
 /// Parse a full release JSON document into a [`ReleaseInfo`].
+#[cfg(target_os = "macos")]
 pub fn parse_release(release: &Value) -> Result<ReleaseInfo> {
     let tag = release
         .get("tag_name")
@@ -166,6 +175,7 @@ pub fn parse_release(release: &Value) -> Result<ReleaseInfo> {
 /// Extract the first hex SHA-256 token from a `.sha256` sidecar body.
 ///
 /// Accepts both bare-digest (`<hex>`) and `shasum`-style (`<hex>  file`) forms.
+#[cfg(any(target_os = "macos", test))]
 fn parse_sha256_sidecar(body: &str) -> Result<String> {
     let token = body
         .split_whitespace()
@@ -183,12 +193,28 @@ fn parse_sha256_sidecar(body: &str) -> Result<String> {
 // otherwise — do not reintroduce it here.)
 
 /// Max bytes we'll read for the release `.dmg` (guards against runaway reads).
+#[cfg(target_os = "macos")]
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Query GitHub for the latest release and compare against `current_version`.
 ///
-/// Blocking — call from `cx.background_spawn`.
+/// Blocking — call from `cx.background_spawn`. The signed-manifest update
+/// channel only ships macOS artifacts, so on other platforms this fails
+/// without touching the network and points at the releases page.
 pub fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = current_version;
+        bail!("in-place update is not supported on this platform; open {RELEASES_PAGE}");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        fetch_latest_macos(current_version)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn fetch_latest_macos(current_version: &str) -> Result<UpdateStatus> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let mut resp = ureq::get(&url)
         .header("User-Agent", USER_AGENT)
@@ -282,8 +308,22 @@ pub fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
 /// Download the release `.dmg`, verify its SHA-256, and return the local path.
 ///
 /// The dmg is written to `dest_dir`, which the caller owns and should clean up.
-/// Blocking — call from `cx.background_spawn`.
+/// Blocking — call from `cx.background_spawn`. Non-macOS platforms have no
+/// in-place update artifact to download.
 pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBuf> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (info, dest_dir);
+        bail!("in-place update is not supported on this platform; open {RELEASES_PAGE}");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        download_and_verify_macos(info, dest_dir)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn download_and_verify_macos(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("create staging dir {}", dest_dir.display()))?;
 
@@ -632,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn parse_release_full() {
         let (marker, extension) = platform_asset_markers();
         let asset_name = format!("Sleipnir-0.2.0{marker}myarch{extension}");

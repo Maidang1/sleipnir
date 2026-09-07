@@ -207,4 +207,26 @@ mod tests {
             &["Sleipnir", "Shell", "Edit", "View", "Window"]
         );
     }
+
+    #[test]
+    fn non_macos_menus_never_expose_hide_actions() {
+        // gpui's Windows `hide()` is a no-op and `hide_other_apps()` /
+        // `unhide_other_apps()` are `unimplemented!()`, so the non-macOS
+        // menu builder must never reference Hide / HideOthers / ShowAll.
+        let src = include_str!("app_menus.rs");
+        let desktop = src
+            .split("fn desktop_menus()")
+            .nth(1)
+            .expect("desktop_menus body");
+        let desktop = desktop
+            .split("#[cfg(test)]")
+            .next()
+            .expect("desktop_menus body before tests");
+        for token in ["Hide", "ShowAll"] {
+            assert!(
+                !desktop.contains(token),
+                "non-macOS menu must not expose {token}"
+            );
+        }
+    }
 }

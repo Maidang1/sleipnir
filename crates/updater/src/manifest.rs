@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +38,7 @@ impl std::fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
+#[cfg(target_os = "macos")]
 fn manifest_error(code: ManifestErrorCode, message: impl Into<String>) -> ManifestError {
     ManifestError {
         code,
@@ -44,6 +46,12 @@ fn manifest_error(code: ManifestErrorCode, message: impl Into<String>) -> Manife
     }
 }
 
+/// Verify the Ed25519 signature and parse a signed update manifest.
+///
+/// The in-place update channel only ships the macOS dmg artifact, so manifest
+/// verification — including the expected `Sleipnir-{version}-macos.dmg`
+/// artifact identity — is compiled only on macOS.
+#[cfg(target_os = "macos")]
 pub fn verify_and_parse(
     bytes: &[u8],
     signature_bytes: &[u8],
@@ -93,7 +101,7 @@ pub fn verify_and_parse(
     Ok(manifest)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
