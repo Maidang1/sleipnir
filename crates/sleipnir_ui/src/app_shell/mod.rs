@@ -109,10 +109,6 @@ actions!(
         OpenQuickTerminal,
         /// Export the active pane's scrollback to a temp file and open it.
         ExportScrollback,
-        /// Clear the Run Ledger (memory + runs.json). Palette / menu only.
-        ClearRunLedger,
-        /// Toggle the Run Ledger panel (P1). Name is registered for key_bindings.
-        ToggleRunLedger,
         /// Clear Attention on every pane in the active tab. Does not delete Runs.
         MarkTabSeen,
         /// Toggle the focused-pane facts overlay (cwd / process tree / ports).
@@ -421,10 +417,9 @@ enum ConfirmKind {
     CloseTab(u64),
     #[cfg(target_os = "linux")]
     CloseWindow,
-    ClearRunLedger,
 }
 
-/// Pending confirmation dialog (close pane, or clear the Run Ledger).
+/// Pending confirmation dialog (close pane / tab / window).
 struct CloseConfirmState {
     /// Human-readable what will happen.
     message: SharedString,
@@ -633,10 +628,9 @@ impl AppShell {
         crate::control_surface::init(cx);
         crate::attention_chrome::refresh(cx);
 
-        // Flush pane-close events and the Run Ledger on quit.
+        // Flush pane-close events on quit.
         shell._quit_subscription = Some(cx.on_app_quit(|this, cx| {
             this.emit_all_panes_closed(cx);
-            RunLedgerGlobal::flush_now_in(cx);
             // Quitting from the update dialog also acknowledges the outcome.
             let _ = updater::install::acknowledge_active_outcome();
             async {}
@@ -891,7 +885,7 @@ impl AppShell {
         if !cx.has_global::<RunLedgerGlobal>() {
             return;
         }
-        let host_event = cx.update_global(|g: &mut RunLedgerGlobal, cx| {
+        let host_event = cx.update_global(|g: &mut RunLedgerGlobal, _cx| {
             let at_ms = g.now_ms();
             match &mut event {
                 RunEvent::Started { at_ms: slot, .. }
@@ -901,7 +895,7 @@ impl AppShell {
                 }
             }
             let kind = event.clone();
-            g.apply(event, cx);
+            g.apply(event);
             plugins::run_event_to_host(&kind, &g.snapshot())
         });
         if let Some(ev) = host_event {
@@ -1454,25 +1448,12 @@ impl AppShell {
     #[cfg(target_os = "linux")]
     fn finish_window_close(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.emit_all_panes_closed(cx);
-        RunLedgerGlobal::flush_now_in(cx);
         window.remove_window();
-    }
-
-    fn request_clear_run_ledger(&mut self, cx: &mut Context<Self>) {
-        if self.close_confirm.is_some() {
-            return;
-        }
-        self.close_confirm = Some(CloseConfirmState {
-            message: "This deletes the recorded command history from this machine. The terminal is not affected.".into(),
-            kind: ConfirmKind::ClearRunLedger,
-        });
-        cx.notify();
     }
 
     fn confirm_close_proceed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let kind = self.close_confirm.take().map(|s| s.kind);
         match kind {
-            Some(ConfirmKind::ClearRunLedger) => self.clear_run_ledger(cx),
             Some(ConfirmKind::CloseTab(tab_id)) => {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
                     self.close_tab_at(index, window, cx);
@@ -1482,35 +1463,6 @@ impl AppShell {
             Some(ConfirmKind::CloseWindow) => self.finish_window_close(window, cx),
             Some(ConfirmKind::ClosePane) | None => self.close_active_pane(window, cx),
         }
-    }
-
-    fn clear_run_ledger(&mut self, cx: &mut Context<Self>) {
-        RunLedgerGlobal::clear_in(cx);
-        cx.notify();
-    }
-
-    fn on_clear_run_ledger(
-        &mut self,
-        _: &ClearRunLedger,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.request_clear_run_ledger(cx);
-    }
-
-    fn on_toggle_run_ledger(
-        &mut self,
-        _: &ToggleRunLedger,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.dispatch_command(CommandId::ToggleRunLedger, window, cx);
-    }
-
-    /// Toggle the Run Ledger panel.
-    fn toggle_run_ledger(&mut self, cx: &mut Context<Self>) {
-        self.mode.toggle(OverlayKind::RunLedger);
-        cx.notify();
     }
 
     fn on_send_selection(
@@ -1707,7 +1659,6 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.mode.open(OverlayKind::RunLedger);
         let run_id = if cx.has_global::<RunLedgerGlobal>() {
             let snapshot = cx.global::<RunLedgerGlobal>().snapshot();
             run_id_for_gutter(&snapshot, pane, line)
@@ -1947,11 +1898,7 @@ mod tests {
             .nth(1)
             .expect("shared window-close finalizer");
         let body = method.split("\n    }").next().expect("finalizer body");
-        for required in [
-            "emit_all_panes_closed(cx)",
-            "RunLedgerGlobal::flush_now_in(cx)",
-            "window.remove_window()",
-        ] {
+        for required in ["emit_all_panes_closed(cx)", "window.remove_window()"] {
             assert!(
                 body.contains(required),
                 "close finalizer missing {required}"
@@ -2301,8 +2248,6 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_toggle_quick_select))
             .on_action(cx.listener(Self::on_open_quick_terminal))
             .on_action(cx.listener(Self::on_export_scrollback))
-            .on_action(cx.listener(Self::on_clear_run_ledger))
-            .on_action(cx.listener(Self::on_toggle_run_ledger))
             .on_action(cx.listener(Self::on_toggle_plugin_monitor))
             .on_action(cx.listener(Self::on_mark_tab_seen))
             .on_action(cx.listener(Self::on_toggle_pane_facts))
@@ -2422,9 +2367,6 @@ impl Render for AppShell {
             })
             .when(self.mode.is(OverlayKind::PaneFacts), |el| {
                 el.child(self.render_pane_facts(&tokens, cx))
-            })
-            .when(self.mode.is(OverlayKind::RunLedger), |el| {
-                el.child(self.render_run_ledger(&tokens, window, cx))
             })
             .when(self.mode.is(OverlayKind::PluginMonitor), |el| {
                 el.child(self.render_plugin_monitor(&tokens, cx))

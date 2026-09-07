@@ -236,6 +236,7 @@ pub fn capability_label(cap: Capability) -> &'static str {
         Capability::HostCallListPanes => "can list open panes",
         Capability::HostCallOpenPane => "can open a new pane",
         Capability::HostCallDrawScene => "can draw a 3D scene in a panel",
+        Capability::HostCallScrollToRun => "can jump a pane back to a command's output",
     }
 }
 
@@ -482,6 +483,7 @@ mod tests {
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
             Capability::HostCallDrawScene,
+            Capability::HostCallScrollToRun,
         ];
         for cap in caps {
             let label = capability_label(cap);

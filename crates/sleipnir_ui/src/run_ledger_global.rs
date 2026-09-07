@@ -1,75 +1,59 @@
-//! GPUI global that owns the process-wide Ledger and its debounced writer.
+//! GPUI global that owns the process-wide Run Ledger as a pure in-memory
+//! fact registry.
+//!
+//! The product surface (panel, grouping, persistence) moved out of core to
+//! the Run Ledger plugin. What stays here is what the rest of core still
+//! reads: the tab Failed red wash, the Dock badge counts, run_id → pane
+//! routing for plugin dispatch, `RenderTarget::Block` anchor lookup, and the
+//! run_id allocation behind `ScrollToRun` and the RunStarted/RunFinished
+//! host events. `RunLedgerMode::Persist` is still accepted from settings for
+//! compatibility, but in core it behaves exactly like `Memory` — the plugin
+//! owns runs.json now.
 
-use gpui::{App, BorrowAppContext, Global, Task};
-use run_ledger::{
-    Badge, LaunchId, Ledger, PaneKey, Retention, Run, RunEvent, default_runs_path, load_runs,
-    save_runs,
-};
+use gpui::{App, BorrowAppContext, Global};
+use run_ledger::{Badge, LaunchId, Ledger, PaneKey, Retention, Run, RunEvent};
 use sleipnir_settings::{RunLedgerMode, TerminalSettings};
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-const FLUSH_DELAY: Duration = Duration::from_secs(2);
-
-const FIRST_PERSIST_NOTICE: &str = "Sleipnir 开始在 runs.json 里记录你跑过的命令（脱敏后的命令行 + 耗时 + 退出码，不含输出）。设置 run_ledger 可关闭。";
+/// Prune the in-memory ledger every N applied events so a long session does
+/// not grow without bound. The plugin owns real disk retention.
+const PRUNE_EVERY: u64 = 64;
 
 pub struct RunLedgerGlobal {
     core: LedgerCore,
     started_at: Instant,
-    _flush: Task<()>,
 }
 
 impl Global for RunLedgerGlobal {}
 
-/// Mode + disk logic, testable without GPUI.
+/// Mode + ledger, testable without GPUI.
 struct LedgerCore {
     ledger: Ledger,
     mode: RunLedgerMode,
-    path: PathBuf,
-    dirty: bool,
-    announced: bool,
-    retention: Retention,
     redact: bool,
     success_threshold_secs: u64,
-}
-
-#[derive(Debug)]
-enum FlushOutcome {
-    Skipped,
-    Wrote { first_announce: bool },
-    Failed,
+    since_prune: u64,
 }
 
 impl LedgerCore {
-    fn new(
-        path: PathBuf,
-        mode: RunLedgerMode,
-        retention: Retention,
-        redact: bool,
-        threshold: u64,
-    ) -> Self {
+    fn new(mode: RunLedgerMode, redact: bool, threshold: u64) -> Self {
         let mut core = Self {
             ledger: Ledger::new(LaunchId::new_v4()),
             mode,
-            path,
-            dirty: false,
-            announced: false,
-            retention,
             redact,
             success_threshold_secs: threshold,
+            since_prune: 0,
         };
         core.sync_ledger_settings();
-        if mode == RunLedgerMode::Persist {
-            core.load_from_disk();
-        }
         core
     }
 
     fn sync_ledger_settings(&mut self) {
         self.ledger.set_redact(self.redact);
-        self.ledger.set_retention(self.retention);
         self.ledger
             .set_success_threshold_secs(self.success_threshold_secs);
+        // In-memory bound only; disk retention is the plugin's business.
+        self.ledger.set_retention(Retention::default());
     }
 
     fn reset_ledger(&mut self) {
@@ -77,88 +61,32 @@ impl LedgerCore {
         self.sync_ledger_settings();
     }
 
-    fn load_from_disk(&mut self) {
-        let (runs, announced) = load_runs(&self.path);
-        self.announced = announced;
-        self.ledger.load_history(runs);
-    }
-
     fn apply(&mut self, event: RunEvent) {
         if self.mode == RunLedgerMode::Off {
             return;
         }
         self.ledger.apply(event);
-        self.dirty = true;
+        self.since_prune += 1;
+        if self.since_prune >= PRUNE_EVERY {
+            self.since_prune = 0;
+            self.ledger.prune();
+        }
     }
 
     fn set_mode(&mut self, mode: RunLedgerMode) {
         if mode == self.mode {
             return;
         }
-        let prev = self.mode;
         self.mode = mode;
-        match (prev, mode) {
-            (_, RunLedgerMode::Off) => {
-                self.reset_ledger();
-                self.dirty = false;
-            }
-            (RunLedgerMode::Off, RunLedgerMode::Persist) => {
-                self.load_from_disk();
-            }
-            (RunLedgerMode::Memory, RunLedgerMode::Persist) => {
-                self.load_from_disk();
-                self.dirty = true;
-            }
-            (RunLedgerMode::Persist, RunLedgerMode::Memory)
-            | (RunLedgerMode::Off, RunLedgerMode::Memory) => {
-                // Keep memory (or stay empty); stop writing.
-            }
-            _ => {}
+        if mode == RunLedgerMode::Off {
+            self.reset_ledger();
         }
     }
 
-    fn configure(&mut self, retention: Retention, redact: bool, threshold: u64) {
-        self.retention = retention;
+    fn configure(&mut self, redact: bool, threshold: u64) {
         self.redact = redact;
         self.success_threshold_secs = threshold;
         self.sync_ledger_settings();
-    }
-
-    fn flush(&mut self) -> FlushOutcome {
-        if self.mode != RunLedgerMode::Persist || !self.dirty {
-            return FlushOutcome::Skipped;
-        }
-        // A successful write always persists `announced: true`, so the notice is
-        // owed exactly once: on the first write this process observes.
-        let first_announce = !self.announced;
-        let runs: Vec<Run> = self.ledger.runs().cloned().collect();
-        match save_runs(&self.path, &runs, self.retention) {
-            Ok(()) => {
-                self.announced = true;
-                self.dirty = false;
-                FlushOutcome::Wrote { first_announce }
-            }
-            Err(err) => {
-                log::warn!(
-                    "run ledger write failed ({}); falling back to memory: {err}",
-                    self.path.display()
-                );
-                self.mode = RunLedgerMode::Memory;
-                FlushOutcome::Failed
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.reset_ledger();
-        self.dirty = false;
-        if self.mode == RunLedgerMode::Persist {
-            if let Err(err) = std::fs::remove_file(&self.path) {
-                if err.kind() != std::io::ErrorKind::NotFound {
-                    log::warn!("failed to delete {}: {err}", self.path.display());
-                }
-            }
-        }
     }
 }
 
@@ -168,21 +96,14 @@ impl RunLedgerGlobal {
             return;
         }
         let settings = TerminalSettings::get_global(cx);
-        let path = default_runs_path(&sleipnir_settings::config_dir());
         let core = LedgerCore::new(
-            path,
             settings.run_ledger,
-            Retention {
-                days: settings.run_ledger_retention_days,
-                max_runs: settings.run_ledger_max_runs,
-            },
             settings.run_ledger_redact,
             settings.notify_on_command_finish_secs,
         );
         cx.set_global(Self {
             core,
             started_at: Instant::now(),
-            _flush: Task::ready(()),
         });
     }
 
@@ -190,62 +111,21 @@ impl RunLedgerGlobal {
         self.started_at.elapsed().as_millis() as u64
     }
 
-    pub fn apply(&mut self, event: RunEvent, cx: &mut App) {
+    pub fn apply(&mut self, event: RunEvent) {
         self.core.apply(event);
-        if self.core.mode == RunLedgerMode::Persist && self.core.dirty {
-            self.schedule_flush(cx);
-        }
     }
 
-    pub fn set_mode(&mut self, mode: RunLedgerMode, cx: &mut App) {
+    pub fn set_mode(&mut self, mode: RunLedgerMode) {
         self.core.set_mode(mode);
-        if self.core.mode == RunLedgerMode::Persist && self.core.dirty {
-            self.schedule_flush(cx);
-        }
     }
 
     pub fn reload_settings(&mut self, cx: &mut App) {
         let settings = TerminalSettings::get_global(cx);
         self.core.configure(
-            Retention {
-                days: settings.run_ledger_retention_days,
-                max_runs: settings.run_ledger_max_runs,
-            },
             settings.run_ledger_redact,
             settings.notify_on_command_finish_secs,
         );
-        self.set_mode(settings.run_ledger, cx);
-    }
-
-    fn schedule_flush(&mut self, cx: &mut App) {
-        self._flush = cx.spawn(async move |cx| {
-            cx.background_executor().timer(FLUSH_DELAY).await;
-            cx.update(|cx| {
-                if cx.has_global::<RunLedgerGlobal>() {
-                    cx.global_mut::<RunLedgerGlobal>().flush_now();
-                }
-            });
-        });
-    }
-
-    pub fn flush_now(&mut self) {
-        if let FlushOutcome::Wrote {
-            first_announce: true,
-        } = self.core.flush()
-        {
-            log::info!("{FIRST_PERSIST_NOTICE}");
-        }
-    }
-
-    pub fn clear(&mut self, _cx: &mut App) {
-        self.core.clear();
-    }
-
-    pub fn clear_in(cx: &mut App) {
-        if !cx.has_global::<Self>() {
-            return;
-        }
-        cx.update_global(|this: &mut RunLedgerGlobal, cx| this.clear(cx));
+        self.set_mode(settings.run_ledger);
     }
 
     pub fn badge_for(&self, panes: &[PaneKey], now_ms: u64) -> Option<Badge> {
@@ -317,14 +197,7 @@ impl RunLedgerGlobal {
         if !cx.has_global::<Self>() {
             return;
         }
-        cx.update_global(|this: &mut RunLedgerGlobal, cx| this.apply(event, cx));
-    }
-
-    pub fn flush_now_in(cx: &mut App) {
-        if !cx.has_global::<Self>() {
-            return;
-        }
-        cx.update_global(|this: &mut RunLedgerGlobal, _cx| this.flush_now());
+        cx.update_global(|this: &mut RunLedgerGlobal, _cx| this.apply(event));
     }
 
     pub fn reload_settings_in(cx: &mut App) {
@@ -339,126 +212,66 @@ impl RunLedgerGlobal {
 mod tests {
     use super::*;
     use run_ledger::RunState;
-    use std::fs;
     use uuid::Uuid;
 
     fn pane() -> PaneKey {
         Uuid::new_v4()
     }
 
-    fn now_ms() -> u64 {
-        1_700_000_000_000
-    }
-
-    fn write_failed_run(path: &std::path::Path, pane: PaneKey, command: &str) {
-        let value = serde_json::json!({
-            "version": 1,
-            "announced": false,
-            "runs": [{
-                "id": Uuid::new_v4(),
-                "launch_id": Uuid::new_v4(),
-                "pane": pane,
-                "command": command,
-                "started_at_unix_ms": now_ms(),
-                "duration": { "secs": 1, "nanos": 0 },
-                "exit_code": 1,
-                "state": "failed",
-            }]
-        });
-        fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    fn failed_run(core: &mut LedgerCore, pane: PaneKey, command: &str) {
+        core.ledger.apply(RunEvent::started(pane, command, None, 0));
+        core.ledger.apply(RunEvent::finished(pane, Some(1), 10));
     }
 
     #[test]
     fn mode_off_drops_events() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("runs.json");
-        let mut core = LedgerCore::new(path, RunLedgerMode::Off, Retention::default(), true, 5);
+        let mut core = LedgerCore::new(RunLedgerMode::Off, true, 5);
         core.apply(RunEvent::started(pane(), "ls", None, 0));
         assert_eq!(core.ledger.runs().count(), 0);
-        assert!(!core.dirty);
     }
 
     #[test]
-    fn mode_memory_never_touches_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("runs.json");
+    fn memory_records_runs_and_exposes_failed_attention() {
+        let mut core = LedgerCore::new(RunLedgerMode::Memory, true, 5);
         let p = pane();
-        write_failed_run(&path, p, "old");
-        let original = fs::read(&path).unwrap();
-        let mut core = LedgerCore::new(
-            path.clone(),
-            RunLedgerMode::Memory,
-            Retention::default(),
-            true,
-            5,
-        );
-        assert_eq!(core.ledger.runs().count(), 0, "Memory must not read disk");
-        core.apply(RunEvent::started(pane(), "cargo test", None, 0));
+        failed_run(&mut core, p, "false");
         assert_eq!(core.ledger.runs().count(), 1);
-        assert!(matches!(core.flush(), FlushOutcome::Skipped));
-        assert_eq!(
-            fs::read(&path).unwrap(),
-            original,
-            "Memory must not write disk"
-        );
+        assert_eq!(core.ledger.failed_attention_count(), 1);
+        let badge = core.ledger.badge_for(&[p], 10).expect("failed badge");
+        assert_eq!(badge.kind, run_ledger::BadgeKind::Failed);
     }
 
     #[test]
-    fn switching_to_off_clears_memory_and_keeps_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("runs.json");
-        let mut core = LedgerCore::new(
-            path.clone(),
-            RunLedgerMode::Persist,
-            Retention::default(),
-            true,
-            5,
-        );
-        core.apply(RunEvent::started(pane(), "sleep 1", None, 0));
-        assert!(matches!(core.flush(), FlushOutcome::Wrote { .. }));
-        let on_disk = fs::read(&path).unwrap();
-        assert!(!on_disk.is_empty());
+    fn persist_is_memory_in_core() {
+        // The plugin owns disk; Persist must behave exactly like Memory here.
+        let mut core = LedgerCore::new(RunLedgerMode::Persist, true, 5);
+        let p = pane();
+        failed_run(&mut core, p, "false");
+        assert_eq!(core.ledger.runs().count(), 1);
+        assert_eq!(core.ledger.failed_attention_count(), 1);
+        core.set_mode(RunLedgerMode::Memory);
+        assert_eq!(core.ledger.runs().count(), 1, "no disk round-trip to lose");
+    }
+
+    #[test]
+    fn switching_to_off_clears_memory() {
+        let mut core = LedgerCore::new(RunLedgerMode::Memory, true, 5);
+        failed_run(&mut core, pane(), "sleep 1");
+        assert_eq!(core.ledger.runs().count(), 1);
         core.set_mode(RunLedgerMode::Off);
         assert_eq!(core.ledger.runs().count(), 0);
-        assert_eq!(fs::read(&path).unwrap(), on_disk);
     }
 
     #[test]
-    fn switching_to_persist_loads_history_as_seen() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("runs.json");
-        let p = pane();
-        write_failed_run(&path, p, "false");
-        let mut core = LedgerCore::new(path, RunLedgerMode::Off, Retention::default(), true, 5);
-        assert_eq!(core.ledger.runs().count(), 0);
-        core.set_mode(RunLedgerMode::Persist);
-        assert_eq!(core.ledger.runs().count(), 1);
-        assert_eq!(core.ledger.runs().next().unwrap().state, RunState::Failed);
-        assert_eq!(core.ledger.attention().count(), 0, "loaded history is seen");
-    }
-
-    #[test]
-    fn first_persist_write_notifies_exactly_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("runs.json");
-        let mut core = LedgerCore::new(
-            path.clone(),
-            RunLedgerMode::Persist,
-            Retention::default(),
-            true,
-            5,
-        );
-        core.apply(RunEvent::started(pane(), "echo once", None, 0));
-        match core.flush() {
-            FlushOutcome::Wrote { first_announce } => assert!(first_announce),
-            other => panic!("expected first write, got {other:?}"),
+    fn apply_prunes_to_the_in_memory_cap() {
+        let mut core = LedgerCore::new(RunLedgerMode::Memory, true, 5);
+        for i in 0..(PRUNE_EVERY * 10) {
+            core.apply(RunEvent::started(pane(), &format!("c{i}"), None, i));
         }
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"announced\": true"), "{text}");
-        core.apply(RunEvent::started(pane(), "echo twice", None, 10));
-        match core.flush() {
-            FlushOutcome::Wrote { first_announce } => assert!(!first_announce),
-            other => panic!("expected second write, got {other:?}"),
-        }
+        assert_eq!(core.ledger.runs().count(), Retention::default().max_runs);
+        assert!(core
+            .ledger
+            .runs()
+            .all(|run| run.state == RunState::Running));
     }
 }

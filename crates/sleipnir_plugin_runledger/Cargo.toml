@@ -1,5 +1,5 @@
 [package]
-name = "run_ledger"
+name = "sleipnir_plugin_runledger"
 version = "0.1.0"
 edition.workspace = true
 publish = false
@@ -9,14 +9,18 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/run_ledger.rs"
+path = "src/lib.rs"
 doctest = false
 
+[[bin]]
+name = "sleipnir-plugin-runledger"
+path = "src/main.rs"
+
 [dependencies]
-atomic_write.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+sleipnir-plugin.workspace = true
+run_ledger.workspace = true
 uuid.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

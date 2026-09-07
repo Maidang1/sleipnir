@@ -168,6 +168,34 @@ that renders a 3D disk-usage chart (a software rasteriser whose framebuffer is
 a `col` of `text` rows — the closed widget set is enough for that, since one
 Unicode scalar is one cell and `wrap_text` honours `\n`).
 
+## Example: Run Ledger (resident observer)
+
+`crates/sleipnir_plugin_runledger` is the Run Ledger product surface — "what
+ran here" — built as a resident, out-of-process plugin. The core only emits
+facts; the plugin owns the ledger (`run_ledger` crate), `runs.json`
+persistence, and every user-facing piece. It exercises most of the
+observation/rendering protocol at once:
+
+- `subscribe_events`, narrowed by `EventFilter.kinds` to `run_started`,
+  `run_finished`, `pane_closed`, `pane_focused`. `pane_closed` is the
+  terminal signal for a run that will never report `run_finished` (its pane
+  went away mid-run), and `run_started.inferred` tells a precise OSC 133
+  report from a busy-probe guess.
+- `render_status`: a ≤24-cell strip with one summary badge (`✗N` failed
+  unseen / `●N` running — also derived into a tab chip) and two buttons,
+  which the host extracts as command palette entries.
+- `render_panel`: the grouped run list (进行中 / 待看 / 今天 / 更早). The
+  panel `PaneKey` is minted once and reused, so re-renders replace one split
+  instead of opening many.
+- `host_call_scroll_to_run`: each jumpable row is a `Btn` whose arg is the
+  host `run_id` from the event stream (the plugin maps it to its own
+  ledger-local id for `mark_run_seen`). An inferred run keeps its button —
+  the host degrades the jump to a pane focus; an Abandoned run gets no
+  button at all.
+
+Because the host `run_id` is only meaningful within a host launch, restored
+history renders without jump buttons — same rule the built-in overlay used.
+
 ## Render targets
 
 A `Render` names one of three mounts (ADR-0017). One widget schema, one
@@ -185,6 +213,55 @@ Every surface carries a non-suppressible attribution marker naming the plugin
 Update model is Elm-style whole-tree replacement: `Render` → user clicks `Btn`
 → host sends `Action { block_id, action, arg }` → plugin `Render`s again. There
 is no patch protocol.
+
+## Host calls
+
+A resident plugin can also ask the host to act (`Context::call`, or the typed
+wrappers such as `Context::draw_scene`). Each call is gated by its own
+capability, and every `Call` id gets exactly one `Reply` — denial is
+`HostCallResult::Error`, never silence. Calls are rate-limited per plugin
+(`draw_scene` is exempt: repainting the host's own surface has no external
+side effect).
+
+| Call | Capability | Effect |
+| --- | --- | --- |
+| `notify` | `host_call_notify` | platform notification |
+| `read_screen` | `host_call_read_screen` | visible text of one terminal pane |
+| `list_panes` | `host_call_list_panes` | open terminal panes |
+| `open_pane` | `host_call_open_pane` | spawn a pane (argv, never a shell line) |
+| `draw_scene` | `host_call_draw_scene` | replace a panel's 3D scene |
+| `scroll_to_run` | `host_call_scroll_to_run` | jump a pane's scrollback to a run |
+
+`scroll_to_run` activates the run's tab and pane and scrolls back to the run's
+output anchor — the same jump as clicking a row in the Run Ledger panel. An
+**inferred** run (a busy-probe guess; see `inferred` below) has no scrollback
+anchor, so the pane is only focused. An unknown `run_id` answers
+`HostCallResult::Error`. The SDK wrapper is
+`Context::scroll_to_run(run_id) -> HostCallResult`.
+
+## Events
+
+With `subscribe_events` the host pushes facts the app already computes
+(`run_ledger`, `pane_facts`), narrowed by `EventFilter { panes, kinds }`.
+`kinds` names `EventKind` discriminants: `run_started`, `run_finished`,
+`port_opened`, `foreground_changed`, `cwd_changed`, `pane_focused`,
+`pane_closed`.
+
+| Event | Fields | Notes |
+| --- | --- | --- |
+| `run_started` | `run_id`, `pane`, `command`, `cwd?`, `inferred` | `command` is redacted at capture |
+| `run_finished` | `run_id`, `pane`, `exit_code?`, `duration_ms` | |
+| `port_opened` | `pane`, `pid`, `addr` | |
+| `foreground_changed` | `pane`, `agent?` | |
+| `cwd_changed` | `pane`, `cwd` | |
+| `pane_focused` | `pane` | |
+| `pane_closed` | `pane` | pane, its tab, or the window/app went away |
+
+`run_started.inferred` is `false` for a precise OSC 133 report and `true` for
+a busy-probe guess. An inferred run has no scrollback anchor, so it is not a
+`scroll_to_run` target beyond focusing the pane. Runs still open in a pane
+that closes never report `run_finished`; `pane_closed` is their terminal
+signal.
 
 ## Invocation contract
 
@@ -226,6 +303,8 @@ by the snapshot set (ADR-0016 §4).
 | `host_call_read_screen` | elevated | read any pane's screen |
 | `host_call_list_panes` | elevated | list open panes |
 | `host_call_open_pane` | elevated | open a new pane |
+| `host_call_draw_scene` | elevated | draw a 3D scene in a panel |
+| `host_call_scroll_to_run` | elevated | jump a pane back to a run's output |
 
 `subscribe_events` is the significant semantic escalation: a plugin moves from
 "runs when you pick it" to "watches every command you run". It must be requested

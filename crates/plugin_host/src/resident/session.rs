@@ -692,11 +692,13 @@ fn redact_run_started(event: v2::HostEvent) -> v2::HostEvent {
             pane,
             command,
             cwd,
+            inferred,
         } => v2::HostEvent::RunStarted {
             run_id,
             pane,
             command: run_ledger::redact_command(&command),
             cwd,
+            inferred,
         },
         other => other,
     }
@@ -803,13 +805,18 @@ mod redact_tests {
             pane: Uuid::nil(),
             command: "AWS_SECRET_ACCESS_KEY=supersecret aws s3 ls".into(),
             cwd: None,
+            inferred: true,
         };
-        let HostEvent::RunStarted { command, .. } = redact_run_started(event) else {
+        let HostEvent::RunStarted {
+            command, inferred, ..
+        } = redact_run_started(event)
+        else {
             panic!("expected RunStarted");
         };
         assert!(
             !command.contains("supersecret"),
             "raw secret must not survive redact: {command}"
         );
+        assert!(inferred, "redaction must not rewrite the provenance flag");
     }
 }

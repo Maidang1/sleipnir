@@ -187,6 +187,7 @@ fn run_started(p: uuid::Uuid, command: &str) -> HostEvent {
         pane: p,
         command: command.into(),
         cwd: Some("/tmp".into()),
+        inferred: false,
     }
 }
 

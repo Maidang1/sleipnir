@@ -31,8 +31,6 @@ pub enum CommandId {
     ToggleQuickSelect,
     OpenQuickTerminal,
     ExportScrollback,
-    ClearRunLedger,
-    ToggleRunLedger,
     MarkTabSeen,
     TogglePaneFacts,
     SendSelection,
@@ -76,8 +74,6 @@ impl CommandId {
             CommandId::ToggleQuickSelect => "toggle_quick_select",
             CommandId::OpenQuickTerminal => "open_quick_terminal",
             CommandId::ExportScrollback => "export_scrollback",
-            CommandId::ClearRunLedger => "clear_run_ledger",
-            CommandId::ToggleRunLedger => "toggle_run_ledger",
             CommandId::MarkTabSeen => "mark_tab_seen",
             CommandId::TogglePaneFacts => "toggle_pane_facts",
             CommandId::SendSelection => "send_selection",
@@ -117,8 +113,6 @@ impl CommandId {
             "toggle_quick_select" | "quick_select" => Some(CommandId::ToggleQuickSelect),
             "open_quick_terminal" | "quick_terminal" => Some(CommandId::OpenQuickTerminal),
             "export_scrollback" | "export_scrollback_to_file" => Some(CommandId::ExportScrollback),
-            "clear_run_ledger" => Some(CommandId::ClearRunLedger),
-            "toggle_run_ledger" => Some(CommandId::ToggleRunLedger),
             "mark_tab_seen" | "mark_as_seen" => Some(CommandId::MarkTabSeen),
             "toggle_pane_facts" | "pane_facts" => Some(CommandId::TogglePaneFacts),
             "send_selection" => Some(CommandId::SendSelection),
@@ -286,12 +280,6 @@ pub fn commands() -> Vec<CommandItem> {
             keywords: "export scrollback save file editor dump".into(),
         },
         CommandItem {
-            id: CommandId::ClearRunLedger,
-            title: "Clear Run Ledger".into(),
-            shortcut: "".into(),
-            keywords: "clear run ledger history runs delete".into(),
-        },
-        CommandItem {
             id: CommandId::MarkTabSeen,
             title: "Mark Tab as Seen".into(),
             shortcut: "".into(),
@@ -302,12 +290,6 @@ pub fn commands() -> Vec<CommandItem> {
             title: "Toggle Pane Facts".into(),
             shortcut: "".into(),
             keywords: "pane facts cwd process tree ports info".into(),
-        },
-        CommandItem {
-            id: CommandId::ToggleRunLedger,
-            title: "Toggle Run Ledger".into(),
-            shortcut: display_shortcut("toggle_run_ledger").into(),
-            keywords: "run ledger panel history attention".into(),
         },
         CommandItem {
             id: CommandId::SendSelection,
@@ -551,19 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_run_ledger_is_a_known_action_name() {
-        assert_eq!(
-            CommandId::from_str("clear_run_ledger"),
-            Some(CommandId::ClearRunLedger)
-        );
-        assert_eq!(
-            CommandId::from_str("toggle_run_ledger"),
-            Some(CommandId::ToggleRunLedger)
-        );
-        assert!(
-            commands().iter().any(|i| i.id == CommandId::ClearRunLedger),
-            "Clear Run Ledger must appear in the palette"
-        );
+    fn run_related_action_names_are_known() {
         assert_eq!(
             CommandId::from_str("mark_tab_seen"),
             Some(CommandId::MarkTabSeen)

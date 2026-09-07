@@ -1,5 +1,6 @@
-//! Pure helpers for the Run Ledger overlay. GPUI is optional; these stay testable
-//! without a window.
+//! Panel row helpers, ported from the deleted core overlay
+//! (`crates/sleipnir_ui/src/run_ledger_panel.rs` at the removal commit).
+//! Pure: no gpui, no I/O — grouping semantics and wording are unchanged.
 
 use run_ledger::{LaunchId, PaneKey, Run, RunId, RunState};
 use std::cmp::Reverse;
@@ -7,7 +8,8 @@ use std::time::Duration;
 
 const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 
-/// One overlay row, copied off a [`Run`] snapshot so the panel does not hold the ledger.
+/// One panel row, copied off a [`Run`] snapshot so the view does not hold the
+/// ledger.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LedgerRow {
     pub id: RunId,
@@ -29,7 +31,7 @@ pub fn rows_from_runs(runs: &[Run]) -> Vec<LedgerRow> {
     rows
 }
 
-/// Overlay section for `row`. Current-launch finished runs (not Abandoned) are
+/// Panel section for `row`. Current-launch finished runs (not Abandoned) are
 /// "待看"; Attention does not survive a restart, so other launches fall through
 /// to the calendar buckets.
 pub fn group_label(row: &LedgerRow, now_unix_ms: u64, current_launch: LaunchId) -> &'static str {
@@ -51,7 +53,9 @@ pub fn group_label(row: &LedgerRow, now_unix_ms: u64, current_launch: LaunchId) 
     }
 }
 
-/// Jump is only valid while the pane's scrollback still exists: same launch, not Abandoned.
+/// Jump is only valid while the pane's scrollback still exists: same launch,
+/// not Abandoned. Inferred runs keep their jump: the host degrades it to a
+/// pane focus when there is no scrollback anchor.
 pub fn can_jump(row: &LedgerRow, current_launch: LaunchId) -> bool {
     row.launch_id == current_launch && row.state != RunState::Abandoned
 }
@@ -104,7 +108,7 @@ mod tests {
         LaunchId::new_v4()
     }
 
-    fn row(state: RunState, launch_id: LaunchId, started_at_unix_ms: u64) -> LedgerRow {
+    pub fn row(state: RunState, launch_id: LaunchId, started_at_unix_ms: u64) -> LedgerRow {
         LedgerRow {
             id: RunId::new_v4(),
             pane: PaneKey::new_v4(),
@@ -183,6 +187,16 @@ mod tests {
     fn abandoned_cannot_jump() {
         let current = launch();
         assert!(!can_jump(&row(RunState::Abandoned, current, 0), current));
+    }
+
+    #[test]
+    fn inferred_runs_keep_their_jump() {
+        // The host owns the degradation: an inferred run has no anchor, so
+        // `scroll_to_run` falls back to focusing the pane.
+        let current = launch();
+        let mut inferred = row(RunState::Failed, current, 0);
+        inferred.inferred = true;
+        assert!(can_jump(&inferred, current));
     }
 
     #[test]

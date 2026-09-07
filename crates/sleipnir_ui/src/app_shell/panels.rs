@@ -1,18 +1,17 @@
-//! Side panels and dialogs: pane facts, run ledger, history search, plugin
+//! Side panels and dialogs: pane facts, history search, plugin
 //! monitor / consent, and the shared confirm dialog.
 //!
 //! A child module of `app_shell` so these can read the shell's private panel
 //! state without widening it to the crate.
 
-use super::{AppShell, ConfirmKind, TogglePaneFacts};
+use super::{AppShell, TogglePaneFacts};
 use crate::chrome::ChromeTokens;
 use crate::chrome::pixel;
-use crate::run_ledger_global::RunLedgerGlobal;
 use crate::ui_mode::{OverlayKind, PANE_FACTS_MAX_AGE, PaneFactsState};
 use gpui::{
-    AppContext as _, BorrowAppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, deferred, div, prelude::FluentBuilder as _, px,
+    AppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    deferred, div, prelude::FluentBuilder as _, px,
 };
 
 impl AppShell {
@@ -142,95 +141,6 @@ impl AppShell {
                                     this.close_pane_facts(cx);
                                 })),
                         ),
-                )
-                .child(body),
-        )
-    }
-
-    pub(super) fn render_run_ledger(
-        &self,
-        tokens: &ChromeTokens,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        use crate::run_ledger_panel::{can_jump, group_label, row_summary, rows_from_runs};
-        let border_w = pixel::PIXEL_BORDER;
-        let ledger = cx.try_global::<RunLedgerGlobal>();
-        let (rows, launch) = match ledger {
-            Some(g) => (rows_from_runs(&g.snapshot()), g.launch_id()),
-            None => (Vec::new(), run_ledger::LaunchId::nil()),
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let mut body = div()
-            .id("run-ledger-body")
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .pb_3()
-            .overflow_y_scroll();
-        let mut last_group = "";
-        for (i, row) in rows.iter().enumerate() {
-            let group = group_label(row, now, launch);
-            if group != last_group {
-                last_group = group;
-                body = body.child(
-                    div()
-                        .pt_2()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(tokens.fg_muted)
-                        .child(group),
-                );
-            }
-            let summary: SharedString = row_summary(row).into();
-            let pane = row.pane;
-            let id = row.id;
-            let jump = can_jump(row, launch);
-            body = body.child(
-                div()
-                    .id(("ledger-row", i))
-                    .text_xs()
-                    .text_color(if jump { tokens.fg } else { tokens.fg_muted })
-                    .cursor_pointer()
-                    .child(summary)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if cx.has_global::<RunLedgerGlobal>() {
-                            cx.update_global(|g: &mut RunLedgerGlobal, _| {
-                                g.mark_run_seen(id);
-                            });
-                        }
-                        this.jump_to_ledger_row(pane, Some(id), window, cx);
-                        cx.notify();
-                    })),
-            );
-        }
-        let _ = window;
-        deferred(
-            div()
-                .id("run-ledger-overlay")
-                .absolute()
-                .top_0()
-                .right_0()
-                .bottom_0()
-                .w(px(300.0))
-                .flex()
-                .flex_col()
-                .bg(tokens.surface)
-                .border_l(border_w)
-                .border_color(tokens.border)
-                .occlude()
-                .child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(tokens.fg)
-                        .child("Run Ledger"),
                 )
                 .child(body),
         )
@@ -684,9 +594,6 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (title, message, ok_label) = match self.close_confirm.as_ref() {
-            Some(s) if s.kind == ConfirmKind::ClearRunLedger => {
-                ("Clear Run Ledger?", s.message.clone(), "Clear")
-            }
             Some(s) => ("Close pane?", s.message.clone(), "Close"),
             None => (
                 "Close pane?",

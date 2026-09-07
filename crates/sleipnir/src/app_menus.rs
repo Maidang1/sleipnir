@@ -5,12 +5,12 @@
 
 use gpui::{Menu, MenuItem, SystemMenuType, actions};
 use sleipnir_ui::{
-    CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
-    JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings,
-    PipeSelection, PrevTab, ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown,
-    SplitRight, ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger,
+    CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback, FocusPaneDown,
+    FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt,
+    MarkTabSeen, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PipeSelection,
+    PrevTab, ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
+    ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
+    TogglePluginMonitor, ToggleQuickSelect,
 };
 use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
 
@@ -129,9 +129,7 @@ fn macos_menus() -> Vec<Menu> {
             MenuItem::action("Clear", Clear),
             MenuItem::separator(),
             MenuItem::action("Export Scrollback…", ExportScrollback),
-            MenuItem::action("Clear Run Ledger", ClearRunLedger),
             MenuItem::action("Mark Tab as Seen", MarkTabSeen),
-            MenuItem::action("Run Ledger", ToggleRunLedger),
             MenuItem::action("Plugin Monitor", TogglePluginMonitor),
             MenuItem::action("Send Selection to Pane", SendSelection),
             MenuItem::action("Pipe Selection to Command", PipeSelection),
@@ -164,9 +162,7 @@ fn desktop_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Clear", Clear),
             MenuItem::action("Export Scrollback…", ExportScrollback),
-            MenuItem::action("Clear Run Ledger", ClearRunLedger),
             MenuItem::action("Mark Tab as Seen", MarkTabSeen),
-            MenuItem::action("Run Ledger", ToggleRunLedger),
             MenuItem::action("Plugin Monitor", TogglePluginMonitor),
             MenuItem::action("Send Selection to Pane", SendSelection),
             MenuItem::action("Pipe Selection to Command", PipeSelection),

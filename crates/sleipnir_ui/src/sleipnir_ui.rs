@@ -23,7 +23,6 @@ mod plugin_panel;
 mod plugin_runtime;
 mod plugin_surface;
 mod run_ledger_global;
-mod run_ledger_panel;
 mod tab_convert;
 mod term_element;
 mod ui_mode;
@@ -34,13 +33,13 @@ pub use assets::AgentAssets;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 
 pub use app_shell::{
-    ActivateTab, AppShell, CheckForUpdates, ClearRunLedger, CloseTab, CycleTheme, DecreaseFontSize,
+    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize,
     ExportScrollback, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
     ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
     ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
-    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, ToggleRunLedger, open_sleipnir_window,
+    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, open_sleipnir_window,
     try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};

@@ -114,6 +114,7 @@ pub enum Capability {
     HostCallListPanes,
     HostCallOpenPane,
     HostCallDrawScene,
+    HostCallScrollToRun,
 }
 
 /// Narrows an event subscription. An empty field means "no filter".
@@ -139,6 +140,7 @@ pub enum EventKind {
     ForegroundChanged,
     CwdChanged,
     PaneFocused,
+    PaneClosed,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +160,10 @@ pub enum HostEvent {
         command: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// True when the run was guessed by the busy probe instead of
+        /// reported by OSC 133. An inferred run has no scrollback anchor.
+        #[serde(default)]
+        inferred: bool,
     },
     RunFinished {
         run_id: RunId,
@@ -183,6 +189,11 @@ pub enum HostEvent {
     PaneFocused {
         pane: PaneKey,
     },
+    /// The pane is gone (closed, or its tab/window/app went away). Runs that
+    /// were still open in it will never report a `RunFinished`.
+    PaneClosed {
+        pane: PaneKey,
+    },
 }
 
 impl HostEvent {
@@ -194,6 +205,7 @@ impl HostEvent {
             Self::ForegroundChanged { .. } => EventKind::ForegroundChanged,
             Self::CwdChanged { .. } => EventKind::CwdChanged,
             Self::PaneFocused { .. } => EventKind::PaneFocused,
+            Self::PaneClosed { .. } => EventKind::PaneClosed,
         }
     }
 
@@ -204,7 +216,8 @@ impl HostEvent {
             | Self::PortOpened { pane, .. }
             | Self::ForegroundChanged { pane, .. }
             | Self::CwdChanged { pane, .. }
-            | Self::PaneFocused { pane } => *pane,
+            | Self::PaneFocused { pane }
+            | Self::PaneClosed { pane } => *pane,
         }
     }
 
@@ -252,6 +265,12 @@ pub enum HostCall {
     DrawScene {
         pane: PaneKey,
         scene: SceneData,
+    },
+    /// Scroll a pane back to the output anchor of a Run. An inferred run has
+    /// no anchor; the pane is focused instead. An unknown `run_id` is an
+    /// `Error`, not a drop.
+    ScrollToRun {
+        run_id: RunId,
     },
 }
 
@@ -330,6 +349,7 @@ impl HostCall {
             Self::ListPanes => Capability::HostCallListPanes,
             Self::OpenPane { .. } => Capability::HostCallOpenPane,
             Self::DrawScene { .. } => Capability::HostCallDrawScene,
+            Self::ScrollToRun { .. } => Capability::HostCallScrollToRun,
         }
     }
 }
@@ -845,6 +865,62 @@ mod tests {
         let line = serde_json::to_string(&call).unwrap();
         assert!(line.contains(r#""call":"draw_scene""#));
         assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+    }
+
+    #[test]
+    fn scroll_to_run_call_round_trips_and_declares_its_capability() {
+        let call = HostCall::ScrollToRun {
+            run_id: Uuid::from_u128(5),
+        };
+        assert_eq!(
+            call.required_capability(),
+            Capability::HostCallScrollToRun
+        );
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(line.contains(r#""call":"scroll_to_run""#));
+        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+    }
+
+    #[test]
+    fn pane_closed_event_round_trips_and_filters() {
+        let pane = Uuid::from_u128(6);
+        let event = HostEvent::PaneClosed { pane };
+        assert_eq!(event.kind(), EventKind::PaneClosed);
+        assert_eq!(event.pane(), pane);
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(line.contains(r#""event":"pane_closed""#));
+        assert_eq!(serde_json::from_str::<HostEvent>(&line).unwrap(), event);
+        assert!(event.matches(&EventFilter {
+            panes: vec![],
+            kinds: vec![EventKind::PaneClosed],
+        }));
+        assert!(!event.matches(&EventFilter {
+            panes: vec![],
+            kinds: vec![EventKind::RunFinished],
+        }));
+    }
+
+    #[test]
+    fn run_started_inferred_round_trips_and_defaults_to_false() {
+        let event = HostEvent::RunStarted {
+            run_id: Uuid::nil(),
+            pane: Uuid::nil(),
+            command: "make".into(),
+            cwd: None,
+            inferred: true,
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<HostEvent>(&line).unwrap(), event);
+        // A payload from an older host without the field decodes as a precise
+        // (OSC 133) run, never as an inferred guess.
+        let old: HostEvent = serde_json::from_str(
+            r#"{"event":"run_started","run_id":"00000000-0000-0000-0000-000000000000","pane":"00000000-0000-0000-0000-000000000000","command":"make"}"#,
+        )
+        .unwrap();
+        let HostEvent::RunStarted { inferred, .. } = old else {
+            panic!("expected RunStarted");
+        };
+        assert!(!inferred);
     }
 
     #[test]

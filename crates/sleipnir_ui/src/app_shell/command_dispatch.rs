@@ -47,8 +47,6 @@ impl AppShell {
             // Same lightweight window as ⌘N (M15).
             CommandId::OpenQuickTerminal => open_sleipnir_window(cx),
             CommandId::ExportScrollback => self.export_scrollback(cx),
-            CommandId::ClearRunLedger => self.request_clear_run_ledger(cx),
-            CommandId::ToggleRunLedger => self.toggle_run_ledger(cx),
             CommandId::MarkTabSeen => self.mark_active_tab_seen(cx),
             CommandId::SendSelection => self.send_selection_to_pty(cx),
             CommandId::PipeSelection => self.pipe_selection(cx),

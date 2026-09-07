@@ -431,6 +431,7 @@ mod tests {
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
             Capability::HostCallDrawScene,
+            Capability::HostCallScrollToRun,
         ] {
             let Decision::NeedsConsent { reason, missing } =
                 check(&[cap], Some(&stored), &bh(HASH_A))
