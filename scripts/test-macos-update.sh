@@ -18,10 +18,21 @@ cargo test -p sleipnir-update-helper --test supervisor
 # The integration suite uses fake process/filesystem/launcher adapters to prove
 # success, timeout, launch failure, rollback failure, and unsafe termination.
 # Packaging verification below proves the production helper is embedded and
-# covered by the application bundle signature.
-if [[ -d build/Sleipnir.app ]]; then
-  test -x build/Sleipnir.app/Contents/MacOS/sleipnir-update-helper
-  codesign --verify --deep --strict build/Sleipnir.app
+# covered by the application bundle signature. CI assembles the bundle at the
+# repository root (./Sleipnir.app); scripts/make-app.sh uses build/Sleipnir.app.
+APP=""
+for candidate in build/Sleipnir.app Sleipnir.app; do
+  if [[ -d "${candidate}" ]]; then
+    APP="${candidate}"
+    break
+  fi
+done
+if [[ -n "${APP}" ]]; then
+  test -x "${APP}/Contents/MacOS/sleipnir-update-helper"
+  codesign --verify --deep --strict "${APP}"
+elif [[ -n "${CI:-}" ]]; then
+  echo "ERROR: Sleipnir.app not found at ./Sleipnir.app or build/Sleipnir.app" >&2
+  exit 1
 fi
 
 echo "macOS transactional update tests: PASS"

@@ -535,12 +535,22 @@ fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
 impl AppShell {
     fn construct(window: &mut Window, cx: &mut Context<Self>) -> Self {
         UpdateModel::init(cx);
+        // The outcome is already captured in the model, so terminal
+        // transactions are cleared immediately instead of depending on the
+        // user pressing the dialog's Close button.
+        if matches!(
+            cx.global::<UpdateModel>().state,
+            UpdateUiState::Updated { .. } | UpdateUiState::RolledBack { .. }
+        ) {
+            let _ = updater::install::acknowledge_active_outcome();
+        }
         let has_update_outcome = matches!(
             cx.global::<UpdateModel>().state,
             UpdateUiState::Updated { .. }
                 | UpdateUiState::RolledBack { .. }
                 | UpdateUiState::ManualInstallRequired { .. }
                 | UpdateUiState::RecoveryRequired { .. }
+                | UpdateUiState::Failed(_)
         );
         crate::plugin_runtime::PluginRuntime::init(cx);
         let plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
@@ -627,6 +637,8 @@ impl AppShell {
         shell._quit_subscription = Some(cx.on_app_quit(|this, cx| {
             this.emit_all_panes_closed(cx);
             RunLedgerGlobal::flush_now_in(cx);
+            // Quitting from the update dialog also acknowledges the outcome.
+            let _ = updater::install::acknowledge_active_outcome();
             async {}
         }));
         // Resident plugins need a live session to receive events. This is

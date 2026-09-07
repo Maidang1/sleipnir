@@ -15,6 +15,7 @@ path = "src/lib.rs"
 anyhow.workspace = true
 dirs.workspace = true
 ed25519-dalek = "2"
+libc.workspace = true
 log.workspace = true
 rand.workspace = true
 semver.workspace = true

@@ -39,6 +39,22 @@ impl AppShell {
     }
 
     pub(super) fn close_update(&mut self, cx: &mut Context<Self>) {
+        // Every exit path from the dialog (Close button, backdrop, Esc, Cmd+Q)
+        // acknowledges a finished or failed transaction so a stale active.json
+        // can never block later updates.
+        if updater::install::acknowledge_active_outcome().is_ok() {
+            let state = &mut cx.global_mut::<UpdateModel>().state;
+            if matches!(
+                state,
+                UpdateUiState::Updated { .. }
+                    | UpdateUiState::RolledBack { .. }
+                    | UpdateUiState::ManualInstallRequired { .. }
+                    | UpdateUiState::RecoveryRequired { .. }
+                    | UpdateUiState::Failed(_)
+            ) {
+                *state = UpdateUiState::Idle;
+            }
+        }
         self.mode.close(OverlayKind::Update);
         cx.notify();
     }
@@ -329,8 +345,6 @@ impl AppShell {
                     "Update complete".into(),
                     format!("Sleipnir was updated to {version}.").into(),
                     vec![self.update_button("upd-ack-success", "Close", tokens, true, cx, |this, _, cx| {
-                        let _ = updater::install::acknowledge_active_outcome();
-                        cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
                         this.close_update(cx);
                     }).into_any_element()],
                 ),
@@ -338,8 +352,6 @@ impl AppShell {
                     "Update couldn’t be completed".into(),
                     format!("Sleipnir {from} failed to start ({reason}), so version {to} was restored.").into(),
                     vec![self.update_button("upd-ack-rollback", "Close", tokens, true, cx, |this, _, cx| {
-                        let _ = updater::install::acknowledge_active_outcome();
-                        cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
                         this.close_update(cx);
                     }).into_any_element()],
                 ),
@@ -354,8 +366,6 @@ impl AppShell {
                             }
                         }).into_any_element(),
                         self.update_button("upd-ack-manual", "Close", tokens, true, cx, |this, _, cx| {
-                            let _ = updater::install::acknowledge_active_outcome();
-                            cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
                             this.close_update(cx);
                         }).into_any_element(),
                     ],
@@ -366,8 +376,6 @@ impl AppShell {
                     vec![
                         self.update_button("upd-recovery-releases", "Open Releases", tokens, false, cx, |_, _, cx| cx.open_url(updater::RELEASES_PAGE)).into_any_element(),
                         self.update_button("upd-ack-recovery", "Close", tokens, true, cx, |this, _, cx| {
-                            let _ = updater::install::acknowledge_active_outcome();
-                            cx.global_mut::<UpdateModel>().state = UpdateUiState::Idle;
                             this.close_update(cx);
                         }).into_any_element(),
                     ],

@@ -193,8 +193,39 @@ pub fn fetch_latest(current_version: &str) -> Result<UpdateStatus> {
     let mut resp = ureq::get(&url)
         .header("User-Agent", USER_AGENT)
         .header("Accept", "application/vnd.github+json")
+        .config()
+        .http_status_as_error(false)
+        .build()
         .call()
         .context("request latest release")?;
+    if resp.status().as_u16() == 403 {
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        if header("x-ratelimit-remaining").as_deref() == Some("0") {
+            // Anonymous GitHub API quota is 60 requests/hour per IP, which a
+            // shared egress IP exhausts quickly.
+            let retry = header("x-ratelimit-reset")
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|reset| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let minutes = reset.saturating_sub(now).div_ceil(60);
+                    format!(" Try again in about {minutes} minute(s).")
+                })
+                .unwrap_or_default();
+            bail!("GitHub rate-limited the update check.{retry}");
+        }
+        bail!("GitHub refused the update check (HTTP 403)");
+    }
+    if !resp.status().is_success() {
+        bail!("latest release request failed with HTTP {}", resp.status());
+    }
     let release: Value = resp.body_mut().read_json().context("decode release JSON")?;
     let tag = release
         .get("tag_name")
@@ -416,6 +447,9 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
     // Materialize the candidate beside the installed app so RENAME_SWAP is
     // same-volume and atomic. Failure here leaves the running app untouched.
     let root = crate::install::updates_root().map_err(anyhow::Error::msg)?;
+    // A previous transaction may be stuck (supervisor died mid-update); finish
+    // or roll it back first instead of refusing every later update.
+    crate::install::recover_active_transaction(&root).map_err(anyhow::Error::msg)?;
     let (transaction_path, mut transaction) = crate::install::new_transaction(
         &root,
         app_bundle,
