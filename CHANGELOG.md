@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 ### Features
 - Plugin protocol v2 gains `HostCall::ScrollToRun` (jump a pane back to a run's scrollback anchor), `HostEvent::PaneClosed`, and an `inferred` flag on `RunStarted` that distinguishes OSC 133 precise events from busy-probe guesses.
