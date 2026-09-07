@@ -26,3 +26,7 @@ docs/upstream-last-diff.txt
 
 # local agent inspection cache
 .agent-cache/
+
+# standalone example plugin (own workspace)
+examples/sleipnir_plugin_disk3d/target/
+examples/sleipnir_plugin_disk3d/Cargo.lock

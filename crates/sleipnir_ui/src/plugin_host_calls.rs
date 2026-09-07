@@ -124,7 +124,7 @@ pub fn plan_call(
     }
     // DrawScene is exempt from the anti-spam limiter: it only repaints the
     // host's own surface (no external side effect like Notify / OpenPane),
-    // and legitimate animations (e.g. disk3d Spin) exceed the budget.
+    // and legitimate animations (e.g. a spinning scene) exceed the budget.
     if !matches!(call, HostCall::DrawScene { .. }) && !limiter.allow(plugin_id, now_ms) {
         return CallPlan::Reply(HostCallResult::Error {
             message: "rate limited".into(),
@@ -458,7 +458,7 @@ mod tests {
     fn draw_scene_is_exempt_from_the_rate_limiter() {
         // DrawScene only repaints the host's own surface; it has no external
         // side effect like Notify / OpenPane. The anti-spam limiter must not
-        // freeze a granted animation (disk3d Spin sends 22 frames in 1.8s).
+        // freeze a granted animation (a spinning scene sends 22 frames in 1.8s).
         let mut limiter = HostCallLimiter::new();
         let granted = [Capability::HostCallDrawScene];
         let call = scene(1, 1, vec![bar(0, 0)]);

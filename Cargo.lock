@@ -5878,17 +5878,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sleipnir-plugin-disk3d"
-version = "0.1.0"
-dependencies = [
- "plugin_protocol",
- "serde_json",
- "sleipnir-plugin",
- "sleipnir_widget",
- "uuid",
-]
-
-[[package]]
 name = "sleipnir-update-helper"
 version = "0.1.0"
 dependencies = [

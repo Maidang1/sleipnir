@@ -118,11 +118,11 @@ that fallback; the host vector path uses square pixels and needs no such factor.
 ## Install
 
 ```sh
-cargo build -p sleipnir-plugin-disk3d
+cargo build --manifest-path examples/sleipnir_plugin_disk3d/Cargo.toml
 
 mkdir -p ~/.config/sleipnir/plugins/disk3d
-cp target/debug/sleipnir-plugin-disk3d ~/.config/sleipnir/plugins/disk3d/
-cp crates/sleipnir_plugin_disk3d/plugin.json ~/.config/sleipnir/plugins/disk3d/
+cp examples/sleipnir_plugin_disk3d/target/debug/sleipnir-plugin-disk3d ~/.config/sleipnir/plugins/disk3d/
+cp examples/sleipnir_plugin_disk3d/plugin.json ~/.config/sleipnir/plugins/disk3d/
 ```
 
 Plugins are off by default; enable them in `~/.config/sleipnir/settings.json`:
@@ -142,7 +142,7 @@ The widget tree is host-rendered, so this example approximates the panel on
 stdout — useful when changing the raster:
 
 ```sh
-cargo run -p sleipnir-plugin-disk3d --example preview -- ~/some/dir
+cargo run --manifest-path examples/sleipnir_plugin_disk3d/Cargo.toml --example preview -- ~/some/dir
 ```
 
 ## Layout

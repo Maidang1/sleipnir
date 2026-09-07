@@ -163,7 +163,7 @@ hex, no RGB.
 `Context::render` is a push: it can be sent at any time, not only as a reply.
 `Context::call` issues a `HostCall` and waits for the matching `Reply`.
 
-See `crates/sleipnir_plugin_disk3d` for a complete, runnable Panel example
+See `examples/sleipnir_plugin_disk3d` for a complete, runnable Panel example
 that renders a 3D disk-usage chart (a software rasteriser whose framebuffer is
 a `col` of `text` rows — the closed widget set is enough for that, since one
 Unicode scalar is one cell and `wrap_text` honours `\n`).

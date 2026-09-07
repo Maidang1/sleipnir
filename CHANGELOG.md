@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changes
+- The disk3d plugin moved from `crates/sleipnir_plugin_disk3d` to `examples/sleipnir_plugin_disk3d` and is no longer part of the Cargo workspace; it is a standalone example plugin (it was never bundled into release artifacts). If you previously installed it, `~/.config/sleipnir/plugins/disk3d/` keeps working; delete that directory and its `plugin-grants.json` entry to remove it.
+
+### Documentation
+- `docs/kitty-graphics.md` now states clearly that Kitty Graphics is on the roadmap (planned, not yet implemented) and links the implementation/removal history in ADR-0019.
+
 ## 0.6.0
 
 ### Features

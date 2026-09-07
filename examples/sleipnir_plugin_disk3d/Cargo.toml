@@ -1,0 +1,26 @@
+# Standalone example plugin — outside the main Sleipnir workspace.
+# Build with: cargo build --manifest-path examples/sleipnir_plugin_disk3d/Cargo.toml
+[workspace]
+
+[package]
+name = "sleipnir-plugin-disk3d"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sleipnir-plugin-disk3d"
+path = "src/main.rs"
+
+[dependencies]
+sleipnir-plugin = { path = "../../crates/sleipnir_plugin_sdk" }
+plugin_protocol = { path = "../../crates/plugin_protocol" }
+uuid = { version = "1", features = ["v4", "serde"] }
+serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
+
+[dev-dependencies]
+sleipnir_widget = { path = "../../crates/sleipnir_widget" }

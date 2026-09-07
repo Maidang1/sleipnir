@@ -181,6 +181,9 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+      - name: Test example plugin (disk3d)
+        run: cargo test --manifest-path examples/sleipnir_plugin_disk3d/Cargo.toml
+
       - name: Test packaging and installer scripts
         run: |
           bash scripts/tests/test-linux-package.sh
