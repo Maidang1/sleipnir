@@ -2,8 +2,19 @@
 
 ## Unreleased
 
+### Features
+- Plugin protocol v2 gains `HostCall::ScrollToRun` (jump a pane back to a run's scrollback anchor), `HostEvent::PaneClosed`, and an `inferred` flag on `RunStarted` that distinguishes OSC 133 precise events from busy-probe guesses.
+
 ### Changes
+- Pixel is now the only UI style: the `ui_style` setting and the default chrome are removed, and all chrome uses pixel-art geometry. A `"ui_style"` key in an existing `settings.json` is ignored.
+- Run Ledger moved out of the core into a resident plugin (`crates/sleipnir_plugin_runledger`): grouped run list, persistence (`runs.json`), and jump-back-to-output are provided by the plugin via the extended protocol, while the core keeps only an in-memory fact registry feeding tab failed wash, the Dock badge, run anchoring, and `sleipnir-ctl wait`. The ledger overlay panel, its palette/menu actions, and the `run_ledger_retention_days` setting are removed from the core.
 - The disk3d plugin moved from `crates/sleipnir_plugin_disk3d` to `examples/sleipnir_plugin_disk3d` and is no longer part of the Cargo workspace; it is a standalone example plugin (it was never bundled into release artifacts). If you previously installed it, `~/.config/sleipnir/plugins/disk3d/` keeps working; delete that directory and its `plugin-grants.json` entry to remove it.
+
+### Fixes
+- macOS auto-update: an interrupted update transaction (supervisor died mid-update) no longer blocks every later update with "another update transaction is already active" — startup/install now recovers, rolls back, or finishes the stale transaction, and interrupted transactions surface as a visible failure instead of silently mapping to idle.
+- Every update-dialog exit path (Close, backdrop, Esc, Cmd+Q) acknowledges the update outcome, and terminal-state transactions are auto-cleared at startup.
+- Update checks that hit GitHub API anonymous rate limiting (HTTP 403) now say so with a retry hint instead of a generic failure.
+- `scripts/test-macos-update.sh` packaging verification also covers the CI layout (`./Sleipnir.app` at repo root), where it was previously skipped silently.
 
 ### Documentation
 - `docs/kitty-graphics.md` now states clearly that Kitty Graphics is on the roadmap (planned, not yet implemented) and links the implementation/removal history in ADR-0019.
