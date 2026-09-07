@@ -87,6 +87,22 @@ fn outcome_state() -> UpdateUiState {
                     .into()
             }),
         },
+        // A non-terminal phase usually means the supervisor is still working
+        // (e.g. the candidate is awaiting its health check), which must stay
+        // invisible. Surface only transactions that can no longer advance: the
+        // supervisor recorded an error or is no longer running.
+        _ if transaction.error_code.is_some()
+            || !updater::install::helper_alive(&transaction) =>
+        {
+            let detail = transaction
+                .os_error
+                .unwrap_or_else(|| "the update did not finish".into());
+            UpdateUiState::Failed(format!(
+                "The previous update to {} was interrupted ({detail}). \
+                 You can simply try updating again.",
+                transaction.new_version
+            ))
+        }
         _ => UpdateUiState::Idle,
     }
 }

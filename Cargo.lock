@@ -6928,6 +6928,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "ed25519-dalek",
+ "libc",
  "log",
  "rand 0.9.5",
  "semver",

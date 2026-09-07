@@ -4,8 +4,12 @@ use std::path::{Path, PathBuf};
 use crate::transaction::{HealthMarker, Phase, Transaction, TransactionError, save_atomic};
 #[cfg(target_os = "macos")]
 use rand::RngCore as _;
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io::Write as _;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt as _;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 #[cfg(target_os = "macos")]
@@ -202,20 +206,179 @@ pub fn clear_active_pointer(root: &Path) -> Result<(), String> {
 
 pub fn acknowledge_active_outcome() -> Result<(), String> {
     let root = updates_root()?;
-    let Some(path) = read_active_pointer(&root)? else {
+    acknowledge_outcome_at(&root)
+}
+
+fn acknowledge_outcome_at(root: &Path) -> Result<(), String> {
+    let Some(path) = read_active_pointer(root)? else {
         return Ok(());
     };
     let transaction = crate::transaction::load(&path).map_err(|e| e.to_string())?;
-    if !matches!(
+    let final_outcome = matches!(
         transaction.phase,
         Phase::Committed
             | Phase::RolledBack
             | Phase::ManualInstallRequired
             | Phase::RecoveryRequired
-    ) {
+    );
+    // A transaction that recorded an error belongs to a supervisor that has
+    // already exited, so it will never advance on its own and is safe to clear.
+    if !final_outcome && transaction.error_code.is_none() {
         return Err("active update has not reached a final outcome".into());
     }
-    clear_active_pointer(&root)
+    clear_active_pointer(root)
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 performs an existence/permission check only.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Whether the supervisor that owns `transaction` is still running.
+pub fn helper_alive(transaction: &Transaction) -> bool {
+    transaction.helper_pid.is_some_and(process_alive)
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_version(app: &Path) -> Option<String> {
+    let output = Command::new("/usr/bin/defaults")
+        .arg("read")
+        .arg(app.join("Contents/Info"))
+        .arg("CFBundleShortVersionString")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!version.is_empty()).then_some(version)
+}
+
+#[cfg(target_os = "macos")]
+const RENAME_SWAP: libc::c_uint = 0x0000_0002;
+#[cfg(target_os = "macos")]
+const AT_FDCWD: libc::c_int = -2;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn renameatx_np(
+        from_fd: libc::c_int,
+        from: *const libc::c_char,
+        to_fd: libc::c_int,
+        to: *const libc::c_char,
+        flags: libc::c_uint,
+    ) -> libc::c_int;
+}
+
+#[cfg(target_os = "macos")]
+fn swap_paths(first: &Path, second: &Path) -> Result<(), String> {
+    let first = CString::new(first.as_os_str().as_bytes())
+        .map_err(|_| "first path contains NUL".to_string())?;
+    let second = CString::new(second.as_os_str().as_bytes())
+        .map_err(|_| "second path contains NUL".to_string())?;
+    // SAFETY: both C strings are NUL terminated and remain alive for the call.
+    let result = unsafe {
+        renameatx_np(
+            AT_FDCWD,
+            first.as_ptr(),
+            AT_FDCWD,
+            second.as_ptr(),
+            RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().to_string())
+    }
+}
+
+/// Resolve a leftover active transaction so a new update can start.
+///
+/// The supervisor can die between phases (crash, reboot, `kill -9`), leaving
+/// `active.json` pointing at a transaction that will never advance; without
+/// recovery `new_transaction` would refuse every later update.
+///
+/// Returns `Err` when a live supervisor still owns the transaction, or when
+/// the on-disk state is contradictory and needs manual recovery.
+#[cfg(target_os = "macos")]
+pub fn recover_active_transaction(root: &Path) -> Result<(), String> {
+    use crate::recovery::{RecoveryAction, RecoveryEvidence};
+    use crate::transaction::UpdateErrorCode;
+
+    let Some(path) = read_active_pointer(root)? else {
+        return Ok(());
+    };
+    let mut transaction = crate::transaction::load(&path).map_err(|e| e.to_string())?;
+    let evidence = RecoveryEvidence {
+        phase: transaction.phase,
+        old_version: transaction.old_version.clone(),
+        new_version: transaction.new_version.clone(),
+        installed_version: bundle_version(&transaction.installed_bundle_path),
+        adjacent_version: bundle_version(&transaction.adjacent_candidate_path),
+        helper_alive: helper_alive(&transaction),
+    };
+    // Drop the staged `.app` copy and its staging directory, if any survived.
+    fn discard_staging(transaction: &Transaction) {
+        let _ = std::fs::remove_dir_all(&transaction.adjacent_candidate_path);
+        if let Some(parent) = transaction.adjacent_candidate_path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    match crate::recovery::decide(&evidence) {
+        RecoveryAction::WaitForSupervisor => {
+            Err("another update transaction is already active".into())
+        }
+        RecoveryAction::RetainPrepared => {
+            // The old install was never touched; the staged candidate is junk.
+            discard_staging(&transaction);
+            clear_active_pointer(root)
+        }
+        RecoveryAction::FinishCommittedCleanup | RecoveryAction::None => {
+            discard_staging(&transaction);
+            clear_active_pointer(root)
+        }
+        RecoveryAction::RestoreOldBySwap => {
+            // The candidate was swapped in but never committed; put the
+            // retained old bundle back before starting over.
+            if transaction.phase != Phase::RollingBack {
+                transaction
+                    .transition(Phase::RollingBack)
+                    .map_err(|e| e.to_string())?;
+            }
+            swap_paths(
+                &transaction.installed_bundle_path,
+                &transaction.adjacent_candidate_path,
+            )?;
+            transaction
+                .transition(Phase::RolledBack)
+                .map_err(|e| e.to_string())?;
+            if transaction.os_error.is_none() {
+                transaction.os_error =
+                    Some("the interrupted update was rolled back".to_string());
+            }
+            save_atomic(&path, &transaction).map_err(|e| e.to_string())?;
+            discard_staging(&transaction);
+            clear_active_pointer(root)
+        }
+        RecoveryAction::RecoveryRequired => {
+            crate::transaction::force_recovery_required(
+                &mut transaction,
+                UpdateErrorCode::RecoveryStateInconsistent,
+                "the interrupted update left the installation in an inconsistent state",
+            );
+            let _ = save_atomic(&path, &transaction);
+            Err("the previous update left the installation in an inconsistent \
+                 state; reinstall manually from the releases page"
+                .into())
+        }
+    }
 }
 
 pub fn write_health_marker(
@@ -310,5 +473,132 @@ mod tests {
         let error =
             new_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap_err();
         assert!(error.contains("already active"));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_fake_bundle(app: &Path, version: &str) {
+        let contents = app.join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <plist version=\"1.0\"><dict>\n\
+                 <key>CFBundleShortVersionString</key><string>{version}</string>\n\
+                 </dict></plist>\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn acknowledge_refuses_a_healthy_in_flight_transaction() {
+        let root = tempdir().unwrap();
+        let mut transaction = Transaction::new(
+            "11111111-1111-4111-8111-111111111111".into(),
+            "ab".repeat(32),
+            "0.3.1".into(),
+            "0.3.2".into(),
+            42,
+            root.path().join("Sleipnir.app"),
+            root.path().join("candidate.app"),
+            root.path().join("update.dmg"),
+        )
+        .unwrap();
+        transaction.transition(Phase::Prepared).unwrap();
+        let path = root.path().join("tx/transaction.json");
+        save_atomic(&path, &transaction).unwrap();
+        write_active_pointer(root.path(), &path).unwrap();
+        assert!(acknowledge_outcome_at(root.path()).is_err());
+        assert!(read_active_pointer(root.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn acknowledge_clears_an_errored_non_terminal_transaction() {
+        let root = tempdir().unwrap();
+        let mut transaction = Transaction::new(
+            "11111111-1111-4111-8111-111111111111".into(),
+            "ab".repeat(32),
+            "0.3.1".into(),
+            "0.3.2".into(),
+            42,
+            root.path().join("Sleipnir.app"),
+            root.path().join("candidate.app"),
+            root.path().join("update.dmg"),
+        )
+        .unwrap();
+        transaction.transition(Phase::Prepared).unwrap();
+        transaction.fail(
+            crate::transaction::UpdateErrorCode::OldProcessWatchFailed,
+            "simulated supervisor failure",
+        );
+        let path = root.path().join("tx/transaction.json");
+        save_atomic(&path, &transaction).unwrap();
+        write_active_pointer(root.path(), &path).unwrap();
+        acknowledge_outcome_at(root.path()).unwrap();
+        assert!(read_active_pointer(root.path()).unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn recovery_clears_prepared_zombie_and_allows_a_new_update() {
+        use crate::transaction::UpdateErrorCode;
+        let root = tempdir().unwrap();
+        let install_parent = tempdir().unwrap();
+        let installed = install_parent.path().join("Sleipnir.app");
+        write_fake_bundle(&installed, "0.3.1");
+        let artifact = root.path().join("update.dmg");
+        let (path, mut transaction) =
+            new_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap();
+        activate_prepared_transaction(root.path(), &path, &mut transaction).unwrap();
+        // The supervisor records a failure and dies: phase stays Prepared.
+        transaction.fail(
+            UpdateErrorCode::OldProcessExitTimeout,
+            "simulated supervisor death",
+        );
+        save_atomic(&path, &transaction).unwrap();
+        std::fs::create_dir_all(&transaction.adjacent_candidate_path).unwrap();
+
+        recover_active_transaction(root.path()).unwrap();
+        assert!(read_active_pointer(root.path()).unwrap().is_none());
+        assert!(!transaction.adjacent_candidate_path.exists());
+
+        // A later update can open a fresh transaction instead of being
+        // permanently blocked by the zombie.
+        let (_path, _transaction) =
+            new_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn recovery_rolls_back_an_uncommitted_swap() {
+        use crate::transaction::UpdateErrorCode;
+        let root = tempdir().unwrap();
+        let install_parent = tempdir().unwrap();
+        let installed = install_parent.path().join("Sleipnir.app");
+        write_fake_bundle(&installed, "0.3.1");
+        let artifact = root.path().join("update.dmg");
+        let (path, mut transaction) =
+            new_transaction(root.path(), &installed, &artifact, "0.3.1", "0.3.2", 42).unwrap();
+        activate_prepared_transaction(root.path(), &path, &mut transaction).unwrap();
+        transaction.transition(Phase::WaitingForOldExit).unwrap();
+        transaction.transition(Phase::Swapping).unwrap();
+        transaction.transition(Phase::LaunchingCandidate).unwrap();
+        transaction.transition(Phase::AwaitingHealth).unwrap();
+        transaction.fail(
+            UpdateErrorCode::HealthConfirmationTimeout,
+            "simulated supervisor death after swap",
+        );
+        save_atomic(&path, &transaction).unwrap();
+        // The swap already happened: candidate installed, old bundle adjacent.
+        write_fake_bundle(&installed, "0.3.2");
+        write_fake_bundle(&transaction.adjacent_candidate_path, "0.3.1");
+
+        recover_active_transaction(root.path()).unwrap();
+        assert_eq!(bundle_version(&installed).as_deref(), Some("0.3.1"));
+        assert!(!transaction.adjacent_candidate_path.exists());
+        assert!(read_active_pointer(root.path()).unwrap().is_none());
+        let restored = crate::transaction::load(&path).unwrap();
+        assert_eq!(restored.phase, Phase::RolledBack);
     }
 }
