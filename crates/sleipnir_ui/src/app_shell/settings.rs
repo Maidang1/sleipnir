@@ -9,7 +9,7 @@ use gpui::{
     deferred, div, prelude::FluentBuilder as _, px,
 };
 use sleipnir_settings::{
-    TerminalSettings, ThemeName, ThemeSetting, UiStyle, default_font_family, palette_for_theme,
+    TerminalSettings, ThemeName, ThemeSetting, default_font_family, palette_for_theme,
 };
 
 use super::{AppShell, OpenSettings, SettingsSection, appearance_of};
@@ -182,8 +182,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let section = self.settings_section;
-        let style = pixel::active_style(cx);
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
 
         // ── Pixel-terminal tab strip: active section gets a boxed label ──
         let mut tab_strip = div()
@@ -236,7 +235,7 @@ impl AppShell {
                 .render_settings_general_section(tokens, cx)
                 .into_any_element(),
             SettingsSection::Shortcuts => self
-                .render_settings_shortcuts_section(tokens, style)
+                .render_settings_shortcuts_section(tokens)
                 .into_any_element(),
         };
 
@@ -303,11 +302,6 @@ impl AppShell {
             .flex()
             .flex_col()
             .relative()
-            .when(style == UiStyle::Default, |el| {
-                el.bg(tokens.surface)
-                    .border_2()
-                    .border_color(tokens.border)
-            })
             .text_color(tokens.fg)
             .font_family(mono)
             .overflow_hidden()
@@ -321,10 +315,8 @@ impl AppShell {
             }])
             // Keep clicks inside the panel from reaching the backdrop.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            // Pixel mode: staircase-corner background painted behind content.
-            .when(style == UiStyle::Pixel, |el| {
-                el.child(pixel::pixel_panel_bg(tokens.surface, tokens.border))
-            })
+            // Staircase-corner background painted behind content.
+            .child(pixel::pixel_panel_bg(tokens.surface, tokens.border))
             // Header: command-line style title + tab strip
             .child(
                 div()
@@ -417,8 +409,7 @@ impl AppShell {
     ) -> impl IntoElement {
         let settings = TerminalSettings::get_global(cx);
         let ligatures = settings.font_ligatures;
-        let style = settings.ui_style;
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
 
         // Card background: slightly elevated from surface
         let card_bg = tokens.hover;
@@ -536,12 +527,8 @@ impl AppShell {
 
     /// Read-only shortcut reference generated from the same command catalog
     /// used by the command palette, so labels stay in sync with the bindings.
-    fn render_settings_shortcuts_section(
-        &self,
-        tokens: &ChromeTokens,
-        style: UiStyle,
-    ) -> impl IntoElement {
-        let border_w = pixel::border_width(style, px(1.0));
+    fn render_settings_shortcuts_section(&self, tokens: &ChromeTokens) -> impl IntoElement {
+        let border_w = pixel::PIXEL_BORDER;
         let mut list = div()
             .id("settings-shortcuts")
             .flex()
@@ -619,29 +606,14 @@ impl AppShell {
         on_toggle: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
         // Toggle switch colors
-        let style = pixel::active_style(cx);
-        let (track_bg, knob_bg) = match style {
-            UiStyle::Pixel => (
-                tokens.content_bg,
-                if enabled {
-                    tokens.accent
-                } else {
-                    tokens.fg_muted
-                },
-            ),
-            UiStyle::Default => (
-                if enabled {
-                    tokens.accent
-                } else {
-                    tokens.border
-                },
-                if enabled {
-                    Hsla::white()
-                } else {
-                    Hsla::white().opacity(0.9)
-                },
-            ),
-        };
+        let (track_bg, knob_bg) = (
+            tokens.content_bg,
+            if enabled {
+                tokens.accent
+            } else {
+                tokens.fg_muted
+            },
+        );
         let knob_offset = if enabled { px(16.0) } else { px(2.0) };
         div()
             .id(id)
@@ -684,9 +656,8 @@ impl AppShell {
                     .w(px(34.0))
                     .h(px(20.0))
                     .bg(track_bg)
-                    .when(style == UiStyle::Pixel, |el| {
-                        el.border_2().border_color(tokens.border)
-                    })
+                    .border_2()
+                    .border_color(tokens.border)
                     .relative()
                     .child(
                         div()
@@ -715,7 +686,7 @@ impl AppShell {
             .settings_theme_selected
             .min(items.len().saturating_sub(1));
         let catalog = TerminalSettings::user_themes(cx);
-        let border_w = pixel::border_width(pixel::active_style(cx), px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
 
         // Type-to-filter: shell-prompt style search field with block cursor.
         let filter_text: SharedString = if self.theme_query.is_empty() {

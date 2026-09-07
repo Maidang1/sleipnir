@@ -24,7 +24,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, size,
 };
 use run_ledger::{PaneKey, RunEvent};
-use sleipnir_settings::{Appearance, ConfirmClose, TerminalPalette, TerminalSettings, UiStyle};
+use sleipnir_settings::{Appearance, ConfirmClose, TerminalPalette, TerminalSettings};
 use std::path::PathBuf;
 
 use crate::chrome::pixel;
@@ -152,18 +152,14 @@ impl Render for TabDragPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
         let tokens = ChromeTokens::from_palette(&palette, window.is_window_active());
-        let style = pixel::active_style(cx);
         div()
             .px_3()
             .py_1()
-            .rounded(pixel::radius(style, px(6.0)))
+            .rounded(px(0.0))
             .bg(tokens.hover)
-            .border(pixel::border_width(style, px(1.0)))
+            .border(pixel::PIXEL_BORDER)
             .border_color(tokens.border)
-            .when(style == UiStyle::Default, |el| el.shadow_lg())
-            .when(style == UiStyle::Pixel, |el| {
-                el.shadow(pixel::hard_shadow(style))
-            })
+            .shadow(pixel::hard_shadow())
             .text_sm()
             .text_color(tokens.fg)
             .child(self.title.clone())
@@ -2030,12 +2026,7 @@ impl Render for AppShell {
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
         let fullscreen = window.is_fullscreen();
-        let ui_style = TerminalSettings::get_global(cx).ui_style;
-        let geo = ChromeGeometry::for_window_styled(
-            cfg!(not(target_os = "macos")),
-            fullscreen,
-            matches!(ui_style, sleipnir_settings::UiStyle::Pixel),
-        );
+        let geo = ChromeGeometry::for_window(cfg!(not(target_os = "macos")), fullscreen);
         let leading = geo.leading_pad;
         let chrome_h = geo.height;
         let banner_top = chrome_h;
@@ -2364,7 +2355,7 @@ impl Render for AppShell {
                             div()
                                 .px_3()
                                 .py_1()
-                                .rounded(pixel::radius(ui_style, px(6.0)))
+                                .rounded(px(0.0))
                                 .bg(tokens.accent.opacity(0.9))
                                 .text_size(px(12.0))
                                 .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
@@ -2386,9 +2377,9 @@ impl Render for AppShell {
                             div()
                                 .px_3()
                                 .py_1()
-                                .rounded(pixel::radius(ui_style, px(6.0)))
+                                .rounded(px(0.0))
                                 .bg(tokens.surface)
-                                .border(pixel::border_width(ui_style, px(1.0)))
+                                .border(pixel::PIXEL_BORDER)
                                 .border_color(tokens.accent)
                                 .text_size(px(12.0))
                                 .text_color(tokens.fg)

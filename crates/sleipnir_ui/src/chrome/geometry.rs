@@ -37,6 +37,7 @@ impl ChromeGeometry {
     }
 
     /// Chrome insets for the platform and current fullscreen state.
+    /// Tab chips and the content clip radius are always square (pixel style).
     pub fn for_window(desktop_controls: bool, fullscreen: bool) -> Self {        Self {
             height: px(32.0),
             traffic_light_position: point(px(12.0), px(8.0)),
@@ -46,7 +47,7 @@ impl ChromeGeometry {
                 leading_pad_for(desktop_controls)
             },
             tab_height: px(24.0),
-            tab_radius: px(5.0),
+            tab_radius: px(0.0),
             tab_min_width: px(80.0),
             tab_max_width: px(220.0),
             tab_gap: px(2.0),
@@ -54,24 +55,13 @@ impl ChromeGeometry {
             after_lights_gap: px(8.0),
             new_tab_hit: px(28.0),
             close_hit: px(24.0),
-            window_radius: px(10.0),
+            window_radius: px(0.0),
             trailing_pad: if fullscreen {
                 px(0.0)
             } else {
                 trailing_pad_for(desktop_controls)
             },
         }
-    }
-
-    /// Chrome insets for the platform, fullscreen state, and UI style.
-    /// Pixel mode squares the tab chips and the content clip radius.
-    pub fn for_window_styled(desktop_controls: bool, fullscreen: bool, pixel: bool) -> Self {
-        let mut geo = Self::for_window(desktop_controls, fullscreen);
-        if pixel {
-            geo.tab_radius = px(0.0);
-            geo.window_radius = px(0.0);
-        }
-        geo
     }
 
     /// Leading pad when the window is fullscreen.
@@ -110,11 +100,9 @@ mod tests {
 
     #[test]
     fn pixel_geometry_squares_tabs_and_window() {
-        let g = ChromeGeometry::for_window_styled(false, false, true);
+        let g = ChromeGeometry::for_window(false, false);
         assert_eq!(g.tab_radius, px(0.0));
         assert_eq!(g.window_radius, px(0.0));
-        let d = ChromeGeometry::for_window_styled(false, false, false);
-        assert_eq!(d, ChromeGeometry::for_window(false, false));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use gpui::{
     deferred, div, prelude::FluentBuilder as _, px, svg,
 };
 use run_ledger::Badge;
-use sleipnir_settings::{TerminalPalette, TerminalSettings, UiStyle};
+use sleipnir_settings::{TerminalPalette, TerminalSettings};
 
 use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview, TabMenuState};
 use crate::chrome::agent::{self, AgentKind};
@@ -106,18 +106,14 @@ impl Render for TabPathPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
         let tokens = ChromeTokens::from_palette(&palette, window.is_window_active());
-        let style = pixel::active_style(cx);
         div()
             .px_3()
             .py_1()
-            .rounded(pixel::radius(style, px(6.0)))
+            .rounded(px(0.0))
             .bg(tokens.hover)
-            .border(pixel::border_width(style, px(1.0)))
+            .border(pixel::PIXEL_BORDER)
             .border_color(tokens.border)
-            .when(style == UiStyle::Default, |el| el.shadow_lg())
-            .when(style == UiStyle::Pixel, |el| {
-                el.shadow(pixel::hard_shadow(style))
-            })
+            .shadow(pixel::hard_shadow())
             .text_sm()
             .text_color(tokens.fg)
             .child(self.text.clone())
@@ -153,7 +149,6 @@ pub(crate) fn render_tab_chip(
         .unwrap_or_else(|| "~".to_string())
         .into();
     let is_renaming = rename_buffer.is_some();
-    let style = pixel::active_style(cx);
     let bg = chip_background(is_active, is_hovered, is_bell, failed, tokens, palette);
     let fg = if is_active || is_bell || is_hovered || failed {
         tokens.fg
@@ -195,12 +190,10 @@ pub(crate) fn render_tab_chip(
         .cursor_pointer()
         .overflow_hidden()
         .when(is_renaming, |el| {
-            el.border(pixel::border_width(style, px(1.0)))
-                .border_color(tokens.accent)
+            el.border(pixel::PIXEL_BORDER).border_color(tokens.accent)
         })
         .when(is_bell, |el| {
-            el.border(pixel::border_width(style, px(1.0)))
-                .border_color(tokens.accent)
+            el.border(pixel::PIXEL_BORDER).border_color(tokens.accent)
         });
     let chip = chip.min_w(geo.tab_min_width).max_w(geo.tab_max_width);
 
@@ -294,7 +287,7 @@ pub(crate) fn render_tab_chip(
                 )))
                 .flex_shrink_0()
                 .px_1()
-                .rounded(pixel::radius(style, px(3.0)))
+                .rounded(px(0.0))
                 .bg(tokens.surface)
                 .text_xs()
                 .text_color(color)
@@ -306,7 +299,7 @@ pub(crate) fn render_tab_chip(
                     .id(("tab-close", tab_id))
                     .flex_shrink_0()
                     .px_1()
-                    .rounded(pixel::radius(style, px(3.0)))
+                    .rounded(px(0.0))
                     .text_xs()
                     .hover(|el| el.bg(tokens.hover))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -399,7 +392,6 @@ impl AppShell {
         cx: &mut Context<AppShell>,
     ) -> impl IntoElement {
         let state = self.tab_menu.expect("tab menu state checked by caller");
-        let style = pixel::active_style(cx);
         const ITEMS: [&str; AppShell::TAB_MENU_ITEM_COUNT] = [
             "Rename Tab",
             "Duplicate Tab",
@@ -472,14 +464,11 @@ impl AppShell {
                         .top(y)
                         .min_w(menu_w)
                         .py_1()
-                        .rounded(pixel::radius(style, px(6.0)))
-                        .border(pixel::border_width(style, px(1.0)))
+                        .rounded(px(0.0))
+                        .border(pixel::PIXEL_BORDER)
                         .border_color(tokens.border)
                         .bg(tokens.content_bg)
-                        .when(style == UiStyle::Default, |el| el.shadow_lg())
-                        .when(style == UiStyle::Pixel, |el| {
-                            el.shadow(pixel::hard_shadow(style))
-                        })
+                        .shadow(pixel::hard_shadow())
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())

@@ -282,7 +282,6 @@ impl AppShell {
             format!("{}/{}", self.find_active_index + 1, self.find_match_count).into()
         };
         // Legible on-accent foreground for the active toggle buttons.
-        let style = pixel::active_style(cx);
         let on_accent = if tokens.accent.l < 0.5 {
             Hsla::white()
         } else {
@@ -299,7 +298,7 @@ impl AppShell {
             .items_center()
             .gap_2()
             .bg(tokens.content_bg)
-            .border_b(pixel::border_width(style, px(1.0)))
+            .border_b(pixel::PIXEL_BORDER)
             .border_color(tokens.border)
             .child(
                 div()
@@ -314,7 +313,7 @@ impl AppShell {
                     .min_w_0()
                     .px_2()
                     .py_1()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .bg(tokens.hover)
                     .text_sm()
                     .text_color(query_color)
@@ -329,7 +328,7 @@ impl AppShell {
                     .id("find-match-case")
                     .px_2()
                     .py_0p5()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .when(self.find_match_case, |el| el.bg(tokens.accent))
@@ -350,7 +349,7 @@ impl AppShell {
                     .id("find-regex")
                     .px_2()
                     .py_0p5()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .when(self.find_regex, |el| el.bg(tokens.accent))
@@ -378,7 +377,7 @@ impl AppShell {
                     .id("find-prev")
                     .px_2()
                     .py_0p5()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_sm()
@@ -393,7 +392,7 @@ impl AppShell {
                     .id("find-next")
                     .px_2()
                     .py_0p5()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_sm()
@@ -408,7 +407,7 @@ impl AppShell {
                     .id("find-close")
                     .px_2()
                     .py_0p5()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_sm()

@@ -13,7 +13,6 @@ use gpui::{
 
 use super::AppShell;
 use crate::chrome::ChromeTokens;
-use crate::chrome::pixel;
 use crate::pane_tree::{PaneId, PaneKey};
 use crate::plugin_panel::{action_at, cell_from_pixels, cols_from_pixels, layout_surface};
 use sleipnir_widget::Tone;
@@ -113,7 +112,7 @@ impl AppShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(pixel::radius(pixel::active_style(cx), px(4.0)))
+                .rounded(px(0.0))
                 .cursor_pointer()
                 .text_color(tokens.fg_muted)
                 .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))

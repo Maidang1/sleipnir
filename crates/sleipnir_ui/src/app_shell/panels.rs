@@ -14,7 +14,6 @@ use gpui::{
     IntoElement, MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, deferred, div, prelude::FluentBuilder as _, px,
 };
-use sleipnir_settings::UiStyle;
 
 impl AppShell {
     pub(super) fn render_pane_facts(
@@ -23,8 +22,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use crate::chrome::pane_facts::localhost_copy;
-        let style = pixel::active_style(cx);
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
         let facts = self
             .active_pane_key()
             .and_then(|pane| self.facts.facts_for(pane))
@@ -156,8 +154,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use crate::run_ledger_panel::{can_jump, group_label, row_summary, rows_from_runs};
-        let style = pixel::active_style(cx);
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
         let ledger = cx.try_global::<RunLedgerGlobal>();
         let (rows, launch) = match ledger {
             Some(g) => (rows_from_runs(&g.snapshot()), g.launch_id()),
@@ -248,8 +245,7 @@ impl AppShell {
             format_activity, format_pid, format_uptime, live_plugin_count, rows_from_snapshots,
             running_indicator_label, state_label, tier_badge,
         };
-        let style = pixel::active_style(cx);
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
         let snapshots = crate::plugin_runtime::snapshots(cx);
         let names = crate::plugin_runtime::catalog_names(cx);
         let tiers = crate::plugin_runtime::grant_tiers();
@@ -295,7 +291,7 @@ impl AppShell {
                 .flex_col()
                 .gap_1()
                 .p_2()
-                .rounded(pixel::radius(style, px(6.0)))
+                .rounded(px(0.0))
                 .bg(tokens.content_bg)
                 .border(border_w)
                 .border_color(tokens.border)
@@ -349,7 +345,7 @@ impl AppShell {
                     .id(("plugin-kill", i))
                     .px_2()
                     .py_1()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .cursor_pointer()
                     .hover(|el| el.bg(tokens.hover))
                     .text_xs()
@@ -418,7 +414,7 @@ impl AppShell {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded(pixel::radius(style, px(4.0)))
+                                        .rounded(px(0.0))
                                         .cursor_pointer()
                                         .text_color(tokens.fg_muted)
                                         .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
@@ -442,7 +438,6 @@ impl AppShell {
             approve_label, capability_label, consent_copy, deny_label, tier_badge,
         };
         let prompt = self.plugin_consent.as_ref().map(|p| p.prompt.clone());
-        let style = pixel::active_style(cx);
         let (title, lead, warning, caps, tier) = match prompt.as_ref() {
             Some(prompt) => {
                 let copy = consent_copy(prompt);
@@ -478,26 +473,12 @@ impl AppShell {
             .id("plugin-consent-panel")
             .w(px(420.0))
             .relative()
-            .when(style == UiStyle::Default, |el| {
-                el.rounded(px(10.0))
-                    .bg(tokens.content_bg)
-                    .border_1()
-                    .border_color(if warning {
-                        tokens.accent
-                    } else {
-                        tokens.border
-                    })
-                    .shadow_lg()
-            })
-            .when(style == UiStyle::Pixel, |el| {
-                el.shadow(pixel::hard_shadow(style)).child(
-                    pixel::pixel_panel_bg(tokens.content_bg, if warning {
-                        tokens.accent
-                    } else {
-                        tokens.border
-                    }),
-                )
-            })
+            .shadow(pixel::hard_shadow())
+            .child(pixel::pixel_panel_bg(tokens.content_bg, if warning {
+                tokens.accent
+            } else {
+                tokens.border
+            }))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -544,7 +525,7 @@ impl AppShell {
                             .id("plugin-consent-approve")
                             .px_3()
                             .py_1p5()
-                            .rounded(pixel::radius(style, px(6.0)))
+                            .rounded(px(0.0))
                             .cursor_pointer()
                             .hover(|el| el.bg(tokens.hover))
                             .text_size(px(13.0))
@@ -559,7 +540,7 @@ impl AppShell {
                             .id("plugin-consent-deny")
                             .px_3()
                             .py_1p5()
-                            .rounded(pixel::radius(style, px(6.0)))
+                            .rounded(px(0.0))
                             .bg(tokens.accent)
                             .cursor_pointer()
                             .text_size(px(13.0))
@@ -641,8 +622,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         use crate::chrome::history_search::{filter_history, load_history_hits};
-        let style = pixel::active_style(cx);
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
         let hits = load_history_hits();
         let shown = filter_history(&hits, &self.history_query, 20);
         let selected = self.history_selected.min(shown.len().saturating_sub(1));
@@ -654,7 +634,7 @@ impl AppShell {
                     .id(("hist", i))
                     .px_2()
                     .py_0p5()
-                    .rounded(pixel::radius(style, px(4.0)))
+                    .rounded(px(0.0))
                     .text_xs()
                     .text_color(tokens.fg)
                     .cursor_pointer()
@@ -679,7 +659,7 @@ impl AppShell {
                 .bg(tokens.surface)
                 .border(border_w)
                 .border_color(tokens.border)
-                .rounded(pixel::radius(style, px(8.0)))
+                .rounded(px(0.0))
                 .occlude()
                 .child(
                     div()
@@ -703,7 +683,6 @@ impl AppShell {
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let confirm_style = pixel::active_style(cx);
         let (title, message, ok_label) = match self.close_confirm.as_ref() {
             Some(s) if s.kind == ConfirmKind::ClearRunLedger => {
                 ("Clear Run Ledger?", s.message.clone(), "Clear")
@@ -720,18 +699,8 @@ impl AppShell {
             .id("close-confirm-panel")
             .w(px(360.0))
             .relative()
-            .when(confirm_style == UiStyle::Default, |el| {
-                el.rounded(px(10.0))
-                    .bg(tokens.content_bg)
-                    .border_1()
-                    .border_color(tokens.border)
-                    .shadow_lg()
-            })
-            .when(confirm_style == UiStyle::Pixel, |el| {
-                el.shadow(pixel::hard_shadow(confirm_style)).child(
-                    pixel::pixel_panel_bg(tokens.content_bg, tokens.border),
-                )
-            })
+            .shadow(pixel::hard_shadow())
+            .child(pixel::pixel_panel_bg(tokens.content_bg, tokens.border))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -770,7 +739,7 @@ impl AppShell {
                             .id("close-confirm-cancel")
                             .px_3()
                             .py_1p5()
-                            .rounded(pixel::radius(confirm_style, px(6.0)))
+                            .rounded(px(0.0))
                             .cursor_pointer()
                             .hover(|el| el.bg(tokens.hover))
                             .text_size(px(13.0))
@@ -785,7 +754,7 @@ impl AppShell {
                             .id("close-confirm-ok")
                             .px_3()
                             .py_1p5()
-                            .rounded(pixel::radius(confirm_style, px(6.0)))
+                            .rounded(px(0.0))
                             .bg(tokens.accent)
                             .cursor_pointer()
                             .text_size(px(13.0))

@@ -1,6 +1,5 @@
 {
   "theme": "auto",
-  "ui_style": "default",
   "confirm_close": "dirty",
   "path_links": true,
   "background_opacity": 1.0,

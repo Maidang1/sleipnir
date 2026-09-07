@@ -1,5 +1,7 @@
 # Pixel UI Style Design
 
+> **Superseded (2026-09-07)**: pixel 已成为唯一 UI 风格，ui_style 设置已移除。本文档仅作历史参考。
+
 **Status:** Approved in conversation
 
 **Goal:** Add a switchable pixel-art geometry skin ("中度像素 / NES.css 感") to the whole Sleipnir UI, layered on top of the existing color-theme system, without changing text rendering, fonts, or the default look.

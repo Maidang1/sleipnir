@@ -13,7 +13,6 @@ use gpui::{
 use super::AppShell;
 use crate::chrome::ChromeTokens;
 use crate::chrome::pixel;
-use sleipnir_settings::UiStyle;
 
 /// One actionable row of the terminal context menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,8 +119,7 @@ impl AppShell {
             .expect("terminal menu state checked by caller");
         let items = self.terminal_menu_items();
         let selected = state.selected.min(items.len().saturating_sub(1));
-        let style = pixel::active_style(cx);
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
 
         // Keep the panel inside the window: menus opened near an edge would
         // otherwise render off-screen.
@@ -195,14 +193,11 @@ impl AppShell {
                         .top(y)
                         .min_w(menu_w)
                         .py_1()
-                        .rounded(pixel::radius(style, px(6.0)))
+                        .rounded(px(0.0))
                         .border(border_w)
                         .border_color(tokens.border)
                         .bg(tokens.content_bg)
-                        .when(style == UiStyle::Default, |el| el.shadow_lg())
-                        .when(style == UiStyle::Pixel, |el| {
-                            el.shadow(pixel::hard_shadow(style))
-                        })
+                        .shadow(pixel::hard_shadow())
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())

@@ -210,8 +210,7 @@ impl AppShell {
         let active_pane = tab.active_pane;
         let tab_id = tab.id;
         let zoomed = tab.zoomed_pane;
-        let style = pixel::active_style(cx);
-        let border_w = pixel::border_width(style, px(1.0));
+        let border_w = pixel::PIXEL_BORDER;
 
         // Gather every leaf (terminals and panels) in tree order.
         let mut leaves = Vec::new();
@@ -245,7 +244,7 @@ impl AppShell {
                             .right(px(8.0))
                             .px_2()
                             .py_0p5()
-                            .rounded(pixel::radius(style, px(4.0)))
+                            .rounded(px(0.0))
                             .bg(tokens.accent.opacity(0.85))
                             .text_size(px(11.0))
                             .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))

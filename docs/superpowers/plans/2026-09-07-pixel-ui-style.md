@@ -1,5 +1,7 @@
 # Pixel UI Style Implementation Plan
 
+> **Superseded (2026-09-07)**: pixel 已成为唯一 UI 风格，ui_style 设置已移除。本文档仅作历史参考。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an opt-in `"ui_style": "pixel"` setting that reskins all Sleipnir chrome with pixel-art geometry (square corners, 2px borders, hard offset shadows, staircase panel corners, blocky controls) while leaving text rendering, fonts, colors, and the default look untouched.

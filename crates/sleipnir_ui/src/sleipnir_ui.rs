@@ -67,7 +67,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, rgb,
 };
 use sleipnir_settings::{
-    NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings, UiStyle,
+    NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -902,7 +902,6 @@ struct LinkPreview {
 impl Render for LinkPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
-        let style = chrome::pixel::active_style(cx);
         let bg = palette
             .background
             .blend(gpui::Hsla::black().opacity(0.4))
@@ -910,7 +909,7 @@ impl Render for LinkPreview {
         div()
             .px_2()
             .py_1()
-            .rounded(chrome::pixel::radius(style, gpui::px(4.0)))
+            .rounded(gpui::px(0.0))
             .bg(bg)
             .text_color(palette.foreground)
             .text_size(gpui::px(12.0))
@@ -927,7 +926,6 @@ impl Render for TermView {
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
-        let toast_style = TerminalSettings::get_global(cx).ui_style;
         let toast_message = self
             .copy_toast
             .as_ref()
@@ -1058,21 +1056,15 @@ impl Render for TermView {
                                 .gap_2()
                                 .px_3()
                                 .py_1p5()
-                                .rounded(chrome::pixel::radius(toast_style, gpui::px(6.0)))
+                                .rounded(gpui::px(0.0))
                                 .bg(toast_bg)
-                                .border(chrome::pixel::border_width(toast_style, gpui::px(1.0)))
+                                .border(chrome::pixel::PIXEL_BORDER)
                                 .border_color(toast_border)
-                                .when(toast_style == UiStyle::Default, |el| el.shadow_md())
-                                .when(toast_style == UiStyle::Pixel, |el| {
-                                    el.shadow(chrome::pixel::hard_shadow(toast_style))
-                                })
+                                .shadow(chrome::pixel::hard_shadow())
                                 .child(
                                     div()
                                         .size(gpui::px(7.0))
-                                        .rounded(chrome::pixel::radius(
-                                            toast_style,
-                                            gpui::px(3.5),
-                                        ))
+                                        .rounded(gpui::px(0.0))
                                         .bg(toast_dot),
                                 )
                                 .child(

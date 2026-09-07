@@ -74,16 +74,6 @@ pub enum NotifyOnCommandFinish {
     Always,
 }
 
-/// Chrome geometry skin. `pixel` = square corners, 2px borders, hard
-/// shadows, staircase panel corners. Colors still come from the theme.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum UiStyle {
-    #[default]
-    Default,
-    Pixel,
-}
-
 /// Line height: bare number (Zed also accepts objects; we accept `f32` or `{"custom": n}`).
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
@@ -166,8 +156,6 @@ pub struct TerminalSettings {
     pub bell: TerminalBell,
     /// Active theme: a built-in name, or a user theme from `themes.json`.
     pub theme: ThemeSetting,
-    /// Chrome geometry skin: default | pixel. Default: default.
-    pub ui_style: UiStyle,
     /// User-defined inline palette; when set, it overrides `theme`.
     pub custom_theme: Option<CustomPalette>,
     /// Enable OpenType ligatures (`calt`) when the font supports them (M10).
@@ -304,7 +292,6 @@ impl Default for TerminalSettings {
             path_hyperlink_timeout_ms: 50,
             bell: TerminalBell::Off,
             theme: ThemeSetting::Builtin(ThemeName::Mocha),
-            ui_style: UiStyle::Default,
             custom_theme: None,
             font_ligatures: false,
             key_bindings: Vec::new(),
@@ -496,9 +483,6 @@ struct SettingsFile {
     /// Theme name: auto | mocha | … or any user theme name from `themes.json`.
     #[serde(default)]
     theme: Option<String>,
-    /// Chrome geometry skin: default | pixel. Default: default.
-    #[serde(default)]
-    ui_style: Option<UiStyle>,
     /// User-defined palette (hex colors); overrides `theme` when present.
     #[serde(default)]
     custom_theme: Option<CustomPalette>,
@@ -640,9 +624,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     } else if let Some(name) = file.terminal.theme {
         settings.theme = ThemeSetting::Builtin(name);
     }
-    if let Some(v) = file.ui_style {
-        settings.ui_style = v;
-    }
     if let Some(custom) = file.custom_theme {
         settings.custom_theme = Some(custom);
     }
@@ -783,7 +764,6 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
     }
     let default = SettingsFile {
         theme: Some("mocha".into()),
-        ui_style: Some(UiStyle::Default),
         custom_theme: None,
         key_bindings: None,
         confirm_close: Some(ConfirmClose::Dirty),
@@ -957,24 +937,6 @@ mod tests {
         assert_eq!(v["theme"], "nord");
         assert!(v.get("custom_theme").is_none());
         assert_eq!(v["path_links"], serde_json::Value::Bool(true));
-    }
-
-    #[test]
-    fn ui_style_defaults_to_default_and_parses_pixel() {
-        // Absent key -> Default.
-        let file: SettingsFile = serde_json::from_str("{}").unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert_eq!(settings.ui_style, UiStyle::Default);
-
-        // "pixel" parses.
-        let file: SettingsFile = serde_json::from_str(r#"{"ui_style":"pixel"}"#).unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert_eq!(settings.ui_style, UiStyle::Pixel);
-
-        // Round-trip serialization uses snake_case.
-        assert_eq!(serde_json::to_string(&UiStyle::Pixel).unwrap(), "\"pixel\"");
     }
 
     #[test]
