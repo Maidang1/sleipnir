@@ -2,16 +2,17 @@ import type { ReactNode } from 'react'
 import changelogRaw from '../../../CHANGELOG.md?raw'
 import { countEntries, parseChangelog, type ChangelogRelease } from '@/lib/changelog'
 import { GITHUB_URL } from '@/lib/release'
+import { Link } from '@/lib/router'
 import { StatusBar } from '@/components/status-bar'
 
 const RELEASES = parseChangelog(changelogRaw)
 
 /** ANSI accent per changelog section, matching the site's palette. */
 const SECTION_TONE: Record<string, string> = {
-  features: 'text-ansi-green border-ansi-green/30',
-  changes: 'text-ansi-cyan border-ansi-cyan/30',
-  fixes: 'text-ansi-amber border-ansi-amber/30',
-  documentation: 'text-ansi-purple border-ansi-purple/30',
+  features: 'text-ink border-ink/30',
+  changes: 'text-ink-soft border-ink-soft/30',
+  fixes: 'text-ink-mid border-ink-mid/30',
+  documentation: 'text-ink-mid border-ink-mid/30',
 }
 
 function sectionTone(name: string): string {
@@ -32,7 +33,7 @@ function renderInline(text: string): ReactNode[] {
       out.push(
         <code
           key={key++}
-          className="rounded-[2px] border border-border bg-muted px-1 py-0.5 text-[11px] text-ansi-cyan"
+          className="rounded-[2px] border border-border bg-muted px-1 py-0.5 text-[11px] text-ink-soft"
         >
           {token.slice(1, -1)}
         </code>,
@@ -45,7 +46,7 @@ function renderInline(text: string): ReactNode[] {
           href={link?.[2]}
           target="_blank"
           rel="noreferrer"
-          className="text-ansi-cyan underline decoration-ansi-cyan/40 underline-offset-2 outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
+          className="text-ink-soft underline decoration-ink-soft/40 underline-offset-2 outline-none transition-colors hover:text-ink focus-visible:text-ink"
         >
           {link?.[1] ?? token}
         </a>,
@@ -73,7 +74,7 @@ function ReleaseBody({ release }: { release: ChangelogRelease }) {
                 key={i}
                 className="flex gap-2 font-mono text-[12px] leading-[1.7] text-muted-foreground"
               >
-                <span className="shrink-0 text-ansi-dimgreen" aria-hidden>
+                <span className="shrink-0 text-ink-dim" aria-hidden>
                   -
                 </span>
                 <span>{renderInline(item)}</span>
@@ -94,7 +95,7 @@ function ReleaseHeader({ release }: { release: ChangelogRelease }) {
       : `${GITHUB_URL}/releases/tag/v${release.version}`
   return (
     <>
-      <span className="font-mono text-[13px] font-semibold text-ansi-green">
+      <span className="font-mono text-[13px] font-semibold text-ink">
         {release.version === 'unreleased' ? 'unreleased' : `v${release.version}`}
       </span>
       <span className="h-px flex-1 self-center bg-border" aria-hidden />
@@ -105,7 +106,7 @@ function ReleaseHeader({ release }: { release: ChangelogRelease }) {
         href={href}
         target="_blank"
         rel="noreferrer"
-        className="font-mono text-[11px] text-muted-foreground/70 outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
+        className="font-mono text-[11px] text-muted-foreground/70 outline-none transition-colors hover:text-ink focus-visible:text-ink"
       >
         github ↗
       </a>
@@ -136,22 +137,22 @@ export function LatestChangelog() {
     <div className="mt-6 max-w-3xl">
       <ReleaseBlock release={latest} />
       {rest > 0 && (
-        <a
-          href="#/changelog"
-          className="mt-3 inline-flex items-center gap-1.5 rounded-[2px] font-mono text-[12px] text-muted-foreground outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
+        <Link
+          to="/changelog"
+          className="mt-3 inline-flex items-center gap-1.5 rounded-[2px] font-mono text-[12px] text-muted-foreground outline-none transition-colors hover:text-ink focus-visible:text-ink"
         >
-          <span className="text-ansi-dimgreen" aria-hidden>
+          <span className="text-ink-dim" aria-hidden>
             &gt;
           </span>
           all releases ({rest} older) →
-        </a>
+        </Link>
       )}
     </div>
   )
 }
 
 /**
- * Full changelog at #/changelog: latest release expanded, older releases in
+ * Full changelog at /changelog: latest release expanded, older releases in
  * collapsible <details> rows.
  */
 export function ChangelogPage({ version }: { version: string | null }) {
@@ -160,27 +161,27 @@ export function ChangelogPage({ version }: { version: string | null }) {
     <div className="min-h-dvh pb-9">
       <header className="sticky top-0 z-40 flex h-11 items-center gap-3 border-b border-border bg-background/95 px-4 md:px-6">
         <div className="flex items-center gap-1.5" aria-hidden>
-          <span className="size-2.5 rounded-full bg-ansi-red/80" />
-          <span className="size-2.5 rounded-full bg-ansi-amber/80" />
-          <span className="size-2.5 rounded-full bg-ansi-green/80" />
+          <span className="size-2.5 rounded-full bg-ink-faint/80" />
+          <span className="size-2.5 rounded-full bg-ink-mid/80" />
+          <span className="size-2.5 rounded-full bg-ink/80" />
         </div>
         <span className="font-mono text-[12px] text-muted-foreground">
           <span className="text-foreground">sleipnir</span>
           <span className="hidden sm:inline"> — changelog — less</span>
         </span>
-        <a
-          href="#top"
-          className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-[2px] px-2 font-mono text-[12px] text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-ansi-green focus-visible:ring-2 focus-visible:ring-ring"
+        <Link
+          to="/"
+          className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-[2px] px-2 font-mono text-[12px] text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-ink focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <span className="text-ansi-dimgreen" aria-hidden>
+          <span className="text-ink-dim" aria-hidden>
             &gt;
           </span>
           cd ..
-        </a>
+        </Link>
       </header>
 
       <main className="mx-auto w-full max-w-[1200px] px-5 pt-14 md:px-8">
-        <p className="font-mono text-[12px] tracking-[0.08em] text-ansi-dimgreen">
+        <p className="font-mono text-[12px] tracking-[0.08em] text-ink-dim">
           <span className="text-muted-foreground">&gt;</span> cat CHANGELOG.md
         </p>
         <h1 className="mt-4 font-mono text-[1.3rem] font-semibold tracking-[-0.022em] text-foreground sm:text-[1.6rem]">
@@ -205,7 +206,7 @@ export function ChangelogPage({ version }: { version: string | null }) {
               >
                 <summary className="flex cursor-pointer list-none items-baseline gap-3 px-4 py-3 outline-none transition-colors hover:bg-card focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
                   <span
-                    className="font-mono text-[11px] text-ansi-dimgreen transition-transform group-open:rotate-90"
+                    className="font-mono text-[11px] text-ink-dim transition-transform group-open:rotate-90"
                     aria-hidden
                   >
                     ▸

@@ -132,7 +132,7 @@ export function DownloadMenu({
               target={item.external ? '_blank' : undefined}
               rel={item.external ? 'noreferrer' : undefined}
               className={cn(
-                'flex h-8 items-center rounded-[2px] px-2.5 text-[12.5px] outline-none hover:bg-accent hover:text-ansi-green focus-visible:ring-2 focus-visible:ring-ring',
+                'flex h-8 items-center rounded-[2px] px-2.5 text-[12.5px] outline-none hover:bg-accent hover:text-ink focus-visible:ring-2 focus-visible:ring-ring',
                 item.muted && 'text-muted-foreground',
               )}
               onClick={() => setOpen(false)}

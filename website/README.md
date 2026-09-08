@@ -34,6 +34,8 @@ npm run preview
 
 Latest release download links are resolved client-side from the GitHub Releases API (`Maidang1/sleipnir`). The pure release parser is covered by Vitest and deliberately ignores `.sha256` sidecars.
 
+The site is a small multi-route SPA: `/` is the landing page and `/changelog` renders the repo `CHANGELOG.md` (bundled at build time). Routing is a zero-dependency History-API router in `src/lib/router.tsx`; `public/_redirects` gives Cloudflare Pages the SPA fallback. The palette is strictly black and white (the `--color-ink*` ramp in `src/styles.css`), no chromatic accents.
+
 ## Content map
 
 | Surface | Source |
@@ -42,6 +44,7 @@ Latest release download links are resolved client-side from the GitHub Releases 
 | Cross-platform one-line install (`curl \| bash`) | `src/components/install-command.tsx` + `INSTALL_COMMAND` in `src/lib/release.ts` |
 | Architecture-labelled download menu | `src/components/download-menu.tsx` + `src/lib/release.ts` |
 | Release parser tests | `src/lib/release.test.ts` |
-| Changelog (repo `CHANGELOG.md` bundled at build time; latest release on the landing, full log at `#/changelog`) | `src/components/changelog.tsx` + `src/lib/changelog.ts` |
+| Changelog (repo `CHANGELOG.md` bundled at build time; latest release on the landing, full log at `/changelog`) | `src/components/changelog.tsx` + `src/lib/changelog.ts` |
 | Changelog parser tests | `src/lib/changelog.test.ts` |
 | Meta / OG | `index.html` |
+| Path routing + SPA fallback | `src/lib/router.tsx` + `public/_redirects` |

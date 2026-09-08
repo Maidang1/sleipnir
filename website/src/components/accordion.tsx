@@ -26,7 +26,7 @@ export function Accordion({ items }: { items: FaqItem[] }) {
                 <span
                   className={cn(
                     'mr-2 transition-colors',
-                    isOpen ? 'text-ansi-amber' : 'text-ansi-dimgreen group-hover:text-ansi-amber',
+                    isOpen ? 'text-ink-mid' : 'text-ink-dim group-hover:text-ink-mid',
                   )}
                   aria-hidden
                 >
@@ -44,7 +44,7 @@ export function Accordion({ items }: { items: FaqItem[] }) {
               <span
                 className={cn(
                   'shrink-0 font-mono text-[13px] transition-colors',
-                  isOpen ? 'text-ansi-green' : 'text-muted-foreground group-hover:text-ansi-green',
+                  isOpen ? 'text-ink' : 'text-muted-foreground group-hover:text-ink',
                 )}
                 aria-hidden
               >

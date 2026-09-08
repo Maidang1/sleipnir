@@ -22,6 +22,7 @@ import { SectionHeading } from '@/components/section-heading'
 import { StatusBar } from '@/components/status-bar'
 import { TerminalWindow } from '@/components/terminal-window'
 import { fetchLatestRelease, GITHUB_URL, type LatestRelease } from '@/lib/release'
+import { Link, usePath } from '@/lib/router'
 
 const HIGHLIGHTS = [
   { icon: Zap, label: 'gpu rendering' },
@@ -115,7 +116,7 @@ const FAQ = [
 
 function Chip({ children }: { children: string }) {
   return (
-    <code className="rounded-[2px] border border-border bg-muted px-1 py-0.5 font-mono text-[11.5px] text-ansi-cyan">
+    <code className="rounded-[2px] border border-border bg-muted px-1 py-0.5 font-mono text-[11.5px] text-ink-soft">
       {children}
     </code>
   )
@@ -134,25 +135,26 @@ function GitHubIcon({ className }: { className?: string }) {
 
 export default function App() {
   const [release, setRelease] = useState<LatestRelease | null>(null)
-  const [hash, setHash] = useState(() => window.location.hash)
+  const path = usePath()
 
   useEffect(() => {
     void fetchLatestRelease().then(setRelease)
   }, [])
 
+  // Compat: the changelog used to live at the #/changelog hash route.
   useEffect(() => {
-    const onHashChange = () => {
-      setHash(window.location.hash)
-      if (window.location.hash.startsWith('#/')) {
-        window.scrollTo(0, 0)
-      }
+    if (window.location.hash === '#/changelog') {
+      window.history.replaceState(null, '', '/changelog')
+      window.dispatchEvent(new PopStateEvent('popstate'))
     }
-    window.addEventListener('hashchange', onHashChange)
-    return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
 
-  // Hash routes (#/...) are pages; plain anchors (#features) stay on the landing.
-  if (hash === '#/changelog') {
+  useEffect(() => {
+    document.title =
+      path === '/changelog' ? 'changelog · sleipnir' : 'sleipnir — gpu-native terminal'
+  }, [path])
+
+  if (path === '/changelog') {
     return <ChangelogPage version={release?.version ?? null} />
   }
 
@@ -161,9 +163,9 @@ export default function App() {
       {/* Title bar: the page itself is a Sleipnir window */}
       <header className="sticky top-0 z-40 flex h-11 items-center gap-3 border-b border-border bg-background/95 px-4 md:px-6">
         <div className="flex items-center gap-1.5" aria-hidden>
-          <span className="size-2.5 rounded-full bg-ansi-red/80" />
-          <span className="size-2.5 rounded-full bg-ansi-amber/80" />
-          <span className="size-2.5 rounded-full bg-ansi-green/80" />
+          <span className="size-2.5 rounded-full bg-ink-faint/80" />
+          <span className="size-2.5 rounded-full bg-ink-mid/80" />
+          <span className="size-2.5 rounded-full bg-ink/80" />
         </div>
         <a
           href="#top"
@@ -182,6 +184,23 @@ export default function App() {
           </span>
         </a>
         <div className="ml-auto flex items-center gap-2">
+          <nav className="mr-1 hidden items-center gap-4 font-mono text-[12px] text-muted-foreground md:flex">
+            <a href="#features" className="outline-none transition-colors hover:text-foreground focus-visible:text-foreground">
+              features
+            </a>
+            <a href="#download" className="outline-none transition-colors hover:text-foreground focus-visible:text-foreground">
+              download
+            </a>
+            <Link
+              to="/changelog"
+              className="outline-none transition-colors hover:text-foreground focus-visible:text-foreground"
+            >
+              changelog
+            </Link>
+            <a href="#faq" className="outline-none transition-colors hover:text-foreground focus-visible:text-foreground">
+              faq
+            </a>
+          </nav>
           <a
             href={GITHUB_URL}
             target="_blank"
@@ -199,13 +218,13 @@ export default function App() {
         {/* Hero: pitch on the left, a live session on the right */}
         <section className="grid grid-cols-1 items-center gap-12 px-5 pt-14 pb-16 md:px-8 md:pt-20 lg:grid-cols-[1.02fr_1fr]">
           <div className="min-w-0">
-            <p className="font-mono text-[12px] tracking-[0.08em] text-ansi-dimgreen">
+            <p className="font-mono text-[12px] tracking-[0.08em] text-ink-dim">
               <span className="text-muted-foreground">&gt;</span> gpu-native terminal
               emulator
             </p>
             <h1 className="mt-5 font-mono text-[1.3rem] leading-[1.16] font-semibold tracking-[-0.022em] text-balance sm:text-[1.9rem] lg:text-[2.2rem]">
               A fast, native terminal{' '}
-              <span className="text-ansi-green text-glow mt-1 block">
+              <span className="text-ink text-glow mt-1 block">
                 for mac, windows &amp; linux.
                 <span className="block-cursor" aria-hidden />
               </span>
@@ -227,7 +246,7 @@ export default function App() {
                 href={GITHUB_URL}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex h-10 items-center gap-1.5 rounded-[2px] border border-input px-4 font-mono text-sm text-muted-foreground outline-none transition-colors hover:border-ansi-green/50 hover:bg-accent hover:text-ansi-green focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex h-10 items-center gap-1.5 rounded-[2px] border border-input px-4 font-mono text-sm text-muted-foreground outline-none transition-colors hover:border-ink/50 hover:bg-accent hover:text-ink focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <GitHubIcon className="size-4" />
                 source
@@ -249,7 +268,7 @@ export default function App() {
                 className="group flex items-center gap-2.5 bg-background px-4 py-3.5 transition-colors hover:bg-card"
               >
                 <h.icon
-                  className="size-4 shrink-0 text-ansi-dimgreen transition-colors group-hover:text-ansi-green"
+                  className="size-4 shrink-0 text-ink-dim transition-colors group-hover:text-ink"
                   strokeWidth={1.75}
                   aria-hidden
                 />
@@ -290,10 +309,10 @@ export default function App() {
                 className="group bg-background p-6 transition-colors hover:bg-card"
               >
                 <div className="flex items-baseline gap-2.5">
-                  <span className="font-mono text-[11px] text-ansi-amber tabular-nums">
+                  <span className="font-mono text-[11px] text-ink-mid tabular-nums">
                     [{String(i + 1).padStart(2, '0')}]
                   </span>
-                  <h3 className="font-mono text-[13.5px] font-semibold tracking-tight text-foreground transition-colors group-hover:text-ansi-green">
+                  <h3 className="font-mono text-[13.5px] font-semibold tracking-tight text-foreground transition-colors group-hover:text-ink">
                     {f.title}
                   </h3>
                 </div>
@@ -360,17 +379,17 @@ export default function App() {
           href={GITHUB_URL}
           target="_blank"
           rel="noreferrer"
-          className="outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
+          className="outline-none transition-colors hover:text-ink focus-visible:text-ink"
         >
           github
         </a>
         <span className="text-border">·</span>
-        <a
-          href="#/changelog"
-          className="outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
+        <Link
+          to="/changelog"
+          className="outline-none transition-colors hover:text-ink focus-visible:text-ink"
         >
           changelog
-        </a>
+        </Link>
         <span className="ml-auto hidden sm:inline">exit 0</span>
       </footer>
 

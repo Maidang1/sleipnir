@@ -27,12 +27,12 @@ export function TerminalWindow({
     >
       <div className="flex h-9 items-center gap-3 border-b border-border bg-muted/60 px-3">
         <div className="flex items-center gap-1.5" aria-hidden>
-          <span className="size-2.5 rounded-full bg-ansi-red/80" />
-          <span className="size-2.5 rounded-full bg-ansi-amber/80" />
-          <span className="size-2.5 rounded-full bg-ansi-green/80" />
+          <span className="size-2.5 rounded-full bg-ink-faint/80" />
+          <span className="size-2.5 rounded-full bg-ink-mid/80" />
+          <span className="size-2.5 rounded-full bg-ink/80" />
         </div>
         <div className="flex h-6 items-center gap-1.5 rounded-sm bg-background/70 px-2 text-[11px] text-muted-foreground">
-          <span className="inline-block size-1.5 rounded-[1px] bg-ansi-green" aria-hidden />
+          <span className="inline-block size-1.5 rounded-[1px] bg-ink" aria-hidden />
           {title}
         </div>
         <span className="ml-auto hidden text-[11px] text-muted-foreground/60 sm:block">

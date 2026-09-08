@@ -77,10 +77,10 @@ export function DownloadTargets({ release }: { release: LatestRelease | null }) 
                 )}
               >
                 <ArrowDownToLine
-                  className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-ansi-green"
+                  className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-ink"
                   aria-hidden
                 />
-                <span className="min-w-0 flex-1 truncate text-ansi-cyan xl:w-56 xl:flex-none xl:whitespace-nowrap">
+                <span className="min-w-0 flex-1 truncate text-ink-soft xl:w-56 xl:flex-none xl:whitespace-nowrap">
                   {t.triple}
                 </span>
                 <span className="hidden shrink-0 text-foreground/80 sm:inline">{t.pkg}</span>
@@ -89,7 +89,7 @@ export function DownloadTargets({ release }: { release: LatestRelease | null }) 
                 </span>
                 <span
                   className={cn(
-                    'shrink-0 text-[11px] text-muted-foreground transition-colors group-hover:text-ansi-green',
+                    'shrink-0 text-[11px] text-muted-foreground transition-colors group-hover:text-ink',
                   )}
                 >
                   [fetch]
@@ -100,13 +100,13 @@ export function DownloadTargets({ release }: { release: LatestRelease | null }) 
         })}
       </ul>
       <div className="border-t border-border bg-muted/40 px-4 py-2 text-[11px] text-muted-foreground">
-        <span className="text-ansi-dimgreen">note</span> · every package ships a .sha256
+        <span className="text-ink-dim">note</span> · every package ships a .sha256
         sidecar ·{' '}
         <a
           href={FALLBACK_RELEASES_URL}
           target="_blank"
           rel="noreferrer"
-          className="text-foreground/80 underline decoration-border underline-offset-4 outline-none transition-colors hover:text-ansi-green"
+          className="text-foreground/80 underline decoration-border underline-offset-4 outline-none transition-colors hover:text-ink"
         >
           all releases
         </a>

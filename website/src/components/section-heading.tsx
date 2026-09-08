@@ -15,9 +15,9 @@ export function SectionHeading({
 }) {
   return (
     <div className="flex items-baseline gap-3 font-mono">
-      <span className="text-[12px] text-ansi-amber">[{index}]</span>
+      <span className="text-[12px] text-ink-mid">[{index}]</span>
       <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
-        <span className="mr-1.5 text-ansi-dimgreen">#</span>
+        <span className="mr-1.5 text-ink-dim">#</span>
         {name}
       </h2>
       <div className="h-px flex-1 self-center bg-border" aria-hidden />

@@ -26,8 +26,8 @@ export function InstallCommand({ className }: { className?: string }) {
 
   return (
     <div className={cn('flex w-full max-w-2xl min-w-0 flex-col gap-2', className)}>
-      <div className="flex min-w-0 items-center gap-2 rounded-[2px] border border-border bg-card px-3 py-2.5 transition-colors focus-within:border-ansi-green/50">
-        <span className="shrink-0 font-mono text-[12.5px] text-ansi-green" aria-hidden>
+      <div className="flex min-w-0 items-center gap-2 rounded-[2px] border border-border bg-card px-3 py-2.5 transition-colors focus-within:border-ink/50">
+        <span className="shrink-0 font-mono text-[12.5px] text-ink" aria-hidden>
           $
         </span>
         <pre
@@ -43,7 +43,7 @@ export function InstallCommand({ className }: { className?: string }) {
           className={cn(
             'inline-flex size-8 shrink-0 items-center justify-center rounded-[2px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring',
             copied
-              ? 'text-ansi-green'
+              ? 'text-ink'
               : 'text-muted-foreground hover:bg-accent hover:text-foreground',
           )}
         >
@@ -58,7 +58,7 @@ export function InstallCommand({ className }: { className?: string }) {
         </span>
       </div>
       <p className="max-w-xl font-mono text-[11px] leading-relaxed text-muted-foreground/80">
-        <span className="text-ansi-dimgreen"># </span>
+        <span className="text-ink-dim"># </span>
         {INSTALL_HINT}
       </p>
     </div>

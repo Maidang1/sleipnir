@@ -23,14 +23,12 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  /* ANSI palette: the site's only accent vocabulary */
-  --color-ansi-green: var(--ansi-green);
-  --color-ansi-dimgreen: var(--ansi-dimgreen);
-  --color-ansi-amber: var(--ansi-amber);
-  --color-ansi-red: var(--ansi-red);
-  --color-ansi-cyan: var(--ansi-cyan);
-  --color-ansi-blue: var(--ansi-blue);
-  --color-ansi-purple: var(--ansi-purple);
+  /* Ink ramp: the site's only accent vocabulary, pure black & white */
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-mid: var(--ink-mid);
+  --color-ink-faint: var(--ink-faint);
   --radius-sm: 0;
   --radius-md: var(--radius);
   --radius-lg: var(--radius);
@@ -39,32 +37,30 @@
 
 /* Terminal theme: dark only. A terminal does not ship a light mode. */
 :root {
-  --background: oklch(0.165 0.012 155);
-  --foreground: oklch(0.92 0.014 150);
-  --card: oklch(0.19 0.014 155);
-  --card-foreground: oklch(0.92 0.014 150);
-  --popover: oklch(0.19 0.014 155);
-  --popover-foreground: oklch(0.92 0.014 150);
-  --primary: oklch(0.87 0.2 150);
-  --primary-foreground: oklch(0.17 0.02 155);
-  --secondary: oklch(0.22 0.016 155);
-  --secondary-foreground: oklch(0.92 0.014 150);
-  --muted: oklch(0.205 0.014 155);
-  --muted-foreground: oklch(0.63 0.02 150);
-  --accent: oklch(0.24 0.02 152);
-  --accent-foreground: oklch(0.87 0.2 150);
+  --background: oklch(0.155 0 0);
+  --foreground: oklch(0.93 0 0);
+  --card: oklch(0.185 0 0);
+  --card-foreground: oklch(0.93 0 0);
+  --popover: oklch(0.185 0 0);
+  --popover-foreground: oklch(0.93 0 0);
+  --primary: oklch(0.96 0 0);
+  --primary-foreground: oklch(0.16 0 0);
+  --secondary: oklch(0.22 0 0);
+  --secondary-foreground: oklch(0.93 0 0);
+  --muted: oklch(0.205 0 0);
+  --muted-foreground: oklch(0.62 0 0);
+  --accent: oklch(0.24 0 0);
+  --accent-foreground: oklch(0.96 0 0);
   --border: oklch(1 0 0 / 9%);
   --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.87 0.2 150 / 60%);
+  --ring: oklch(0.96 0 0 / 60%);
   --radius: 0.125rem;
 
-  --ansi-green: oklch(0.87 0.2 150);
-  --ansi-dimgreen: oklch(0.7 0.13 150);
-  --ansi-amber: oklch(0.83 0.15 85);
-  --ansi-red: oklch(0.7 0.19 25);
-  --ansi-cyan: oklch(0.85 0.11 195);
-  --ansi-blue: oklch(0.72 0.14 255);
-  --ansi-purple: oklch(0.72 0.16 300);
+  --ink: oklch(0.96 0 0);
+  --ink-soft: oklch(0.82 0 0);
+  --ink-dim: oklch(0.68 0 0);
+  --ink-mid: oklch(0.56 0 0);
+  --ink-faint: oklch(0.42 0 0);
 }
 
 @layer base {
@@ -83,7 +79,7 @@
     background-position: center top;
   }
   ::selection {
-    background: var(--ansi-green);
+    background: var(--ink);
     color: var(--primary-foreground);
   }
 }
@@ -106,19 +102,19 @@
   height: 1.05em;
   margin-left: 0.08em;
   vertical-align: text-bottom;
-  background: var(--ansi-green);
-  box-shadow: 0 0 12px oklch(0.87 0.2 150 / 45%);
+  background: var(--ink);
+  box-shadow: 0 0 12px oklch(0.96 0 0 / 35%);
   animation: cursor-blink 1.06s step-end infinite;
 }
 
 .block-cursor--hollow {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--ansi-green);
+  box-shadow: inset 0 0 0 1.5px var(--ink);
 }
 
-/* Soft phosphor glow, reserved for the hero headline accent */
+/* Soft glow, reserved for the hero headline accent */
 .text-glow {
-  text-shadow: 0 0 22px oklch(0.87 0.2 150 / 32%);
+  text-shadow: 0 0 22px oklch(0.96 0 0 / 22%);
 }
 
 /* Boot terminal line reveal */

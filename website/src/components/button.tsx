@@ -6,9 +6,9 @@ const base =
 
 const variants = {
   default:
-    'bg-ansi-green text-primary-foreground hover:bg-ansi-green/90 hover:shadow-[0_0_24px_oklch(0.87_0.2_150/35%)]',
+    'bg-ink text-primary-foreground hover:bg-ink/90 hover:shadow-[0_0_24px_oklch(0.87_0.2_150/35%)]',
   outline:
-    'border-input bg-transparent text-foreground hover:border-ansi-green/50 hover:bg-accent hover:text-ansi-green',
+    'border-input bg-transparent text-foreground hover:border-ink/50 hover:bg-accent hover:text-ink',
   ghost: 'text-muted-foreground hover:bg-accent hover:text-foreground',
 } as const
 

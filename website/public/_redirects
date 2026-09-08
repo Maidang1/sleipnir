@@ -1,0 +1,2 @@
+# SPA fallback: unknown paths render the app, real files pass through.
+/*    /index.html   200

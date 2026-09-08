@@ -37,7 +37,7 @@ export function StatusBar({ version }: { version: string | null }) {
       aria-label="Section navigation"
       className="fixed inset-x-0 bottom-0 z-40 flex h-9 items-stretch border-t border-border bg-card/95 text-[11px] text-muted-foreground backdrop-blur-none"
     >
-      <div className="flex items-center gap-1.5 bg-ansi-green px-3 font-medium text-primary-foreground">
+      <div className="flex items-center gap-1.5 bg-ink px-3 font-medium text-primary-foreground">
         <span aria-hidden>[</span>sleipnir<span aria-hidden>]</span>
       </div>
       <div className="flex items-stretch overflow-x-auto">
@@ -51,11 +51,11 @@ export function StatusBar({ version }: { version: string | null }) {
               className={cn(
                 'flex items-center gap-1 border-r border-border px-3 outline-none transition-colors focus-visible:bg-accent',
                 isActive
-                  ? 'bg-accent font-medium text-ansi-green'
+                  ? 'bg-accent font-medium text-ink'
                   : 'hover:bg-muted hover:text-foreground',
               )}
             >
-              <span className={isActive ? 'text-ansi-amber' : 'text-muted-foreground/60'}>
+              <span className={isActive ? 'text-ink-mid' : 'text-muted-foreground/60'}>
                 {i}:
               </span>
               {w.label}

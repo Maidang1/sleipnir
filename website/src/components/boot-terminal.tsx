@@ -12,12 +12,12 @@ type DoneEntry = { step: Step; shown: number }
 const TONE_CLASS: Record<Tone, string> = {
   fg: 'text-foreground',
   dim: 'text-muted-foreground',
-  green: 'text-ansi-green',
-  dimgreen: 'text-ansi-dimgreen',
-  amber: 'text-ansi-amber',
-  cyan: 'text-ansi-cyan',
-  red: 'text-ansi-red',
-  purple: 'text-ansi-purple',
+  green: 'text-ink',
+  dimgreen: 'text-ink-dim',
+  amber: 'text-ink-mid',
+  cyan: 'text-ink-soft',
+  red: 'text-ink-faint',
+  purple: 'text-ink-mid',
 }
 
 const SCRIPT: Step[] = [
@@ -153,7 +153,7 @@ export function BootTerminal() {
       {done.map(({ step, shown }, si) =>
         step.type === 'cmd' ? (
           <div key={si} className="whitespace-pre-wrap wrap-anywhere">
-            <span className="text-ansi-green">$ </span>
+            <span className="text-ink">$ </span>
             <span className="text-foreground">{step.text}</span>
           </div>
         ) : (
@@ -168,14 +168,14 @@ export function BootTerminal() {
       )}
       {typing !== null && (
         <div className="whitespace-pre-wrap wrap-anywhere">
-          <span className="text-ansi-green">$ </span>
+          <span className="text-ink">$ </span>
           <span className="text-foreground">{typing}</span>
           <span className="block-cursor" aria-hidden />
         </div>
       )}
       {finished && (
         <div>
-          <span className="text-ansi-green">$ </span>
+          <span className="text-ink">$ </span>
           <span className="block-cursor" aria-hidden />
         </div>
       )}
