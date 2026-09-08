@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { Accordion } from '@/components/accordion'
 import { BootTerminal } from '@/components/boot-terminal'
+import { Changelog } from '@/components/changelog'
 import { DownloadMenu } from '@/components/download-menu'
 import { DownloadTargets } from '@/components/download-targets'
 import { InstallCommand } from '@/components/install-command'
@@ -307,9 +308,19 @@ export default function App() {
           </div>
         </section>
 
+        {/* Changelog, straight from the repo */}
+        <section id="changelog" className="scroll-mt-16 px-5 pt-20 md:px-8">
+          <SectionHeading
+            index="03"
+            name="changelog"
+            meta={release ? `latest: v${release.version}` : 'from CHANGELOG.md'}
+          />
+          <Changelog />
+        </section>
+
         {/* FAQ, man-page style */}
         <section id="faq" className="scroll-mt-16 px-5 pt-20 pb-24 md:px-8">
-          <SectionHeading index="03" name="faq" meta="man sleipnir" />
+          <SectionHeading index="04" name="faq" meta="man sleipnir" />
           <div className="mt-6 max-w-3xl border-t border-border">
             <Accordion items={FAQ} />
           </div>
@@ -335,6 +346,13 @@ export default function App() {
           className="outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
         >
           github
+        </a>
+        <span className="text-border">·</span>
+        <a
+          href="#changelog"
+          className="outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
+        >
+          changelog
         </a>
         <span className="ml-auto hidden sm:inline">exit 0</span>
       </footer>

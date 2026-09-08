@@ -12,5 +12,9 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    fs: {
+      // CHANGELOG.md lives at the repo root, one level above the website.
+      allow: ['..'],
+    },
   },
 })

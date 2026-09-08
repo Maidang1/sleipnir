@@ -42,4 +42,6 @@ Latest release download links are resolved client-side from the GitHub Releases 
 | Cross-platform one-line install (`curl \| bash`) | `src/components/install-command.tsx` + `INSTALL_COMMAND` in `src/lib/release.ts` |
 | Architecture-labelled download menu | `src/components/download-menu.tsx` + `src/lib/release.ts` |
 | Release parser tests | `src/lib/release.test.ts` |
+| Changelog section (repo `CHANGELOG.md` bundled at build time) | `src/components/changelog.tsx` + `src/lib/changelog.ts` |
+| Changelog parser tests | `src/lib/changelog.test.ts` |
 | Meta / OG | `index.html` |
