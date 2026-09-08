@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import changelogRaw from '../../../CHANGELOG.md?raw'
 import { countEntries, parseChangelog, type ChangelogRelease } from '@/lib/changelog'
 import { GITHUB_URL } from '@/lib/release'
+import { StatusBar } from '@/components/status-bar'
 
 const RELEASES = parseChangelog(changelogRaw)
 
@@ -112,42 +113,115 @@ function ReleaseHeader({ release }: { release: ChangelogRelease }) {
   )
 }
 
-/**
- * Repo CHANGELOG.md, rendered as a release log. The latest release is always
- * expanded; older ones collapse into native <details> rows.
- */
-export function Changelog() {
-  if (RELEASES.length === 0) return null
-  const [latest, ...older] = RELEASES
-
+function ReleaseBlock({ release }: { release: ChangelogRelease }) {
   return (
-    <div className="mt-6 max-w-3xl space-y-3">
-      <div className="overflow-hidden rounded-md border border-border bg-card/40">
-        <div className="flex items-baseline gap-3 border-b border-border px-4 py-3">
-          <ReleaseHeader release={latest} />
-        </div>
-        <ReleaseBody release={latest} />
+    <div className="overflow-hidden rounded-md border border-border bg-card/40">
+      <div className="flex items-baseline gap-3 border-b border-border px-4 py-3">
+        <ReleaseHeader release={release} />
       </div>
+      <ReleaseBody release={release} />
+    </div>
+  )
+}
 
-      {older.map((release) => (
-        <details
-          key={release.version}
-          className="group overflow-hidden rounded-md border border-border bg-background open:bg-card/40"
+/**
+ * Home-page teaser: only the latest release, expanded, plus a link to the
+ * full changelog page.
+ */
+export function LatestChangelog() {
+  const latest = RELEASES[0]
+  if (!latest) return null
+  const rest = RELEASES.length - 1
+  return (
+    <div className="mt-6 max-w-3xl">
+      <ReleaseBlock release={latest} />
+      {rest > 0 && (
+        <a
+          href="#/changelog"
+          className="mt-3 inline-flex items-center gap-1.5 rounded-[2px] font-mono text-[12px] text-muted-foreground outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
         >
-          <summary className="flex cursor-pointer list-none items-baseline gap-3 px-4 py-3 outline-none transition-colors hover:bg-card focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
-            <span
-              className="font-mono text-[11px] text-ansi-dimgreen transition-transform group-open:rotate-90"
-              aria-hidden
-            >
-              ▸
-            </span>
-            <ReleaseHeader release={release} />
-          </summary>
-          <div className="border-t border-border">
-            <ReleaseBody release={release} />
+          <span className="text-ansi-dimgreen" aria-hidden>
+            &gt;
+          </span>
+          all releases ({rest} older) →
+        </a>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Full changelog at #/changelog: latest release expanded, older releases in
+ * collapsible <details> rows.
+ */
+export function ChangelogPage({ version }: { version: string | null }) {
+  const [latest, ...older] = RELEASES
+  return (
+    <div className="min-h-dvh pb-9">
+      <header className="sticky top-0 z-40 flex h-11 items-center gap-3 border-b border-border bg-background/95 px-4 md:px-6">
+        <div className="flex items-center gap-1.5" aria-hidden>
+          <span className="size-2.5 rounded-full bg-ansi-red/80" />
+          <span className="size-2.5 rounded-full bg-ansi-amber/80" />
+          <span className="size-2.5 rounded-full bg-ansi-green/80" />
+        </div>
+        <span className="font-mono text-[12px] text-muted-foreground">
+          <span className="text-foreground">sleipnir</span>
+          <span className="hidden sm:inline"> — changelog — less</span>
+        </span>
+        <a
+          href="#top"
+          className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-[2px] px-2 font-mono text-[12px] text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-ansi-green focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <span className="text-ansi-dimgreen" aria-hidden>
+            &gt;
+          </span>
+          cd ..
+        </a>
+      </header>
+
+      <main className="mx-auto w-full max-w-[1200px] px-5 pt-14 md:px-8">
+        <p className="font-mono text-[12px] tracking-[0.08em] text-ansi-dimgreen">
+          <span className="text-muted-foreground">&gt;</span> cat CHANGELOG.md
+        </p>
+        <h1 className="mt-4 font-mono text-[1.3rem] font-semibold tracking-[-0.022em] text-foreground sm:text-[1.6rem]">
+          changelog
+        </h1>
+        <p className="mt-3 max-w-[34rem] font-mono text-[12.5px] leading-relaxed text-muted-foreground">
+          Every release, straight from the repo's CHANGELOG.md.{' '}
+          {version ? `Latest: v${version}.` : ''}
+        </p>
+
+        {RELEASES.length === 0 ? (
+          <p className="mt-8 font-mono text-[12px] text-muted-foreground">
+            no releases parsed.
+          </p>
+        ) : (
+          <div className="mt-8 max-w-3xl space-y-3 pb-24">
+            <ReleaseBlock release={latest} />
+            {older.map((release) => (
+              <details
+                key={release.version}
+                className="group overflow-hidden rounded-md border border-border bg-background open:bg-card/40"
+              >
+                <summary className="flex cursor-pointer list-none items-baseline gap-3 px-4 py-3 outline-none transition-colors hover:bg-card focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                  <span
+                    className="font-mono text-[11px] text-ansi-dimgreen transition-transform group-open:rotate-90"
+                    aria-hidden
+                  >
+                    ▸
+                  </span>
+                  <ReleaseHeader release={release} />
+                </summary>
+                <div className="border-t border-border">
+                  <ReleaseBody release={release} />
+                </div>
+              </details>
+            ))}
           </div>
-        </details>
-      ))}
+        )}
+      </main>
+
+      <StatusBar version={version} />
     </div>
   )
 }

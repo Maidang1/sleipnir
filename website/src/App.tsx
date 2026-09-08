@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { Accordion } from '@/components/accordion'
 import { BootTerminal } from '@/components/boot-terminal'
-import { Changelog } from '@/components/changelog'
+import { ChangelogPage, LatestChangelog } from '@/components/changelog'
 import { DownloadMenu } from '@/components/download-menu'
 import { DownloadTargets } from '@/components/download-targets'
 import { InstallCommand } from '@/components/install-command'
@@ -134,10 +134,27 @@ function GitHubIcon({ className }: { className?: string }) {
 
 export default function App() {
   const [release, setRelease] = useState<LatestRelease | null>(null)
+  const [hash, setHash] = useState(() => window.location.hash)
 
   useEffect(() => {
     void fetchLatestRelease().then(setRelease)
   }, [])
+
+  useEffect(() => {
+    const onHashChange = () => {
+      setHash(window.location.hash)
+      if (window.location.hash.startsWith('#/')) {
+        window.scrollTo(0, 0)
+      }
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
+  // Hash routes (#/...) are pages; plain anchors (#features) stay on the landing.
+  if (hash === '#/changelog') {
+    return <ChangelogPage version={release?.version ?? null} />
+  }
 
   return (
     <div id="top" className="min-h-dvh pb-9">
@@ -315,7 +332,7 @@ export default function App() {
             name="changelog"
             meta={release ? `latest: v${release.version}` : 'from CHANGELOG.md'}
           />
-          <Changelog />
+          <LatestChangelog />
         </section>
 
         {/* FAQ, man-page style */}
@@ -349,7 +366,7 @@ export default function App() {
         </a>
         <span className="text-border">·</span>
         <a
-          href="#changelog"
+          href="#/changelog"
           className="outline-none transition-colors hover:text-ansi-green focus-visible:text-ansi-green"
         >
           changelog
