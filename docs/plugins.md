@@ -196,6 +196,80 @@ observation/rendering protocol at once:
 Because the host `run_id` is only meaningful within a host launch, restored
 history renders without jump buttons — same rule the built-in overlay used.
 
+## Example: Agents (resident observer, non-controlling)
+
+`crates/sleipnir_plugin_agents` is the first agent-collaboration slice: a
+resident plugin that watches which panes run a known coding agent (whatever
+`foreground_changed.agent` reports — claude, codex, gemini, opencode, …) and
+shows the most conservative status the events prove. It never writes to a
+terminal: no prompt injection, no approval answering, no model/provider
+code, no network, no persistence (ADR-0008). Its one outward action beyond
+rendering is a single OS notification per proven unseen session exit.
+
+- `subscribe_events`, narrowed to `foreground_changed`, `run_started`,
+  `run_finished`, `pane_focused`, `pane_closed`, `cwd_changed`. Because the
+  host emits `cwd_changed` / `run_started` before the foreground poll
+  recognizes a new agent, the plugin caches the latest cwd and open run per
+  pane and adopts them when `foreground_changed` names the agent — a
+  freshly discovered agent whose launch command was observed starts as
+  `running`, not `unknown`. The containing run is pinned at that point; a
+  later `run_started` in the pane never moves the pin, and on identity
+  replacement a cached run that belonged to the outgoing agent is never
+  inherited.
+- Per-pane state is bounded to process/session facts: `running` (the shell
+  Run containing the agent process is still open — including while the
+  agent waits at its prompt), `exited-unseen` / `exited-seen` (the latest
+  agent session ended, which implies nothing about success), `unknown`.
+  The protocol carries no task percentage, no turn progress, no
+  agent-readiness, and no approval-pending fact, so the plugin never
+  displays any of them; a shell exit code is not an agent task outcome, so
+  it is not surfaced.
+- Exit records are durable and honest about their evidence: only a
+  `run_finished` matching the agent's pinned containing run proves an exit.
+  `foreground_changed` with no agent is only a loss of foreground detection
+  (a transient child/tool process can hold the foreground while the agent
+  stays alive), so it never creates an `exited-*` state; the record and its
+  cached run are preserved until the matching finish arrives or a different
+  agent takes the foreground. An `unknown` pane has no pinned run, so no
+  finish can prove an exit there. A seen record never flips back; only
+  `pane_closed` removes a row.
+- `render_status`: a ≤24-cell strip with one summary badge (`!N` Warn for
+  exited-unseen — deliberately no checkmark/Ok tone — / `●N` Accent for
+  running) and a palette-contributing **Agents** button.
+- `render_panel`: rows grouped Running / Exited — unseen / Exited — seen /
+  Unknown, captioned as process/session status, not task progress. Only
+  exited rows with a run observed this session are `Btn`s, jumping via
+  `scroll_to_run`: its start anchor is the completed output for an exited
+  session, but on a still-open run it would pull the user away from the
+  live output tail, so running and unknown rows are plain text (the
+  protocol has no focus-by-pane host call). A click marks the row seen only
+  when the host answers `HostCallResult::Ok`.
+- `host_call_notify`: exactly one OS notification when a tracked session's
+  pinned containing run finishes while its pane is unfocused
+  (`running → exited-unseen`). No notification when the pane is focused, on
+  `foreground_changed` losing the agent, on unknown/orphan finishes, on
+  mismatched, stale, duplicate, or shell-interlude finishes, or when the
+  host denies the call (a denial changes nothing and is not retried). The
+  text names the agent and the cwd basename when known and says only that
+  the session exited and output is ready to review — never success, task
+  completion, or approval state.
+
+Build and install:
+
+```sh
+cargo build --release -p sleipnir_plugin_agents
+
+mkdir -p ~/.config/sleipnir/plugins/agents
+cp target/release/sleipnir-plugin-agents ~/.config/sleipnir/plugins/agents/
+cp crates/sleipnir_plugin_agents/plugin.json ~/.config/sleipnir/plugins/agents/
+```
+
+Approve the consent prompt (`resident`, `subscribe_events`, `render_panel`,
+`render_status`, `host_call_scroll_to_run`, `host_call_notify`) on first
+launch. The slice's boundaries and follow-up decisions are recorded in
+`docs/superpowers/plans/2026-09-09-agent-collaboration-slice-1.md`.
+
+
 ## Render targets
 
 A `Render` names one of three mounts (ADR-0017). One widget schema, one
@@ -217,8 +291,11 @@ is no patch protocol.
 ## Host calls
 
 A resident plugin can also ask the host to act (`Context::call`, or the typed
-wrappers such as `Context::draw_scene`). Each call is gated by its own
-capability, and every `Call` id gets exactly one `Reply` — denial is
+wrappers such as `Context::draw_scene`, `Context::focus_pane`,
+`Context::send_text`, `Context::send_key`, `Context::request_close_pane`,
+`Context::open_pane_argv`).
+Each call is gated by its own capability, and every `Call` id gets exactly
+one `Reply` — denial is
 `HostCallResult::Error`, never silence. Calls are rate-limited per plugin
 (`draw_scene` is exempt: repainting the host's own surface has no external
 side effect).
@@ -228,9 +305,14 @@ side effect).
 | `notify` | `host_call_notify` | platform notification |
 | `read_screen` | `host_call_read_screen` | visible text of one terminal pane |
 | `list_panes` | `host_call_list_panes` | open terminal panes |
-| `open_pane` | `host_call_open_pane` | spawn a pane (argv, never a shell line) |
+| `open_pane` | `host_call_open_pane` | spawn a pane from a whitespace-split command string |
+| `open_pane_argv` | `host_call_open_pane` | spawn a pane from structured `{ cwd, program, args }` (never a shell line) |
 | `draw_scene` | `host_call_draw_scene` | replace a panel's 3D scene |
 | `scroll_to_run` | `host_call_scroll_to_run` | jump a pane's scrollback to a run |
+| `focus_pane` | `host_call_focus_pane` | focus a specific terminal pane |
+| `send_text` | `host_call_send_text` | type into a specific terminal pane (paste-aware) |
+| `send_key` | `host_call_send_key` | send one allowlisted key to a specific terminal pane |
+| `request_close_pane` | `host_call_request_close_pane` | ask to close a specific terminal pane (user-policy path; not force-close) |
 
 `scroll_to_run` activates the run's tab and pane and scrolls back to the run's
 output anchor — the same jump as clicking a row in the Run Ledger panel. An
@@ -238,6 +320,53 @@ output anchor — the same jump as clicking a row in the Run Ledger panel. An
 anchor, so the pane is only focused. An unknown `run_id` answers
 `HostCallResult::Error`. The SDK wrapper is
 `Context::scroll_to_run(run_id) -> HostCallResult`.
+
+`focus_pane`, `send_text`, `send_key`, and `request_close_pane` are the
+generic primitives a future coordinator can use to operate **visible agent
+panes**. Each has its own grant; `write_terminal` (the snapshot
+`Output::Insert` route into the *active* pane) does **not** imply any of
+them. They take an explicit `pane` and never fall back to the focused pane.
+Plugin panels and unknown pane keys answer `HostCallResult::Error`.
+
+- `focus_pane` activates the tab and pane **inside the owning Sleipnir
+  window**. It does not raise a background OS window to the front.
+- `send_text` inserts through the same bracketed-paste-aware path as a user
+  paste (`Terminal::paste`), then optionally a carriage return. Text above
+  8192 characters is rejected, not truncated. A pane that is still loading
+  (no PTY yet) is `Error`, not `Ok`. It is not a shell command string and
+  does not answer native agent approvals.
+  Outside bracketed-paste mode, `\n` and `\r\n` in `text` are converted to
+  `\r` (each line is a return). Inside bracketed-paste mode, ESC is stripped
+  and newlines are left as-is inside the paste brackets; `enter: true` still
+  sends a separate CR after the paste so submit is not swallowed.
+- `send_key` accepts logical names only: `ctrl-c`, `escape`, `enter`, `tab`,
+  `up`, `down`, `left`, `right` (with obvious aliases such as `esc` and
+  `ctrl+c`). Encoded bytes and unknown names are errors. The host maps names
+  through the terminal key table so interrupt/navigation keys stay
+  APP_CURSOR-aware; there is no raw-byte key injection. If the pane is in
+  terminal vi mode, the call is `Error` — those keys would be consumed as
+  scrollback motion rather than sent to the PTY.
+- `request_close_pane` invokes the same user-policy close path as ⌘W
+  (`confirm_close`: never / always / dirty). A busy pane can still require
+  confirmation. `HostCallResult::Ok` means the request was **accepted**, not
+  that the pane has closed. There is no force-close host call.
+
+These variants are additive on protocol v2 (`PROTOCOL_VERSION` stays 2).
+Existing v2 messages still decode. A plugin that sends a new `call` variant
+to an older v2 host that does not yet implement it is skipped as a malformed
+line (no `Reply` is produced), so `Context::call` waits until its deadline
+and returns a timeout `Error`. It does not receive a decode-error reply.
+
+SDK wrappers: `Context::focus_pane(pane)`, `Context::send_text(pane, text,
+enter)`, `Context::send_key(pane, key)`, `Context::request_close_pane(pane)`,
+`Context::open_pane_argv(cwd, program, args)`.
+
+`open_pane` keeps the existing command-string form (whitespace-split into
+argv, no quote processing, no `sh -c`). `open_pane_argv` is the structured
+form a coordinator should use: nonempty NUL-free `program`, bounded
+NUL-free `args`, passed **directly** to `spawn_term_view`. Arguments that
+contain spaces stay one argv entry; they are never rejoined into a shell
+line. Both calls use `host_call_open_pane`.
 
 ## Events
 
@@ -305,6 +434,10 @@ by the snapshot set (ADR-0016 §4).
 | `host_call_open_pane` | elevated | open a new pane |
 | `host_call_draw_scene` | elevated | draw a 3D scene in a panel |
 | `host_call_scroll_to_run` | elevated | jump a pane back to a run's output |
+| `host_call_focus_pane` | elevated | focus a specific terminal pane |
+| `host_call_send_text` | elevated | type into a specific terminal pane |
+| `host_call_send_key` | elevated | send interrupt/navigation keys to a specific terminal pane |
+| `host_call_request_close_pane` | elevated | ask to close a specific terminal pane (may confirm; not force-close) |
 
 `subscribe_events` is the significant semantic escalation: a plugin moves from
 "runs when you pick it" to "watches every command you run". It must be requested

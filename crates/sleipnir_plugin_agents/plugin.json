@@ -1,0 +1,20 @@
+{
+  "id": "agents",
+  "name": "Agents",
+  "version": "0.1.0",
+  "api_version": 2,
+  "enabled": true,
+  "lifecycle": "resident",
+  "binary": "./sleipnir-plugin-agents",
+  "permissions": ["resident", "subscribe_events", "render_panel", "render_status", "host_call_scroll_to_run", "host_call_notify", "host_call_open_pane", "host_call_focus_pane", "host_call_send_text", "host_call_send_key", "host_call_request_close_pane"],
+  "commands": [
+    {
+      "id": "open",
+      "title": "Agents: Open panel",
+      "description": "Open the Agents panel: one row per pane running a known coding agent, with a conservative status.",
+      "keywords": ["agent", "agents", "claude", "codex", "gemini", "opencode", "status"],
+      "permissions": [],
+      "timeout_secs": 15
+    }
+  ]
+}

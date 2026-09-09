@@ -237,6 +237,16 @@ pub fn capability_label(cap: Capability) -> &'static str {
         Capability::HostCallOpenPane => "can open a new pane",
         Capability::HostCallDrawScene => "can draw a 3D scene in a panel",
         Capability::HostCallScrollToRun => "can jump a pane back to a command's output",
+        Capability::HostCallFocusPane => "can switch which terminal pane is focused",
+        Capability::HostCallSendText => {
+            "can type into a specific terminal pane, including pressing Enter"
+        }
+        Capability::HostCallSendKey => {
+            "can send interrupt and navigation keys (such as Ctrl+C and Escape) to a specific terminal pane"
+        }
+        Capability::HostCallRequestClosePane => {
+            "can ask to close a specific terminal pane (you may still be asked to confirm)"
+        }
     }
 }
 
@@ -484,6 +494,10 @@ mod tests {
             Capability::HostCallOpenPane,
             Capability::HostCallDrawScene,
             Capability::HostCallScrollToRun,
+            Capability::HostCallFocusPane,
+            Capability::HostCallSendText,
+            Capability::HostCallSendKey,
+            Capability::HostCallRequestClosePane,
         ];
         for cap in caps {
             let label = capability_label(cap);

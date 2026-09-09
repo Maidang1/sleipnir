@@ -1384,6 +1384,33 @@ impl AppShell {
         cx.notify();
     }
 
+    /// Request close of a specific terminal pane via the same user-policy path
+    /// as ⌘W. Activates the pane so `confirm_close` / busy-process copy apply
+    /// to it. Does not force-close. `Ok` means the request was accepted; the
+    /// pane may still be open if a confirm modal is showing.
+    pub(crate) fn request_close_terminal_pane(
+        &mut self,
+        pane: PaneKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let found = self
+            .tabs
+            .iter()
+            .enumerate()
+            .find_map(|(ix, tab)| tab.tree.pane_id_for_key(pane).map(|id| (ix, id)));
+        let Some((ix, id)) = found else {
+            return Err(format!("pane {pane} not found"));
+        };
+        self.activate(ix, window, cx);
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.active_pane = id;
+        }
+        self.focus_active(window, cx);
+        self.request_close_active_pane(window, cx);
+        Ok(())
+    }
+
     /// Gate close on `confirm_close` setting; may open a modal instead of closing.
     fn request_close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_confirm.is_some() {

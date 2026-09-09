@@ -328,6 +328,56 @@ impl TermView {
         }
     }
 
+    /// Insert text through the bracketed-paste-aware path (`Terminal::paste`),
+    /// then optionally a carriage return. Used by plugin `SendText` so a
+    /// payload cannot smuggle CSI by riding along with typed bytes.
+    ///
+    /// Returns `false` when the pane is still `Loading` or has failed to
+    /// attach a PTY — the caller must reply `Error`, not `Ok`.
+    pub fn insert_text(&self, text: &str, enter: bool, cx: &mut Context<Self>) -> bool {
+        let Some(term) = self.terminal_entity().cloned() else {
+            return false;
+        };
+        if !text.is_empty() {
+            term.update(cx, |term, _| term.paste(text));
+        }
+        if enter {
+            term.update(cx, |term, _| term.input(vec![b'\r']));
+        }
+        if !text.is_empty() || enter {
+            self.note_user_typed(cx);
+        }
+        true
+    }
+
+    /// Terminal vi mode: keys are scrollback motion, not PTY input.
+    pub fn vi_mode_enabled(&self, cx: &App) -> bool {
+        self.terminal_entity()
+            .is_some_and(|t| t.read(cx).vi_mode_enabled())
+    }
+
+    /// Send one gpui keystroke name (`ctrl-c`, `escape`, …) through the
+    /// terminal mapping table. Returns false when the name is not a
+    /// deliverable terminal key, the PTY is missing, or vi mode is active
+    /// (in which case `try_keystroke` would swallow the key as motion).
+    pub fn send_named_keystroke(&self, name: &str, cx: &mut Context<Self>) -> bool {
+        if self.vi_mode_enabled(cx) {
+            return false;
+        }
+        let Ok(keystroke) = gpui::Keystroke::parse(name) else {
+            return false;
+        };
+        let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+        let Some(terminal) = self.terminal_entity().cloned() else {
+            return false;
+        };
+        let handled = terminal.update(cx, |term, _| term.try_keystroke(&keystroke, option_as_meta));
+        if handled {
+            self.note_user_typed(cx);
+        }
+        handled
+    }
+
     fn note_user_typed(&self, cx: &mut Context<Self>) {
         cx.emit(TermViewEvent::UserTyped);
     }

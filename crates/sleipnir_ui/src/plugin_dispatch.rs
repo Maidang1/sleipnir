@@ -41,19 +41,18 @@ impl WindowRoutes {
                 target: RenderTarget::Panel { pane },
                 ..
             } => self.panes.get(pane).copied().or(self.preferred),
-            Inbound::Call {
-                call: HostCall::ReadScreen { pane } | HostCall::DrawScene { pane, .. },
-                ..
-            } => self.panes.get(pane).copied(),
-            Inbound::Call {
-                call: HostCall::ScrollToRun { run_id },
-                ..
-            } => self
-                .runs
-                .get(run_id)
-                .and_then(|pane| self.panes.get(pane))
-                .copied(),
-            Inbound::Call { .. } => self.preferred,
+            Inbound::Call { call, .. } => {
+                if let Some(pane) = call.target_pane() {
+                    self.panes.get(&pane).copied()
+                } else if let HostCall::ScrollToRun { run_id } = call {
+                    self.runs
+                        .get(run_id)
+                        .and_then(|pane| self.panes.get(pane))
+                        .copied()
+                } else {
+                    self.preferred
+                }
+            }
         };
         destination.into_iter().collect()
     }
@@ -129,7 +128,10 @@ impl PluginDispatcher {
             let live_panes = if matches!(
                 &message,
                 Inbound::Call {
-                    call: HostCall::ListPanes | HostCall::ReadScreen { .. },
+                    call: HostCall::ListPanes
+                        | HostCall::ReadScreen { .. }
+                        | HostCall::SendText { .. }
+                        | HostCall::SendKey { .. },
                     ..
                 }
             ) {
@@ -253,6 +255,48 @@ mod tests {
         assert_eq!(routes.destinations(&message), vec![1]);
         routes.runs.remove(&Uuid::from_u128(10));
         assert!(routes.destinations(&message).is_empty());
+    }
+
+    #[test]
+    fn targeted_input_calls_route_once_to_the_owner_and_missing_targets_do_not_fall_back() {
+        let mut routes = two_windows();
+        for call in [
+            HostCall::FocusPane {
+                pane: Uuid::from_u128(2),
+            },
+            HostCall::SendText {
+                pane: Uuid::from_u128(2),
+                text: "hi".into(),
+                enter: true,
+            },
+            HostCall::SendKey {
+                pane: Uuid::from_u128(2),
+                key: "ctrl-c".into(),
+            },
+            HostCall::RequestClosePane {
+                pane: Uuid::from_u128(2),
+            },
+        ] {
+            let message = Inbound::Call { id: 1, call };
+            assert_eq!(
+                routes.destinations(&message),
+                vec![1],
+                "must route to the pane owner, not the preferred window"
+            );
+        }
+        routes.panes.remove(&Uuid::from_u128(2));
+        let missing = Inbound::Call {
+            id: 2,
+            call: HostCall::SendText {
+                pane: Uuid::from_u128(2),
+                text: "hi".into(),
+                enter: false,
+            },
+        };
+        assert!(
+            routes.destinations(&missing).is_empty(),
+            "missing pane must not fall back to the preferred window"
+        );
     }
 
     #[test]

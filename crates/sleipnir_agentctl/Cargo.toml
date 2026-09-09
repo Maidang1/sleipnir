@@ -1,0 +1,23 @@
+[package]
+name = "sleipnir_agentctl"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/sleipnir_agentctl.rs"
+doctest = false
+
+[[bin]]
+name = "sleipnir-agentctl"
+path = "src/bin/sleipnir-agentctl.rs"
+
+[dependencies]
+agent_coordination.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

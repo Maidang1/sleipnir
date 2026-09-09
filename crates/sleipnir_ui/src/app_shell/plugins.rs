@@ -329,6 +329,7 @@ impl AppShell {
     ) {
         use crate::plugin_host_calls::{
             CallPlan, cap_screen, error_result, filter_listed_panes, read_screen_access,
+            send_key_ready, send_text_result,
         };
         use plugin_protocol::v2::{Capability, HostCallResult, PaneInfo};
         let granted: Vec<Capability> = [
@@ -338,6 +339,10 @@ impl AppShell {
             Capability::HostCallOpenPane,
             Capability::HostCallDrawScene,
             Capability::HostCallScrollToRun,
+            Capability::HostCallFocusPane,
+            Capability::HostCallSendText,
+            Capability::HostCallSendKey,
+            Capability::HostCallRequestClosePane,
         ]
         .into_iter()
         .filter(|cap| crate::plugin_runtime::has_grant(plugin_id, *cap, cx))
@@ -420,6 +425,61 @@ impl AppShell {
                         HostCallResult::Ok
                     }
                     None => error_result(format!("run {run_id} not found")),
+                }
+            }
+            CallPlan::FocusPane { pane } => {
+                let (terminals, panels) = self.terminal_and_panel_keys();
+                match read_screen_access(pane, &terminals, &panels) {
+                    Err(message) => error_result(message),
+                    Ok(()) => {
+                        self.jump_to_ledger_row(pane, None, window, cx);
+                        HostCallResult::Ok
+                    }
+                }
+            }
+            CallPlan::SendText { pane, text, enter } => {
+                match self.terminal_view_for_call(pane, live_panes) {
+                    Err(message) => error_result(message),
+                    Ok(view) => {
+                        let delivered =
+                            view.update(cx, |view, cx| view.insert_text(&text, enter, cx));
+                        send_text_result(delivered)
+                    }
+                }
+            }
+            CallPlan::SendKey { pane, key } => {
+                match self.terminal_view_for_call(pane, live_panes) {
+                    Err(message) => error_result(message),
+                    Ok(view) => {
+                        let has_terminal = view.read(cx).terminal_entity().is_some();
+                        let vi_mode = view.read(cx).vi_mode_enabled(cx);
+                        match send_key_ready(has_terminal, vi_mode) {
+                            Err(message) => error_result(message),
+                            Ok(()) => {
+                                let delivered = view.update(cx, |view, cx| {
+                                    view.send_named_keystroke(key.keystroke_str(), cx)
+                                });
+                                if delivered {
+                                    HostCallResult::Ok
+                                } else {
+                                    error_result(format!(
+                                        "key {} was not delivered",
+                                        key.keystroke_str()
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            CallPlan::RequestClosePane { pane } => {
+                let (terminals, panels) = self.terminal_and_panel_keys();
+                match read_screen_access(pane, &terminals, &panels) {
+                    Err(message) => error_result(message),
+                    Ok(()) => match self.request_close_terminal_pane(pane, window, cx) {
+                        Ok(()) => HostCallResult::Ok,
+                        Err(message) => error_result(message),
+                    },
                 }
             }
         };
@@ -552,6 +612,20 @@ impl AppShell {
             cx,
         );
     }
+    fn terminal_view_for_call(
+        &self,
+        pane: PaneKey,
+        live_panes: &[(PaneKey, Entity<TermView>)],
+    ) -> Result<Entity<TermView>, String> {
+        let (terminals, panels) = self.terminal_and_panel_keys();
+        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
+        live_panes
+            .iter()
+            .find(|(key, _)| *key == pane)
+            .map(|(_, view)| view.clone())
+            .or_else(|| self.view_for_pane(pane))
+            .ok_or_else(|| format!("pane {pane} not found"))
+    }
     pub(crate) fn terminal_and_panel_keys(
         &self,
     ) -> (
@@ -592,7 +666,7 @@ impl AppShell {
                 resolved
             }
         };
-        let argv = command.map(|c| (c.program, c.args));
+        let argv = command.map(crate::plugin_host_calls::spawn_argv);
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         let tab_id = self.next_id;

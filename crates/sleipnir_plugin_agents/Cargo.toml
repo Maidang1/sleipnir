@@ -1,0 +1,22 @@
+[package]
+name = "sleipnir_plugin_agents"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "sleipnir-plugin-agents"
+path = "src/main.rs"
+
+[dependencies]
+sleipnir-plugin.workspace = true
+agent_coordination.workspace = true
+uuid.workspace = true

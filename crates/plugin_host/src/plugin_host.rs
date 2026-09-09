@@ -64,6 +64,10 @@ pub enum Permission {
     HostCallOpenPane,
     HostCallDrawScene,
     HostCallScrollToRun,
+    HostCallFocusPane,
+    HostCallSendText,
+    HostCallSendKey,
+    HostCallRequestClosePane,
 }
 
 impl Permission {
@@ -88,6 +92,12 @@ impl Permission {
             Self::HostCallOpenPane => plugin_protocol::v2::Capability::HostCallOpenPane,
             Self::HostCallDrawScene => plugin_protocol::v2::Capability::HostCallDrawScene,
             Self::HostCallScrollToRun => plugin_protocol::v2::Capability::HostCallScrollToRun,
+            Self::HostCallFocusPane => plugin_protocol::v2::Capability::HostCallFocusPane,
+            Self::HostCallSendText => plugin_protocol::v2::Capability::HostCallSendText,
+            Self::HostCallSendKey => plugin_protocol::v2::Capability::HostCallSendKey,
+            Self::HostCallRequestClosePane => {
+                plugin_protocol::v2::Capability::HostCallRequestClosePane
+            }
         }
     }
 }
@@ -586,7 +596,11 @@ mod tests {
                     "host_call_notify",
                     "host_call_read_screen",
                     "host_call_list_panes",
-                    "host_call_open_pane"
+                    "host_call_open_pane",
+                    "host_call_focus_pane",
+                    "host_call_send_text",
+                    "host_call_send_key",
+                    "host_call_request_close_pane"
                 ]
             }"#,
         );
@@ -595,6 +609,10 @@ mod tests {
         let perms = &catalog.plugins[0].manifest.permissions;
         assert!(perms.contains(&Permission::HostCallNotify));
         assert!(perms.contains(&Permission::HostCallOpenPane));
+        assert!(perms.contains(&Permission::HostCallFocusPane));
+        assert!(perms.contains(&Permission::HostCallSendText));
+        assert!(perms.contains(&Permission::HostCallSendKey));
+        assert!(perms.contains(&Permission::HostCallRequestClosePane));
         assert!(perms.contains(&Permission::RenderPanel));
         assert!(perms.contains(&Permission::RenderStatus));
     }

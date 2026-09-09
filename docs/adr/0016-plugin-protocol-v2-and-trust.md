@@ -114,12 +114,28 @@ enum HostCall {
     ReadScreen { pane: PaneKey },
     ListPanes,
     OpenPane   { cwd: Option<String>, command: Option<String> },
+    OpenPaneArgv { cwd: Option<String>, program: String, args: Vec<String> },
+    FocusPane  { pane: PaneKey },
+    SendText   { pane: PaneKey, text: String, enter: bool },
+    SendKey    { pane: PaneKey, key: String },
+    RequestClosePane { pane: PaneKey },
 }
 ```
 
 Each maps to an existing capability already reachable through the control surface
 ([ADR-0011](0011-control-surface.md)), so v2 adds no power that the machine did
-not already expose locally — it changes *who* may ask.
+not already expose locally — it changes *who* may ask. `FocusPane` / `SendText`
+/ `SendKey` are the targeted input surface: they name a pane explicitly,
+`SendText` uses the paste-aware insertion path rather than raw bytes, and
+`SendKey` is an allowlist of logical names (interrupt and navigation), not
+encoded key sequences. Snapshot `write_terminal` does not grant them.
+`FocusPane` activates the tab/pane in the owning window and does not raise a
+background OS window. `SendKey` is refused while terminal vi mode is active.
+`RequestClosePane` uses the same user-policy close path as the UI (a busy
+pane may require confirmation); `Ok` means the request was accepted, not
+that the pane is gone. There is no force-close primitive. `OpenPaneArgv`
+uses the same `host_call_open_pane` grant as `OpenPane` and passes
+`program`/`args` directly to spawn (never a shell line).
 
 ### 4. Capabilities: new grants sit a tier above the v1 seven
 
@@ -133,7 +149,7 @@ never implied by the old set:
 | `resident` | the process keeps running between invocations |
 | `subscribe_events` | **continuous observation** rather than one snapshot; narrowable by pane and by event kind |
 | `render_block` / `render_panel` / `render_status` | the plugin draws into the app's own surfaces |
-| `host_call:notify` / `host_call:read_screen` / `host_call:list_panes` / `host_call:open_pane` | plugin-initiated action, not user-initiated |
+| `host_call:notify` / `host_call:read_screen` / `host_call:list_panes` / `host_call:open_pane` / `host_call:focus_pane` / `host_call:send_text` / `host_call:send_key` / `host_call:request_close_pane` | plugin-initiated action, not user-initiated |
 
 `subscribe_events` is the significant semantic escalation: a plugin moves from
 "runs when you pick it" to "watches every command you run". It must be requested

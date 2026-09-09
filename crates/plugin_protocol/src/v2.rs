@@ -115,6 +115,18 @@ pub enum Capability {
     HostCallOpenPane,
     HostCallDrawScene,
     HostCallScrollToRun,
+    /// Focus a specific terminal pane. Never implied by snapshot writes.
+    HostCallFocusPane,
+    /// Type into a specific terminal pane via the paste-aware insertion path.
+    /// Never implied by [`Capability::WriteTerminal`] (which only covers
+    /// user-invoked `Output::Insert` into the active pane).
+    HostCallSendText,
+    /// Send one allowlisted logical key to a specific terminal pane.
+    /// Never implied by [`Capability::WriteTerminal`].
+    HostCallSendKey,
+    /// Request close of a specific terminal pane via the user-policy path
+    /// (busy panes may require confirmation). Never a force-close.
+    HostCallRequestClosePane,
 }
 
 /// Narrows an event subscription. An empty field means "no filter".
@@ -237,6 +249,13 @@ impl HostEvent {
 /// (ADR-0011), so v2 adds no power the machine did not already expose locally —
 /// it changes *who* may ask, which is why each is separately granted.
 ///
+/// `FocusPane` / `SendText` / `SendKey` / `RequestClosePane` / `OpenPaneArgv`
+/// are additive v2 variants (serde tagged unions): existing messages still
+/// decode and `PROTOCOL_VERSION` stays 2. Snapshot [`Capability::WriteTerminal`]
+/// does not grant them. An older v2 host that does not know a new `call`
+/// tag skips the line as malformed and sends no `Reply`; the plugin's
+/// `call` waits until timeout.
+///
 /// Not `Eq`: `DrawScene` carries floating-point geometry.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "call", rename_all = "snake_case")]
@@ -255,6 +274,17 @@ pub enum HostCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },
+    /// Spawn a pane with a structured argv. Same grant as [`Self::OpenPane`].
+    /// `program` and `args` are passed directly to the PTY spawn; they are
+    /// never joined into a shell line. Keep [`Self::OpenPane`] for the
+    /// whitespace-split command string.
+    OpenPaneArgv {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        program: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+    },
     /// A 3D scene the host projects and paints with vector polygons.
     ///
     /// Replaces the earlier `WriteGraphics` PNG path: the plugin sends compact
@@ -271,6 +301,54 @@ pub enum HostCall {
     /// `Error`, not a drop.
     ScrollToRun {
         run_id: RunId,
+    },
+    /// Focus a terminal pane. Plugin panels and unknown keys are errors.
+    /// Requires [`Capability::HostCallFocusPane`]; not implied by
+    /// [`Capability::WriteTerminal`].
+    ///
+    /// Activates the tab and pane inside the owning Sleipnir window. Does
+    /// not raise a background OS window to the front.
+    FocusPane {
+        pane: PaneKey,
+    },
+    /// Insert `text` into a specific terminal pane through the host's
+    /// bracketed-paste-aware path, then optionally a carriage return.
+    ///
+    /// This is a targeted, plugin-initiated write. [`Capability::WriteTerminal`]
+    /// does **not** grant it: that snapshot permission only covers
+    /// user-invoked `Output::Insert` into the active pane. Oversize text,
+    /// plugin panels, missing panes, and panes with no PTY yet are errors,
+    /// not silent truncation or fallback to the focused pane.
+    ///
+    /// Outside bracketed-paste mode, `\n` / `\r\n` become `\r`. Inside it,
+    /// ESC is stripped and newlines stay inside the paste brackets; `enter`
+    /// still sends a separate CR afterwards.
+    SendText {
+        pane: PaneKey,
+        text: String,
+        #[serde(default)]
+        enter: bool,
+    },
+    /// Send one logical key to a specific terminal pane.
+    ///
+    /// `key` is a name (`ctrl-c`, `escape`, …), never encoded bytes. The host
+    /// allowlists names sufficient for interruption and navigation; unknown
+    /// names are `Error`. Terminal vi mode is `Error` (the key would be
+    /// consumed as scrollback motion). Requires [`Capability::HostCallSendKey`].
+    SendKey {
+        pane: PaneKey,
+        key: String,
+    },
+    /// Request close of a terminal pane through the same user-policy path
+    /// as the UI close command. A busy pane may require confirmation.
+    ///
+    /// `HostCallResult::Ok` means the request was **accepted**, not that the
+    /// pane is gone. Plugin panels and unknown keys are `Error`. There is
+    /// no force-close primitive. Requires
+    /// [`Capability::HostCallRequestClosePane`]; not implied by
+    /// [`Capability::WriteTerminal`] or [`Capability::HostCallFocusPane`].
+    RequestClosePane {
+        pane: PaneKey,
     },
 }
 
@@ -347,9 +425,31 @@ impl HostCall {
             Self::Notify { .. } => Capability::HostCallNotify,
             Self::ReadScreen { .. } => Capability::HostCallReadScreen,
             Self::ListPanes => Capability::HostCallListPanes,
-            Self::OpenPane { .. } => Capability::HostCallOpenPane,
+            Self::OpenPane { .. } | Self::OpenPaneArgv { .. } => Capability::HostCallOpenPane,
             Self::DrawScene { .. } => Capability::HostCallDrawScene,
             Self::ScrollToRun { .. } => Capability::HostCallScrollToRun,
+            Self::FocusPane { .. } => Capability::HostCallFocusPane,
+            Self::SendText { .. } => Capability::HostCallSendText,
+            Self::SendKey { .. } => Capability::HostCallSendKey,
+            Self::RequestClosePane { .. } => Capability::HostCallRequestClosePane,
+        }
+    }
+
+    /// Pane this call addresses, when it names one. Used by the dispatcher to
+    /// route to the owning window instead of falling back to the active one.
+    pub fn target_pane(&self) -> Option<PaneKey> {
+        match self {
+            Self::ReadScreen { pane }
+            | Self::DrawScene { pane, .. }
+            | Self::FocusPane { pane }
+            | Self::SendText { pane, .. }
+            | Self::SendKey { pane, .. }
+            | Self::RequestClosePane { pane } => Some(*pane),
+            Self::Notify { .. }
+            | Self::ListPanes
+            | Self::OpenPane { .. }
+            | Self::OpenPaneArgv { .. }
+            | Self::ScrollToRun { .. } => None,
         }
     }
 }
@@ -867,6 +967,41 @@ mod tests {
     }
 
     #[test]
+    fn open_pane_argv_round_trips_and_uses_open_pane_capability() {
+        let call = HostCall::OpenPaneArgv {
+            cwd: Some("/work".into()),
+            program: "codex".into(),
+            args: vec!["--foo".into(), "bar baz".into()],
+        };
+        assert_eq!(call.required_capability(), Capability::HostCallOpenPane);
+        assert_eq!(
+            HostCall::OpenPane {
+                cwd: None,
+                command: None
+            }
+            .required_capability(),
+            Capability::HostCallOpenPane
+        );
+        assert!(call.target_pane().is_none());
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(line.contains(r#""call":"open_pane_argv""#));
+        assert!(line.contains("--foo"));
+        assert!(line.contains("bar baz"));
+        assert!(!line.contains("sh -c"));
+        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+        let omitted: HostCall =
+            serde_json::from_str(r#"{"call":"open_pane_argv","program":"codex"}"#).unwrap();
+        match omitted {
+            HostCall::OpenPaneArgv { cwd, program, args } => {
+                assert!(cwd.is_none());
+                assert_eq!(program, "codex");
+                assert!(args.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn scroll_to_run_call_round_trips_and_declares_its_capability() {
         let call = HostCall::ScrollToRun {
             run_id: Uuid::from_u128(5),
@@ -875,6 +1010,99 @@ mod tests {
         let line = serde_json::to_string(&call).unwrap();
         assert!(line.contains(r#""call":"scroll_to_run""#));
         assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+    }
+
+    #[test]
+    fn focus_pane_call_round_trips_and_declares_its_capability() {
+        let call = HostCall::FocusPane {
+            pane: Uuid::from_u128(8),
+        };
+        assert_eq!(call.required_capability(), Capability::HostCallFocusPane);
+        assert_eq!(call.target_pane(), Some(Uuid::from_u128(8)));
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(line.contains(r#""call":"focus_pane""#));
+        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+        assert_eq!(
+            serde_json::to_string(&Capability::HostCallFocusPane).unwrap(),
+            r#""host_call_focus_pane""#
+        );
+    }
+
+    #[test]
+    fn send_text_call_round_trips_and_is_not_write_terminal() {
+        let call = HostCall::SendText {
+            pane: Uuid::from_u128(9),
+            text: "hello".into(),
+            enter: true,
+        };
+        assert_eq!(call.required_capability(), Capability::HostCallSendText);
+        assert_ne!(call.required_capability(), Capability::WriteTerminal);
+        assert_eq!(call.target_pane(), Some(Uuid::from_u128(9)));
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(line.contains(r#""call":"send_text""#));
+        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+        // Additive field: an older sender omitting `enter` still decodes.
+        let old: HostCall = serde_json::from_str(
+            r#"{"call":"send_text","pane":"00000000-0000-0000-0000-000000000009","text":"hello"}"#,
+        )
+        .unwrap();
+        match old {
+            HostCall::SendText { enter, text, .. } => {
+                assert!(!enter);
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected SendText, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_string(&Capability::HostCallSendText).unwrap(),
+            r#""host_call_send_text""#
+        );
+    }
+
+    #[test]
+    fn send_key_call_round_trips_and_is_not_write_terminal() {
+        let call = HostCall::SendKey {
+            pane: Uuid::from_u128(10),
+            key: "ctrl-c".into(),
+        };
+        assert_eq!(call.required_capability(), Capability::HostCallSendKey);
+        assert_ne!(call.required_capability(), Capability::WriteTerminal);
+        assert_eq!(call.target_pane(), Some(Uuid::from_u128(10)));
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(line.contains(r#""call":"send_key""#));
+        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+        assert_eq!(
+            serde_json::to_string(&Capability::HostCallSendKey).unwrap(),
+            r#""host_call_send_key""#
+        );
+    }
+
+    #[test]
+    fn request_close_pane_call_round_trips_and_is_not_force_close() {
+        let call = HostCall::RequestClosePane {
+            pane: Uuid::from_u128(11),
+        };
+        assert_eq!(
+            call.required_capability(),
+            Capability::HostCallRequestClosePane
+        );
+        assert_ne!(call.required_capability(), Capability::WriteTerminal);
+        assert_ne!(call.required_capability(), Capability::HostCallFocusPane);
+        assert_eq!(call.target_pane(), Some(Uuid::from_u128(11)));
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(line.contains(r#""call":"request_close_pane""#));
+        assert!(!line.contains("force"));
+        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
+        assert_eq!(
+            serde_json::to_string(&Capability::HostCallRequestClosePane).unwrap(),
+            r#""host_call_request_close_pane""#
+        );
+        assert!(
+            serde_json::from_str::<HostCall>(
+                r#"{"call":"force_close_pane","pane":"00000000-0000-0000-0000-00000000000b"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -2,9 +2,13 @@
 //!
 //! A `Call` is a plugin asking the host to do something the control surface
 //! already exposes locally (ADR-0011): notify, read a pane, list panes, open a
-//! pane. v2 adds no new power — it changes *who* may ask, which is why each
-//! verb is a separately granted capability and is **never implied** by a
-//! snapshot-read permission.
+//! pane, focus a pane, type into a pane, send an allowlisted key, request
+//! close of a pane. v2 adds no new power — it changes *who* may ask, which
+//! is why each verb is a separately granted capability and is **never implied**
+//! by a snapshot-read or snapshot-write permission. [`Capability::WriteTerminal`]
+//! covers user-invoked `Output::Insert` into the active pane; it does not grant
+//! [`HostCall::FocusPane`], [`HostCall::SendText`], [`HostCall::SendKey`], or
+//! [`HostCall::RequestClosePane`].
 //!
 //! Every `Call` id must produce exactly one `Reply`. A silent drop (denied,
 //! missing pane, rate limit, dead plugin) would leave a resident plugin
@@ -27,6 +31,12 @@ pub const MAX_NOTIFY_BODY: usize = 500;
 pub const MAX_SCREEN_CHARS: usize = 64 * 1024;
 /// OpenPane command string cap, before argv split.
 pub const MAX_OPEN_COMMAND_CHARS: usize = 1024;
+/// OpenPaneArgv program length cap.
+pub const MAX_OPEN_PROGRAM_CHARS: usize = 256;
+/// OpenPaneArgv argv entry count cap (not counting `program`).
+pub const MAX_OPEN_ARGS: usize = 16;
+/// OpenPaneArgv per-arg length cap.
+pub const MAX_OPEN_ARG_CHARS: usize = 256;
 /// Sliding window for per-plugin host-call rate limiting.
 pub const RATE_WINDOW_MS: u64 = 5_000;
 /// Max accepted calls per plugin in [`RATE_WINDOW_MS`].
@@ -37,6 +47,69 @@ pub const MAX_SCENE_BARS: usize = 256;
 /// Max grid extent (cols or rows) in one DrawScene call. A bar grid larger than
 /// this cannot be laid out legibly and is almost certainly a bad payload.
 pub const MAX_SCENE_GRID: u32 = 64;
+/// SendText payload cap. Oversize is an error, not truncation: silently
+/// cutting a prompt could execute a different command than the plugin sent.
+pub const MAX_SEND_TEXT_CHARS: usize = 8 * 1024;
+
+/// Allowlisted logical keys for [`HostCall::SendKey`]. Names, not bytes;
+/// sufficient for interruption and prompt navigation. Unknown names are
+/// rejected rather than forwarded as encoded input.
+pub const SEND_KEY_NAMES: &[&str] = &[
+    "ctrl-c", "escape", "enter", "tab", "up", "down", "left", "right",
+];
+
+/// Canonical logical key after parsing a [`HostCall::SendKey`] name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalKey {
+    CtrlC,
+    Escape,
+    Enter,
+    Tab,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl LogicalKey {
+    /// Parse a plugin-supplied key name. Case-insensitive; `ctrl+c` / `esc`
+    /// / `return` / `arrow-*` are accepted aliases. Unknown names error.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        let normalized = name.trim().to_ascii_lowercase().replace('_', "-");
+        let canonical = match normalized.as_str() {
+            "ctrl-c" | "ctrl+c" => Self::CtrlC,
+            "escape" | "esc" => Self::Escape,
+            "enter" | "return" => Self::Enter,
+            "tab" => Self::Tab,
+            "up" | "arrow-up" => Self::Up,
+            "down" | "arrow-down" => Self::Down,
+            "left" | "arrow-left" => Self::Left,
+            "right" | "arrow-right" => Self::Right,
+            "" => return Err("key is empty".into()),
+            other => {
+                return Err(format!(
+                    "unknown key {other:?}; allowed: {}",
+                    SEND_KEY_NAMES.join(", ")
+                ));
+            }
+        };
+        Ok(canonical)
+    }
+
+    /// gpui `Keystroke::parse` token for the terminal mapping table.
+    pub fn keystroke_str(self) -> &'static str {
+        match self {
+            Self::CtrlC => "ctrl-c",
+            Self::Escape => "escape",
+            Self::Enter => "enter",
+            Self::Tab => "tab",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
 
 /// Program + argv for OpenPane. Never a shell command line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +143,21 @@ pub enum CallPlan {
     },
     ScrollToRun {
         run_id: RunId,
+    },
+    FocusPane {
+        pane: PaneKey,
+    },
+    SendText {
+        pane: PaneKey,
+        text: String,
+        enter: bool,
+    },
+    SendKey {
+        pane: PaneKey,
+        key: LogicalKey,
+    },
+    RequestClosePane {
+        pane: PaneKey,
     },
 }
 
@@ -145,6 +233,15 @@ pub fn plan_call(
             Ok((cwd, command)) => CallPlan::OpenPane { cwd, command },
             Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
         },
+        HostCall::OpenPaneArgv { cwd, program, args } => {
+            match parse_open_pane_argv(cwd, program, args) {
+                Ok((cwd, command)) => CallPlan::OpenPane {
+                    cwd,
+                    command: Some(command),
+                },
+                Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
+            }
+        }
         HostCall::DrawScene { pane, scene } => match validate_scene(scene) {
             Ok(()) => CallPlan::DrawScene {
                 pane: *pane,
@@ -153,7 +250,30 @@ pub fn plan_call(
             Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
         },
         HostCall::ScrollToRun { run_id } => CallPlan::ScrollToRun { run_id: *run_id },
+        HostCall::FocusPane { pane } => CallPlan::FocusPane { pane: *pane },
+        HostCall::SendText { pane, text, enter } => match validate_send_text(text) {
+            Ok(()) => CallPlan::SendText {
+                pane: *pane,
+                text: text.clone(),
+                enter: *enter,
+            },
+            Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
+        },
+        HostCall::SendKey { pane, key } => match LogicalKey::parse(key) {
+            Ok(key) => CallPlan::SendKey { pane: *pane, key },
+            Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
+        },
+        HostCall::RequestClosePane { pane } => CallPlan::RequestClosePane { pane: *pane },
     }
+}
+
+fn validate_send_text(text: &str) -> Result<(), String> {
+    if text.chars().count() > MAX_SEND_TEXT_CHARS {
+        return Err(format!(
+            "text exceeds length cap of {MAX_SEND_TEXT_CHARS} characters"
+        ));
+    }
+    Ok(())
 }
 
 fn cap_chars(s: &str, max: usize) -> String {
@@ -163,22 +283,65 @@ fn cap_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+fn parse_open_cwd(cwd: &Option<String>) -> Result<Option<String>, String> {
+    match cwd.as_deref() {
+        None => Ok(None),
+        Some(raw) if raw.trim().is_empty() => Err("cwd is empty".into()),
+        Some(raw) if raw.contains('\0') => Err("cwd contains NUL".into()),
+        Some(raw) => Ok(Some(raw.to_string())),
+    }
+}
+
 fn parse_open_pane(
     cwd: &Option<String>,
     command: &Option<String>,
 ) -> Result<(Option<String>, Option<OpenCommand>), String> {
-    let cwd = match cwd.as_deref() {
-        None => None,
-        Some(raw) if raw.trim().is_empty() => {
-            return Err("cwd is empty".into());
-        }
-        Some(raw) => Some(raw.to_string()),
-    };
+    let cwd = parse_open_cwd(cwd)?;
     let command = match command.as_deref() {
         None => None,
         Some(raw) => Some(parse_open_command(raw)?),
     };
     Ok((cwd, command))
+}
+
+fn parse_open_pane_argv(
+    cwd: &Option<String>,
+    program: &str,
+    args: &[String],
+) -> Result<(Option<String>, OpenCommand), String> {
+    let cwd = parse_open_cwd(cwd)?;
+    if program.trim().is_empty() {
+        return Err("program is empty".into());
+    }
+    if program.contains('\0') {
+        return Err("program contains NUL".into());
+    }
+    if program.chars().count() > MAX_OPEN_PROGRAM_CHARS {
+        return Err("program exceeds length cap".into());
+    }
+    if args.len() > MAX_OPEN_ARGS {
+        return Err(format!("too many args (max {MAX_OPEN_ARGS})"));
+    }
+    for arg in args {
+        if arg.contains('\0') {
+            return Err("arg contains NUL".into());
+        }
+        if arg.chars().count() > MAX_OPEN_ARG_CHARS {
+            return Err("arg exceeds length cap".into());
+        }
+    }
+    Ok((
+        cwd,
+        OpenCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+        },
+    ))
+}
+
+/// argv handed to `spawn_term_view`. Never rejoins into a shell line.
+pub fn spawn_argv(command: OpenCommand) -> (String, Vec<String>) {
+    (command.program, command.args)
 }
 
 /// Split `command` into program + argv on whitespace.
@@ -251,9 +414,10 @@ pub fn filter_listed_panes(
         .collect()
 }
 
-/// Classify a ReadScreen target. The caller already required
-/// [`Capability::HostCallReadScreen`]; no snapshot-read permission is
-/// consulted here.
+/// Classify a terminal-pane target. Used by ReadScreen, FocusPane, SendText,
+/// SendKey, and RequestClosePane. The caller already required the matching
+/// host-call capability; no snapshot-read or [`Capability::WriteTerminal`]
+/// grant is consulted here.
 pub fn read_screen_access(
     pane: PaneKey,
     terminal_keys: &BTreeSet<PaneKey>,
@@ -272,6 +436,39 @@ pub fn error_result(message: impl Into<String>) -> HostCallResult {
     HostCallResult::Error {
         message: message.into(),
     }
+}
+
+/// Reply for [`HostCall::SendText`] after attempting insertion. A loading or
+/// failed pane has no PTY; that is an Error, not a silent Ok.
+pub const SEND_TEXT_NO_TERMINAL: &str = "pane has no terminal yet";
+/// Reply for [`HostCall::SendKey`] when the pane is in terminal vi mode.
+/// `try_keystroke` would consume arrows/escape as scrollback motion.
+pub const SEND_KEY_VI_MODE: &str =
+    "terminal vi mode is active; the key would be consumed as scrollback motion";
+
+/// Map `TermView::insert_text`'s delivery flag to a host-call reply.
+pub fn send_text_result(delivered: bool) -> HostCallResult {
+    if delivered {
+        HostCallResult::Ok
+    } else {
+        error_result(SEND_TEXT_NO_TERMINAL)
+    }
+}
+
+/// Whether a plugin [`HostCall::SendKey`] may be delivered to this pane.
+///
+/// Loading/failed panes have no PTY. Vi mode handles keys as scrollback
+/// motion (`Terminal::try_keystroke` returns true without writing to the
+/// PTY), so the plugin must not be told the interrupt/navigation key was
+/// sent.
+pub fn send_key_ready(has_terminal: bool, vi_mode: bool) -> Result<(), String> {
+    if !has_terminal {
+        return Err(SEND_TEXT_NO_TERMINAL.into());
+    }
+    if vi_mode {
+        return Err(SEND_KEY_VI_MODE.into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -301,7 +498,23 @@ mod tests {
                 cwd: None,
                 command: None,
             },
+            HostCall::OpenPaneArgv {
+                cwd: None,
+                program: "codex".into(),
+                args: vec![],
+            },
             HostCall::ScrollToRun { run_id: key(7) },
+            HostCall::FocusPane { pane: key(1) },
+            HostCall::SendText {
+                pane: key(1),
+                text: "hi".into(),
+                enter: false,
+            },
+            HostCall::SendKey {
+                pane: key(1),
+                key: "ctrl-c".into(),
+            },
+            HostCall::RequestClosePane { pane: key(1) },
         ];
         for call in calls {
             let plan = plan_call("demo", &call, &[], &mut limiter, 0);
@@ -391,6 +604,22 @@ mod tests {
                 .contains("not found")
         );
         assert!(read_screen_access(terminal, &terminals, &panels).is_ok());
+    }
+
+    #[test]
+    fn targeted_input_uses_the_same_terminal_access_rules() {
+        // FocusPane / SendText / SendKey / RequestClosePane execute against
+        // read_screen_access so a plugin panel is never a write/close target
+        // and a missing pane never falls back to the focused one.
+        let terminal = key(1);
+        let panel = key(2);
+        let mut terminals = BTreeSet::new();
+        terminals.insert(terminal);
+        let mut panels = BTreeSet::new();
+        panels.insert(panel);
+        for pane in [panel, key(99)] {
+            assert!(read_screen_access(pane, &terminals, &panels).is_err());
+        }
     }
 
     #[test]
@@ -493,6 +722,127 @@ mod tests {
     }
 
     #[test]
+    fn open_pane_argv_plans_structured_argv_without_rejoin() {
+        let mut limiter = HostCallLimiter::new();
+        let plan = plan_call(
+            "demo",
+            &HostCall::OpenPaneArgv {
+                cwd: Some("/work".into()),
+                program: "codex".into(),
+                args: vec!["--model".into(), "gpt 4".into()],
+            },
+            &[Capability::HostCallOpenPane],
+            &mut limiter,
+            0,
+        );
+        match plan {
+            CallPlan::OpenPane { cwd, command } => {
+                assert_eq!(cwd.as_deref(), Some("/work"));
+                let command = command.expect("argv");
+                assert_eq!(command.program, "codex");
+                assert_eq!(command.args, ["--model", "gpt 4"]);
+                let argv = spawn_argv(command);
+                assert_eq!(argv.0, "codex");
+                assert_eq!(argv.1, ["--model", "gpt 4"]);
+                assert_ne!(argv.1.join(" "), "codex --model gpt 4");
+            }
+            other => panic!("expected OpenPane plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_pane_argv_rejects_empty_nul_and_oversize() {
+        let mut limiter = HostCallLimiter::new();
+        let granted = [Capability::HostCallOpenPane];
+        for call in [
+            HostCall::OpenPaneArgv {
+                cwd: None,
+                program: "  ".into(),
+                args: vec![],
+            },
+            HostCall::OpenPaneArgv {
+                cwd: None,
+                program: "ok\0no".into(),
+                args: vec![],
+            },
+            HostCall::OpenPaneArgv {
+                cwd: None,
+                program: "ok".into(),
+                args: vec!["a\0b".into()],
+            },
+            HostCall::OpenPaneArgv {
+                cwd: Some("/tmp\0".into()),
+                program: "ok".into(),
+                args: vec![],
+            },
+        ] {
+            match plan_call("demo", &call, &granted, &mut limiter, 0) {
+                CallPlan::Reply(HostCallResult::Error { message }) => {
+                    assert!(
+                        message.contains("empty")
+                            || message.contains("NUL")
+                            || message.contains("exceeds")
+                            || message.contains("too many"),
+                        "{message}"
+                    );
+                }
+                other => panic!("expected error, got {other:?}"),
+            }
+        }
+        let too_many: Vec<String> = (0..MAX_OPEN_ARGS + 1).map(|i| i.to_string()).collect();
+        match plan_call(
+            "demo",
+            &HostCall::OpenPaneArgv {
+                cwd: None,
+                program: "ok".into(),
+                args: too_many,
+            },
+            &granted,
+            &mut limiter,
+            0,
+        ) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("too many"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let long: String = std::iter::repeat_n('x', MAX_OPEN_PROGRAM_CHARS + 1).collect();
+        match plan_call(
+            "demo",
+            &HostCall::OpenPaneArgv {
+                cwd: None,
+                program: long,
+                args: vec![],
+            },
+            &granted,
+            &mut limiter,
+            0,
+        ) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("program"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let long_arg: String = std::iter::repeat_n('y', MAX_OPEN_ARG_CHARS + 1).collect();
+        match plan_call(
+            "demo",
+            &HostCall::OpenPaneArgv {
+                cwd: None,
+                program: "ok".into(),
+                args: vec![long_arg],
+            },
+            &granted,
+            &mut limiter,
+            0,
+        ) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("arg"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn empty_open_cwd_is_malformed_not_executed() {
         let mut limiter = HostCallLimiter::new();
         let plan = plan_call(
@@ -534,8 +884,42 @@ mod tests {
             Capability::HostCallOpenPane
         );
         assert_eq!(
+            HostCall::OpenPaneArgv {
+                cwd: None,
+                program: "codex".into(),
+                args: vec!["--foo".into()],
+            }
+            .required_capability(),
+            Capability::HostCallOpenPane
+        );
+        assert_eq!(
             HostCall::ScrollToRun { run_id: key(1) }.required_capability(),
             Capability::HostCallScrollToRun
+        );
+        assert_eq!(
+            HostCall::FocusPane { pane: key(1) }.required_capability(),
+            Capability::HostCallFocusPane
+        );
+        assert_eq!(
+            HostCall::SendText {
+                pane: key(1),
+                text: "x".into(),
+                enter: false
+            }
+            .required_capability(),
+            Capability::HostCallSendText
+        );
+        assert_eq!(
+            HostCall::SendKey {
+                pane: key(1),
+                key: "escape".into()
+            }
+            .required_capability(),
+            Capability::HostCallSendKey
+        );
+        assert_eq!(
+            HostCall::RequestClosePane { pane: key(1) }.required_capability(),
+            Capability::HostCallRequestClosePane
         );
     }
 
@@ -693,5 +1077,242 @@ mod tests {
             plan,
             CallPlan::Reply(HostCallResult::Error { .. })
         ));
+    }
+
+    fn send_text(text: &str, enter: bool) -> HostCall {
+        HostCall::SendText {
+            pane: key(1),
+            text: text.into(),
+            enter,
+        }
+    }
+
+    fn send_key(name: &str) -> HostCall {
+        HostCall::SendKey {
+            pane: key(1),
+            key: name.into(),
+        }
+    }
+
+    #[test]
+    fn write_terminal_does_not_imply_cross_pane_calls() {
+        let mut limiter = HostCallLimiter::new();
+        let granted = [Capability::WriteTerminal];
+        for call in [
+            HostCall::FocusPane { pane: key(1) },
+            send_text("hi", true),
+            send_key("ctrl-c"),
+            HostCall::RequestClosePane { pane: key(1) },
+        ] {
+            match plan_call("demo", &call, &granted, &mut limiter, 0) {
+                CallPlan::Reply(HostCallResult::Error { message }) => {
+                    assert!(
+                        message.contains("not granted"),
+                        "WriteTerminal must not grant {call:?}: {message}"
+                    );
+                }
+                other => panic!("WriteTerminal must not imply {call:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn each_cross_pane_call_needs_its_own_capability() {
+        let mut limiter = HostCallLimiter::new();
+        let plan = plan_call(
+            "demo",
+            &send_text("hi", false),
+            &[Capability::HostCallFocusPane, Capability::HostCallSendKey],
+            &mut limiter,
+            0,
+        );
+        assert!(
+            matches!(plan, CallPlan::Reply(HostCallResult::Error { .. })),
+            "FocusPane/SendKey must not imply SendText: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn send_text_plans_when_granted_and_rejects_oversize() {
+        let mut limiter = HostCallLimiter::new();
+        let granted = [Capability::HostCallSendText];
+        match plan_call("demo", &send_text("hi", true), &granted, &mut limiter, 0) {
+            CallPlan::SendText { text, enter, pane } => {
+                assert_eq!(pane, key(1));
+                assert_eq!(text, "hi");
+                assert!(enter);
+            }
+            other => panic!("expected SendText, got {other:?}"),
+        }
+        let long: String = std::iter::repeat_n('x', MAX_SEND_TEXT_CHARS + 1).collect();
+        match plan_call("demo", &send_text(&long, false), &granted, &mut limiter, 0) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("exceeds"), "{message}");
+            }
+            other => panic!("oversize must be an Error, not truncation: {other:?}"),
+        }
+        let exact: String = std::iter::repeat_n('y', MAX_SEND_TEXT_CHARS).collect();
+        assert!(matches!(
+            plan_call("demo", &send_text(&exact, false), &granted, &mut limiter, 0),
+            CallPlan::SendText { .. }
+        ));
+    }
+
+    #[test]
+    fn send_key_accepts_allowlisted_names_and_rejects_unknown() {
+        let mut limiter = HostCallLimiter::new();
+        let granted = [Capability::HostCallSendKey];
+        for (i, (name, expected)) in [
+            ("ctrl-c", LogicalKey::CtrlC),
+            ("Ctrl+C", LogicalKey::CtrlC),
+            ("escape", LogicalKey::Escape),
+            ("ESC", LogicalKey::Escape),
+            ("enter", LogicalKey::Enter),
+            ("tab", LogicalKey::Tab),
+            ("up", LogicalKey::Up),
+            ("arrow-down", LogicalKey::Down),
+            ("left", LogicalKey::Left),
+            ("right", LogicalKey::Right),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Spread across the rate window so the allowlist, not the limiter,
+            // is the thing under test.
+            let now = (i as u64) * RATE_WINDOW_MS;
+            match plan_call("demo", &send_key(name), &granted, &mut limiter, now) {
+                CallPlan::SendKey { key: logical, pane } => {
+                    assert_eq!(pane, key(1));
+                    assert_eq!(logical, expected, "name {name}");
+                }
+                other => panic!("expected SendKey for {name}, got {other:?}"),
+            }
+        }
+        let mut limiter = HostCallLimiter::new();
+        match plan_call("demo", &send_key("ctrl-x"), &granted, &mut limiter, 0) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("unknown key"), "{message}");
+                assert!(message.contains("ctrl-c"), "{message}");
+            }
+            other => panic!("unknown key must be Error, got {other:?}"),
+        }
+        match plan_call("demo", &send_key("\\x03"), &granted, &mut limiter, 0) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("unknown key"), "{message}");
+            }
+            other => panic!("encoded bytes must be rejected, got {other:?}"),
+        }
+        match plan_call("demo", &send_key("  "), &granted, &mut limiter, 0) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("empty"), "{message}");
+            }
+            other => panic!("empty key must be Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_pane_writes_use_the_default_rate_limiter() {
+        let mut limiter = HostCallLimiter::new();
+        let granted = [Capability::HostCallSendText];
+        let call = send_text("x", false);
+        for _ in 0..RATE_MAX_CALLS {
+            assert!(matches!(
+                plan_call("demo", &call, &granted, &mut limiter, 1_000),
+                CallPlan::SendText { .. }
+            ));
+        }
+        assert!(matches!(
+            plan_call("demo", &call, &granted, &mut limiter, 1_000),
+            CallPlan::Reply(HostCallResult::Error { message }) if message == "rate limited"
+        ));
+        assert_eq!(
+            limiter.dropped_counts().get("demo").copied().unwrap_or(0),
+            1
+        );
+    }
+
+    #[test]
+    fn request_close_pane_plans_when_granted_and_needs_its_own_capability() {
+        let mut limiter = HostCallLimiter::new();
+        match plan_call(
+            "demo",
+            &HostCall::RequestClosePane { pane: key(3) },
+            &[Capability::HostCallRequestClosePane],
+            &mut limiter,
+            0,
+        ) {
+            CallPlan::RequestClosePane { pane } => assert_eq!(pane, key(3)),
+            other => panic!("expected RequestClosePane, got {other:?}"),
+        }
+        match plan_call(
+            "demo",
+            &HostCall::RequestClosePane { pane: key(3) },
+            &[Capability::HostCallFocusPane],
+            &mut limiter,
+            0,
+        ) {
+            CallPlan::Reply(HostCallResult::Error { message }) => {
+                assert!(message.contains("not granted"), "{message}");
+            }
+            other => panic!("FocusPane must not imply RequestClosePane: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn focus_pane_plans_when_granted() {
+        let mut limiter = HostCallLimiter::new();
+        match plan_call(
+            "demo",
+            &HostCall::FocusPane { pane: key(3) },
+            &[Capability::HostCallFocusPane],
+            &mut limiter,
+            0,
+        ) {
+            CallPlan::FocusPane { pane } => assert_eq!(pane, key(3)),
+            other => panic!("expected FocusPane, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_key_keystroke_tokens_match_the_terminal_table() {
+        assert_eq!(LogicalKey::CtrlC.keystroke_str(), "ctrl-c");
+        assert_eq!(LogicalKey::Escape.keystroke_str(), "escape");
+        assert_eq!(LogicalKey::Enter.keystroke_str(), "enter");
+        assert_eq!(LogicalKey::Tab.keystroke_str(), "tab");
+        assert_eq!(LogicalKey::Up.keystroke_str(), "up");
+        assert_eq!(LogicalKey::Down.keystroke_str(), "down");
+        assert_eq!(LogicalKey::Left.keystroke_str(), "left");
+        assert_eq!(LogicalKey::Right.keystroke_str(), "right");
+    }
+
+    #[test]
+    fn send_text_without_a_terminal_is_an_error_not_ok() {
+        assert_eq!(send_text_result(true), HostCallResult::Ok);
+        match send_text_result(false) {
+            HostCallResult::Error { message } => {
+                assert_eq!(message, SEND_TEXT_NO_TERMINAL);
+            }
+            other => panic!("loading pane must not reply Ok: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_key_is_not_eligible_without_a_terminal_or_in_vi_mode() {
+        assert!(send_key_ready(true, false).is_ok());
+        match send_key_ready(false, false) {
+            Err(message) => assert_eq!(message, SEND_TEXT_NO_TERMINAL),
+            Ok(()) => panic!("loading pane must reject SendKey"),
+        }
+        match send_key_ready(true, true) {
+            Err(message) => {
+                assert_eq!(message, SEND_KEY_VI_MODE);
+                assert!(message.contains("vi mode"), "{message}");
+            }
+            Ok(()) => panic!("vi mode must reject SendKey"),
+        }
+        match send_key_ready(false, true) {
+            Err(message) => assert_eq!(message, SEND_TEXT_NO_TERMINAL),
+            Ok(()) => panic!("no terminal takes priority over vi mode"),
+        }
     }
 }

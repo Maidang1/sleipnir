@@ -105,6 +105,19 @@ pub trait Plugin {
         let _ = (req, ctx);
         Ok(Output::Ignore)
     }
+
+    /// Opt-in period for [`Self::on_tick`]. `None` (the default) never wakes
+    /// the serve loop for ticks. `Some(Duration::ZERO)` is treated as `None`
+    /// so the loop cannot busy-spin.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Called when [`Self::tick_interval`] elapses with no pending host
+    /// message. Queued inbound messages are always dispatched first.
+    fn on_tick(&mut self, ctx: &mut Context<'_>) {
+        let _ = ctx;
+    }
 }
 
 /// Handle given to plugin callbacks. Render is a push; [`Self::call`] waits
@@ -210,6 +223,67 @@ impl Context<'_> {
     pub fn scroll_to_run(&mut self, run_id: RunId) -> HostCallResult {
         self.call(HostCall::ScrollToRun { run_id })
     }
+
+    /// Focus a terminal pane. Plugin panels and unknown keys are errors.
+    /// Requires `host_call_focus_pane`; not implied by `write_terminal`.
+    /// Activates the tab/pane in the owning window; does not raise a
+    /// background OS window.
+    pub fn focus_pane(&mut self, pane: PaneKey) -> HostCallResult {
+        self.call(HostCall::FocusPane { pane })
+    }
+
+    /// Insert `text` into a specific terminal pane through the host's
+    /// bracketed-paste-aware path, then optionally press Enter.
+    /// Requires `host_call_send_text`; not implied by `write_terminal`.
+    /// A pane with no PTY yet, and oversize text, are `Error`.
+    pub fn send_text(
+        &mut self,
+        pane: PaneKey,
+        text: impl Into<String>,
+        enter: bool,
+    ) -> HostCallResult {
+        self.call(HostCall::SendText {
+            pane,
+            text: text.into(),
+            enter,
+        })
+    }
+
+    /// Send one allowlisted logical key (`ctrl-c`, `escape`, …) to a pane.
+    /// Requires `host_call_send_key`; not implied by `write_terminal`.
+    /// Terminal vi mode is `Error` (the key would be scrollback motion).
+    pub fn send_key(&mut self, pane: PaneKey, key: impl Into<String>) -> HostCallResult {
+        self.call(HostCall::SendKey {
+            pane,
+            key: key.into(),
+        })
+    }
+
+    /// Ask the host to close a terminal pane via the same user-policy path
+    /// as the UI close command (a busy pane may require confirmation).
+    /// `Ok` means the request was accepted, not that the pane is gone.
+    /// Plugin panels and unknown keys are `Error`. Requires
+    /// `host_call_request_close_pane`; there is no force-close wrapper.
+    pub fn request_close_pane(&mut self, pane: PaneKey) -> HostCallResult {
+        self.call(HostCall::RequestClosePane { pane })
+    }
+
+    /// Open a new terminal pane with a structured argv. Requires
+    /// `host_call_open_pane` (same grant as the string `OpenPane` call).
+    /// `program` and `args` are passed directly to spawn; they are never
+    /// joined into a shell line.
+    pub fn open_pane_argv(
+        &mut self,
+        cwd: Option<String>,
+        program: impl Into<String>,
+        args: Vec<String>,
+    ) -> HostCallResult {
+        self.call(HostCall::OpenPaneArgv {
+            cwd,
+            program: program.into(),
+            args,
+        })
+    }
 }
 
 trait SessionIo {
@@ -309,15 +383,6 @@ impl<W: Write> SessionIo for Io<W> {
     }
 }
 
-impl<W: Write> Io<W> {
-    fn next_msg(&mut self) -> io::Result<Option<HostMessage>> {
-        if let Some(msg) = self.queued.pop_front() {
-            return Ok(Some(msg));
-        }
-        self.read_host_until(None)
-    }
-}
-
 /// Run the plugin: handshake, then serve until `Shutdown` or EOF. Call from
 /// `main`.
 pub fn run<P: Plugin>(plugin: P) {
@@ -367,13 +432,61 @@ pub fn serve<P: Plugin>(
 
     handshake(&mut plugin, &mut io)?;
 
+    let tick_interval = plugin.tick_interval().filter(|d| !d.is_zero());
+    let mut next_tick_at = tick_interval.map(|d| Instant::now() + d);
+
     while !io.shutdown {
-        let Some(msg) = io.next_msg()? else {
-            break;
-        };
-        dispatch(&mut plugin, &mut io, msg)?;
+        match next_work(&mut io, next_tick_at)? {
+            Work::Eof => break,
+            Work::Message(msg) => dispatch(&mut plugin, &mut io, msg)?,
+            Work::Tick => {
+                let mut ctx = Context { io: &mut io };
+                plugin.on_tick(&mut ctx);
+                if let Some(d) = tick_interval {
+                    next_tick_at = Some(Instant::now() + d);
+                }
+            }
+        }
     }
     Ok(())
+}
+
+enum Work {
+    Message(HostMessage),
+    Tick,
+    Eof,
+}
+
+/// Drain queued host messages first, then the channel. A due tick never
+/// skips a waiting inbound line; with no interval we block like before.
+fn next_work<W: Write>(io: &mut Io<W>, next_tick_at: Option<Instant>) -> io::Result<Work> {
+    if let Some(msg) = io.queued.pop_front() {
+        return Ok(Work::Message(msg));
+    }
+    match io.reader.try_recv() {
+        Ok(Ok(Some(msg))) => return Ok(Work::Message(msg)),
+        Ok(Ok(None)) => return Ok(Work::Eof),
+        Ok(Err(err)) => return Err(err),
+        Err(mpsc::TryRecvError::Disconnected) => return Ok(Work::Eof),
+        Err(mpsc::TryRecvError::Empty) => {}
+    }
+    let Some(deadline) = next_tick_at else {
+        return match io.read_host_until(None)? {
+            Some(msg) => Ok(Work::Message(msg)),
+            None => Ok(Work::Eof),
+        };
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Ok(Work::Tick);
+    }
+    match io.reader.recv_timeout(remaining) {
+        Ok(Ok(Some(msg))) => Ok(Work::Message(msg)),
+        Ok(Ok(None)) => Ok(Work::Eof),
+        Ok(Err(err)) => Err(err),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Work::Eof),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(Work::Tick),
+    }
 }
 
 fn handshake<P: Plugin, W: Write>(plugin: &mut P, io: &mut Io<W>) -> io::Result<()> {
@@ -513,6 +626,121 @@ fn read_host_line_strict(reader: &mut impl BufRead) -> io::Result<Option<HostMes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reply_session(
+        granted: Vec<Capability>,
+        reply: HostCallResult,
+    ) -> (
+        mpsc::SyncSender<io::Result<Option<HostMessage>>>,
+        Io<Vec<u8>>,
+    ) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Ok(Some(HostMessage::Reply {
+                id: 1,
+                result: reply,
+            })))
+            .unwrap();
+        (
+            sender,
+            Io {
+                reader: receiver,
+                writer: Vec::new(),
+                next_id: 1,
+                unmatched: HashMap::new(),
+                queued: VecDeque::new(),
+                shutdown: false,
+                granted,
+                instance_id: Uuid::nil(),
+            },
+        )
+    }
+
+    fn written_call(writer: &[u8]) -> HostCall {
+        let line = std::str::from_utf8(writer).unwrap().trim();
+        match serde_json::from_str::<PluginMessage>(line).unwrap() {
+            PluginMessage::Call { call, .. } => call,
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn focus_pane_wrapper_writes_the_call_and_returns_ok() {
+        let pane = Uuid::from_u128(3);
+        let (_keep, mut session) =
+            reply_session(vec![Capability::HostCallFocusPane], HostCallResult::Ok);
+        let result = Context { io: &mut session }.focus_pane(pane);
+        assert_eq!(result, HostCallResult::Ok);
+        assert_eq!(written_call(&session.writer), HostCall::FocusPane { pane });
+    }
+
+    #[test]
+    fn send_text_wrapper_writes_the_call_and_returns_ok() {
+        let pane = Uuid::from_u128(4);
+        let (_keep, mut session) =
+            reply_session(vec![Capability::HostCallSendText], HostCallResult::Ok);
+        let result = Context { io: &mut session }.send_text(pane, "hello", true);
+        assert_eq!(result, HostCallResult::Ok);
+        assert_eq!(
+            written_call(&session.writer),
+            HostCall::SendText {
+                pane,
+                text: "hello".into(),
+                enter: true,
+            }
+        );
+    }
+
+    #[test]
+    fn send_key_wrapper_writes_the_call_and_returns_ok() {
+        let pane = Uuid::from_u128(5);
+        let (_keep, mut session) =
+            reply_session(vec![Capability::HostCallSendKey], HostCallResult::Ok);
+        let result = Context { io: &mut session }.send_key(pane, "ctrl-c");
+        assert_eq!(result, HostCallResult::Ok);
+        assert_eq!(
+            written_call(&session.writer),
+            HostCall::SendKey {
+                pane,
+                key: "ctrl-c".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn open_pane_argv_wrapper_writes_the_call_and_returns_ok() {
+        let (_keep, mut session) =
+            reply_session(vec![Capability::HostCallOpenPane], HostCallResult::Ok);
+        let result = Context { io: &mut session }.open_pane_argv(
+            Some("/work".into()),
+            "codex",
+            vec!["--foo".into()],
+        );
+        assert_eq!(result, HostCallResult::Ok);
+        assert_eq!(
+            written_call(&session.writer),
+            HostCall::OpenPaneArgv {
+                cwd: Some("/work".into()),
+                program: "codex".into(),
+                args: vec!["--foo".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn request_close_pane_wrapper_writes_the_call_and_returns_ok() {
+        let pane = Uuid::from_u128(6);
+        let (_keep, mut session) = reply_session(
+            vec![Capability::HostCallRequestClosePane],
+            HostCallResult::Ok,
+        );
+        let result = Context { io: &mut session }.request_close_pane(pane);
+        assert_eq!(result, HostCallResult::Ok);
+        assert_eq!(
+            written_call(&session.writer),
+            HostCall::RequestClosePane { pane }
+        );
+    }
 
     #[test]
     fn missing_host_reply_times_out_without_waiting_for_eof() {
@@ -913,6 +1141,189 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+
+    struct LineFeed {
+        rx: mpsc::Receiver<String>,
+        leftover: Vec<u8>,
+    }
+
+    impl std::io::Read for LineFeed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.leftover.is_empty() {
+                match self.rx.recv() {
+                    Ok(line) => {
+                        let mut bytes = line.into_bytes();
+                        if !bytes.ends_with(&[b'\n']) {
+                            bytes.push(b'\n');
+                        }
+                        self.leftover = bytes;
+                    }
+                    Err(_) => return Ok(0),
+                }
+            }
+            let n = self.leftover.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.leftover[..n]);
+            self.leftover.drain(..n);
+            Ok(n)
+        }
+    }
+
+    struct Ticker {
+        interval: Option<Duration>,
+        ticks: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Plugin for Ticker {
+        fn manifest(&self) -> Manifest {
+            Manifest {
+                id: "ticker".into(),
+                name: "Ticker".into(),
+                version: "0.1.0".into(),
+                description: String::new(),
+                lifecycle: Lifecycle::Resident,
+                commands: vec![],
+            }
+        }
+
+        fn requests(&self) -> Vec<Capability> {
+            vec![Capability::Resident, Capability::SubscribeEvents]
+        }
+
+        fn tick_interval(&self) -> Option<Duration> {
+            self.interval
+        }
+
+        fn on_tick(&mut self, _ctx: &mut Context<'_>) {
+            self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn on_event(&mut self, event: HostEvent, _ctx: &mut Context<'_>) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{:?}", event.kind()));
+        }
+    }
+
+    fn live_serve(
+        plugin: Ticker,
+    ) -> (
+        std::thread::JoinHandle<io::Result<()>>,
+        mpsc::Sender<String>,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            serve(
+                plugin,
+                std::io::BufReader::new(LineFeed {
+                    rx,
+                    leftover: Vec::new(),
+                }),
+                std::io::sink(),
+            )
+        });
+        (handle, tx)
+    }
+
+    fn wait_until(cond: impl Fn() -> bool, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        cond()
+    }
+
+    #[test]
+    fn default_plugin_does_not_tick() {
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = Ticker {
+            interval: None,
+            ticks: std::sync::Arc::clone(&ticks),
+            events,
+        };
+        let (handle, tx) = live_serve(plugin);
+        tx.send(hello(v2::PROTOCOL_VERSION)).unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(ticks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        tx.send(serde_json::to_string(&HostMessage::Shutdown).unwrap())
+            .unwrap();
+        drop(tx);
+        handle.join().unwrap().unwrap();
+        assert_eq!(ticks.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn enabled_ticks_repeat_without_busy_spin() {
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = Ticker {
+            interval: Some(Duration::from_millis(5)),
+            ticks: std::sync::Arc::clone(&ticks),
+            events,
+        };
+        let started = Instant::now();
+        let (handle, tx) = live_serve(plugin);
+        tx.send(hello(v2::PROTOCOL_VERSION)).unwrap();
+        assert!(
+            wait_until(
+                || ticks.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+                Duration::from_millis(400)
+            ),
+            "expected repeated ticks, got {}",
+            ticks.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        let n = ticks.load(std::sync::atomic::Ordering::SeqCst);
+        let elapsed = started.elapsed();
+        // A busy-spin would produce thousands of ticks in a few milliseconds.
+        assert!(
+            n < 200,
+            "tick loop must wait, not busy-spin: {n} ticks in {elapsed:?}"
+        );
+        tx.send(serde_json::to_string(&HostMessage::Shutdown).unwrap())
+            .unwrap();
+        drop(tx);
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn inbound_messages_are_not_starved_by_ticks() {
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = Ticker {
+            interval: Some(Duration::from_millis(5)),
+            ticks: std::sync::Arc::clone(&ticks),
+            events: std::sync::Arc::clone(&events),
+        };
+        let (handle, tx) = live_serve(plugin);
+        tx.send(hello(v2::PROTOCOL_VERSION)).unwrap();
+        assert!(wait_until(
+            || ticks.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            Duration::from_millis(400)
+        ));
+        tx.send(run_finished()).unwrap();
+        tx.send(pane_focused()).unwrap();
+        assert!(
+            wait_until(
+                || events.lock().unwrap().len() >= 2,
+                Duration::from_millis(400)
+            ),
+            "ticks must not starve inbound events: {:?}",
+            events.lock().unwrap()
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["RunFinished".to_string(), "PaneFocused".to_string()]
+        );
+        tx.send(serde_json::to_string(&HostMessage::Shutdown).unwrap())
+            .unwrap();
+        drop(tx);
+        handle.join().unwrap().unwrap();
     }
 
     #[test]
