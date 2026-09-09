@@ -982,9 +982,6 @@ mod tests {
         let pane = run_ledger::PaneKey::from_u128(3);
         let event = run_ledger::RunEvent::PaneClosed { pane, at_ms: 10 };
         let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
-        assert_eq!(
-            host,
-            plugin_protocol::v2::HostEvent::PaneClosed { pane }
-        );
+        assert_eq!(host, plugin_protocol::v2::HostEvent::PaneClosed { pane });
     }
 }

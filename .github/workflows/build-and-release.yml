@@ -72,6 +72,9 @@ jobs:
       - name: Release build
         run: cargo build --release -p sleipnir
 
+      - name: Verify Windows GUI subsystem
+        run: python scripts/tests/check-windows-subsystem.py target/release/sleipnir.exe
+
       - name: Package exe
         shell: bash
         env:

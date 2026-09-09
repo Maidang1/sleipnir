@@ -384,11 +384,14 @@ impl AppShell {
             .w(px(420.0))
             .relative()
             .shadow(pixel::hard_shadow())
-            .child(pixel::pixel_panel_bg(tokens.content_bg, if warning {
-                tokens.accent
-            } else {
-                tokens.border
-            }))
+            .child(pixel::pixel_panel_bg(
+                tokens.content_bg,
+                if warning {
+                    tokens.accent
+                } else {
+                    tokens.border
+                },
+            ))
             .flex()
             .flex_col()
             .overflow_hidden()

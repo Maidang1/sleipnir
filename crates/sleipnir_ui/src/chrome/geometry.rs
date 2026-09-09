@@ -38,7 +38,8 @@ impl ChromeGeometry {
 
     /// Chrome insets for the platform and current fullscreen state.
     /// Tab chips and the content clip radius are always square (pixel style).
-    pub fn for_window(desktop_controls: bool, fullscreen: bool) -> Self {        Self {
+    pub fn for_window(desktop_controls: bool, fullscreen: bool) -> Self {
+        Self {
             height: px(32.0),
             traffic_light_position: point(px(12.0), px(8.0)),
             leading_pad: if fullscreen {

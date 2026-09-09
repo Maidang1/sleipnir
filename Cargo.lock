@@ -5935,6 +5935,7 @@ dependencies = [
  "collections",
  "diff_core",
  "dirs",
+ "futures",
  "gpui",
  "itertools 0.14.0",
  "log",

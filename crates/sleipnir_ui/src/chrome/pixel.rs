@@ -139,6 +139,9 @@ mod tests {
 
         let b = &button_shadow()[0];
         assert_eq!(b.blur_radius, px(0.0));
-        assert!(b.offset.x < s.offset.x, "button shadow is tighter than panel shadow");
+        assert!(
+            b.offset.x < s.offset.x,
+            "button shadow is tighter than panel shadow"
+        );
     }
 }

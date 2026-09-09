@@ -703,7 +703,6 @@ mod tests {
         assert!(!host_compatible(1, 2), "a v1 host cannot speak v2 frames");
     }
 
-
     #[test]
     fn correlation_id_round_trips() {
         let msg = HostMessage::Event {
@@ -872,10 +871,7 @@ mod tests {
         let call = HostCall::ScrollToRun {
             run_id: Uuid::from_u128(5),
         };
-        assert_eq!(
-            call.required_capability(),
-            Capability::HostCallScrollToRun
-        );
+        assert_eq!(call.required_capability(), Capability::HostCallScrollToRun);
         let line = serde_json::to_string(&call).unwrap();
         assert!(line.contains(r#""call":"scroll_to_run""#));
         assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);

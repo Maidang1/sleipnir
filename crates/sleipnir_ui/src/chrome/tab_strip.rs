@@ -290,19 +290,34 @@ pub(crate) fn render_tab_chip(
                 .child(format!("{}:{}", b.plugin_id, b.text))
         }))
         .when(is_hovered, |el| {
+            // Overlay the close button on top of the label instead of taking
+            // flex space, so hovering never reflows (jitters) the chip.
             el.child(
                 div()
-                    .id(("tab-close", tab_id))
-                    .flex_shrink_0()
-                    .px_1()
-                    .rounded(px(0.0))
-                    .text_xs()
-                    .hover(|el| el.bg(tokens.hover))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.request_close_tab(tab_id, window, cx);
-                        cx.stop_propagation();
-                    }))
-                    .child("✕"),
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .pr_1()
+                    // Opaque background so the truncated label doesn't bleed
+                    // through underneath the button.
+                    .bg(bg)
+                    .child(
+                        div()
+                            .id(("tab-close", tab_id))
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded(px(0.0))
+                            .text_xs()
+                            .hover(|el| el.bg(tokens.hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request_close_tab(tab_id, window, cx);
+                                cx.stop_propagation();
+                            }))
+                            .child("✕"),
+                    ),
             )
         });
 
@@ -403,7 +418,10 @@ impl AppShell {
         let menu_w = px(190.0);
         let menu_h = px(AppShell::TAB_MENU_ITEM_COUNT as f32 * 28.0 + 12.0);
         let x = state.position.x.min((viewport.width - menu_w).max(px(0.0)));
-        let y = state.position.y.min((viewport.height - menu_h).max(px(0.0)));
+        let y = state
+            .position
+            .y
+            .min((viewport.height - menu_h).max(px(0.0)));
 
         let close_menu = |this: &mut AppShell, cx: &mut Context<AppShell>| {
             this.tab_menu = None;

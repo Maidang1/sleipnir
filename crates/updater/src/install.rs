@@ -360,8 +360,7 @@ pub fn recover_active_transaction(root: &Path) -> Result<(), String> {
                 .transition(Phase::RolledBack)
                 .map_err(|e| e.to_string())?;
             if transaction.os_error.is_none() {
-                transaction.os_error =
-                    Some("the interrupted update was rolled back".to_string());
+                transaction.os_error = Some("the interrupted update was rolled back".to_string());
             }
             save_atomic(&path, &transaction).map_err(|e| e.to_string())?;
             discard_staging(&transaction);
@@ -374,9 +373,11 @@ pub fn recover_active_transaction(root: &Path) -> Result<(), String> {
                 "the interrupted update left the installation in an inconsistent state",
             );
             let _ = save_atomic(&path, &transaction);
-            Err("the previous update left the installation in an inconsistent \
+            Err(
+                "the previous update left the installation in an inconsistent \
                  state; reinstall manually from the releases page"
-                .into())
+                    .into(),
+            )
         }
     }
 }

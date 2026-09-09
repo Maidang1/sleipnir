@@ -63,8 +63,9 @@ impl LedgerState {
         inferred: bool,
         at_ms: u64,
     ) -> RunId {
-        self.ledger
-            .apply(RunEvent::started_at(pane, command, cwd, at_ms, inferred, None));
+        self.ledger.apply(RunEvent::started_at(
+            pane, command, cwd, at_ms, inferred, None,
+        ));
         let local = self
             .ledger
             .runs()
@@ -195,10 +196,7 @@ mod tests {
     }
 
     fn state_in(dir: &Path) -> LedgerState {
-        LedgerState::with_ledger(
-            default_runs_path(dir),
-            Ledger::new(LaunchId::new_v4()),
-        )
+        LedgerState::with_ledger(default_runs_path(dir), Ledger::new(LaunchId::new_v4()))
     }
 
     #[test]
@@ -259,7 +257,10 @@ mod tests {
         state.save().unwrap();
 
         let loaded = LedgerState::load(path);
-        assert_eq!(loaded.ledger.runs().next().unwrap().state, RunState::Abandoned);
+        assert_eq!(
+            loaded.ledger.runs().next().unwrap().state,
+            RunState::Abandoned
+        );
     }
 
     #[test]
@@ -269,7 +270,10 @@ mod tests {
         let p = pane();
         state.apply_started(RunId::new_v4(), p, "make", None, false, 0);
         state.apply_finished(p, Some(0), 50);
-        assert_eq!(state.ledger.runs().next().unwrap().state, RunState::Succeeded);
+        assert_eq!(
+            state.ledger.runs().next().unwrap().state,
+            RunState::Succeeded
+        );
     }
 
     #[test]

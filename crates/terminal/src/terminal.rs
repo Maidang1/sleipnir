@@ -3063,7 +3063,8 @@ mod tests {
         assert!(
             body.contains("pointer_map_locked(term)"),
             "coordinates must still route through RowGeometry"
-        );    }
+        );
+    }
 
     /// Regression: v0.4.1 accumulated fractional uniform-grid wheel movement
     /// without feeding it into the paint transform. Opposite fractional

@@ -88,12 +88,15 @@ impl Plugin for RunLedger {
             id: "runledger".into(),
             name: "Run Ledger".into(),
             version: "0.1.0".into(),
-            description: "What ran here: every command, its outcome, and a jump back to its output.".into(),
+            description:
+                "What ran here: every command, its outcome, and a jump back to its output.".into(),
             lifecycle: Lifecycle::Resident,
             commands: vec![CommandSpec {
                 id: "open".into(),
                 title: "Run Ledger: Open panel".into(),
-                description: "Open the Run Ledger panel: every run, grouped, with a jump back to its output.".into(),
+                description:
+                    "Open the Run Ledger panel: every run, grouped, with a jump back to its output."
+                        .into(),
                 keywords: vec![
                     "run".into(),
                     "ledger".into(),

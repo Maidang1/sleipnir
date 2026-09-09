@@ -269,9 +269,6 @@ mod tests {
             core.apply(RunEvent::started(pane(), &format!("c{i}"), None, i));
         }
         assert_eq!(core.ledger.runs().count(), Retention::default().max_runs);
-        assert!(core
-            .ledger
-            .runs()
-            .all(|run| run.state == RunState::Running));
+        assert!(core.ledger.runs().all(|run| run.state == RunState::Running));
     }
 }

@@ -327,6 +327,12 @@ Until an external installation channel ships, plugins are Tier 0/1 only
 (built-in / locally authored). Tier 2 sandboxing is required before an open
 marketplace (ADR-0016 §6).
 
+**Process isolation is not a security sandbox.** Current local plugins run
+with the user's OS permissions and inherited environment. Host capability
+checks restrict RPC access to terminal data and actions; they do not prevent
+a plugin from reading files, spawning processes, or opening network connections
+itself, even without the `network` capability. Only install trusted local code.
+
 The Plugin Monitor (command palette: "Plugin Monitor") lists running plugins
 and offers a kill switch. A non-zero running count is always shown in chrome.
 

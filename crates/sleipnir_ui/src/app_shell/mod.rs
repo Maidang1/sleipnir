@@ -30,9 +30,7 @@ use std::path::PathBuf;
 use crate::chrome::pixel;
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::command_palette::{CommandId, CommandItem, commands as palette_commands};
-use crate::pane_tree::{
-    CloseOutcome, Direction, PaneId, PaneRect, SplitAxis, SplitPath, neighbor,
-};
+use crate::pane_tree::{CloseOutcome, Direction, PaneId, PaneRect, SplitAxis, SplitPath, neighbor};
 use crate::run_ledger_global::RunLedgerGlobal;
 pub(crate) use crate::tab_convert::Tab;
 use crate::ui_mode::{OverlayKind, PaneFactsState, UiMode};
@@ -1511,8 +1509,7 @@ impl AppShell {
     pub(crate) fn run_history_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let hits = crate::chrome::history_search::load_history_hits();
         let shown = crate::chrome::history_search::filter_history(&hits, &self.history_query, 20);
-        let Some(hit) = shown.get(self.history_selected.min(shown.len().saturating_sub(1)))
-        else {
+        let Some(hit) = shown.get(self.history_selected.min(shown.len().saturating_sub(1))) else {
             return;
         };
         let cmd = hit.command.clone();

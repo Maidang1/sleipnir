@@ -20,10 +20,16 @@ Sleipnir is a standalone terminal built on [GPUI](https://gpui.rs), with a forke
 
 - GPU-rendered terminal with smooth redraw and scrollback
 - Tabs, splits, and multi-window sessions
-- Native PTY/ConPTY support and session restore
+- Native PTY/ConPTY support; every new window starts with a fresh tab
 - Smart paste, path links, and system-aware themes
-- Search in scrollback, diff inspection, and run ledger tracking
+- Search in scrollback, diff inspection, and in-memory command status tracking
 - Zed-compatible `terminal.*` settings and hot reload
+- Optional process-based plugins for panels, inline blocks, and command-palette actions (off by default)
+
+Window layouts and terminal scrollback are not restored after restarting.
+Persistent command history and the Run Ledger panel are provided by the
+[optional Run Ledger plugin](crates/sleipnir_plugin_runledger/README.md), which
+you must install and enable separately.
 
 ## Install
 
@@ -77,7 +83,12 @@ Common options include:
 - `notify_on_command_finish_secs`
 - `run_ledger`
 
-See [`docs/settings.example.json`](docs/settings.example.json) for the full example config.
+See [`docs/settings.example.json`](docs/settings.example.json) for the full example config
+and [`docs/settings.md`](docs/settings.md) for current behavior and removed settings.
+`run_ledger: "memory"` collects core command facts; the legacy `"persist"` value
+has the same in-memory behavior. Disk history is owned by the optional plugin.
+See [`docs/plugins.md`](docs/plugins.md) for plugin development and the local,
+unsandboxed trust model.
 
 ## Quick shortcuts
 
@@ -89,4 +100,8 @@ See [`docs/settings.example.json`](docs/settings.example.json) for the full exam
 
 ## License
 
-Sleipnir is licensed under the Apache 2.0 and GPL v2 licenses. See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-GPL](LICENSE-GPL).
+The application and terminal crates declare `GPL-3.0-or-later`; the local
+`gpui_platform` crate and upstream GPUI stack use Apache 2.0. These are
+component-specific licenses, not a choice of two licenses for the whole app.
+See [LICENSE-GPL](LICENSE-GPL), [LICENSE-APACHE](LICENSE-APACHE), the crate
+manifests, and [UPSTREAM.md](UPSTREAM.md).

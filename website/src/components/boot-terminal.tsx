@@ -29,7 +29,7 @@ const SCRIPT: Step[] = [
       { text: 'pty       native · conpty on windows', tone: 'fg' },
       { text: 'config    ~/.config/sleipnir/settings.json', tone: 'cyan' },
       { text: '          zed-compatible · hot reload', tone: 'dim' },
-      { text: 'session   tabs · splits · windows · restored', tone: 'fg' },
+      { text: 'session   tabs · splits · fresh windows', tone: 'fg' },
     ],
   },
   { type: 'cmd', text: INSTALL_COMMAND },

@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import {
   AppWindow,
   Columns2,
-  HardDrive,
   Image as ImageIcon,
   Keyboard,
   Link2,
@@ -31,7 +30,7 @@ const HIGHLIGHTS = [
   { icon: Palette, label: 'adaptive themes' },
   { icon: ImageIcon, label: 'smart paste' },
   { icon: Search, label: 'find & palette' },
-  { icon: HardDrive, label: 'session restore' },
+  { icon: Maximize2, label: 'pane zoom' },
   { icon: Link2, label: 'path links' },
 ]
 
@@ -42,7 +41,7 @@ const FEATURES = [
   },
   {
     title: 'tabs, splits & pane zoom',
-    body: 'Top tab strip shows the last two folders of the cwd; the side rail shows title, branch, and dirty +N −M. Split right or down, jump tabs with ⌘1–9 / Ctrl+Shift+1–9, zoom a pane with ⌘⇧Enter. Inactive splits dim so focus stays clear.',
+    body: 'The top tab strip groups tabs by workspace and shows the last two folders of the cwd. Split right or down, jump tabs with ⌘1–9 / Ctrl+Shift+1–9, zoom a pane with ⌘⇧Enter. Inactive splits dim so focus stays clear.',
   },
   {
     title: 'multi-window & font zoom',
@@ -66,11 +65,11 @@ const FEATURES = [
   },
   {
     title: 'daily extras without bloat',
-    body: 'Run Ledger (⌘⇧L) remembers redacted command runs. Quick Terminal, Quick Select, optional content opacity, and a desktop notification when a long command finishes in another app.',
+    body: 'Core command facts power failure attention and completion notifications. The optional Run Ledger plugin adds a history panel and persistence: install and enable separately. Quick Terminal, Quick Select, and content opacity stay built in.',
   },
   {
     title: 'quietly current',
-    body: 'Check for updates when you want (⌘⇧U). Downloads verify against a published SHA-256 sidecar. macOS updates in place; Windows and Linux open Releases. Session layout restores on launch.',
+    body: 'Check for updates when you want (⌘⇧U). macOS in-place updates require a signed manifest and verified download; Windows and Linux open Releases. Every new window starts with a fresh tab; layouts and scrollback are not persisted.',
   },
 ]
 
@@ -85,8 +84,8 @@ const FAQ = [
       <>
         <Chip>~/.config/sleipnir/settings.json</Chip> on macOS and Linux, or{' '}
         <Chip>%APPDATA%\sleipnir\settings.json</Chip> on Windows. Terminal keys are
-        Zed-compatible; hot-reload with ⌘⇧R / Ctrl+Shift+R. Session layout restores from{' '}
-        <Chip>session.json</Chip> in the same folder. See the repo{' '}
+        Zed-compatible; reload settings with ⌘⇧R / Ctrl+Shift+R. Restart the app after
+        changing key bindings. Windows start fresh, without restoring prior layouts. See the repo{' '}
         <Chip>docs/settings.example.json</Chip> for keys like <Chip>confirm_close</Chip>,{' '}
         <Chip>path_links</Chip>, and <Chip>background_opacity</Chip>.
       </>
@@ -94,7 +93,7 @@ const FAQ = [
   },
   {
     q: 'Does it auto-update on launch?',
-    a: 'No. Updates are manual via Sleipnir → Check for Updates… (⌘⇧U / Ctrl+Shift+U). macOS can verify and install the published .dmg in place; on Windows and Linux, the action opens GitHub Releases for a manual install.',
+    a: 'No. Updates are manual via Sleipnir → Check for Updates… (⌘⇧U / Ctrl+Shift+U). macOS can install a verified .dmg in place when the release includes a signed update manifest; otherwise install manually. On Windows and Linux, the action opens GitHub Releases.',
   },
   {
     q: 'macOS says the app is from an unidentified developer.',
@@ -106,7 +105,7 @@ const FAQ = [
   },
   {
     q: 'How is this different from Terminal.app / iTerm / Warp?',
-    a: 'GPU-first rendering via GPUI, a side tab rail grouped by git workspace, Run Ledger for command history, Zed-shaped settings, file-manager paste, and light shell integration. No account, no cloud, no built-in AI.',
+    a: 'GPU-first rendering via GPUI, a top tab strip grouped by git workspace, an optional Run Ledger plugin for persistent history, Zed-shaped settings, file-manager paste, and light shell integration. No account, no cloud, no built-in AI.',
   },
   {
     q: 'Is there AI built in?',
@@ -231,7 +230,7 @@ export default function App() {
             </h1>
             <p className="mt-6 max-w-[34rem] font-mono text-[13.5px] leading-relaxed text-pretty text-muted-foreground">
               Rust + GPUI, the stack behind Zed. Tabs, splits, multi-window,
-              adaptive themes, Run Ledger, and session restore. No account, no
+              adaptive themes, and optional plugins. No account, no
               cloud, no Electron.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -373,7 +372,7 @@ export default function App() {
         />
         <span>© {new Date().getFullYear()} sleipnir</span>
         <span className="text-border">·</span>
-        <span>apache-2.0</span>
+        <span>GPL-3.0-or-later</span>
         <span className="text-border">·</span>
         <a
           href={GITHUB_URL}

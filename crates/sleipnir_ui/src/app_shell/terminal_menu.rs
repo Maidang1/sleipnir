@@ -6,8 +6,8 @@
 
 use gpui::{
     ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px,
-    prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, deferred, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use super::AppShell;
@@ -40,10 +40,7 @@ fn menu_item_label(item: TerminalMenuItem) -> SharedString {
 
 /// Rows shown above a divider.
 fn has_leading_divider(item: TerminalMenuItem) -> bool {
-    matches!(
-        item,
-        TerminalMenuItem::SplitRight | TerminalMenuItem::Find
-    )
+    matches!(item, TerminalMenuItem::SplitRight | TerminalMenuItem::Find)
 }
 
 impl AppShell {
@@ -127,7 +124,10 @@ impl AppShell {
         let menu_w = px(190.0);
         let menu_h = px(items.len() as f32 * 28.0 + 16.0);
         let x = state.position.x.min((viewport.width - menu_w).max(px(0.0)));
-        let y = state.position.y.min((viewport.height - menu_h).max(px(0.0)));
+        let y = state
+            .position
+            .y
+            .min((viewport.height - menu_h).max(px(0.0)));
 
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         for (index, item) in items.iter().enumerate() {
@@ -177,14 +177,20 @@ impl AppShell {
                         cx.notify();
                     }),
                 )
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
-                    this.terminal_menu = None;
-                    cx.notify();
-                }))
-                .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, _, cx| {
-                    this.terminal_menu = None;
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| {
+                        this.terminal_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, _, cx| {
+                        this.terminal_menu = None;
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .id("terminal-menu-panel")

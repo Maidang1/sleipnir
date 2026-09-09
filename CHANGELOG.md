@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- Control surface: a pending `wait` no longer blocks another client's `send`, `capture`, `ls`, or `wait`. Pending waits are capped at 64 and cancelled when the control surface stops.
+- Fix Clippy failures in query input handling and its malformed UTF-16 range test; normalize workspace formatting.
+
+### Changes
+- Add a read-only PR/main quality workflow with native Rust tests on macOS, Windows, and Linux, formatting checks, macOS Clippy, packaging-script checks, and website tests/build.
+- Newly generated settings use `run_ledger: "memory"` and omit ineffective retention/tombstone keys while continuing to accept old configurations.
+
+### Documentation
+- Align READMEs, website copy/metadata, and glossary with fresh-window behavior, top-only tabs, and the separately installed Run Ledger plugin; add a current-settings compatibility reference.
+- Correct app license labels to match the crate manifests and clarify that local plugin capability grants are not an OS security sandbox.
+
 ## 0.6.2
 
 ### Fixes

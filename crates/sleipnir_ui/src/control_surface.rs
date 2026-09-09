@@ -30,6 +30,9 @@ struct Job {
     reply: mpsc::Sender<ControlResponse>,
 }
 
+#[cfg(unix)]
+const MAX_PENDING_WAITS: usize = 64;
+
 pub struct ControlSurface {
     stop: Option<mpsc::Sender<()>>,
     _pump: Task<()>,
@@ -209,19 +212,56 @@ fn handle_connection(mut stream: UnixStream, jobs: async_channel::Sender<Job>) {
 
 #[cfg(unix)]
 async fn pump_jobs(cx: &mut AsyncApp, jobs: async_channel::Receiver<Job>) {
-    while let Ok(job) = jobs.recv().await {
-        match job.req {
-            ControlRequest::Wait {
-                pane,
-                until,
-                timeout_secs,
-            } => {
-                let resp = wait_until(cx, pane, until, timeout_secs).await;
-                let _ = job.reply.send(resp);
+    serve_jobs(jobs, |req| {
+        let mut cx = cx.clone();
+        async move {
+            match req {
+                ControlRequest::Wait {
+                    pane,
+                    until,
+                    timeout_secs,
+                } => wait_until(&mut cx, pane, until, timeout_secs).await,
+                other => cx.update(|cx| dispatch(other, cx)),
             }
-            other => {
-                let resp = cx.update(|cx| dispatch(other, cx));
-                let _ = job.reply.send(resp);
+        }
+    })
+    .await;
+}
+
+/// The same request queue is used by every socket connection. Keep its
+/// scheduling independent of GPUI so concurrent clients can be tested without
+/// a native window or a running shell.
+#[cfg(unix)]
+async fn serve_jobs<F, R>(jobs: async_channel::Receiver<Job>, mut respond: F)
+where
+    F: FnMut(ControlRequest) -> R,
+    R: std::future::Future<Output = ControlResponse>,
+{
+    use futures::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
+
+    // Owned by the pump, not detached: disabling the control surface drops
+    // every pending wait along with the receiver. Ordinary requests remain
+    // ordered, but never queue behind a wait from another connection.
+    let mut waits = FuturesUnordered::new();
+    loop {
+        futures::select_biased! {
+            _ = waits.select_next_some() => {},
+            job = jobs.recv().fuse() => {
+                let Ok(job) = job else { break };
+                if matches!(job.req, ControlRequest::Wait { .. }) {
+                    if waits.len() >= MAX_PENDING_WAITS {
+                        let _ = job.reply.send(ControlResponse::Error {
+                            message: "too many pending wait requests".into(),
+                        });
+                        continue;
+                    }
+                    let response = respond(job.req);
+                    waits.push(async move {
+                        let _ = job.reply.send(response.await);
+                    });
+                } else {
+                    let _ = job.reply.send(respond(job.req).await);
+                }
             }
         }
     }
@@ -347,4 +387,258 @@ pub(crate) fn live_terminal_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<Te
 #[cfg(unix)]
 fn collect_live_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
     live_terminal_panes(cx)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use futures::FutureExt as _;
+    use std::pin::pin;
+
+    fn enqueue(
+        jobs: &async_channel::Sender<Job>,
+        req: ControlRequest,
+    ) -> mpsc::Receiver<ControlResponse> {
+        let (reply, receiver) = mpsc::channel();
+        jobs.try_send(Job { req, reply }).unwrap();
+        receiver
+    }
+
+    #[test]
+    fn waiting_client_does_not_block_send_capture_or_list() {
+        let (jobs, receiver) = async_channel::unbounded();
+        let (finished, completion) = async_channel::bounded(1);
+        let pane = PaneKey::new_v4();
+        let wait = enqueue(
+            &jobs,
+            ControlRequest::Wait {
+                pane,
+                until: WaitUntil::Free,
+                timeout_secs: 60,
+            },
+        );
+        let mut pump = pin!(serve_jobs(receiver, |req| {
+            let completion = completion.clone();
+            async move {
+                match req {
+                    ControlRequest::Wait { .. } => {
+                        completion.recv().await.unwrap();
+                        ControlResponse::Wait
+                    }
+                    ControlRequest::Send { .. } => ControlResponse::Send,
+                    ControlRequest::Capture { .. } => ControlResponse::Capture {
+                        text: "still responsive".into(),
+                    },
+                    ControlRequest::Ls => ControlResponse::Ls { panes: vec![] },
+                }
+            }
+        }));
+        assert!(pump.as_mut().now_or_never().is_none());
+
+        let send = enqueue(
+            &jobs,
+            ControlRequest::Send {
+                pane,
+                text: "exit".into(),
+                enter: true,
+            },
+        );
+        let capture = enqueue(&jobs, ControlRequest::Capture { pane });
+        let list = enqueue(&jobs, ControlRequest::Ls);
+        assert!(pump.as_mut().now_or_never().is_none());
+        assert_eq!(send.try_recv(), Ok(ControlResponse::Send));
+        assert_eq!(
+            capture.try_recv(),
+            Ok(ControlResponse::Capture {
+                text: "still responsive".into(),
+            })
+        );
+        assert_eq!(list.try_recv(), Ok(ControlResponse::Ls { panes: vec![] }));
+        assert_eq!(wait.try_recv(), Err(mpsc::TryRecvError::Empty));
+
+        finished.try_send(()).unwrap();
+        assert!(pump.as_mut().now_or_never().is_none());
+        assert_eq!(wait.try_recv(), Ok(ControlResponse::Wait));
+        drop(jobs);
+        assert!(pump.as_mut().now_or_never().is_some());
+    }
+
+    #[test]
+    fn waits_complete_independently_and_preserve_error_replies() {
+        let (jobs, receiver) = async_channel::unbounded();
+        let (complete, completion) = async_channel::bounded(1);
+        let pane = PaneKey::new_v4();
+        let first = enqueue(
+            &jobs,
+            ControlRequest::Wait {
+                pane,
+                until: WaitUntil::Free,
+                timeout_secs: 60,
+            },
+        );
+        let mut pump = pin!(serve_jobs(receiver, |req| {
+            let completion = completion.clone();
+            async move {
+                if matches!(
+                    req,
+                    ControlRequest::Wait {
+                        timeout_secs: 0,
+                        ..
+                    }
+                ) {
+                    return ControlResponse::Error {
+                        message: "timeout".into(),
+                    };
+                }
+                completion.recv().await.unwrap();
+                ControlResponse::Wait
+            }
+        }));
+        assert!(pump.as_mut().now_or_never().is_none());
+        let second = enqueue(
+            &jobs,
+            ControlRequest::Wait {
+                pane,
+                until: WaitUntil::Failed,
+                timeout_secs: 0,
+            },
+        );
+        assert!(pump.as_mut().now_or_never().is_none());
+        assert_eq!(
+            second.try_recv(),
+            Ok(ControlResponse::Error {
+                message: "timeout".into()
+            })
+        );
+        assert_eq!(first.try_recv(), Err(mpsc::TryRecvError::Empty));
+        complete.try_send(()).unwrap();
+        assert!(pump.as_mut().now_or_never().is_none());
+        assert_eq!(first.try_recv(), Ok(ControlResponse::Wait));
+    }
+
+    #[test]
+    fn wait_limit_does_not_block_ordinary_requests_and_shutdown_cancels_waits() {
+        let (jobs, receiver) = async_channel::unbounded();
+        let mut pending = Vec::new();
+        for _ in 0..MAX_PENDING_WAITS {
+            pending.push(enqueue(
+                &jobs,
+                ControlRequest::Wait {
+                    pane: PaneKey::new_v4(),
+                    until: WaitUntil::Free,
+                    timeout_secs: 60,
+                },
+            ));
+        }
+        let mut pump = Box::pin(serve_jobs(receiver, |req| async move {
+            match req {
+                ControlRequest::Wait { .. } => std::future::pending().await,
+                _ => ControlResponse::Ls { panes: vec![] },
+            }
+        }));
+        assert!(pump.as_mut().now_or_never().is_none());
+        let overflow = enqueue(
+            &jobs,
+            ControlRequest::Wait {
+                pane: PaneKey::new_v4(),
+                until: WaitUntil::Free,
+                timeout_secs: 60,
+            },
+        );
+        let list = enqueue(&jobs, ControlRequest::Ls);
+        assert!(pump.as_mut().now_or_never().is_none());
+        assert_eq!(
+            overflow.try_recv(),
+            Ok(ControlResponse::Error {
+                message: "too many pending wait requests".into(),
+            })
+        );
+        assert_eq!(list.try_recv(), Ok(ControlResponse::Ls { panes: vec![] }));
+        drop(pump);
+        assert!(jobs.is_closed());
+        for reply in pending {
+            assert_eq!(reply.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        }
+    }
+
+    #[test]
+    fn separate_socket_clients_can_send_while_one_waits() {
+        let (jobs, receiver) = async_channel::unbounded();
+        let (started, wait_started) = mpsc::channel();
+        let (finished, completion) = async_channel::bounded(1);
+        let pane = PaneKey::new_v4();
+        let (mut waiting_client, waiting_host) = UnixStream::pair().unwrap();
+        let (mut sending_client, sending_host) = UnixStream::pair().unwrap();
+        // Timeouts are failure guards only; channels establish all ordering.
+        for stream in [&waiting_client, &sending_client] {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+        }
+        let waiting_jobs = jobs.clone();
+        let waiting_server =
+            std::thread::spawn(move || handle_connection(waiting_host, waiting_jobs));
+        let sending_server = std::thread::spawn(move || handle_connection(sending_host, jobs));
+        let waiting = std::thread::spawn(move || {
+            let request = ControlRequest::Wait {
+                pane,
+                until: WaitUntil::Free,
+                timeout_secs: 60,
+            };
+            writeln!(
+                waiting_client,
+                "{}",
+                serde_json::to_string(&request).unwrap()
+            )
+            .unwrap();
+            let mut line = String::new();
+            BufReader::new(waiting_client).read_line(&mut line).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ControlResponse>(&line).unwrap(),
+                ControlResponse::Wait
+            );
+        });
+        let sending = std::thread::spawn(move || {
+            wait_started.recv_timeout(Duration::from_secs(5)).unwrap();
+            let request = ControlRequest::Send {
+                pane,
+                text: "exit".into(),
+                enter: true,
+            };
+            writeln!(
+                sending_client,
+                "{}",
+                serde_json::to_string(&request).unwrap()
+            )
+            .unwrap();
+            let mut line = String::new();
+            let result = BufReader::new(sending_client).read_line(&mut line);
+            // Release the waiter even if a regression timed out this client.
+            finished.send_blocking(()).unwrap();
+            result.unwrap();
+            assert_eq!(
+                serde_json::from_str::<ControlResponse>(&line).unwrap(),
+                ControlResponse::Send
+            );
+        });
+        futures::executor::block_on(serve_jobs(receiver, |request| {
+            let completion = completion.clone();
+            let started = started.clone();
+            async move {
+                match request {
+                    ControlRequest::Wait { .. } => {
+                        started.send(()).unwrap();
+                        completion.recv().await.unwrap();
+                        ControlResponse::Wait
+                    }
+                    ControlRequest::Send { .. } => ControlResponse::Send,
+                    _ => unreachable!(),
+                }
+            }
+        }));
+        waiting.join().unwrap();
+        sending.join().unwrap();
+        waiting_server.join().unwrap();
+        sending_server.join().unwrap();
+    }
 }

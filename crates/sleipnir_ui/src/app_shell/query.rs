@@ -141,7 +141,7 @@ impl AppShell {
         cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
         use gpui::Styled as _;
-        let shell = cx.entity().clone();
+        let shell = cx.entity();
         let focus = self.focus_handle.clone();
         gpui::canvas(
             move |bounds, _window, _cx| bounds,
@@ -276,7 +276,11 @@ mod tests {
     fn utf16_byte_roundtrip_with_cjk_and_emoji() {
         let s = "ab你😀c";
         for ch_count in 0..=s.chars().count() {
-            let byte = s.char_indices().nth(ch_count).map(|(b, _)| b).unwrap_or(s.len());
+            let byte = s
+                .char_indices()
+                .nth(ch_count)
+                .map(|(b, _)| b)
+                .unwrap_or(s.len());
             let u16 = byte_to_utf16(s, byte);
             assert_eq!(utf16_to_byte(s, u16), byte, "roundtrip at char {ch_count}");
         }
@@ -320,7 +324,9 @@ mod tests {
     #[test]
     fn splice_clamps_inverted_and_out_of_range_offsets() {
         let mut s = "hi".to_string();
-        splice_utf16(&mut s, 9..1, "!");
+        // Deliberately malformed IME offsets: this is input to clamp, not a
+        // range to iterate over.
+        splice_utf16(&mut s, std::ops::Range { start: 9, end: 1 }, "!");
         assert_eq!(s, "hi!");
     }
 }

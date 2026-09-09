@@ -318,10 +318,9 @@ impl AppShell {
                     .text_sm()
                     .text_color(query_color)
                     .child(query_display)
-                    .child(self.query_input_canvas(
-                        crate::app_shell::query::QuerySurface::Find,
-                        cx,
-                    )),
+                    .child(
+                        self.query_input_canvas(crate::app_shell::query::QuerySurface::Find, cx),
+                    ),
             )
             .child(
                 div()

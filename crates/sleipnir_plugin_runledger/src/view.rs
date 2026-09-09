@@ -58,7 +58,11 @@ pub fn status_tree(failed: usize, running: usize) -> Widget {
 
 /// Badge text is also a tab chip (8-char cap), so counts fold at 999.
 fn short_count(n: usize) -> String {
-    if n > 999 { "999+".into() } else { n.to_string() }
+    if n > 999 {
+        "999+".into()
+    } else {
+        n.to_string()
+    }
 }
 
 /// The grouped panel. Every jumpable row (current launch, not Abandoned, and
@@ -94,9 +98,7 @@ pub fn panel_tree(rows: &[PanelRow], now_unix_ms: u64, current_launch: LaunchId)
     if !any_group {
         tree = tree.child(text("暂无记录 — 在终端里跑条命令就会出现在这里").tone(Tone::Dim));
     } else if rows.len() > shown {
-        tree = tree.child(
-            text(format!("…仅显示最新 {MAX_PANEL_ROWS} 条")).tone(Tone::Dim),
-        );
+        tree = tree.child(text(format!("…仅显示最新 {MAX_PANEL_ROWS} 条")).tone(Tone::Dim));
     }
     tree.into()
 }
@@ -135,14 +137,24 @@ mod tests {
         }
     }
 
-    fn panel_row(state: RunState, launch_id: LaunchId, unix_ms: u64, host: Option<RunId>) -> PanelRow {
+    fn panel_row(
+        state: RunState,
+        launch_id: LaunchId,
+        unix_ms: u64,
+        host: Option<RunId>,
+    ) -> PanelRow {
         PanelRow {
             row: ledger_row(state, launch_id, unix_ms),
             host_id: host,
         }
     }
 
-    fn collect(widget: &Widget, texts: &mut Vec<String>, btns: &mut Vec<(String, String, Option<String>)>, badges: &mut Vec<(String, Tone)>) {
+    fn collect(
+        widget: &Widget,
+        texts: &mut Vec<String>,
+        btns: &mut Vec<(String, String, Option<String>)>,
+        badges: &mut Vec<(String, Tone)>,
+    ) {
         match widget {
             Widget::Col { children, .. } | Widget::Row { children, .. } => {
                 for child in children {
@@ -156,7 +168,13 @@ mod tests {
         }
     }
 
-    fn parts(widget: &Widget) -> (Vec<String>, Vec<(String, String, Option<String>)>, Vec<(String, Tone)>) {
+    fn parts(
+        widget: &Widget,
+    ) -> (
+        Vec<String>,
+        Vec<(String, String, Option<String>)>,
+        Vec<(String, Tone)>,
+    ) {
         let mut texts = Vec::new();
         let mut btns = Vec::new();
         let mut badges = Vec::new();

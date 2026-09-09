@@ -129,11 +129,9 @@ impl AppShell {
         let items = self.filtered_theme_items(cx);
         let ix = items
             .iter()
-            .position(|item| {
-                match &item.kind {
-                    ThemeItemKind::Builtin(t) => current == ThemeSetting::Builtin(*t),
-                    ThemeItemKind::Custom(n) => current == ThemeSetting::Custom(n.clone()),
-                }
+            .position(|item| match &item.kind {
+                ThemeItemKind::Builtin(t) => current == ThemeSetting::Builtin(*t),
+                ThemeItemKind::Custom(n) => current == ThemeSetting::Custom(n.clone()),
             })
             .unwrap_or(0);
         self.settings_theme_selected = ix;
@@ -361,7 +359,9 @@ impl AppShell {
                     .min_h_0()
                     .w_full()
                     .when(section == SettingsSection::Theme, |el| el.overflow_hidden())
-                    .when(section != SettingsSection::Theme, |el| el.overflow_y_scroll())
+                    .when(section != SettingsSection::Theme, |el| {
+                        el.overflow_y_scroll()
+                    })
                     .px(px(20.0))
                     .py(px(16.0))
                     .child(body),

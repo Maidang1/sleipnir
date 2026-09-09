@@ -7,7 +7,8 @@ pub struct HistoryHit {
 }
 
 /// Parse bash/zsh-style history text (ignores `: ts:0;` prefixes).
-pub fn parse_history_file(text: &str) -> Vec<HistoryHit> {    let mut out = Vec::new();
+pub fn parse_history_file(text: &str) -> Vec<HistoryHit> {
+    let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for raw in text.lines().rev() {
         let line = raw.trim();

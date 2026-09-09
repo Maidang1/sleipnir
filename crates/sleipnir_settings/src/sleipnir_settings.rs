@@ -182,7 +182,8 @@ pub struct TerminalSettings {
     pub inject_osc133: bool,
     /// Whether the Run Ledger collects runs in memory for core chrome.
     pub run_ledger: RunLedgerMode,
-    /// Cap on persisted runs (oldest dropped first).
+    /// Legacy compatibility field; persistence and retention belong to the
+    /// Run Ledger plugin. This field has no effect in core.
     pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
     pub run_ledger_redact: bool,
@@ -194,7 +195,7 @@ pub struct TerminalSettings {
     pub pipe_selection_command: Option<String>,
     /// Built-in keymap overlay.
     pub keybinding_preset: KeybindingPreset,
-    /// Chrome banner after session restore when a pane has Run history.
+    /// Legacy compatibility field; session restore and its banner were removed.
     pub show_tombstone: bool,
     /// External command plugin discovery and permission policy.
     pub plugins: PluginSettings,
@@ -510,7 +511,7 @@ struct SettingsFile {
     /// Run Ledger mode: off | memory | persist (default persist).
     #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
     run_ledger: Option<RunLedgerMode>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     run_ledger_max_runs: Option<usize>,
     #[serde(default)]
     run_ledger_redact: Option<bool>,
@@ -523,7 +524,7 @@ struct SettingsFile {
     pipe_selection_command: Option<String>,
     #[serde(default)]
     keybinding_preset: Option<KeybindingPreset>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     show_tombstone: Option<bool>,
     #[serde(default)]
     plugins: Option<PluginSettings>,
@@ -560,6 +561,7 @@ struct TerminalSettingsFile {
     inject_osc133: Option<bool>,
     #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
     run_ledger: Option<RunLedgerMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     run_ledger_max_runs: Option<usize>,
     run_ledger_redact: Option<bool>,
 }
@@ -573,7 +575,7 @@ where
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
-/// Directory that holds `settings.json` and `session.json`.
+/// Directory that holds `settings.json` and local plugin configuration.
 pub fn config_dir() -> PathBuf {
     config_dir_for(cfg!(windows))
 }
@@ -753,7 +755,14 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let default = SettingsFile {
+    let json = serde_json::to_string_pretty(&default_settings_file())?;
+    std::fs::write(&path, format!("{json}\n"))?;
+    log::info!("wrote default settings to {}", path.display());
+    Ok(())
+}
+
+fn default_settings_file() -> SettingsFile {
+    SettingsFile {
         theme: Some("mocha".into()),
         custom_theme: None,
         key_bindings: None,
@@ -763,14 +772,14 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
         notify_on_command_finish_secs: Some(5),
         notify_on_command_finish_mode: Some(NotifyOnCommandFinish::Unfocused),
         inject_osc133: Some(true),
-        run_ledger: Some(RunLedgerMode::Persist),
-        run_ledger_max_runs: Some(500),
+        run_ledger: Some(RunLedgerMode::Memory),
+        run_ledger_max_runs: None,
         run_ledger_redact: Some(true),
         agent_icons: Some(true),
         control_surface: Some(false),
         pipe_selection_command: None,
         keybinding_preset: Some(KeybindingPreset::Default),
-        show_tombstone: Some(true),
+        show_tombstone: None,
         plugins: None,
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
@@ -784,11 +793,7 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
             cursor_shape: Some(CursorShape::Block),
             ..Default::default()
         },
-    };
-    let json = serde_json::to_string_pretty(&default)?;
-    std::fs::write(&path, format!("{json}\n"))?;
-    log::info!("wrote default settings to {}", path.display());
-    Ok(())
+    }
 }
 
 /// Parse settings JSON (or empty object), apply `patch`, return pretty JSON + newline.
@@ -1010,6 +1015,30 @@ mod tests {
         assert_eq!(s.run_ledger, RunLedgerMode::Persist);
         assert_eq!(s.run_ledger_max_runs, 500);
         assert!(s.run_ledger_redact);
+    }
+
+    #[test]
+    fn new_config_does_not_advertise_removed_persistence_settings() {
+        let file = serde_json::to_value(default_settings_file()).unwrap();
+        assert_eq!(file["run_ledger"], "memory");
+        assert!(file.get("show_tombstone").is_none());
+        assert!(file.get("run_ledger_max_runs").is_none());
+        assert!(file["terminal"].get("run_ledger_max_runs").is_none());
+        assert!(file.get("restore_session").is_none());
+    }
+
+    #[test]
+    fn legacy_settings_still_load_after_removing_their_product_surfaces() {
+        let file: SettingsFile = serde_json::from_str(
+            r#"{"run_ledger":"persist","run_ledger_max_runs":120,"show_tombstone":true,
+                "restore_session":true,"ui_style":"default","tab_placement":"side"}"#,
+        )
+        .unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.run_ledger, RunLedgerMode::Persist);
+        assert_eq!(settings.run_ledger_max_runs, 120);
+        assert!(settings.show_tombstone);
     }
 
     #[test]

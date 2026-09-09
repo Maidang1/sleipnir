@@ -1,5 +1,11 @@
 //! Sleipnir — standalone terminal (HIG-aligned window chrome).
 
+// Release builds own their GUI window; keep the console only for debug logs.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app_menus;
 
 #[cfg(target_os = "macos")]

@@ -17,8 +17,9 @@ Tab is visible per Window at a time. A Tab owns exactly one PaneTree.
 _Avoid_: Page.
 
 **Pane**:
-A rectangular region inside a Tab that holds exactly one terminal session (one
-PTY). A Pane is always a leaf of its Tab's PaneTree.
+A rectangular region inside a Tab that holds either one terminal session (one
+PTY) or one plugin Panel. A Pane is always a leaf of its Tab's PaneTree.
+PTY-specific operations skip Panel leaves.
 _Avoid_: Split, terminal, view, cell (a cell is one character in the grid).
 
 **PaneTree**:
@@ -43,7 +44,7 @@ _Avoid_: Focused terminal, current pane.
 ## Chrome & appearance
 
 **Chrome**:
-The custom chrome of a Window: the Tab rail or top tab strip plus native-style
+The custom chrome of a Window: the top tab strip plus native-style
 window controls and their reserved space. It stays visually secondary to terminal
 content across supported platforms.
 _Avoid_: Titlebar, header, toolbar.
@@ -60,11 +61,8 @@ _Avoid_: Sidebar, tab rail (the side rail was removed), activity bar.
 A grouping key for Tabs, derived from the git work tree of the Tab's active Pane
 cwd (or the cwd itself if there is no `.git`, or `~` if cwd is unknown). Not a
 stored object; `cd` into another repo moves the Tab. Not an OS Window. Grouping
-is silent (no header, no tab count). On the rail, a work-tree row shows a
-branch subtitle with a `+N` / `−M` count of lines inserted / deleted vs
-`HEAD` (`git diff --numstat`, tracked files only). The top strip does not
-show git. Long titles, paths, and branch names truncate with `…`. A
-non-repo pane shows no rail subtitle. Drag-reorder stays inside a group.
+is silent (no header, no tab count). The top strip does not show git status.
+Long titles and paths truncate with `…`. Drag-reorder stays inside a group.
 _Avoid_: Project, folder, space.
 
 **Diff inspector**:
@@ -72,7 +70,7 @@ A window-level overlay that renders the active Pane's git work tree as a
 `git diff HEAD` (split or unified, file tree, expandable hidden context after
 a full-file upgrade, word-level intra-line highlights, tree-sitter on a
 small language set, optional minimap). Not a Pane. Not persisted. Open from
-the chrome **Diff** button, the rail `+N −M` counts, the platform shortcut, the
+the chrome **Diff** button, the platform shortcut, the
 command palette, or View → Diff Inspector. `v` toggles split / unified; `m` toggles
 the minimap. Click `⋯ N hidden lines` to expand a gap.
 _Avoid_: Diff pane, review tab, source control panel.
@@ -113,9 +111,12 @@ _Avoid_: Task, Command (a command is the text; a Run is one execution),
 Block, Job.
 
 **Ledger**:
-The ordered collection of every Run across Window / Tab / Pane. There is one
-in-process Ledger, persisted to `runs.json`. It is the only source of truth;
-UI reads snapshots of it.
+An ordered collection of Runs across terminal panes. The core holds an
+in-memory fact registry for Attention, run IDs, anchors, and control requests;
+it never reads or writes `runs.json`. The optional Run Ledger plugin maintains
+its own Ledger from host events and owns the history panel and `runs.json`.
+The plugin must be installed and enabled separately. Host and plugin run IDs
+are mapped explicitly; restored history has no live host anchor.
 _Avoid_: History (shell history is a text history of commands), Log, Timeline.
 
 **Anchor**:
@@ -133,12 +134,10 @@ the Ledger. It does not survive a restart (loaded history is marked seen).
 _Avoid_: Unread, Badge (a badge is one rendering of Attention; tab chrome no
 longer draws one), Alert.
 
-**Tombstone**:
-A chrome banner above the grid after session restore, generated from prior-launch
-Run metadata. It is not VT content and is not searchable with the Find action. It
-dismisses on type. Hidden when `show_tombstone` is false, or when the last
-command was still running or unrecognized.
-_Avoid_: Restored output, grid line (ADR-0006's grid-line tombstone is superseded).
+**Tombstone (removed)**:
+The historical restored-session banner. Session persistence was removed in
+0.6.0, so current windows do not display it. The legacy `show_tombstone`
+setting has no effect.
 
 ## Control
 
@@ -146,4 +145,18 @@ _Avoid_: Restored output, grid line (ADR-0006's grid-line tombstone is supersede
 An optional local Unix socket that enumerates panes, captures the visible
 screen, injects keys, and waits on Run Ledger state. Off unless
 `control_surface: true` or `SLEIPNIR_CONTROL=1`. Client is `sleipnir-ctl`.
-_Avoid_: API, RPC, plugin (there is no plugin system).
+_Avoid_: Plugin (plugins use a separate, supervised protocol).
+
+## Plugins
+
+**Plugin**:
+An optional independent child process speaking protocol v2. Plugins are off
+by default and require binary-bound capability grants. Current local plugins
+are unsandboxed; grants restrict host calls, not the process's OS permissions.
+
+**Panel**:
+A plugin-owned widget surface occupying a PaneTree leaf. It has no PTY.
+
+**Block**:
+A plugin-owned widget surface anchored to a live Run inside terminal
+scrollback. It is not VT output; its height is managed by host RowGeometry.

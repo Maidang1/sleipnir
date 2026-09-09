@@ -26,6 +26,12 @@ Socket path: `$SLEIPNIR_CONTROL_SOCKET` if set and non-empty, otherwise
 
 Protocol: one JSON object per line (request, then response).
 
+Requests on one connection remain sequential. A pending `wait` on one
+connection must not delay `ls`, `capture`, `send`, or another `wait` on a
+different connection. The host supports at most 64 pending waits and replies
+with an error when that limit is reached; ordinary requests remain available.
+Disabling the control surface cancels pending waits with its request pump.
+
 Verbs:
 
 - `ls` — enumerate panes
