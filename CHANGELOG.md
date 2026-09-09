@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.3
 
 ### Fixes
 - Control surface: a pending `wait` no longer blocks another client's `send`, `capture`, `ls`, or `wait`. Pending waits are capped at 64 and cancelled when the control surface stops.
