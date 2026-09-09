@@ -279,28 +279,9 @@ export default function App() {
           </div>
         </section>
 
-        {/* The product, framed as the product */}
-        <section className="px-5 pt-20 md:px-8">
-          <SectionHeading index="00" name="session" meta="claude · codex · kimi · grok" />
-          <TerminalWindow
-            title="agents — 4 panes"
-            className="mt-6"
-            bodyClassName="p-0 md:p-0"
-          >
-            <img
-              src="/app-screenshot.jpg"
-              alt="Sleipnir with four split panes running Claude Code, OpenAI Codex, Kimi Code, and Grok Build"
-              width={3456}
-              height={1980}
-              loading="lazy"
-              className="block h-auto w-full"
-            />
-          </TerminalWindow>
-        </section>
-
         {/* Features as a split-pane grid */}
         <section id="features" className="scroll-mt-16 px-5 pt-20 md:px-8">
-          <SectionHeading index="01" name="features" meta="9 entries" />
+          <SectionHeading index="00" name="features" meta="9 entries" />
           <div className="mt-6 grid grid-cols-1 gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-2 lg:grid-cols-3">
             {FEATURES.map((f, i) => (
               <article
@@ -326,7 +307,7 @@ export default function App() {
         {/* Download: one-liner plus the target matrix */}
         <section id="download" className="scroll-mt-16 px-5 pt-20 md:px-8">
           <SectionHeading
-            index="02"
+            index="01"
             name="download"
             meta={release ? `latest: v${release.version}` : 'latest: …'}
           />
@@ -346,7 +327,7 @@ export default function App() {
         {/* Changelog, straight from the repo */}
         <section id="changelog" className="scroll-mt-16 px-5 pt-20 md:px-8">
           <SectionHeading
-            index="03"
+            index="02"
             name="changelog"
             meta={release ? `latest: v${release.version}` : 'from CHANGELOG.md'}
           />
@@ -355,7 +336,7 @@ export default function App() {
 
         {/* FAQ, man-page style */}
         <section id="faq" className="scroll-mt-16 px-5 pt-20 pb-24 md:px-8">
-          <SectionHeading index="04" name="faq" meta="man sleipnir" />
+          <SectionHeading index="03" name="faq" meta="man sleipnir" />
           <div className="mt-6 max-w-3xl border-t border-border">
             <Accordion items={FAQ} />
           </div>

@@ -35,32 +35,34 @@
   --radius-xl: calc(var(--radius) * 2);
 }
 
-/* Terminal theme: dark only. A terminal does not ship a light mode. */
+/* Terminal theme, flipped to paper: near-white ground with the same
+   whisper of cool (hue 264); the ink ramp now runs light → dark so
+   every `text-ink-*` token keeps its role, only its value inverts. */
 :root {
-  --background: oklch(0.155 0 0);
-  --foreground: oklch(0.93 0 0);
-  --card: oklch(0.185 0 0);
-  --card-foreground: oklch(0.93 0 0);
-  --popover: oklch(0.185 0 0);
-  --popover-foreground: oklch(0.93 0 0);
-  --primary: oklch(0.96 0 0);
-  --primary-foreground: oklch(0.16 0 0);
-  --secondary: oklch(0.22 0 0);
-  --secondary-foreground: oklch(0.93 0 0);
-  --muted: oklch(0.205 0 0);
-  --muted-foreground: oklch(0.62 0 0);
-  --accent: oklch(0.24 0 0);
-  --accent-foreground: oklch(0.96 0 0);
-  --border: oklch(1 0 0 / 9%);
-  --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.96 0 0 / 60%);
+  --background: oklch(0.975 0.003 264);
+  --foreground: oklch(0.20 0.008 264);
+  --card: oklch(0.955 0.005 264);
+  --card-foreground: oklch(0.20 0.008 264);
+  --popover: oklch(0.99 0.002 264);
+  --popover-foreground: oklch(0.20 0.008 264);
+  --primary: oklch(0.19 0.008 264);
+  --primary-foreground: oklch(0.97 0.003 264);
+  --secondary: oklch(0.935 0.006 264);
+  --secondary-foreground: oklch(0.20 0.008 264);
+  --muted: oklch(0.945 0.005 264);
+  --muted-foreground: oklch(0.36 0.011 264);
+  --accent: oklch(0.925 0.007 264);
+  --accent-foreground: oklch(0.19 0.008 264);
+  --border: oklch(0 0 0 / 12%);
+  --input: oklch(0 0 0 / 18%);
+  --ring: oklch(0.25 0 0 / 55%);
   --radius: 0.125rem;
 
-  --ink: oklch(0.96 0 0);
-  --ink-soft: oklch(0.82 0 0);
-  --ink-dim: oklch(0.68 0 0);
-  --ink-mid: oklch(0.56 0 0);
-  --ink-faint: oklch(0.42 0 0);
+  --ink: oklch(0.16 0.008 264);
+  --ink-soft: oklch(0.25 0.009 264);
+  --ink-dim: oklch(0.33 0.01 264);
+  --ink-mid: oklch(0.43 0.011 264);
+  --ink-faint: oklch(0.54 0.012 264);
 }
 
 @layer base {
@@ -73,8 +75,8 @@
   body {
     @apply bg-background text-foreground font-mono antialiased;
     background-image:
-      linear-gradient(oklch(1 0 0 / 2.5%) 1px, transparent 1px),
-      linear-gradient(90deg, oklch(1 0 0 / 2.5%) 1px, transparent 1px);
+      linear-gradient(oklch(0 0 0 / 3%) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(0 0 0 / 3%) 1px, transparent 1px);
     background-size: 56px 56px;
     background-position: center top;
   }
@@ -103,7 +105,7 @@
   margin-left: 0.08em;
   vertical-align: text-bottom;
   background: var(--ink);
-  box-shadow: 0 0 12px oklch(0.96 0 0 / 35%);
+  box-shadow: 0 0 12px oklch(0.2 0 0 / 30%);
   animation: cursor-blink 1.06s step-end infinite;
 }
 
@@ -114,7 +116,7 @@
 
 /* Soft glow, reserved for the hero headline accent */
 .text-glow {
-  text-shadow: 0 0 22px oklch(0.96 0 0 / 22%);
+  text-shadow: 0 0 22px oklch(0.2 0 0 / 12%);
 }
 
 /* Boot terminal line reveal */
