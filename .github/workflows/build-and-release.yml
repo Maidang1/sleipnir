@@ -336,7 +336,8 @@ jobs:
   build-and-release:
     name: Build & Publish
     runs-on: macos-latest
-    timeout-minutes: 60
+    # Two release builds (aarch64 + x86_64) before lipo; allow headroom.
+    timeout-minutes: 120
     env:
       HAS_SIGNING_CERT: ${{ secrets.CODE_SIGNING_CERT_P12 != '' }}
       HAS_NOTARIZATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' }}
@@ -361,6 +362,7 @@ jobs:
         with:
           toolchain: ${{ steps.rust-toolchain-file.outputs.channel }}
           components: rustfmt, clippy
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -400,17 +402,40 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
-      - name: Build release binaries
-        run: cargo build --release -p sleipnir -p sleipnir-update-helper
+      - name: Build release binaries (Apple Silicon + Intel)
+        run: |
+          cargo build --release -p sleipnir -p sleipnir-update-helper \
+            --target aarch64-apple-darwin
+          cargo build --release -p sleipnir -p sleipnir-update-helper \
+            --target x86_64-apple-darwin
+
+      - name: Create universal binaries
+        run: |
+          mkdir -p build/universal
+          for bin in sleipnir sleipnir-update-helper; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/${bin}" \
+              "target/x86_64-apple-darwin/release/${bin}" \
+              -output "build/universal/${bin}"
+          done
+          # Fail the build if either architecture is missing.
+          for bin in sleipnir sleipnir-update-helper; do
+            INFO="$(lipo -info "build/universal/${bin}")"
+            echo "  ${INFO}"
+            case "${INFO}" in
+              *x86_64*arm64*) ;;
+              *) echo "ERROR: ${bin} is not a universal (arm64 + x86_64) binary" >&2; exit 1 ;;
+            esac
+          done
 
       - name: Assemble .app bundle
         run: |
           APP="Sleipnir.app"
           VER="${{ steps.version.outputs.version }}"
-          rm -rf "${APP}" build
-          mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" build
-          cp target/release/sleipnir "${APP}/Contents/MacOS/sleipnir"
-          cp target/release/sleipnir-update-helper "${APP}/Contents/MacOS/sleipnir-update-helper"
+          rm -rf "${APP}"
+          mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+          cp build/universal/sleipnir "${APP}/Contents/MacOS/sleipnir"
+          cp build/universal/sleipnir-update-helper "${APP}/Contents/MacOS/sleipnir-update-helper"
           chmod 755 "${APP}/Contents/MacOS/sleipnir" "${APP}/Contents/MacOS/sleipnir-update-helper"
           file "${APP}/Contents/MacOS/sleipnir-update-helper"
           sed "s|0.1.0|${VER}|g" resources/Info.plist > "${APP}/Contents/Info.plist"
@@ -522,7 +547,7 @@ jobs:
             echo ""
             echo "### Install"
             echo ""
-            echo "**macOS:** Download \`Sleipnir-${VERSION}-macos.dmg\`, open it, and drag Sleipnir to Applications."
+            echo "**macOS (Apple Silicon + Intel):** Download \`Sleipnir-${VERSION}-macos.dmg\`, open it, and drag Sleipnir to Applications. The dmg is a universal build that runs natively on both."
             echo ""
             echo "> **Note:** The macOS build is ad-hoc signed (no Apple Developer certificate in CI)."
             echo "> On first launch Gatekeeper will show \"Sleipnir is an unidentified developer\"."
@@ -539,7 +564,7 @@ jobs:
             echo "In-place updates are macOS-only; Linux Check for Updates opens this release for manual installation."
             echo ""
             echo "### Requirements"
-            echo "- macOS 14.0+ (Sonoma), Windows 10 1809+ with a Direct3D 11 GPU, or Ubuntu 22.04+ with Vulkan and Wayland/X11"
+            echo "- macOS 14.0+ (Sonoma, Apple Silicon or Intel), Windows 10 1809+ with a Direct3D 11 GPU, or Ubuntu 22.04+ with Vulkan and Wayland/X11"
             echo "- Rust 1.95+ (only needed for building from source)"
             echo ""
             echo "### Source"
