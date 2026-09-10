@@ -9,6 +9,7 @@ pub struct AvailableUpdate {
     pub sha256_url: String,
     pub expected_sha256: Option<String>,
     pub expected_size: Option<u64>,
+    pub minimum_macos: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -42,7 +43,7 @@ pub enum UpdateUiState {
 #[derive(Default)]
 pub struct UpdateModel {
     pub state: UpdateUiState,
-    pub staged_dmg: Option<std::path::PathBuf>,
+    pub verified_artifact: Option<updater::VerifiedArtifact>,
 }
 
 impl Global for UpdateModel {}
@@ -52,7 +53,7 @@ impl UpdateModel {
         if !cx.has_global::<Self>() {
             cx.set_global(Self {
                 state: outcome_state(),
-                staged_dmg: None,
+                verified_artifact: None,
             });
         }
     }
@@ -121,10 +122,11 @@ mod tests {
             sha256_url: String::new(),
             expected_sha256: Some("a".repeat(64)),
             expected_size: Some(42),
+            minimum_macos: "14.0".into(),
         };
         let model = UpdateModel {
             state: UpdateUiState::WaitingForHelper(update),
-            staged_dmg: None,
+            verified_artifact: None,
         };
         assert!(matches!(model.state, UpdateUiState::WaitingForHelper(_)));
     }

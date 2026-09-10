@@ -131,6 +131,7 @@ pub struct PendingInvoke {
     id: MessageId,
     rx: mpsc::Receiver<Result<Output, SessionError>>,
     session: Arc<Session>,
+    cleanup_on_drop: Option<Arc<dyn Fn(Uuid) + Send + Sync>>,
 }
 
 impl PendingInvoke {
@@ -139,13 +140,28 @@ impl PendingInvoke {
     }
 
     pub fn wait(self, timeout: Duration) -> Result<Output, SessionError> {
-        match self.rx.recv_timeout(timeout) {
+        let result = match self.rx.recv_timeout(timeout) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
                 mutex_lock(&self.session.pending).remove(&self.id);
                 Err(SessionError::Timeout(timeout))
             }
             Err(RecvTimeoutError::Disconnected) => Err(SessionError::Disconnected),
+        };
+        result
+    }
+
+    pub(crate) fn with_cleanup(mut self, cleanup: Arc<dyn Fn(Uuid) + Send + Sync>) -> Self {
+        self.cleanup_on_drop = Some(cleanup);
+        self
+    }
+}
+
+impl Drop for PendingInvoke {
+    fn drop(&mut self) {
+        mutex_lock(&self.session.pending).remove(&self.id);
+        if let Some(cleanup) = &self.cleanup_on_drop {
+            cleanup(self.session.instance_id());
         }
     }
 }
@@ -226,8 +242,9 @@ impl Session {
         });
 
         let writer_sink = spawned.stdin;
+        let writer_session = Arc::downgrade(&session);
         let writer_thread = spawn_named(&format!("plugin-{}-writer", spec.plugin_id), move || {
-            writer_loop(writer_sink, write_rx)
+            writer_loop(writer_sink, write_rx, writer_session)
         });
 
         {
@@ -331,6 +348,7 @@ impl Session {
             id,
             rx,
             session: Arc::clone(self),
+            cleanup_on_drop: None,
         })
     }
 
@@ -436,9 +454,7 @@ impl Session {
     }
 
     pub(crate) fn cancel(&self) {
-        self.dead.store(true, Ordering::SeqCst);
-        self.fail_handshake(SessionError::Disconnected);
-        self.fail_waiters(SessionError::Disconnected);
+        self.mark_dead(SessionError::Disconnected);
     }
 
     /// Shutdown, grace, kill, reap, join. Idempotent. Pending waiters get
@@ -448,19 +464,19 @@ impl Session {
             return;
         }
         let _ = self.enqueue(WriteCmd::Shutdown);
-        {
-            let mut proc = mutex_lock(&self.process);
-            if !proc.wait_timeout(grace) {
-                let _ = proc.kill();
-                let _ = proc.wait_timeout(Duration::ZERO);
-            }
-        }
-        self.dead.store(true, Ordering::SeqCst);
         if let Some(tx) = mutex_lock(&self.write_tx).take() {
             drop(tx);
         }
-        self.fail_waiters(SessionError::Disconnected);
-        self.fail_handshake(SessionError::Disconnected);
+        {
+            let mut proc = mutex_lock(&self.process);
+            if !grace.is_zero() {
+                let _ = proc.wait_timeout(grace);
+            }
+            let _ = proc.cancel_io();
+            let _ = proc.kill();
+            let _ = proc.wait_timeout(Duration::ZERO);
+        }
+        self.mark_dead(SessionError::Disconnected);
         let mut threads = mutex_lock(&self.threads);
         join_thread(threads.stderr.take());
         join_thread(threads.reader.take());
@@ -509,6 +525,14 @@ impl Session {
         if let HandshakeSlot::Waiting(tx) = std::mem::replace(&mut *slot, HandshakeSlot::Done) {
             let _ = tx.send(Err(err));
         }
+    }
+
+    fn mark_dead(&self, err: SessionError) {
+        if self.dead.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.fail_handshake(err.clone());
+        self.fail_waiters(err);
     }
 
     fn complete_waiter(&self, id: MessageId, result: Result<Output, SessionError>) {
@@ -613,9 +637,7 @@ impl Session {
     }
 
     fn on_eof(&self) {
-        self.dead.store(true, Ordering::SeqCst);
-        self.fail_handshake(SessionError::Disconnected);
-        self.fail_waiters(SessionError::Disconnected);
+        self.mark_dead(SessionError::Disconnected);
     }
 
     fn disconnect(self: &Arc<Self>) {
@@ -630,10 +652,7 @@ impl Session {
 
     fn on_oversized(&self) {
         self.malformed.fetch_add(1, Ordering::Relaxed);
-        self.dead.store(true, Ordering::SeqCst);
-        let err = SessionError::Protocol("oversized line".into());
-        self.fail_handshake(err.clone());
-        self.fail_waiters(err);
+        self.mark_dead(SessionError::Protocol("oversized line".into()));
     }
 
     fn push_stderr(&self, line: String) {
@@ -704,17 +723,24 @@ fn redact_run_started(event: v2::HostEvent) -> v2::HostEvent {
     }
 }
 
-fn writer_loop(mut sink: Box<dyn LineSink>, rx: mpsc::Receiver<WriteCmd>) {
+fn writer_loop(mut sink: Box<dyn LineSink>, rx: mpsc::Receiver<WriteCmd>, session: Weak<Session>) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             WriteCmd::Line(line) => {
                 if sink.send_line(&line).is_err() {
+                    if let Some(session) = session.upgrade() {
+                        session.mark_dead(SessionError::Disconnected);
+                    }
                     break;
                 }
             }
             WriteCmd::Shutdown => {
                 if let Ok(line) = serde_json::to_string(&HostMessage::Shutdown) {
-                    let _ = sink.send_line(&line);
+                    if sink.send_line(&line).is_err() {
+                        if let Some(session) = session.upgrade() {
+                            session.mark_dead(SessionError::Disconnected);
+                        }
+                    }
                 }
                 break;
             }
@@ -789,6 +815,318 @@ where
 fn join_thread(handle: Option<JoinHandle<()>>) {
     if let Some(handle) = handle {
         let _ = handle.join();
+    }
+}
+
+#[cfg(test)]
+mod worker_error_tests {
+    use super::*;
+    use crate::PluginLifecycle;
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+
+    struct BrokenSink;
+
+    impl LineSink for BrokenSink {
+        fn send_line(&mut self, _line: &str) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "simulated sink failure",
+            ))
+        }
+    }
+
+    struct IdleSource;
+
+    impl LineSource for IdleSource {
+        fn recv_line(&mut self, _max_bytes: usize) -> std::io::Result<RecvLine> {
+            Ok(RecvLine::Eof)
+        }
+    }
+
+    struct FakeProcess {
+        dead: bool,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        graceful_exit: bool,
+    }
+
+    impl PluginProcess for FakeProcess {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+
+        fn cancel_io(&mut self) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push("cancel_io");
+            self.dead = true;
+            Ok(())
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push("kill");
+            self.dead = true;
+            Ok(())
+        }
+
+        fn wait_timeout(&mut self, timeout: Duration) -> bool {
+            if timeout.is_zero() {
+                self.calls.lock().unwrap().push("wait_zero");
+                return self.dead;
+            }
+            self.calls.lock().unwrap().push("wait_grace");
+            if self.graceful_exit {
+                self.dead = true;
+            }
+            self.graceful_exit
+        }
+    }
+
+    fn test_spec() -> LaunchSpec {
+        LaunchSpec {
+            plugin_id: "demo".into(),
+            lifecycle: PluginLifecycle::Resident,
+            declared_capabilities: BTreeSet::new(),
+            granted: vec![],
+            binary: "demo".into(),
+            args: vec![],
+            cwd: PathBuf::from("."),
+        }
+    }
+
+    #[test]
+    fn writer_failure_marks_session_dead_and_wakes_waiter() {
+        let clock = Arc::new(super::super::ManualClock::new(1_000)) as Arc<dyn Clock>;
+        let spawned = Spawned {
+            stdin: Box::new(BrokenSink),
+            stdout: Box::new(IdleSource),
+            stderr: Box::new(IdleSource),
+            process: Box::new(FakeProcess {
+                dead: false,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                graceful_exit: false,
+            }),
+        };
+        let session = Session::spawn(
+            &test_spec(),
+            spawned,
+            &SupervisorConfig::for_tests(),
+            clock,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(session, SessionError::Disconnected);
+    }
+
+    #[derive(Clone, Default)]
+    struct WireState {
+        lines: Arc<Mutex<Vec<String>>>,
+        shutdown_sent: Arc<(Mutex<bool>, Condvar)>,
+        closed: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl WireState {
+        fn wait_for_shutdown(&self, timeout: Duration) -> bool {
+            let (lock, cv) = &*self.shutdown_sent;
+            let sent = lock.lock().unwrap();
+            let (sent, _) = cv
+                .wait_timeout_while(sent, timeout, |sent| !*sent)
+                .unwrap_or_else(|e| e.into_inner());
+            *sent
+        }
+
+        fn close(&self) {
+            let (lock, cv) = &*self.closed;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+
+        fn wait_until_closed(&self) {
+            let (lock, cv) = &*self.closed;
+            let closed = lock.lock().unwrap();
+            let _guard = cv
+                .wait_while(closed, |closed| !*closed)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    struct RecordingSink {
+        wire: WireState,
+    }
+
+    impl LineSink for RecordingSink {
+        fn send_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.wire.lines.lock().unwrap().push(line.to_string());
+            if line == serde_json::to_string(&HostMessage::Shutdown).unwrap() {
+                let (lock, cv) = &*self.wire.shutdown_sent;
+                *lock.lock().unwrap() = true;
+                cv.notify_all();
+            }
+            Ok(())
+        }
+    }
+
+    struct ScriptedSource {
+        ready: Option<String>,
+        wire: WireState,
+    }
+
+    impl LineSource for ScriptedSource {
+        fn recv_line(&mut self, _max_bytes: usize) -> std::io::Result<RecvLine> {
+            if let Some(line) = self.ready.take() {
+                return Ok(RecvLine::Line(line));
+            }
+            self.wire.wait_until_closed();
+            Ok(RecvLine::Eof)
+        }
+    }
+
+    struct OrderingProcess {
+        dead: bool,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        wire: WireState,
+        graceful_exit: bool,
+    }
+
+    impl PluginProcess for OrderingProcess {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+
+        fn cancel_io(&mut self) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push("cancel_io");
+            self.wire.close();
+            self.dead = true;
+            Ok(())
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push("kill");
+            self.wire.close();
+            self.dead = true;
+            Ok(())
+        }
+
+        fn wait_timeout(&mut self, timeout: Duration) -> bool {
+            if timeout.is_zero() {
+                self.calls.lock().unwrap().push("wait_zero");
+                return self.dead;
+            }
+            self.calls.lock().unwrap().push("wait_grace");
+            let saw_shutdown = self.wire.wait_for_shutdown(timeout);
+            assert!(
+                saw_shutdown,
+                "grace wait should observe Shutdown before teardown cleanup"
+            );
+            if self.graceful_exit {
+                self.dead = true;
+            }
+            self.graceful_exit
+        }
+    }
+
+    fn ready_line() -> String {
+        serde_json::to_string(&PluginMessage::Ready {
+            protocol_version: v2::PROTOCOL_VERSION,
+            manifest: plugin_protocol::v2::Manifest {
+                id: "demo".into(),
+                name: "Demo".into(),
+                version: "1".into(),
+                description: String::new(),
+                lifecycle: plugin_protocol::v2::Lifecycle::Resident,
+                commands: vec![],
+            },
+            requests: vec![],
+            event_filter: plugin_protocol::v2::EventFilter::default(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn teardown_waits_for_shutdown_write_before_cancel_when_grace_is_positive() {
+        let clock = Arc::new(super::super::ManualClock::new(1_000)) as Arc<dyn Clock>;
+        let wire = WireState::default();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let spawned = Spawned {
+            stdin: Box::new(RecordingSink { wire: wire.clone() }),
+            stdout: Box::new(ScriptedSource {
+                ready: Some(ready_line()),
+                wire: wire.clone(),
+            }),
+            stderr: Box::new(ScriptedSource {
+                ready: None,
+                wire: wire.clone(),
+            }),
+            process: Box::new(OrderingProcess {
+                dead: false,
+                calls: calls.clone(),
+                wire: wire.clone(),
+                graceful_exit: true,
+            }),
+        };
+        let session = Session::spawn(
+            &test_spec(),
+            spawned,
+            &SupervisorConfig::for_tests(),
+            clock,
+            0,
+        )
+        .expect("session should spawn");
+
+        let teardown_session = Arc::clone(&session);
+        let teardown = thread::spawn(move || teardown_session.teardown(Duration::from_millis(1)));
+        teardown.join().unwrap();
+
+        let lines = wire.lines.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "expected Hello then Shutdown");
+        assert_eq!(
+            lines[1],
+            serde_json::to_string(&HostMessage::Shutdown).expect("serialize shutdown")
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &["wait_grace", "cancel_io", "kill", "wait_zero"],
+            "positive grace must flush Shutdown before cancel, then always clean owned process state"
+        );
+        drop(session);
+    }
+
+    #[test]
+    fn teardown_zero_grace_cancels_immediately() {
+        let clock = Arc::new(super::super::ManualClock::new(1_000)) as Arc<dyn Clock>;
+        let wire = WireState::default();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let spawned = Spawned {
+            stdin: Box::new(RecordingSink { wire: wire.clone() }),
+            stdout: Box::new(ScriptedSource {
+                ready: Some(ready_line()),
+                wire: wire.clone(),
+            }),
+            stderr: Box::new(ScriptedSource {
+                ready: None,
+                wire: wire.clone(),
+            }),
+            process: Box::new(OrderingProcess {
+                dead: false,
+                calls: calls.clone(),
+                wire,
+                graceful_exit: false,
+            }),
+        };
+        let session = Session::spawn(
+            &test_spec(),
+            spawned,
+            &SupervisorConfig::for_tests(),
+            clock,
+            0,
+        )
+        .expect("session should spawn");
+        session.teardown(Duration::ZERO);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &["cancel_io", "kill", "wait_zero"],
+            "zero grace must skip the grace wait and clean immediately"
+        );
     }
 }
 

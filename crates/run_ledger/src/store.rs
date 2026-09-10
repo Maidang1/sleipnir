@@ -1,17 +1,15 @@
 //! `runs.json` persistence: versioned, atomic, corruption-tolerant.
 
-use crate::ledger::Retention;
-use crate::run::{Run, RunId};
+use crate::ledger::{Retention, apply_retention};
+use crate::run::{LaunchId, Run, RunId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 pub const RUNS_VERSION: u32 = 1;
-
-const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Serialize, Deserialize)]
 pub struct RunsFile {
@@ -51,13 +49,19 @@ pub fn load_runs(path: &Path) -> (Vec<Run>, bool) {
     }
 }
 
-/// Write under a cross-process lock, merging by `RunId` while the lock is held.
-///
-/// The lock makes the read/modify/write cycle atomic across application
-/// instances, so a concurrent save cannot drop a run. Writing `announced: true`
-/// is inherent to persisting: reaching this function *is* the first persist that
-/// the notice describes.
-pub fn save_runs(path: &Path, runs: &[Run], retention: Retention) -> io::Result<()> {
+/// Persist only the current launch's owned runs under a cross-process lock.
+/// Imported history is read-only: if another launch has since advanced one of
+/// its runs on disk, that newer disk copy wins over the stale imported
+/// snapshot this process is holding. The lock makes the read/modify/write
+/// cycle atomic across application instances, so a concurrent save cannot drop
+/// a run. Writing `announced: true` is inherent to persisting: reaching this
+/// function *is* the first persist that the notice describes.
+pub fn save_runs(
+    path: &Path,
+    runs: &[Run],
+    current_launch: LaunchId,
+    retention: Retention,
+) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -71,21 +75,28 @@ pub fn save_runs(path: &Path, runs: &[Run], retention: Retention) -> io::Result<
         .truncate(false)
         .open(atomic_write::sibling_path(path, ".lock"))?;
     lock.lock()?;
-    let result = save_runs_locked(path, runs, retention);
-    // Report an unlock failure only when the write itself succeeded, so the
-    // original error is never masked.
+    let result = save_runs_locked(path, runs, current_launch, retention);
     match (result, lock.unlock()) {
         (Ok(()), Err(err)) => Err(err),
         (result, _) => result,
     }
 }
 
-fn save_runs_locked(path: &Path, runs: &[Run], retention: Retention) -> io::Result<()> {
+fn save_runs_locked(
+    path: &Path,
+    runs: &[Run],
+    current_launch: LaunchId,
+    retention: Retention,
+) -> io::Result<()> {
     let (disk_runs, _) = load_runs(path);
-    let mut merged = merge_by_id(disk_runs, runs);
+    let mut merged = merge_owned_runs(disk_runs, runs, current_launch);
     merged.sort_by_key(|run| run.started_at_unix_ms);
-    apply_retention(&mut merged, retention);
+    apply_retention(&mut merged, retention, now_ms());
 
+    write_runs_file(path, merged)
+}
+
+fn write_runs_file(path: &Path, merged: Vec<Run>) -> io::Result<()> {
     let file = RunsFile {
         version: RUNS_VERSION,
         announced: true,
@@ -104,25 +115,22 @@ fn parse_runs_file(bytes: &[u8]) -> Option<RunsFile> {
     (file.version == RUNS_VERSION).then_some(file)
 }
 
-fn merge_by_id(disk: Vec<Run>, incoming: &[Run]) -> Vec<Run> {
+fn merge_owned_runs(disk: Vec<Run>, incoming: &[Run], current_launch: LaunchId) -> Vec<Run> {
     let mut by_id: HashMap<RunId, Run> = disk.into_iter().map(|run| (run.id, run)).collect();
-    for run in incoming {
+    for run in incoming
+        .iter()
+        .filter(|run| run.launch_id == current_launch)
+    {
         by_id.insert(run.id, run.clone());
     }
     by_id.into_values().collect()
 }
 
-fn apply_retention(runs: &mut Vec<Run>, retention: Retention) {
-    let now = SystemTime::now()
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let cutoff = now.saturating_sub(retention.days.saturating_mul(MS_PER_DAY));
-    runs.retain(|run| run.started_at_unix_ms >= cutoff);
-    if runs.len() > retention.max_runs {
-        let drop = runs.len() - retention.max_runs;
-        runs.drain(..drop);
-    }
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -162,9 +170,12 @@ mod tests {
     fn save_then_load_round_trips() {
         let (_dir, path) = runs_path();
         let now = now_ms();
-        let a = make_run("cargo test", now - 10);
-        let b = make_run("npm test", now);
-        save_runs(&path, &[a.clone(), b.clone()], Retention::default()).unwrap();
+        let launch = LaunchId::new_v4();
+        let mut a = make_run("cargo test", now - 10);
+        let mut b = make_run("npm test", now);
+        a.launch_id = launch;
+        b.launch_id = launch;
+        save_runs(&path, &[a.clone(), b.clone()], launch, Retention::default()).unwrap();
         let (loaded, announced) = load_runs(&path);
         assert!(announced);
         assert_eq!(loaded.len(), 2);
@@ -217,8 +228,20 @@ mod tests {
         let now = now_ms();
         let a = make_run("first", now - 50);
         let b = make_run("second", now - 10);
-        save_runs(&path, std::slice::from_ref(&a), Retention::default()).unwrap();
-        save_runs(&path, std::slice::from_ref(&b), Retention::default()).unwrap();
+        save_runs(
+            &path,
+            std::slice::from_ref(&a),
+            a.launch_id,
+            Retention::default(),
+        )
+        .unwrap();
+        save_runs(
+            &path,
+            std::slice::from_ref(&b),
+            b.launch_id,
+            Retention::default(),
+        )
+        .unwrap();
         let (loaded, _) = load_runs(&path);
         let cmds: Vec<_> = loaded.iter().map(|r| r.command.as_str()).collect();
         assert_eq!(cmds, ["first", "second"], "union by id, oldest first");
@@ -241,7 +264,13 @@ mod tests {
             threads.push(std::thread::spawn(move || {
                 let run = make_run(&format!("worker-{i}"), now + i as u64);
                 barrier.wait();
-                save_runs(&path, &[run], Retention::default()).unwrap();
+                save_runs(
+                    &path,
+                    std::slice::from_ref(&run),
+                    run.launch_id,
+                    Retention::default(),
+                )
+                .unwrap();
             }));
         }
         for thread in threads {
@@ -267,12 +296,18 @@ mod tests {
     fn save_applies_retention_before_writing() {
         let (_dir, path) = runs_path();
         let now = now_ms();
+        let launch = LaunchId::new_v4();
         let runs: Vec<_> = (0..600)
-            .map(|i| make_run(&format!("c{i}"), now - 600 + i as u64))
+            .map(|i| {
+                let mut run = make_run(&format!("c{i}"), now - 600 + i as u64);
+                run.launch_id = launch;
+                run
+            })
             .collect();
         save_runs(
             &path,
             &runs,
+            launch,
             Retention {
                 days: 7,
                 max_runs: 500,
@@ -291,7 +326,13 @@ mod tests {
         let (_dir, path) = runs_path();
         let mut run = make_run("secret-ish", now_ms());
         run.seen = true;
-        save_runs(&path, &[run], Retention::default()).unwrap();
+        save_runs(
+            &path,
+            std::slice::from_ref(&run),
+            run.launch_id,
+            Retention::default(),
+        )
+        .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(
             !text.contains("seen"),
@@ -312,8 +353,135 @@ mod tests {
     fn unix_permissions_are_0600() {
         use std::os::unix::fs::PermissionsExt;
         let (_dir, path) = runs_path();
-        save_runs(&path, &[make_run("chmod", now_ms())], Retention::default()).unwrap();
+        let run = make_run("chmod", now_ms());
+        save_runs(
+            &path,
+            std::slice::from_ref(&run),
+            run.launch_id,
+            Retention::default(),
+        )
+        .unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn stale_reader_cannot_overwrite_newer_disk_state() {
+        let (_dir, path) = runs_path();
+        let now = now_ms();
+        let launch_a = LaunchId::new_v4();
+        let launch_b = LaunchId::new_v4();
+        let mut run = make_run("shared", now);
+        run.launch_id = launch_a;
+        run.state = RunState::Succeeded;
+        run.exit_code = Some(0);
+        run.duration = std::time::Duration::from_millis(200);
+        save_runs(
+            &path,
+            std::slice::from_ref(&run),
+            launch_a,
+            Retention::default(),
+        )
+        .unwrap();
+
+        let mut stale = run.clone();
+        stale.state = RunState::Abandoned;
+        stale.exit_code = None;
+        stale.duration = std::time::Duration::from_millis(50);
+        let mut owned = make_run("owned", now + 1);
+        owned.launch_id = launch_b;
+        save_runs(
+            &path,
+            &[stale, owned.clone()],
+            launch_b,
+            Retention::default(),
+        )
+        .unwrap();
+
+        let (loaded, _) = load_runs(&path);
+        let shared = loaded.iter().find(|loaded| loaded.id == run.id).unwrap();
+        let owned_loaded = loaded.iter().find(|loaded| loaded.id == owned.id).unwrap();
+        assert_eq!(shared.state, RunState::Succeeded);
+        assert_eq!(shared.exit_code, Some(0));
+        assert_eq!(shared.duration, std::time::Duration::from_millis(200));
+        assert_eq!(owned_loaded.id, owned.id);
+    }
+
+    #[test]
+    fn imported_foreign_runs_are_not_reinserted_after_they_leave_disk() {
+        let (_dir, path) = runs_path();
+        let now = now_ms();
+        let foreign_launch = LaunchId::new_v4();
+        let current_launch = LaunchId::new_v4();
+        let mut foreign = make_run("foreign", now);
+        foreign.launch_id = foreign_launch;
+        save_runs(
+            &path,
+            &[foreign.clone()],
+            foreign_launch,
+            Retention::default(),
+        )
+        .unwrap();
+
+        fs::write(&path, r#"{"version":1,"announced":true,"runs":[]}"#).unwrap();
+
+        let mut owned = make_run("owned", now + 1);
+        owned.launch_id = current_launch;
+        save_runs(
+            &path,
+            &[foreign, owned.clone()],
+            current_launch,
+            Retention::default(),
+        )
+        .unwrap();
+
+        let (loaded, _) = load_runs(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, owned.id);
+    }
+
+    #[test]
+    fn second_writer_does_not_prune_another_launches_running_row() {
+        let (_dir, path) = runs_path();
+        let now = now_ms();
+        let launch_a = LaunchId::new_v4();
+        let launch_b = LaunchId::new_v4();
+
+        let mut running_a = make_run("running-a", now);
+        running_a.launch_id = launch_a;
+        running_a.state = RunState::Running;
+        running_a.exit_code = None;
+        running_a.duration = std::time::Duration::ZERO;
+        save_runs(
+            &path,
+            std::slice::from_ref(&running_a),
+            launch_a,
+            Retention {
+                days: 7,
+                max_runs: 1,
+            },
+        )
+        .unwrap();
+
+        let mut finished_b = make_run("finished-b", now + 1);
+        finished_b.launch_id = launch_b;
+        save_runs(
+            &path,
+            std::slice::from_ref(&finished_b),
+            launch_b,
+            Retention {
+                days: 7,
+                max_runs: 1,
+            },
+        )
+        .unwrap();
+
+        let (loaded, _) = load_runs(&path);
+        assert!(
+            loaded
+                .iter()
+                .any(|run| run.command == "running-a" && run.state == RunState::Running),
+            "the second writer must not prune another launch's live row"
+        );
     }
 }

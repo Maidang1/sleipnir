@@ -17,6 +17,7 @@ use plugin_protocol::v2::{InvokeContext, Output};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use uuid::Uuid;
 
 #[derive(Default)]
 struct Health {
@@ -29,11 +30,19 @@ struct Health {
 struct Inner {
     closed: bool,
     live: HashMap<String, Arc<Session>>,
+    active: HashMap<Uuid, Arc<Session>>,
     health: HashMap<String, Health>,
 }
 
+#[derive(Debug, Clone)]
+pub struct InboundEnvelope {
+    pub plugin_id: String,
+    pub instance_id: Uuid,
+    pub message: Inbound,
+}
+
 pub struct Supervisor {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
     /// Per-plugin lock so two `connect` calls cannot handshake the same id
     /// twice, without holding the registry lock across I/O.
     plugin_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -49,11 +58,12 @@ impl Supervisor {
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
-            inner: Mutex::new(Inner {
+            inner: Arc::new(Mutex::new(Inner {
                 live: HashMap::new(),
+                active: HashMap::new(),
                 health: HashMap::new(),
                 closed: false,
-            }),
+            })),
             plugin_locks: Mutex::new(HashMap::new()),
             launcher,
             clock,
@@ -111,6 +121,9 @@ impl Supervisor {
             inner
                 .live
                 .insert(spec.plugin_id.clone(), Arc::clone(&session));
+            inner
+                .active
+                .insert(session.instance_id(), Arc::clone(&session));
         }
         Ok(session)
     }
@@ -122,11 +135,21 @@ impl Supervisor {
         context: InvokeContext,
     ) -> Result<Output, SessionError> {
         let session = self.connect(spec)?;
+        if spec.lifecycle == PluginLifecycle::OnDemand {
+            if let Err(err) = self.register_active(Arc::clone(&session)) {
+                session.cancel();
+                session.teardown(self.config.shutdown_grace);
+                return Err(err);
+            }
+        }
         let result = session.invoke(command_id, context, self.config.request_timeout);
         match spec.lifecycle {
             // OnDemand never enters the live map; dropping the Arc tears the
             // session down. The explicit teardown bounds the shutdown grace.
-            PluginLifecycle::OnDemand => session.teardown(self.config.shutdown_grace),
+            PluginLifecycle::OnDemand => {
+                self.drop_active_by_instance(session.instance_id());
+                session.teardown(self.config.shutdown_grace);
+            }
             PluginLifecycle::Resident => {
                 if result.is_err() && session.is_dead() {
                     self.reap_dead(&spec.plugin_id);
@@ -142,7 +165,31 @@ impl Supervisor {
         command_id: &str,
         context: InvokeContext,
     ) -> Result<PendingInvoke, SessionError> {
-        self.connect(spec)?.begin_invoke(command_id, context)
+        let session = self.connect(spec)?;
+        if spec.lifecycle == PluginLifecycle::OnDemand {
+            if let Err(err) = self.register_active(Arc::clone(&session)) {
+                session.cancel();
+                session.teardown(self.config.shutdown_grace);
+                return Err(err);
+            }
+        }
+        let pending = match session.begin_invoke(command_id, context) {
+            Ok(pending) => pending,
+            Err(err) => {
+                if spec.lifecycle == PluginLifecycle::OnDemand {
+                    self.drop_active_by_instance(session.instance_id());
+                    session.teardown(self.config.shutdown_grace);
+                }
+                return Err(err);
+            }
+        };
+        match spec.lifecycle {
+            PluginLifecycle::Resident => Ok(pending),
+            PluginLifecycle::OnDemand => {
+                let cleanup = self.cleanup_hook(spec.plugin_id.clone());
+                Ok(pending.with_cleanup(cleanup))
+            }
+        }
     }
 
     /// Fan-out one event to every live connection. Never blocks: missing
@@ -162,25 +209,42 @@ impl Supervisor {
         id: MessageId,
         result: v2::HostCallResult,
     ) -> Result<(), SessionError> {
-        self.require_live(plugin_id)?.reply(id, result)
+        self.require_plugin_target(plugin_id)?.reply(id, result)
+    }
+
+    pub fn reply_to_instance(
+        &self,
+        instance_id: Uuid,
+        id: MessageId,
+        result: v2::HostCallResult,
+    ) -> Result<(), SessionError> {
+        self.require_active_instance(instance_id)?.reply(id, result)
     }
 
     pub fn drain_inbound(&self, plugin_id: &str) -> Vec<Inbound> {
-        self.require_live(plugin_id)
+        self.require_plugin_target(plugin_id)
             .map(|s| s.drain_inbound())
             .unwrap_or_default()
     }
 
     /// Drain every live connection's inbound queue. Order is plugin-id sorted
     /// so a UI poll is deterministic.
-    pub fn drain_all_inbound(&self) -> Vec<(String, Inbound)> {
+    pub fn drain_all_inbound(&self) -> Vec<InboundEnvelope> {
         let mut sessions: Vec<Arc<Session>> =
-            mutex_lock(&self.inner).live.values().cloned().collect();
-        sessions.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+            mutex_lock(&self.inner).active.values().cloned().collect();
+        sessions.sort_by(|a, b| {
+            a.plugin_id
+                .cmp(&b.plugin_id)
+                .then_with(|| a.instance_id().cmp(&b.instance_id()))
+        });
         let mut out = Vec::new();
         for session in sessions {
             for msg in session.drain_inbound() {
-                out.push((session.plugin_id.clone(), msg));
+                out.push(InboundEnvelope {
+                    plugin_id: session.plugin_id.clone(),
+                    instance_id: session.instance_id(),
+                    message: msg,
+                });
             }
         }
         out
@@ -191,6 +255,11 @@ impl Supervisor {
             .is_some_and(|s| s.has_grant(cap))
     }
 
+    pub fn has_grant_for_instance(&self, instance_id: Uuid, cap: v2::Capability) -> bool {
+        self.require_active_instance(instance_id)
+            .is_ok_and(|session| session.has_grant(cap))
+    }
+
     pub fn push_action(
         &self,
         plugin_id: &str,
@@ -199,6 +268,17 @@ impl Supervisor {
         arg: Option<String>,
     ) -> Result<MessageId, SessionError> {
         self.require_live(plugin_id)?
+            .push_action(block_id, action, arg)
+    }
+
+    pub fn push_action_to_instance(
+        &self,
+        instance_id: Uuid,
+        block_id: v2::BlockId,
+        action: String,
+        arg: Option<String>,
+    ) -> Result<MessageId, SessionError> {
+        self.require_active_instance(instance_id)?
             .push_action(block_id, action, arg)
     }
 
@@ -215,22 +295,27 @@ impl Supervisor {
 
     pub fn snapshots(&self) -> Vec<ConnectionSnapshot> {
         let inner = mutex_lock(&self.inner);
-        let mut out: Vec<_> = inner.live.values().map(|s| s.snapshot()).collect();
-        for (id, health) in &inner.health {
-            if inner.live.contains_key(id) {
+        let mut out: Vec<_> = inner.active.values().map(|s| s.snapshot()).collect();
+        for health in inner.health.values() {
+            let Some(snap) = &health.last_snapshot else {
+                continue;
+            };
+            if inner.active.contains_key(&snap.instance_id) {
                 continue;
             }
-            if let Some(snap) = &health.last_snapshot {
-                out.push(snap.clone());
-            }
+            out.push(snap.clone());
         }
-        out.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        out.sort_by(|a, b| {
+            a.plugin_id
+                .cmp(&b.plugin_id)
+                .then_with(|| a.instance_id.cmp(&b.instance_id))
+        });
         out
     }
 
     pub fn live_instances(&self) -> Vec<(String, uuid::Uuid)> {
         let mut instances: Vec<_> = mutex_lock(&self.inner)
-            .live
+            .active
             .values()
             .filter(|session| !session.is_dead() && !session.is_shutting_down())
             .map(|session| (session.plugin_id.clone(), session.instance_id()))
@@ -284,7 +369,7 @@ impl Supervisor {
     pub fn shutdown(&self, plugin_id: &str) {
         let plug_lock = self.plugin_lock(plugin_id);
         let _guard = mutex_lock(&plug_lock);
-        if let Some(session) = self.drop_live(plugin_id) {
+        for session in self.drop_all_for_plugin(plugin_id) {
             session.teardown(self.config.shutdown_grace);
         }
     }
@@ -293,7 +378,9 @@ impl Supervisor {
         self.close();
         let sessions: Vec<Arc<Session>> = {
             let mut inner = mutex_lock(&self.inner);
-            inner.live.drain().map(|(_, s)| s).collect()
+            let sessions = inner.active.drain().map(|(_, s)| s).collect();
+            inner.live.clear();
+            sessions
         };
         for session in sessions {
             session.teardown(self.config.shutdown_grace);
@@ -303,15 +390,17 @@ impl Supervisor {
     pub fn close(&self) {
         let mut inner = mutex_lock(&self.inner);
         inner.closed = true;
-        for session in inner.live.values() {
+        for session in inner.active.values() {
             session.cancel();
         }
     }
 
-    pub fn disconnect(&self, plugin_id: &str) -> Option<Arc<Session>> {
-        let session = self.drop_live(plugin_id)?;
-        session.cancel();
-        Some(session)
+    pub fn disconnect(&self, plugin_id: &str) -> Vec<Arc<Session>> {
+        let sessions = self.drop_all_for_plugin(plugin_id);
+        for session in &sessions {
+            session.cancel();
+        }
+        sessions
     }
 
     fn plugin_lock(&self, id: &str) -> Arc<Mutex<()>> {
@@ -330,8 +419,100 @@ impl Supervisor {
         self.live_if_usable(id).ok_or(SessionError::Disconnected)
     }
 
+    fn require_plugin_target(&self, plugin_id: &str) -> Result<Arc<Session>, SessionError> {
+        if let Some(session) = self.live_if_usable(plugin_id) {
+            return Ok(session);
+        }
+        let mut sessions: Vec<_> = mutex_lock(&self.inner)
+            .active
+            .values()
+            .filter(|session| {
+                session.plugin_id == plugin_id && !session.is_dead() && !session.is_shutting_down()
+            })
+            .cloned()
+            .collect();
+        match sessions.len() {
+            1 => Ok(sessions.pop().expect("exactly one active session")),
+            _ => Err(SessionError::Disconnected),
+        }
+    }
+
+    fn require_active_instance(&self, instance_id: Uuid) -> Result<Arc<Session>, SessionError> {
+        let session = mutex_lock(&self.inner).active.get(&instance_id).cloned();
+        match session {
+            Some(session) if !session.is_dead() && !session.is_shutting_down() => Ok(session),
+            _ => Err(SessionError::Disconnected),
+        }
+    }
+
     fn drop_live(&self, id: &str) -> Option<Arc<Session>> {
-        mutex_lock(&self.inner).live.remove(id)
+        let mut inner = mutex_lock(&self.inner);
+        let removed = inner.live.remove(id);
+        if let Some(session) = &removed {
+            inner.active.remove(&session.instance_id());
+        }
+        removed
+    }
+
+    fn drop_active_by_instance(&self, instance_id: Uuid) -> Option<Arc<Session>> {
+        mutex_lock(&self.inner).active.remove(&instance_id)
+    }
+
+    fn register_active(&self, session: Arc<Session>) -> Result<(), SessionError> {
+        let mut inner = mutex_lock(&self.inner);
+        if inner.closed {
+            return Err(SessionError::Disconnected);
+        }
+        inner.active.insert(session.instance_id(), session);
+        Ok(())
+    }
+
+    fn drop_all_for_plugin(&self, plugin_id: &str) -> Vec<Arc<Session>> {
+        let mut inner = mutex_lock(&self.inner);
+        let mut removed = Vec::new();
+        if let Some(session) = inner.live.remove(plugin_id) {
+            inner.active.remove(&session.instance_id());
+            removed.push(session);
+        }
+        let ids: Vec<Uuid> = inner
+            .active
+            .iter()
+            .filter(|(_, session)| session.plugin_id == plugin_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(session) = inner.active.remove(&id) {
+                removed.push(session);
+            }
+        }
+        removed.sort_by_key(|session| session.instance_id());
+        removed.dedup_by_key(|session| session.instance_id());
+        removed
+    }
+
+    fn cleanup_hook(&self, plugin_id: String) -> Arc<dyn Fn(Uuid) + Send + Sync> {
+        let inner = Arc::clone(&self.inner);
+        let shutdown_grace = self.config.shutdown_grace;
+        Arc::new(move |instance_id| {
+            let session = {
+                let mut guard = mutex_lock(&inner);
+                if let Some(session) = guard.active.remove(&instance_id) {
+                    if guard
+                        .live
+                        .get(&plugin_id)
+                        .is_some_and(|live| live.instance_id() == instance_id)
+                    {
+                        guard.live.remove(&plugin_id);
+                    }
+                    Some(session)
+                } else {
+                    None
+                }
+            };
+            if let Some(session) = session {
+                session.teardown(shutdown_grace);
+            }
+        })
     }
 
     fn crash_count(&self, id: &str) -> u32 {
@@ -364,6 +545,7 @@ impl Supervisor {
     fn reap_dead(&self, id: &str) {
         let session = self.drop_live(id);
         if let Some(session) = session {
+            self.drop_active_by_instance(session.instance_id());
             let snap = session.snapshot();
             session.teardown(Duration::ZERO);
             self.note_crash(id, Some(snap));

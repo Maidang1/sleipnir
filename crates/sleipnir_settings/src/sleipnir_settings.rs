@@ -11,12 +11,15 @@ pub use themes::{
     palette_for_theme,
 };
 
+use anyhow::{Context as _, bail};
+use atomic_write::save_atomic;
 use collections::HashMap;
 use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels, px};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap as StdHashMap;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ── enums (schema-compatible) ───────────────────────────────────────────────
@@ -369,10 +372,10 @@ impl TerminalSettings {
         let mut settings = Self::get_global(cx).clone();
         settings.theme = theme.clone();
         settings.custom_theme = None;
-        apply_loaded(settings, cx);
         if let Err(err) = persist_theme(&theme) {
             log::warn!("failed to persist theme={:?}: {err}", theme.as_str());
         } else {
+            apply_loaded(settings, cx);
             log::info!("theme -> {} (persisted)", theme.as_str());
         }
     }
@@ -386,10 +389,10 @@ impl TerminalSettings {
         } else {
             FontFeatures::disable_ligatures()
         });
-        apply_loaded(settings, cx);
         if let Err(err) = persist_terminal_bool("font_ligatures", enabled) {
             log::warn!("failed to persist font_ligatures={enabled}: {err}");
         } else {
+            apply_loaded(settings, cx);
             log::info!("font_ligatures -> {enabled} (persisted)");
         }
     }
@@ -398,10 +401,10 @@ impl TerminalSettings {
     pub fn set_copy_on_select(enabled: bool, cx: &mut App) {
         let mut settings = Self::get_global(cx).clone();
         settings.copy_on_select = enabled;
-        apply_loaded(settings, cx);
         if let Err(err) = persist_terminal_bool("copy_on_select", enabled) {
             log::warn!("failed to persist copy_on_select={enabled}: {err}");
         } else {
+            apply_loaded(settings, cx);
             log::info!("copy_on_select -> {enabled} (persisted)");
         }
     }
@@ -796,20 +799,50 @@ fn default_settings_file() -> SettingsFile {
     }
 }
 
-/// Parse settings JSON (or empty object), apply `patch`, return pretty JSON + newline.
+fn parse_settings_document(raw: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    match raw {
+        Some(raw) => {
+            let value: serde_json::Value = serde_json::from_str(raw)
+                .context("existing settings document is malformed JSON")?;
+            if !value.is_object() {
+                bail!("existing settings document root must be a JSON object");
+            }
+            Ok(value)
+        }
+        None => Ok(serde_json::json!({})),
+    }
+}
+
+/// Parse settings JSON, apply `patch`, return pretty JSON + newline.
+///
+/// Missing input starts from `{}`. Existing malformed or non-object input is
+/// rejected so the caller can preserve the current file on disk.
 pub fn merge_settings_json(
     raw: Option<&str>,
     patch: impl FnOnce(&mut serde_json::Value),
-) -> String {
-    let mut value: serde_json::Value = raw
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !value.is_object() {
-        value = serde_json::json!({});
-    }
+) -> anyhow::Result<String> {
+    let mut value = parse_settings_document(raw)?;
     patch(&mut value);
-    let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into());
-    format!("{pretty}\n")
+    if !value.is_object() {
+        bail!("settings patch must leave the document root as a JSON object");
+    }
+    let pretty =
+        serde_json::to_string_pretty(&value).context("failed to serialize settings JSON")?;
+    Ok(format!("{pretty}\n"))
+}
+
+fn patch_theme_document(value: &mut serde_json::Value, theme: &ThemeSetting) {
+    value["theme"] = serde_json::Value::String(theme.as_str());
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("custom_theme");
+    }
+    // Prefer top-level theme; drop nested terminal.theme if present so the two
+    // cannot disagree after a picker write.
+    if let Some(terminal) = value.get_mut("terminal") {
+        if let Some(obj) = terminal.as_object_mut() {
+            obj.remove("theme");
+        }
+    }
 }
 
 /// Merge `theme` into an existing settings JSON document, preserving other keys.
@@ -817,59 +850,82 @@ pub fn merge_settings_json(
 /// Drops `custom_theme` and nested `terminal.theme` so a picker write cannot
 /// leave a higher-priority override that would resurrect on reload.
 ///
-/// Returns pretty-printed JSON with a trailing newline. On empty/invalid input,
-/// starts from an empty object so only `"theme"` is written.
-pub fn merge_theme_into_json(raw: Option<&str>, theme: &ThemeSetting) -> String {
-    merge_settings_json(raw, |value| {
-        value["theme"] = serde_json::Value::String(theme.as_str());
-        if let Some(obj) = value.as_object_mut() {
-            obj.remove("custom_theme");
-        }
-        // Prefer top-level theme; drop nested terminal.theme if present so the two
-        // cannot disagree after a picker write.
-        if let Some(terminal) = value.get_mut("terminal") {
-            if let Some(obj) = terminal.as_object_mut() {
-                obj.remove("theme");
-            }
-        }
-    })
+/// Returns pretty-printed JSON with a trailing newline. Missing input starts
+/// from an empty object; invalid existing input is rejected.
+pub fn merge_theme_into_json(raw: Option<&str>, theme: &ThemeSetting) -> anyhow::Result<String> {
+    merge_settings_json(raw, |value| patch_theme_document(value, theme))
 }
 
-fn read_settings_raw() -> anyhow::Result<Option<String>> {
-    let path = config_path();
-    match std::fs::read_to_string(&path) {
+fn read_settings_raw_at_path(path: &Path) -> anyhow::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(s)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
 }
 
-fn write_settings_json(json: &str) -> anyhow::Result<()> {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, json)?;
+fn write_settings_json_at_path(path: &Path, json: &str) -> anyhow::Result<()> {
+    save_atomic(path, json.as_bytes())
+        .with_context(|| format!("failed to atomically write {}", path.display()))?;
     Ok(())
 }
 
+fn with_settings_file_lock<T>(
+    path: &Path,
+    body: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let lock_path = atomic_write::sibling_path(path, ".lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open settings lock {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("failed to lock settings file {}", path.display()))?;
+
+    let result = body();
+    match (result, lock.unlock()) {
+        (Ok(_), Err(err)) => {
+            Err(err).with_context(|| format!("failed to unlock settings file {}", path.display()))
+        }
+        (result, _) => result,
+    }
+}
+
+fn patch_settings_file_at_path(
+    path: &Path,
+    patch: impl FnOnce(&mut serde_json::Value),
+) -> anyhow::Result<()> {
+    with_settings_file_lock(path, || {
+        let raw = read_settings_raw_at_path(path)?;
+        let json = merge_settings_json(raw.as_deref(), patch)?;
+        write_settings_json_at_path(path, &json)
+    })
+}
+
 fn persist_theme(theme: &ThemeSetting) -> anyhow::Result<()> {
-    let raw = read_settings_raw()?;
-    let json = merge_theme_into_json(raw.as_deref(), theme);
-    write_settings_json(&json)
+    let path = config_path();
+    patch_settings_file_at_path(&path, |doc| patch_theme_document(doc, theme))
 }
 
 fn persist_terminal_bool(key: &str, value: bool) -> anyhow::Result<()> {
-    let raw = read_settings_raw()?;
-    let json = merge_settings_json(raw.as_deref(), |doc| {
+    let path = config_path();
+    patch_settings_file_at_path(&path, |doc| {
         if !doc.get("terminal").map(|t| t.is_object()).unwrap_or(false) {
             doc["terminal"] = serde_json::json!({});
         }
         if let Some(terminal) = doc.get_mut("terminal").and_then(|t| t.as_object_mut()) {
             terminal.insert(key.to_string(), serde_json::Value::Bool(value));
         }
-    });
-    write_settings_json(&json)
+    })
 }
 
 pub fn init(cx: &mut App) {
@@ -880,10 +936,52 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::io;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
+
+    const SETTINGS_LOCK_HELPER_ENV: &str = "SLEIPNIR_SETTINGS_LOCK_HELPER";
+    const SETTINGS_LOCK_PATH_ENV: &str = "SLEIPNIR_SETTINGS_LOCK_PATH";
+    const SETTINGS_LOCK_READY_ENV: &str = "SLEIPNIR_SETTINGS_LOCK_READY_PATH";
+    const SETTINGS_LOCK_RELEASE_ENV: &str = "SLEIPNIR_SETTINGS_LOCK_RELEASE_PATH";
+
+    fn wait_for_path(path: &Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {}", path.display());
+    }
+
+    #[test]
+    fn cross_process_settings_lock_helper() {
+        if env::var_os(SETTINGS_LOCK_HELPER_ENV).is_none() {
+            return;
+        }
+
+        let lock_target = PathBuf::from(env::var_os(SETTINGS_LOCK_PATH_ENV).expect("lock path"));
+        let ready_path = PathBuf::from(env::var_os(SETTINGS_LOCK_READY_ENV).expect("ready path"));
+        let release_path =
+            PathBuf::from(env::var_os(SETTINGS_LOCK_RELEASE_ENV).expect("release path"));
+
+        with_settings_file_lock(&lock_target, || {
+            std::fs::write(&ready_path, b"ready")?;
+            wait_for_path(&release_path, Duration::from_secs(10));
+            Ok(())
+        })
+        .expect("helper lock lifecycle");
+    }
 
     #[test]
     fn merge_theme_sets_top_level_on_empty() {
-        let out = merge_theme_into_json(None, &ThemeSetting::Builtin(ThemeName::Nord));
+        let out = merge_theme_into_json(None, &ThemeSetting::Builtin(ThemeName::Nord)).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "nord");
     }
@@ -897,7 +995,8 @@ mod tests {
     "font_family": "Menlo"
   }
 }"#;
-        let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::Latte));
+        let out =
+            merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::Latte)).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "latte");
         assert_eq!(v["terminal"]["font_size"], 14);
@@ -908,7 +1007,8 @@ mod tests {
     #[test]
     fn merge_theme_removes_nested_terminal_theme() {
         let raw = r#"{"theme":"mocha","terminal":{"theme":"latte","font_size":12}}"#;
-        let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::TokyoNight));
+        let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::TokyoNight))
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "tokyo_night");
         assert!(v["terminal"].get("theme").is_none());
@@ -927,11 +1027,26 @@ mod tests {
   },
   "path_links": true
 }"##;
-        let out = merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::Nord));
+        let out =
+            merge_theme_into_json(Some(raw), &ThemeSetting::Builtin(ThemeName::Nord)).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "nord");
         assert!(v.get("custom_theme").is_none());
         assert_eq!(v["path_links"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn merge_theme_rejects_malformed_existing_json() {
+        let err = merge_theme_into_json(Some("{"), &ThemeSetting::Builtin(ThemeName::Nord))
+            .expect_err("malformed JSON must be preserved, not replaced");
+        assert!(err.to_string().contains("malformed JSON"));
+    }
+
+    #[test]
+    fn merge_settings_rejects_non_object_existing_document() {
+        let err = merge_settings_json(Some("[]"), |_| {})
+            .expect_err("non-object root must not be replaced with an empty object");
+        assert!(err.to_string().contains("root must be a JSON object"));
     }
 
     #[test]
@@ -987,12 +1102,148 @@ mod tests {
                 v["terminal"] = serde_json::json!({});
             }
             v["terminal"]["font_ligatures"] = serde_json::Value::Bool(true);
-        });
+        })
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "mocha");
         assert_eq!(v["inject_osc133"], false);
         assert_eq!(v["terminal"]["font_size"], 14);
         assert_eq!(v["terminal"]["font_ligatures"], true);
+    }
+
+    #[test]
+    fn patch_settings_file_preserves_malformed_existing_document() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = "{ definitely not json\n";
+        std::fs::write(&path, original).unwrap();
+
+        let err = patch_settings_file_at_path(&path, |doc| {
+            doc["theme"] = serde_json::Value::String("nord".into());
+        })
+        .expect_err("malformed JSON should stop the write");
+
+        assert!(err.to_string().contains("malformed JSON"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn patch_settings_file_serializes_concurrent_different_patches() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "theme": "mocha",
+  "terminal": {
+    "font_size": 14
+  },
+  "unknown": {
+    "preserve": true
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let path_a = path.clone();
+        let thread_a = thread::spawn(move || {
+            patch_settings_file_at_path(&path_a, |doc| {
+                doc["theme"] = serde_json::Value::String("nord".into());
+                ready_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+
+        let path_b = path.clone();
+        let thread_b = thread::spawn(move || {
+            patch_settings_file_at_path(&path_b, |doc| {
+                if !doc["terminal"].is_object() {
+                    doc["terminal"] = serde_json::json!({});
+                }
+                doc["terminal"]["copy_on_select"] = serde_json::Value::Bool(true);
+            })
+            .unwrap();
+        });
+
+        release_tx.send(()).unwrap();
+        thread_a.join().unwrap();
+        thread_b.join().unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["theme"], "nord");
+        assert_eq!(value["terminal"]["font_size"], 14);
+        assert_eq!(value["terminal"]["copy_on_select"], true);
+        assert_eq!(value["unknown"]["preserve"], true);
+    }
+
+    #[test]
+    fn patch_settings_file_blocks_across_processes() -> io::Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let ready_path = dir.path().join("helper.ready");
+        let release_path = dir.path().join("helper.release");
+        std::fs::write(
+            &path,
+            r#"{
+  "theme": "mocha",
+  "terminal": {
+    "font_size": 14
+  }
+}
+"#,
+        )?;
+
+        let current_exe = env::current_exe()?;
+        let mut child = Command::new(current_exe)
+            .arg("--exact")
+            .arg("tests::cross_process_settings_lock_helper")
+            .arg("--nocapture")
+            .env(SETTINGS_LOCK_HELPER_ENV, "1")
+            .env(SETTINGS_LOCK_PATH_ENV, &path)
+            .env(SETTINGS_LOCK_READY_ENV, &ready_path)
+            .env(SETTINGS_LOCK_RELEASE_ENV, &release_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        wait_for_path(&ready_path, Duration::from_secs(10));
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let path_for_patch = path.clone();
+        let patch_thread = thread::spawn(move || {
+            patch_settings_file_at_path(&path_for_patch, |doc| {
+                entered_tx.send(()).unwrap();
+                doc["theme"] = serde_json::Value::String("nord".into());
+            })
+            .unwrap();
+        });
+
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "patch closure should not run before the child releases the lock"
+        );
+
+        std::fs::write(&release_path, b"release")?;
+        assert!(child.wait()?.success(), "helper process failed");
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("patch closure should run after child release");
+        patch_thread.join().unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["theme"], "nord");
+        assert_eq!(value["terminal"]["font_size"], 14);
+        Ok(())
     }
 
     #[test]

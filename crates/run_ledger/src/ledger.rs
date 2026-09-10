@@ -1,7 +1,7 @@
 //! The Ledger: every Run this app has seen, plus the rules for what to show.
 
 use crate::redact::redact_command;
-use crate::run::{LaunchId, PaneKey, Run, RunEvent, RunId, RunState};
+use crate::run::{Anchor, LaunchId, PaneKey, Run, RunEvent, RunId, RunState};
 use std::time::Duration;
 
 /// Wall-clock source injected by the caller so tests stay deterministic.
@@ -129,6 +129,37 @@ impl Ledger {
         self.runs.clone()
     }
 
+    /// Scrollback history shrank for one live pane. Anchors from removed
+    /// lines are invalidated; survivors shift down by the removed count.
+    pub fn rebase_anchors(&mut self, pane: PaneKey, removed: i32) {
+        if removed <= 0 {
+            return;
+        }
+        for run in &mut self.runs {
+            if run.pane != pane {
+                continue;
+            }
+            let Some(mut anchor) = run.anchor else {
+                continue;
+            };
+            if anchor.line < removed {
+                run.anchor = None;
+                continue;
+            }
+            anchor.line -= removed;
+            run.anchor = Some(anchor);
+        }
+    }
+
+    /// The pane's scrollback no longer matches stored absolute coordinates.
+    pub fn clear_anchors(&mut self, pane: PaneKey) {
+        for run in &mut self.runs {
+            if run.pane == pane {
+                run.anchor = None;
+            }
+        }
+    }
+
     pub fn failed_attention_count(&self) -> usize {
         self.attention()
             .filter(|r| r.state == RunState::Failed)
@@ -209,14 +240,7 @@ impl Ledger {
 
     /// 时间窗 + 条数双约束，先到先裁。
     pub fn prune(&mut self) {
-        let now = (self.now_unix_ms)();
-        let window_ms = self.retention.days.saturating_mul(MS_PER_DAY);
-        let cutoff = now.saturating_sub(window_ms);
-        self.runs.retain(|r| r.started_at_unix_ms >= cutoff);
-        if self.runs.len() > self.retention.max_runs {
-            let drop = self.runs.len() - self.retention.max_runs;
-            self.runs.drain(..drop);
-        }
+        apply_retention(&mut self.runs, self.retention, (self.now_unix_ms)());
     }
 
     /// 启动时载入历史：全部标记 `seen = true`（Attention 不跨重启）；
@@ -224,12 +248,70 @@ impl Ledger {
     pub fn load_history(&mut self, runs: Vec<Run>) {
         for mut run in runs {
             run.seen = true;
-            if run.state == RunState::Running {
+            if run.launch_id != self.launch_id && run.state == RunState::Running {
                 run.state = RunState::Abandoned;
             }
             self.runs.push(run);
         }
         self.runs.sort_by_key(|r| r.started_at_unix_ms);
+    }
+
+    pub fn apply_external_start(
+        &mut self,
+        id: RunId,
+        pane: PaneKey,
+        command: String,
+        cwd: Option<String>,
+        at_ms: u64,
+        inferred: bool,
+        anchor: Option<Anchor>,
+    ) {
+        if self
+            .runs
+            .iter()
+            .any(|run| run.id == id && run.state != RunState::Abandoned)
+        {
+            return;
+        }
+        self.abandon_running_in(pane, at_ms);
+        let unix_ms = (self.now_unix_ms)();
+        let command = if self.redact {
+            redact_command(&command)
+        } else {
+            command
+        };
+        let mut run = Run::start_with_id(
+            id,
+            self.launch_id,
+            pane,
+            command,
+            cwd,
+            at_ms,
+            unix_ms,
+            inferred,
+        );
+        run.anchor = anchor;
+        self.runs.push(run);
+    }
+
+    pub fn apply_external_finish(
+        &mut self,
+        id: RunId,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+    ) -> bool {
+        let Some(run) = self.runs.iter_mut().find(|run| run.id == id) else {
+            return false;
+        };
+        if run.state.is_finished() {
+            return false;
+        }
+        run.finish_with_duration(exit_code, Duration::from_millis(duration_ms));
+        let seen_now = self.window_active && self.focused_pane == Some(run.pane);
+        if seen_now {
+            run.seen = true;
+        }
+        true
     }
 
     pub fn apply(&mut self, event: RunEvent) {
@@ -304,6 +386,36 @@ fn default_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+pub(crate) fn apply_retention(runs: &mut Vec<Run>, retention: Retention, now_unix_ms: u64) {
+    let window_ms = retention.days.saturating_mul(MS_PER_DAY);
+    let cutoff = now_unix_ms.saturating_sub(window_ms);
+    runs.retain(|run| run.state == RunState::Running || run.started_at_unix_ms >= cutoff);
+    if runs.len() <= retention.max_runs {
+        return;
+    }
+
+    let protected: Vec<bool> = runs
+        .iter()
+        .map(|run| run.state == RunState::Running)
+        .collect();
+    let protected_count = protected.iter().filter(|flag| **flag).count();
+    if protected_count >= retention.max_runs {
+        runs.retain(|run| run.state == RunState::Running);
+        return;
+    }
+
+    let mut to_drop = runs.len() - retention.max_runs;
+    let mut idx = 0usize;
+    runs.retain(|_| {
+        let keep = protected[idx] || to_drop == 0;
+        if !keep {
+            to_drop -= 1;
+        }
+        idx += 1;
+        keep
+    });
 }
 
 #[cfg(test)]
@@ -400,6 +512,88 @@ mod tests {
     }
 
     #[test]
+    fn rebase_anchors_only_updates_the_target_pane() {
+        let pane = pane();
+        let other = PaneKey::new_v4();
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        ledger.apply(RunEvent::started_at(
+            pane,
+            "first",
+            None,
+            0,
+            false,
+            Some(Anchor { line: 2, column: 1 }),
+        ));
+        ledger.apply(RunEvent::finished(pane, Some(0), 1));
+        ledger.apply(RunEvent::started_at(
+            pane,
+            "second",
+            None,
+            2,
+            false,
+            Some(Anchor { line: 9, column: 3 }),
+        ));
+        ledger.apply(RunEvent::started_at(
+            other,
+            "other",
+            None,
+            3,
+            false,
+            Some(Anchor {
+                line: 11,
+                column: 7,
+            }),
+        ));
+
+        ledger.rebase_anchors(pane, 5);
+
+        let runs: Vec<_> = ledger.runs().collect();
+        assert_eq!(runs[0].anchor, None, "removed-region anchor is invalidated");
+        assert_eq!(
+            runs[1].anchor,
+            Some(Anchor { line: 4, column: 3 }),
+            "survivor shifts by removed history"
+        );
+        assert_eq!(
+            runs[2].anchor,
+            Some(Anchor {
+                line: 11,
+                column: 7
+            }),
+            "other panes must stay untouched"
+        );
+    }
+
+    #[test]
+    fn clear_anchors_only_clears_the_target_pane() {
+        let pane = pane();
+        let other = PaneKey::new_v4();
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        ledger.apply(RunEvent::started_at(
+            pane,
+            "clear-me",
+            None,
+            0,
+            false,
+            Some(Anchor { line: 4, column: 1 }),
+        ));
+        ledger.apply(RunEvent::started_at(
+            other,
+            "keep-me",
+            None,
+            1,
+            false,
+            Some(Anchor { line: 8, column: 2 }),
+        ));
+
+        ledger.clear_anchors(pane);
+
+        let runs: Vec<_> = ledger.runs().collect();
+        assert_eq!(runs[0].anchor, None);
+        assert_eq!(runs[1].anchor, Some(Anchor { line: 8, column: 2 }));
+    }
+
+    #[test]
     fn closing_a_pane_abandons_its_running_run() {
         let mut ledger = Ledger::new(LaunchId::new_v4());
         let p = pane();
@@ -463,6 +657,133 @@ mod tests {
         assert_eq!(cmds.len(), 500);
         assert_eq!(cmds.first().copied(), Some("c100"));
         assert_eq!(cmds.last().copied(), Some("c599"));
+    }
+
+    #[test]
+    fn prune_keeps_current_launch_running_runs_even_when_the_cap_is_hit() {
+        let current = LaunchId::new_v4();
+        let mut ledger = Ledger::with_clock(current, fixed_clock);
+        ledger.set_retention(Retention {
+            days: 7,
+            max_runs: 2,
+        });
+        let old_pane = pane();
+        let running_pane = pane();
+        ledger.load_history(vec![disk_run(
+            old_pane,
+            "old-finished",
+            fixed_clock() - 1,
+            RunState::Succeeded,
+        )]);
+        ledger.apply(RunEvent::started(running_pane, "still-running-a", None, 0));
+        ledger.apply(RunEvent::started(pane(), "still-running-b", None, 1));
+        ledger.prune();
+        let runs: Vec<_> = ledger.runs().collect();
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|run| run.state == RunState::Running));
+        let commands: Vec<_> = runs.iter().map(|run| run.command.as_str()).collect();
+        assert_eq!(commands, ["still-running-a", "still-running-b"]);
+    }
+
+    #[test]
+    fn prune_allows_current_launch_running_runs_to_exceed_the_finished_history_cap() {
+        let current = LaunchId::new_v4();
+        let mut ledger = Ledger::with_clock(current, fixed_clock);
+        ledger.set_retention(Retention {
+            days: 7,
+            max_runs: 1,
+        });
+        ledger.load_history(vec![disk_run(
+            pane(),
+            "old-finished",
+            fixed_clock() - 1,
+            RunState::Succeeded,
+        )]);
+        ledger.apply(RunEvent::started(pane(), "still-running-a", None, 0));
+        ledger.apply(RunEvent::started(pane(), "still-running-b", None, 1));
+
+        ledger.prune();
+
+        let runs: Vec<_> = ledger.runs().collect();
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|run| run.state == RunState::Running));
+        let commands: Vec<_> = runs.iter().map(|run| run.command.as_str()).collect();
+        assert_eq!(commands, ["still-running-a", "still-running-b"]);
+    }
+
+    #[test]
+    fn external_finish_preserves_the_host_run_id_and_duration() {
+        let id = RunId::new_v4();
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        let pane = pane();
+        ledger.apply_external_start(id, pane, "cargo test".into(), None, 10, false, None);
+        assert!(ledger.apply_external_finish(id, Some(0), 4321));
+        let run = ledger.runs().next().unwrap();
+        assert_eq!(run.id, id);
+        assert_eq!(run.duration, Duration::from_millis(4321));
+        assert_eq!(run.state, RunState::Succeeded);
+    }
+
+    #[test]
+    fn duplicate_external_start_is_idempotent() {
+        let id = RunId::new_v4();
+        let pane = pane();
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        ledger.apply_external_start(id, pane, "cargo test".into(), None, 10, false, None);
+        ledger.apply_external_start(id, pane, "cargo test".into(), None, 20, false, None);
+        let runs: Vec<_> = ledger.runs().collect();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, id);
+        assert_eq!(runs[0].state, RunState::Running);
+    }
+
+    #[test]
+    fn duplicate_external_finish_is_ignored() {
+        let id = RunId::new_v4();
+        let pane = pane();
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        ledger.apply_external_start(id, pane, "cargo test".into(), None, 10, false, None);
+        assert!(ledger.apply_external_finish(id, Some(1), 4321));
+        assert!(!ledger.apply_external_finish(id, Some(0), 9999));
+        let run = ledger.runs().next().unwrap();
+        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(run.exit_code, Some(1));
+        assert_eq!(run.duration, Duration::from_millis(4321));
+    }
+
+    #[test]
+    fn prune_keeps_running_rows_from_other_launches_too() {
+        let current = LaunchId::new_v4();
+        let other = LaunchId::new_v4();
+        let mut runs = vec![disk_run(
+            pane(),
+            "other-running",
+            fixed_clock() - 1,
+            RunState::Running,
+        )];
+        runs[0].launch_id = other;
+        runs.push(Run::start(
+            current,
+            pane(),
+            "current-running".into(),
+            None,
+            0,
+            fixed_clock(),
+            false,
+        ));
+
+        apply_retention(
+            &mut runs,
+            Retention {
+                days: 7,
+                max_runs: 1,
+            },
+            fixed_clock(),
+        );
+
+        let commands: Vec<_> = runs.iter().map(|run| run.command.as_str()).collect();
+        assert_eq!(commands, ["other-running", "current-running"]);
+        assert!(runs.iter().all(|run| run.state == RunState::Running));
     }
 
     #[test]

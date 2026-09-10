@@ -4,10 +4,12 @@ use std::path::Path;
 pub struct BundleFacts {
     pub bundle_id: String,
     pub version: String,
+    pub build_version: String,
     pub executable_exists: bool,
     pub helper_exists: bool,
     pub signature_valid: bool,
     pub critical_paths_inside_bundle: bool,
+    pub target_install_path_valid: bool,
     pub install_parent_writable: bool,
     pub same_volume: bool,
     pub swap_supported: bool,
@@ -32,10 +34,14 @@ pub fn classify_preflight(facts: &BundleFacts, expected_version: &str) -> Prefli
     if facts.bundle_id != "com.maidang1.sleipnir" {
         return PreflightDecision::Reject(PreflightError::BundleIdentifierMismatch);
     }
-    if facts.version != expected_version {
+    if facts.version != expected_version || facts.build_version != expected_version {
         return PreflightDecision::Reject(PreflightError::BundleVersionMismatch);
     }
-    if !facts.executable_exists || !facts.helper_exists || !facts.critical_paths_inside_bundle {
+    if !facts.executable_exists
+        || !facts.helper_exists
+        || !facts.critical_paths_inside_bundle
+        || !facts.target_install_path_valid
+    {
         return PreflightDecision::Reject(PreflightError::BundleLayoutInvalid);
     }
     if !facts.signature_valid {
@@ -60,10 +66,12 @@ mod tests {
         BundleFacts {
             bundle_id: "com.maidang1.sleipnir".into(),
             version: "0.3.2".into(),
+            build_version: "0.3.2".into(),
             executable_exists: true,
             helper_exists: true,
             signature_valid: true,
             critical_paths_inside_bundle: true,
+            target_install_path_valid: true,
             install_parent_writable: true,
             same_volume: true,
             swap_supported: true,
@@ -90,6 +98,10 @@ mod tests {
                 PreflightError::BundleVersionMismatch,
             ),
             (
+                |f| f.build_version = "0.3.1".into(),
+                PreflightError::BundleVersionMismatch,
+            ),
+            (
                 |f| f.executable_exists = false,
                 PreflightError::BundleLayoutInvalid,
             ),
@@ -103,6 +115,10 @@ mod tests {
             ),
             (
                 |f| f.critical_paths_inside_bundle = false,
+                PreflightError::BundleLayoutInvalid,
+            ),
+            (
+                |f| f.target_install_path_valid = false,
                 PreflightError::BundleLayoutInvalid,
             ),
         ];

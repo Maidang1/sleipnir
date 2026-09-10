@@ -5,7 +5,9 @@
 //! directory, and quarantine a corrupt file to `.bak` rather than failing open.
 //! This crate is that discipline, std-only.
 
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 

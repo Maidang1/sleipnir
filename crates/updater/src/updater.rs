@@ -12,6 +12,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
+use std::process::Command;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 /// GitHub `owner/repo` slug used for the releases API and download URLs.
@@ -61,6 +63,16 @@ pub struct ReleaseInfo {
     pub expected_sha256: Option<String>,
     /// Signed manifest byte count, when available.
     pub expected_size: Option<u64>,
+    /// Minimum macOS version required by the signed manifest, if known.
+    pub minimum_macos: String,
+}
+
+/// A downloaded artifact whose release identity has already been validated.
+#[derive(Clone, Debug)]
+pub struct VerifiedArtifact {
+    pub path: PathBuf,
+    pub version: semver::Version,
+    pub minimum_macos: String,
 }
 
 /// Result of a version check.
@@ -169,21 +181,8 @@ pub fn parse_release(release: &Value) -> Result<ReleaseInfo> {
         sha256_url,
         expected_sha256: None,
         expected_size: None,
+        minimum_macos: String::new(),
     })
-}
-
-/// Extract the first hex SHA-256 token from a `.sha256` sidecar body.
-///
-/// Accepts both bare-digest (`<hex>`) and `shasum`-style (`<hex>  file`) forms.
-#[cfg(any(target_os = "macos", test))]
-fn parse_sha256_sidecar(body: &str) -> Result<String> {
-    let token = body
-        .split_whitespace()
-        .next()
-        .map(str::trim)
-        .filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| anyhow!("could not parse SHA-256 from sidecar"))?;
-    Ok(token.to_ascii_lowercase())
 }
 
 // ── network / IO (synchronous; run on a background thread) ──────────────────
@@ -302,6 +301,7 @@ fn fetch_latest_macos(current_version: &str) -> Result<UpdateStatus> {
         sha256_url: String::new(),
         expected_sha256: Some(manifest.sha256),
         expected_size: Some(manifest.size),
+        minimum_macos: manifest.minimum_macos,
     }))
 }
 
@@ -310,7 +310,7 @@ fn fetch_latest_macos(current_version: &str) -> Result<UpdateStatus> {
 /// The dmg is written to `dest_dir`, which the caller owns and should clean up.
 /// Blocking — call from `cx.background_spawn`. Non-macOS platforms have no
 /// in-place update artifact to download.
-pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBuf> {
+pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<VerifiedArtifact> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (info, dest_dir);
@@ -323,24 +323,17 @@ pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBu
 }
 
 #[cfg(target_os = "macos")]
-fn download_and_verify_macos(info: &ReleaseInfo, dest_dir: &Path) -> Result<PathBuf> {
+fn download_and_verify_macos(info: &ReleaseInfo, dest_dir: &Path) -> Result<VerifiedArtifact> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("create staging dir {}", dest_dir.display()))?;
 
-    let expected = match &info.expected_sha256 {
-        Some(digest) => digest.clone(),
-        None => {
-            let sidecar = ureq::get(&info.sha256_url)
-                .header("User-Agent", USER_AGENT)
-                .call()
-                .context("download sha256 sidecar")?
-                .body_mut()
-                .read_to_string()
-                .context("read sha256 sidecar body")?;
-            parse_sha256_sidecar(&sidecar)?
-        }
-    };
-    let expected_size = info.expected_size.unwrap_or(MAX_ARTIFACT_BYTES);
+    let expected = info
+        .expected_sha256
+        .clone()
+        .ok_or_else(|| anyhow!("release is missing signed SHA-256 metadata"))?;
+    let expected_size = info
+        .expected_size
+        .ok_or_else(|| anyhow!("release is missing signed size metadata"))?;
     if expected_size > MAX_ARTIFACT_BYTES {
         bail!("release artifact exceeds maximum size");
     }
@@ -350,14 +343,19 @@ fn download_and_verify_macos(info: &ReleaseInfo, dest_dir: &Path) -> Result<Path
         .context("download release dmg")?;
     let (_, extension) = platform_asset_markers();
     let file_name = format!("Sleipnir-{}-downloaded{}", info.version, extension);
-    crate::download::download_verified(
+    let path = crate::download::download_verified(
         response.body_mut().as_reader(),
         expected_size,
         &expected,
         dest_dir,
         &file_name,
     )
-    .map_err(|err| anyhow!("download release dmg: {err}"))
+    .map_err(|err| anyhow!("download release dmg: {err}"))?;
+    Ok(VerifiedArtifact {
+        path,
+        version: info.version.clone(),
+        minimum_macos: info.minimum_macos.clone(),
+    })
 }
 
 /// Whether this platform can swap the running install in place.
@@ -400,20 +398,23 @@ pub fn current_app_bundle_path() -> Option<PathBuf> {
 ///
 /// On failure to install (permissions, etc.) the helper opens the releases page
 /// for a manual install. Non-macOS platforms have no in-place helper.
-pub fn install_and_relaunch(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
+pub fn install_and_relaunch(artifact: &VerifiedArtifact, app_bundle: &Path) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (dmg_path, app_bundle);
+        let _ = (artifact, app_bundle);
         bail!("in-place update is not supported on this platform; open {RELEASES_PAGE}");
     }
     #[cfg(target_os = "macos")]
     {
-        install_and_relaunch_macos(dmg_path, app_bundle)
+        install_and_relaunch_macos(artifact, app_bundle)
     }
 }
 
 #[cfg(target_os = "macos")]
-fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> {
+fn install_and_relaunch_macos(artifact: &VerifiedArtifact, app_bundle: &Path) -> Result<()> {
+    ensure_host_meets_minimum_macos(&artifact.minimum_macos)?;
+
+    let dmg_path = &artifact.path;
     let stage = dmg_path
         .parent()
         .ok_or_else(|| anyhow!("dmg has no parent dir"))?
@@ -486,19 +487,19 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
 
     // Materialize the candidate beside the installed app so RENAME_SWAP is
     // same-volume and atomic. Failure here leaves the running app untouched.
-    let root = crate::install::updates_root().map_err(anyhow::Error::msg)?;
+    let root = crate::install::updates_root().map_err(|error| anyhow!(error))?;
     // A previous transaction may be stuck (supervisor died mid-update); finish
     // or roll it back first instead of refusing every later update.
-    crate::install::recover_active_transaction(&root).map_err(anyhow::Error::msg)?;
+    crate::install::recover_active_transaction(&root).map_err(|error| anyhow!(error))?;
     let (transaction_path, mut transaction) = crate::install::new_transaction(
         &root,
         app_bundle,
         dmg_path,
         &inner_bundle_version(app_bundle)?,
-        &inner_bundle_version(&new_app)?,
+        &artifact.version.to_string(),
         std::process::id(),
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(|error| anyhow!(error))?;
     let result = (|| -> Result<()> {
         let candidate = &transaction.adjacent_candidate_path;
         let candidate_parent = candidate
@@ -519,10 +520,10 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
             );
         }
 
-        validate_candidate_bundle(candidate, &transaction.new_version)?;
+        validate_candidate_bundle(candidate, app_bundle, &artifact.version.to_string())?;
         let packaged_helper = candidate.join("Contents/MacOS/sleipnir-update-helper");
         crate::install::activate_prepared_transaction(&root, &transaction_path, &mut transaction)
-            .map_err(anyhow::Error::msg)?;
+            .map_err(|error| anyhow!(error))?;
         let transaction_dir = transaction_path.parent().expect("transaction has parent");
         let helper = transaction_dir.join("update-helper");
         std::fs::copy(&packaged_helper, &helper).context("copy update supervisor")?;
@@ -530,18 +531,30 @@ fn install_and_relaunch_macos(dmg_path: &Path, app_bundle: &Path) -> Result<()> 
         use std::os::unix::fs::PermissionsExt as _;
         permissions.set_mode(0o700);
         std::fs::set_permissions(&helper, permissions)?;
-        crate::install::launch_supervisor(&helper, &transaction_path)
-            .map_err(anyhow::Error::msg)?;
-        if !crate::install::wait_for_supervisor_ready(&transaction_path, Duration::from_secs(5))
-            .map_err(anyhow::Error::msg)?
-        {
-            bail!("update supervisor did not become ready");
-        }
+        let mut helper_child = crate::install::launch_supervisor(&helper, &transaction_path)
+            .map_err(|error| anyhow!(error))?;
+        crate::install::wait_for_supervisor_ready(
+            &transaction_path,
+            &mut helper_child,
+            Duration::from_secs(5),
+        )
+        .map_err(anyhow::Error::new)?;
         Ok(())
     })();
     if result.is_err() {
-        let _ = crate::install::clear_active_pointer(&root);
-        let _ = std::fs::remove_dir_all(&transaction.adjacent_candidate_path);
+        let safe_cleanup = result.as_ref().err().and_then(|error| {
+            error
+                .downcast_ref::<crate::install::WaitForSupervisorReadyError>()
+                .map(|error| {
+                    error.cleanup_disposition() == crate::install::CleanupDisposition::Safe
+                })
+        });
+        if safe_cleanup != Some(false) {
+            let _ = crate::install::clear_active_pointer(&root, &transaction_path);
+        }
+        if safe_cleanup.unwrap_or(true) {
+            let _ = std::fs::remove_dir_all(&transaction.adjacent_candidate_path);
+        }
     }
     result
 }
@@ -559,35 +572,38 @@ fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn validate_candidate_bundle(app: &Path, expected_version: &str) -> Result<()> {
-    let executable = app.join("Contents/MacOS/sleipnir");
-    let helper = app.join("Contents/MacOS/sleipnir-update-helper");
-    if !executable.is_file() || !helper.is_file() {
-        bail!("candidate bundle is missing a required executable");
+fn validate_candidate_bundle(
+    app: &Path,
+    installed_app: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    let facts = collect_bundle_facts(app, installed_app)?;
+    match crate::prepare::classify_preflight(&facts, expected_version) {
+        crate::prepare::PreflightDecision::Ready => Ok(()),
+        crate::prepare::PreflightDecision::ManualInstallRequired => {
+            bail!("automatic replacement is unavailable for the current installation location")
+        }
+        crate::prepare::PreflightDecision::Reject(
+            crate::prepare::PreflightError::BundleIdentifierMismatch,
+        ) => {
+            bail!("candidate bundle identifier does not match Sleipnir")
+        }
+        crate::prepare::PreflightDecision::Reject(
+            crate::prepare::PreflightError::BundleVersionMismatch,
+        ) => {
+            bail!("candidate bundle version changed during preparation")
+        }
+        crate::prepare::PreflightDecision::Reject(
+            crate::prepare::PreflightError::BundleLayoutInvalid,
+        ) => {
+            bail!("candidate bundle is missing a required executable")
+        }
+        crate::prepare::PreflightDecision::Reject(
+            crate::prepare::PreflightError::BundleSignatureInvalid,
+        ) => {
+            bail!("candidate bundle signature is invalid")
+        }
     }
-    let bundle_id = std::process::Command::new("/usr/bin/defaults")
-        .arg("read")
-        .arg(app.join("Contents/Info"))
-        .arg("CFBundleIdentifier")
-        .output()
-        .context("read candidate bundle identifier")?;
-    if !bundle_id.status.success()
-        || String::from_utf8_lossy(&bundle_id.stdout).trim() != "com.maidang1.sleipnir"
-    {
-        bail!("candidate bundle identifier does not match Sleipnir");
-    }
-    if inner_bundle_version(app)? != expected_version {
-        bail!("candidate bundle version changed during preparation");
-    }
-    let status = std::process::Command::new("/usr/bin/codesign")
-        .args(["--verify", "--deep", "--strict"])
-        .arg(app)
-        .status()
-        .context("verify candidate bundle signature")?;
-    if !status.success() {
-        bail!("candidate bundle signature is invalid");
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -609,10 +625,204 @@ fn inner_bundle_version(app: &Path) -> Result<String> {
     Ok(version)
 }
 
+#[cfg(target_os = "macos")]
+fn inner_bundle_build_version(app: &Path) -> Result<String> {
+    let output = Command::new("/usr/bin/defaults")
+        .arg("read")
+        .arg(app.join("Contents/Info"))
+        .arg("CFBundleVersion")
+        .output()
+        .context("read candidate bundle build version")?;
+    if !output.status.success() {
+        bail!("candidate bundle build version is unreadable");
+    }
+    let version = String::from_utf8(output.stdout)
+        .context("candidate bundle build version is not UTF-8")?
+        .trim()
+        .to_string();
+    parse_tag(&version)?;
+    Ok(version)
+}
+
+#[cfg(target_os = "macos")]
+fn read_bundle_identifier(app: &Path) -> Result<String> {
+    let bundle_id = Command::new("/usr/bin/defaults")
+        .arg("read")
+        .arg(app.join("Contents/Info"))
+        .arg("CFBundleIdentifier")
+        .output()
+        .context("read candidate bundle identifier")?;
+    if !bundle_id.status.success() {
+        bail!("candidate bundle identifier is unreadable");
+    }
+    Ok(String::from_utf8(bundle_id.stdout)
+        .context("candidate bundle identifier is not UTF-8")?
+        .trim()
+        .to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn canonical_path(path: &Path, context: &str) -> Result<PathBuf> {
+    std::fs::canonicalize(path)
+        .with_context(|| format!("canonicalize {context}: {}", path.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn collect_bundle_facts(app: &Path, installed_app: &Path) -> Result<crate::prepare::BundleFacts> {
+    let executable = app.join("Contents/MacOS/sleipnir");
+    let helper = app.join("Contents/MacOS/sleipnir-update-helper");
+    let executable_canonical = canonical_path(&executable, "candidate executable")?;
+    let helper_canonical = canonical_path(&helper, "candidate helper")?;
+    let app_canonical = canonical_path(app, "candidate bundle")?;
+    let installed_canonical = canonical_path(installed_app, "installed bundle")?;
+
+    let signature_valid = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app)
+        .status()
+        .context("verify candidate bundle signature")?
+        .success();
+
+    let candidate_parent = app
+        .parent()
+        .ok_or_else(|| anyhow!("candidate path has no parent"))?;
+    let installed_parent = installed_app
+        .parent()
+        .ok_or_else(|| anyhow!("installed app has no parent"))?;
+
+    Ok(crate::prepare::BundleFacts {
+        bundle_id: read_bundle_identifier(app)?,
+        version: inner_bundle_version(app)?,
+        build_version: inner_bundle_build_version(app)?,
+        executable_exists: executable.is_file(),
+        helper_exists: helper.is_file(),
+        signature_valid,
+        critical_paths_inside_bundle: crate::prepare::path_is_within(
+            &app_canonical,
+            &executable_canonical,
+        ) && crate::prepare::path_is_within(
+            &app_canonical,
+            &helper_canonical,
+        ),
+        target_install_path_valid: installed_app.is_absolute()
+            && !std::fs::symlink_metadata(installed_app)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
+            && installed_canonical
+                == canonical_path(installed_parent, "installed app parent")?.join(
+                    installed_app
+                        .file_name()
+                        .ok_or_else(|| anyhow!("installed app has no file name"))?,
+                ),
+        install_parent_writable: install_parent_is_writable(installed_parent),
+        same_volume: same_volume(candidate_parent, installed_parent)?,
+        swap_supported: swap_support_probe(installed_parent)?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn install_parent_is_writable(parent: &Path) -> bool {
+    let probe = parent.join(format!(".sleipnir-write-probe-{}", uuid::Uuid::new_v4()));
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn same_volume(first_parent: &Path, second_parent: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(std::fs::metadata(first_parent)?.dev() == std::fs::metadata(second_parent)?.dev())
+}
+
+#[cfg(target_os = "macos")]
+fn swap_support_probe(parent: &Path) -> Result<bool> {
+    let probe_dir = parent.join(format!(".sleipnir-swap-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&probe_dir)
+        .with_context(|| format!("create swap probe dir {}", probe_dir.display()))?;
+    let first = probe_dir.join("first");
+    let second = probe_dir.join("second");
+    let result = (|| -> Result<bool> {
+        std::fs::write(&first, b"a")?;
+        std::fs::write(&second, b"b")?;
+        match crate::install::swap_paths(&first, &second) {
+            Ok(()) => {
+                crate::install::swap_paths(&first, &second).map_err(|error| anyhow!(error))?;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    })();
+    let _ = std::fs::remove_file(&first);
+    let _ = std::fs::remove_file(&second);
+    let _ = std::fs::remove_dir(&probe_dir);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn host_meets_minimum_macos_version(host_version: &str, minimum: &str) -> Result<bool> {
+    fn parse(version: &str) -> Result<Vec<u64>> {
+        let trimmed = version.trim();
+        if trimmed.is_empty() {
+            bail!("version string is empty");
+        }
+        trimmed
+            .split('.')
+            .map(|part| {
+                part.parse::<u64>()
+                    .with_context(|| format!("invalid macOS version component: {part}"))
+            })
+            .collect()
+    }
+
+    let mut host = parse(host_version)?;
+    let mut required = parse(minimum)?;
+    let width = host.len().max(required.len());
+    host.resize(width, 0);
+    required.resize(width, 0);
+    Ok(host >= required)
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_version() -> Result<String> {
+    let output = Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .context("read host macOS version")?;
+    if !output.status.success() {
+        bail!("host macOS version is unreadable");
+    }
+    Ok(String::from_utf8(output.stdout)
+        .context("host macOS version is not UTF-8")?
+        .trim()
+        .to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_host_meets_minimum_macos(minimum: &str) -> Result<()> {
+    if minimum.trim().is_empty() {
+        return Ok(());
+    }
+    let host = current_macos_version()?;
+    if host_meets_minimum_macos_version(&host, minimum)? {
+        Ok(())
+    } else {
+        bail!("update requires macOS {minimum} or newer; host is {host}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn parse_tag_strips_v() {
@@ -694,19 +904,27 @@ mod tests {
         assert_eq!(info.sha256_url, "https://x/sha");
         assert_eq!(info.expected_sha256, None);
         assert_eq!(info.expected_size, None);
+        assert_eq!(info.minimum_macos, "");
     }
 
     #[test]
-    fn sha256_sidecar_parsing() {
-        let hex = "a".repeat(64);
-        assert_eq!(parse_sha256_sidecar(&hex).unwrap(), hex);
-        // shasum-style with filename.
-        let line = format!("{hex}  Sleipnir-0.2.0-macos.dmg");
-        assert_eq!(parse_sha256_sidecar(&line).unwrap(), hex);
-        // uppercase normalized to lowercase.
-        let upper = "A".repeat(64);
-        assert_eq!(parse_sha256_sidecar(&upper).unwrap(), "a".repeat(64));
-        assert!(parse_sha256_sidecar("short").is_err());
+    fn verified_artifact_carries_path_version_and_minimum_macos() {
+        let artifact = VerifiedArtifact {
+            path: PathBuf::from("/tmp/Sleipnir.dmg"),
+            version: semver::Version::new(0, 3, 2),
+            minimum_macos: "14.0".into(),
+        };
+        assert_eq!(artifact.path, PathBuf::from("/tmp/Sleipnir.dmg"));
+        assert_eq!(artifact.version, semver::Version::new(0, 3, 2));
+        assert_eq!(artifact.minimum_macos, "14.0");
+    }
+
+    #[test]
+    fn minimum_macos_gate_compares_dotted_versions() {
+        assert!(host_meets_minimum_macos_version("14.6.1", "14.0").unwrap());
+        assert!(host_meets_minimum_macos_version("14.0", "14.0").unwrap());
+        assert!(!host_meets_minimum_macos_version("13.6.9", "14.0").unwrap());
+        assert!(!host_meets_minimum_macos_version("14.0", "14.0.1").unwrap());
     }
 
     #[test]
@@ -735,5 +953,34 @@ mod tests {
         assert!(!src.contains(&forbidden_shell));
         assert!(src.contains("launch_supervisor"));
         assert!(src.contains("wait_for_supervisor_ready"));
+    }
+
+    #[test]
+    fn production_install_path_uses_verified_artifact_preflight_and_preserves_wait_error_type() {
+        let src = include_str!("updater.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section before tests");
+        assert!(
+            production.contains("pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<VerifiedArtifact>"),
+            "download contract must return a typed verified artifact"
+        );
+        assert!(
+            production.contains("pub fn install_and_relaunch(artifact: &VerifiedArtifact, app_bundle: &Path) -> Result<()>"),
+            "install contract must accept the verified artifact"
+        );
+        assert!(
+            production.contains("classify_preflight("),
+            "production install must run the real preflight classifier"
+        );
+        assert!(
+            !production.contains("match &info.expected_sha256"),
+            "production download must not fall back to unsigned sidecar metadata"
+        );
+        assert!(
+            !production.contains(".map_err(anyhow::Error::msg)?"),
+            "WaitForSupervisorReadyError must not be type-erased"
+        );
     }
 }

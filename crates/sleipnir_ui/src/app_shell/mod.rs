@@ -301,7 +301,7 @@ struct DragState {
 #[derive(Clone)]
 struct PanelDrag {
     pane_key: PaneKey,
-    plugin_id: String,
+    owner_instance_id: uuid::Uuid,
     surface_id: plugin_protocol::v2::BlockId,
     last: Point<Pixels>,
 }
@@ -411,10 +411,22 @@ pub struct AppShell {
 /// What the shared confirm dialog is asking about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConfirmKind {
-    ClosePane,
+    ClosePane(PaneKey),
     CloseTab(u64),
     #[cfg(target_os = "linux")]
     CloseWindow,
+}
+
+impl ConfirmKind {
+    /// Resolve a captured identity against current ownership, not current focus.
+    fn pane_target(self, tabs: &[Tab]) -> Option<(usize, PaneId)> {
+        let Self::ClosePane(key) = self else {
+            return None;
+        };
+        tabs.iter()
+            .enumerate()
+            .find_map(|(index, tab)| tab.tree.pane_id_for_key(key).map(|id| (index, id)))
+    }
 }
 
 /// Pending confirmation dialog (close pane / tab / window).
@@ -507,22 +519,6 @@ pub fn open_sleipnir_window_at_cwd(cwd: PathBuf, cx: &mut App) -> Option<WindowH
         |window, cx| cx.new(|cx| AppShell::new_at_cwd(cwd, window, cx)),
         cx,
     )
-}
-
-/// Open a new window and move `tab` into it (detach tab to a new window).
-/// The tab's panes keep their live PTYs; observers are re-wired to the new
-/// window's `AppShell`.
-fn open_sleipnir_window_with_tab(tab: Tab, cx: &mut App) {
-    open_shell_window(
-        move |window, cx| {
-            cx.new(|cx| {
-                let mut shell = AppShell::new(window, cx);
-                shell.adopt_tab(tab, window, cx);
-                shell
-            })
-        },
-        cx,
-    );
 }
 
 impl AppShell {
@@ -696,7 +692,7 @@ impl AppShell {
 
     /// Observe a pane's `TermView` so its events route to this AppShell. The
     /// ownership guard makes stale subscriptions harmless once a pane is
-    /// detached into another window (re-wired there via `adopt_tab`).
+    /// detached into another window and re-wired there.
     fn wire_term_view(
         &mut self,
         view: &Entity<TermView>,
@@ -1220,7 +1216,11 @@ impl AppShell {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
-        if let Some(next) = neighbor(&self.pane_rects, tab.active_pane, direction) {
+        let Some(area) = self.content_bounds else {
+            return;
+        };
+        let rects = Self::navigation_rects(&tab.tree, area);
+        if let Some(next) = neighbor(&rects, tab.active_pane, direction) {
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.active_pane = next;
             }
@@ -1238,8 +1238,22 @@ impl AppShell {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
-        let target = tab.active_pane;
-        let closed_key = tab.tree.pane_key_for_id(target);
+        self.close_pane_at(self.active, tab.active_pane, window, cx);
+    }
+
+    fn close_pane_at(
+        &mut self,
+        index: usize,
+        target: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let Some(closed_key) = tab.tree.pane_key_for_id(target) else {
+            return;
+        };
         let closing_terminal = tab.tree.is_terminal_leaf(target);
         let terminals_after = tab
             .tree
@@ -1259,43 +1273,32 @@ impl AppShell {
                 .map(|(_, k, _)| k)
                 .collect();
             self.plugin_panels.remove_all(panel_keys);
-            if let Some(key) = closed_key {
-                self.plugin_panels.remove(key);
-            }
-            self.close_active_tab(window, cx);
+            self.plugin_panels.remove(closed_key);
+            self.close_tab_at(index, window, cx);
             return;
         }
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
-        // Focus the sibling that survives the close, not blindly the first
-        // leaf: closing a right-hand pane should not jump focus across the tab.
+        // Only replace focus when closing the focused pane. A confirmation can
+        // outlive a focus change or a move to another tab.
+        let was_active = tab.active_pane == target;
         let successor = tab.tree.close_successor_id(target);
         let outcome = tab.tree.close(target);
         match outcome {
             CloseOutcome::TreeEmpty => {
-                self.close_active_tab(window, cx);
+                self.close_tab_at(index, window, cx);
             }
-            CloseOutcome::NotFound => {
-                // Stale active_pane id: recover focus instead of nuking the tab.
-                if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.active_pane = tab.tree.first_leaf_id();
-                }
-                self.focus_active(window, cx);
-                self.sync_ledger_focus(window, cx);
-                cx.notify();
-            }
+            CloseOutcome::NotFound => {}
             CloseOutcome::Closed => {
-                if let Some(pane) = closed_key {
-                    self.plugin_panels.remove(pane);
-                    self.apply_pane_closed(pane, cx);
-                }
-                // Surviving subtree: focus its sibling of the closed pane when
-                // known, else the first leaf as a fallback.
-                if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.active_pane = successor
-                        .filter(|id| tab.tree.contains_leaf(*id))
-                        .unwrap_or_else(|| tab.tree.first_leaf_id());
+                self.plugin_panels.remove(closed_key);
+                self.apply_pane_closed(closed_key, cx);
+                if was_active {
+                    if let Some(tab) = self.tabs.get_mut(index) {
+                        tab.active_pane = successor
+                            .filter(|id| tab.tree.contains_leaf(*id))
+                            .unwrap_or_else(|| tab.tree.first_leaf_id());
+                    }
                 }
                 self.commit_workspace(window, cx);
             }
@@ -1394,6 +1397,9 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.close_confirm.is_some() {
+            return Err("a close confirmation is already pending".into());
+        }
         let found = self
             .tabs
             .iter()
@@ -1406,7 +1412,7 @@ impl AppShell {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.active_pane = id;
         }
-        self.focus_active(window, cx);
+        self.commit_workspace(window, cx);
         self.request_close_active_pane(window, cx);
         Ok(())
     }
@@ -1416,6 +1422,9 @@ impl AppShell {
         if self.close_confirm.is_some() {
             return;
         }
+        let Some(target) = self.active_pane_key() else {
+            return;
+        };
         let policy = TerminalSettings::get_global(cx).confirm_close;
         let needs_confirm = match policy {
             ConfirmClose::Never => false,
@@ -1431,7 +1440,7 @@ impl AppShell {
             };
             self.close_confirm = Some(CloseConfirmState {
                 message: message.into(),
-                kind: ConfirmKind::ClosePane,
+                kind: ConfirmKind::ClosePane(target),
             });
             cx.notify();
         } else {
@@ -1486,8 +1495,14 @@ impl AppShell {
             }
             #[cfg(target_os = "linux")]
             Some(ConfirmKind::CloseWindow) => self.finish_window_close(window, cx),
-            Some(ConfirmKind::ClosePane) | None => self.close_active_pane(window, cx),
+            Some(kind @ ConfirmKind::ClosePane(_)) => {
+                if let Some((index, target)) = kind.pane_target(&self.tabs) {
+                    self.close_pane_at(index, target, window, cx);
+                }
+            }
+            None => {}
         }
+        cx.notify();
     }
 
     fn on_send_selection(
@@ -2427,6 +2442,93 @@ fn run_id_for_gutter(
         .filter(|(_, start)| *start <= line)
         .max_by_key(|(_, start)| *start)
         .map(|(id, _)| id)
+}
+
+#[cfg(test)]
+mod workspace_regression_tests {
+    use super::{ConfirmKind, PaneKey, Tab};
+    use crate::pane_tree::{CloseOutcome, PaneNode, SplitAxis};
+
+    fn tab(id: u64, pane_id: u64, key: PaneKey) -> Tab {
+        Tab {
+            id,
+            tree: PaneNode::panel_leaf(pane_id, key, "test"),
+            active_pane: pane_id,
+            custom_title: None,
+            zoomed_pane: None,
+        }
+    }
+
+    #[test]
+    fn workspace_regression_pending_close_keeps_original_target_after_focus_changes() {
+        let first = PaneKey::new_v4();
+        let second = PaneKey::new_v4();
+        let mut tabs = vec![tab(1, 10, first)];
+        tabs[0].tree = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(tabs[0].tree.clone()),
+            second: Box::new(PaneNode::panel_leaf(20, second, "test")),
+        };
+        let pending = ConfirmKind::ClosePane(first);
+        // A second request changes focus while the first dialog is pending.
+        tabs[0].active_pane = 20;
+        let (owner, target) = pending.pane_target(&tabs).unwrap();
+        assert_eq!(target, 10);
+        assert_eq!(tabs[owner].tree.close(target), CloseOutcome::Closed);
+        assert_eq!(tabs[0].tree.pane_id_for_key(first), None);
+        assert_eq!(tabs[0].tree.pane_id_for_key(second), Some(20));
+    }
+
+    #[test]
+    fn workspace_regression_pending_close_resolves_current_owner_and_local_id() {
+        let key = PaneKey::new_v4();
+        let pending = ConfirmKind::ClosePane(key);
+        let mut tabs = vec![tab(1, 10, key), tab(2, 20, PaneKey::new_v4())];
+        assert_eq!(pending.pane_target(&tabs), Some((0, 10)));
+        // A transfer can change both the owning tab and its local pane id.
+        tabs[0] = tab(1, 10, PaneKey::new_v4());
+        tabs[1] = tab(2, 30, key);
+        assert_eq!(pending.pane_target(&tabs), Some((1, 30)));
+        tabs.swap(0, 1);
+        assert_eq!(pending.pane_target(&tabs), Some((0, 30)));
+    }
+
+    #[test]
+    fn workspace_regression_zoom_navigation_uses_current_tree_after_split() {
+        let mut tab = tab(1, 10, PaneKey::new_v4());
+        tab.zoomed_pane = Some(10);
+        tab.tree = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(tab.tree),
+            second: Box::new(PaneNode::panel_leaf(20, PaneKey::new_v4(), "test")),
+        };
+        tab.active_pane = 20;
+        tab.reconcile_pane_focus();
+        let area = gpui::Bounds::new(
+            gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            gpui::size(gpui::px(800.0), gpui::px(600.0)),
+        );
+        let rects = super::AppShell::navigation_rects(&tab.tree, area);
+        let next =
+            crate::pane_tree::neighbor(&rects, tab.active_pane, crate::pane_tree::Direction::Left)
+                .unwrap();
+        assert_eq!(next, 10);
+        tab.active_pane = next;
+        tab.reconcile_pane_focus();
+        assert_eq!(tab.zoomed_pane, Some(10));
+    }
+
+    #[test]
+    fn workspace_regression_missing_close_target_never_falls_back_to_active() {
+        let key = PaneKey::new_v4();
+        let pending = ConfirmKind::ClosePane(key);
+        let tabs = vec![tab(1, 10, PaneKey::new_v4())];
+        assert_eq!(pending.pane_target(&tabs), None);
+        assert_eq!(ConfirmKind::CloseTab(1).pane_target(&tabs), None);
+        assert_eq!(tabs[0].active_pane, 10);
+    }
 }
 
 #[cfg(test)]

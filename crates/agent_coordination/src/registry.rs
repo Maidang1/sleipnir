@@ -95,6 +95,8 @@ struct Session {
     pane: Option<Uuid>,
     tasks: Vec<CoordinationTaskId>,
     closed_at_ms: Option<u64>,
+    /// Orders delivery against ownership/terminal mutations without holding `Inner` during I/O.
+    delivery: Arc<Mutex<()>>,
 }
 
 struct Task {
@@ -127,6 +129,26 @@ impl Registry {
     }
 
     pub fn handle(&self, req: WireRequest, now_ms: u64) -> WireResponse {
+        let order = {
+            let inner = self.lock();
+            let session = match &req.body {
+                Request::Prompt { session, .. }
+                | Request::Interrupt { session }
+                | Request::HumanTakeover { session }
+                | Request::Close { session }
+                | Request::ReportSessionClosed { session } => Some(*session),
+                Request::ReportRunning { task }
+                | Request::ReportAwaitingHuman { task, .. }
+                | Request::ReportResult { task, .. } => {
+                    inner.tasks.get(task).map(|task| task.session)
+                }
+                _ => None,
+            };
+            session.and_then(|id| inner.sessions.get(&id).map(|s| s.delivery.clone()))
+        };
+        let _ordered = order
+            .as_ref()
+            .map(|lock| lock.lock().unwrap_or_else(|p| p.into_inner()));
         let body = match self.lock().handle(req.body, now_ms) {
             Ok(body) => body,
             Err(message) => Response::Error { message },
@@ -136,7 +158,47 @@ impl Registry {
 
     /// Apply an adapter/host update. Does **not** drain facts or effects.
     pub fn apply(&self, update: AdapterUpdate, now_ms: u64) -> Result<(), String> {
+        let order = {
+            let inner = self.lock();
+            let session = match &update {
+                AdapterUpdate::TaskRunning { task }
+                | AdapterUpdate::TaskAwaitingHuman { task }
+                | AdapterUpdate::TaskResult { task, .. } => {
+                    inner.tasks.get(task).map(|t| t.session)
+                }
+                AdapterUpdate::SessionClosed { session }
+                | AdapterUpdate::ReleaseToCoordinator { session }
+                | AdapterUpdate::BindPane { session, .. } => Some(*session),
+                AdapterUpdate::PromptDelivered { seq }
+                | AdapterUpdate::InterruptDelivered { seq }
+                | AdapterUpdate::FocusDelivered { seq }
+                | AdapterUpdate::CloseDelivered { seq }
+                | AdapterUpdate::DeliveryFailed { seq } => inner
+                    .effects
+                    .iter()
+                    .find(|e| e.seq == *seq)
+                    .map(|e| e.body.session()),
+            };
+            session.and_then(|id| inner.sessions.get(&id).map(|s| s.delivery.clone()))
+        };
+        let _ordered = order
+            .as_ref()
+            .map(|lock| lock.lock().unwrap_or_else(|p| p.into_inner()));
         self.lock().apply(update, now_ms)
+    }
+
+    /// Claim an exact queued intent under the session delivery lease. The callback
+    /// may perform host I/O, but must not synchronously mutate this same session.
+    /// Reads and other sessions remain available throughout the callback.
+    pub fn deliver<T>(
+        &self,
+        effect: &Effect,
+        deliver: impl FnOnce(&Delivery<'_>) -> T,
+    ) -> Result<T, String> {
+        let order = self.lock().session(effect.body.session())?.delivery.clone();
+        let _ordered = order.lock().unwrap_or_else(|p| p.into_inner());
+        self.lock().validate_effect(effect)?;
+        Ok(deliver(&Delivery { registry: self }))
     }
 
     /// Pending adapter intents, oldest first. Does not consume them.
@@ -153,8 +215,44 @@ impl Registry {
         self.lock().stats
     }
 
+    /// Host-local summary read. Unlike wire pages, this can return every session.
+    pub fn session_summaries(&self) -> Vec<SessionSnapshot> {
+        let inner = self.lock();
+        inner
+            .sessions
+            .values()
+            .filter_map(|session| {
+                inner
+                    .snapshot_page(session, session.tasks.len().saturating_sub(1), true)
+                    .ok()
+            })
+            .collect()
+    }
+
+    /// Host-local bounded preview, never a second copy of a complete result.
+    pub fn result_excerpt(&self, task: CoordinationTaskId, max_chars: usize) -> Option<String> {
+        self.lock()
+            .tasks
+            .get(&task)?
+            .result
+            .as_deref()
+            .map(|text| text.chars().take(max_chars).collect())
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// Acknowledgements issued while the session delivery lease is still held.
+/// Prevents a second consumer from replaying a successful-but-not-yet-acked effect.
+pub struct Delivery<'a> {
+    registry: &'a Registry,
+}
+
+impl Delivery<'_> {
+    pub fn apply(&self, update: AdapterUpdate, now_ms: u64) -> Result<(), String> {
+        self.registry.lock().apply(update, now_ms)
     }
 }
 
@@ -165,11 +263,48 @@ impl Default for Registry {
 }
 
 impl Inner {
+    fn validate_effect(&self, effect: &Effect) -> Result<(), String> {
+        if !self.effects.iter().any(|pending| pending == effect) {
+            return Err("obsolete effect".into());
+        }
+        let session = self.session(effect.body.session())?;
+        if !session.open {
+            return Err("session is closed".into());
+        }
+        if !matches!(effect.body, EffectBody::FocusRequested { .. })
+            && session.writer != Writer::Coordinator
+        {
+            return Err("human owns this session".into());
+        }
+        let task = match effect.body {
+            EffectBody::LaunchRequested { task, .. } | EffectBody::PromptRequested { task, .. } => {
+                Some(task)
+            }
+            EffectBody::InterruptRequested { task, .. } => task,
+            _ => None,
+        };
+        if let Some(task) = task {
+            let status = self.task(task)?.status;
+            if !status.is_in_flight() {
+                return Err("task is not in flight".into());
+            }
+            if matches!(effect.body, EffectBody::PromptRequested { .. })
+                && status != TaskStatus::Dispatching
+            {
+                return Err("prompt is no longer dispatchable".into());
+            }
+        }
+        Ok(())
+    }
+
     fn handle(&mut self, req: Request, now_ms: u64) -> Result<Response, String> {
         match req {
-            Request::List => Ok(Response::Agents {
-                agents: self.list(),
+            Request::List => self.list_page(0),
+            Request::ListPage { offset } => self.list_page(offset),
+            Request::InspectPage { session, offset } => Ok(Response::Inspect {
+                session: self.snapshot_page(self.session(session)?, offset, false)?,
             }),
+            Request::EffectsPage { cursor } => Ok(self.effects_page(cursor)),
             Request::Launch {
                 kind,
                 cwd,
@@ -177,7 +312,8 @@ impl Inner {
                 args,
             } => self.launch(kind, cwd, name, args, now_ms),
             Request::Prompt { session, text } => self.prompt(session, text, now_ms),
-            Request::Wait { task } => self.wait(task),
+            Request::Wait { task } => self.wait_page(task, 0),
+            Request::WaitPage { task, offset } => self.wait_page(task, offset),
             Request::Interrupt { session } => self.interrupt(session),
             Request::Focus { session } => self.focus(session),
             Request::Inspect { session } => self.inspect(session),
@@ -189,9 +325,7 @@ impl Inner {
             }
             Request::ReportResult { task, text } => self.report_result(task, text),
             Request::ReportSessionClosed { session } => self.report_session_closed(session, now_ms),
-            Request::Effects => Ok(Response::Effects {
-                effects: self.effects.iter().cloned().collect(),
-            }),
+            Request::Effects => Ok(self.effects_page(0)),
             Request::Facts { cursor } => {
                 let batch = self.facts_since(cursor);
                 Ok(Response::Facts {
@@ -238,6 +372,7 @@ impl Inner {
                 pane: None,
                 tasks: vec![task_id],
                 closed_at_ms: None,
+                delivery: Arc::new(Mutex::new(())),
             },
         );
         self.tasks.insert(
@@ -300,6 +435,12 @@ impl Inner {
             }
         }
         self.ensure_task_capacity()?;
+        let before = self.effects.len();
+        self.effects.retain(|effect| {
+            !matches!(effect.body,
+            EffectBody::InterruptRequested { session, task: None } if session == session_id)
+        });
+        self.stats.effects_drained += (before - self.effects.len()) as u64;
         self.ensure_effect_capacity()?;
         let task_id = CoordinationTaskId::new();
         self.session_mut(session_id)?.tasks.push(task_id);
@@ -327,14 +468,22 @@ impl Inner {
         Ok(Response::PromptAccepted { task: task_id })
     }
 
-    fn wait(&self, task_id: CoordinationTaskId) -> Result<Response, String> {
+    fn wait_page(&self, task_id: CoordinationTaskId, offset: usize) -> Result<Response, String> {
         let task = self.task(task_id)?;
+        let (result, next_result_offset) = self.wait_result_page(
+            task_id,
+            task.status,
+            task.result.as_deref(),
+            task.detail.as_deref(),
+            offset,
+        )?;
         Ok(Response::Wait {
             task: task_id,
             status: task.status,
             terminal: task.status.is_terminal(),
-            result: task.result.clone(),
+            result,
             detail: task.detail.clone(),
+            next_result_offset,
         })
     }
 
@@ -386,23 +535,25 @@ impl Inner {
         if self
             .effects
             .iter()
-            .any(|e| matches!(&e.body, EffectBody::InterruptRequested { session } if *session == session_id))
+            .any(|e| matches!(&e.body, EffectBody::InterruptRequested { session, .. } if *session == session_id))
         {
             return Ok(Response::InterruptAccepted {
                 session: session_id,
             });
         }
         self.ensure_effect_capacity()?;
-        for id in ids {
-            if let Some(task) = self.tasks.get_mut(&id) {
-                if task.status.is_in_flight() {
-                    task.status = TaskStatus::Interrupting;
-                    self.push_fact(Event::TaskInterrupting { task: id });
-                }
-            }
+        let task = ids.into_iter().find(|id| {
+            self.tasks
+                .get(id)
+                .is_some_and(|task| task.status.is_in_flight())
+        });
+        if let Some(id) = task {
+            self.task_mut(id)?.status = TaskStatus::Interrupting;
+            self.push_fact(Event::TaskInterrupting { task: id });
         }
         self.push_effect(EffectBody::InterruptRequested {
             session: session_id,
+            task,
         });
         Ok(Response::InterruptAccepted {
             session: session_id,
@@ -508,7 +659,7 @@ impl Inner {
                 )?;
                 Ok(())
             }
-            AdapterUpdate::DeliveryFailed { seq } => self.delivery_failed(seq),
+            AdapterUpdate::DeliveryFailed { seq } => self.delivery_failed(seq, now_ms),
             AdapterUpdate::TaskRunning { task } => self.task_running(task),
             AdapterUpdate::TaskAwaitingHuman { task } => self.task_awaiting_human(task, None),
             AdapterUpdate::TaskResult { task, text } => self.record_result(task, text),
@@ -580,22 +731,14 @@ impl Inner {
             |b| matches!(b, EffectBody::InterruptRequested { .. }),
             "interrupt_requested",
         )?;
-        let EffectBody::InterruptRequested { session } = effect.body else {
+        let EffectBody::InterruptRequested { task, .. } = effect.body else {
             return Ok(());
         };
-        let ids = self
-            .session(session)
-            .map(|s| s.tasks.clone())
-            .unwrap_or_default();
-        for id in ids {
-            if let Some(t) = self.tasks.get_mut(&id) {
-                if t.status.is_in_flight() {
-                    t.status = TaskStatus::Settled;
-                    self.push_fact(Event::TaskSettled { task: id });
-                }
-            }
+        if let Some(task) = task {
+            // A successful key write is not evidence that the worker stopped.
+            // Retire only the captured assignment, with an explicitly unknown outcome.
+            self.finish_task(task, TaskStatus::Unknown)?;
         }
-        self.prune(0);
         Ok(())
     }
 
@@ -664,35 +807,60 @@ impl Inner {
         Ok(())
     }
 
-    fn delivery_failed(&mut self, seq: u64) -> Result<(), String> {
-        let Some(effect) = self.remove_effect(seq) else {
-            return Err("unknown effect".into());
-        };
+    fn delivery_failed(&mut self, seq: u64, now_ms: u64) -> Result<(), String> {
+        let effect = self
+            .remove_effect(seq)
+            .ok_or_else(|| "unknown effect".to_string())?;
         match effect.body {
-            EffectBody::LaunchRequested { task, .. } | EffectBody::PromptRequested { task, .. } => {
-                if let Some(t) = self.tasks.get_mut(&task) {
-                    if t.status.is_in_flight() {
-                        t.status = TaskStatus::FailedDelivery;
-                        self.push_fact(Event::TaskFailedDelivery { task });
-                    }
+            EffectBody::LaunchRequested { task, session, .. } => {
+                self.finish_task(task, TaskStatus::FailedDelivery)?;
+                if self.session(session)?.pane.is_none() {
+                    self.close_session(session, now_ms)?;
                 }
             }
-            EffectBody::InterruptRequested { session } => {
-                let ids = self
-                    .session(session)
-                    .map(|s| s.tasks.clone())
-                    .unwrap_or_default();
-                for id in ids {
-                    if let Some(t) = self.tasks.get_mut(&id) {
-                        if t.status == TaskStatus::Interrupting {
-                            t.status = TaskStatus::Unknown;
-                            self.push_fact(Event::TaskUnknown { task: id });
-                        }
-                    }
+            EffectBody::PromptRequested { task, .. } => {
+                // A newer native report or interrupt supersedes an undelivered
+                // prompt; retiring that prompt must preserve the approval/interrupt gate.
+                if self.task(task)?.status == TaskStatus::Dispatching {
+                    self.finish_task(task, TaskStatus::FailedDelivery)?;
                 }
             }
-            EffectBody::FocusRequested { .. } | EffectBody::CloseRequested { .. } => {}
+            EffectBody::InterruptRequested {
+                task: Some(task), ..
+            } => {
+                self.finish_task(task, TaskStatus::Unknown)?;
+            }
+            EffectBody::InterruptRequested { task: None, .. }
+            | EffectBody::FocusRequested { .. }
+            | EffectBody::CloseRequested { .. } => {}
         }
+        Ok(())
+    }
+
+    /// Terminal state and stale-intent retirement are one registry mutation.
+    fn finish_task(&mut self, id: CoordinationTaskId, status: TaskStatus) -> Result<(), String> {
+        let task = self.task_mut(id)?;
+        if !task.status.is_in_flight() {
+            return Ok(());
+        }
+        task.status = status;
+        let event = match status {
+            TaskStatus::Settled => Event::TaskSettled { task: id },
+            TaskStatus::Unknown => Event::TaskUnknown { task: id },
+            TaskStatus::FailedDelivery => Event::TaskFailedDelivery { task: id },
+            _ => unreachable!("terminal transition required"),
+        };
+        let before = self.effects.len();
+        self.effects.retain(|effect| match effect.body {
+            EffectBody::LaunchRequested { task, .. }
+            | EffectBody::PromptRequested { task, .. }
+            | EffectBody::InterruptRequested {
+                task: Some(task), ..
+            } => task != id,
+            _ => true,
+        });
+        self.stats.effects_drained += (before - self.effects.len()) as u64;
+        self.push_fact(event);
         Ok(())
     }
 
@@ -713,10 +881,8 @@ impl Inner {
             | TaskStatus::Running
             | TaskStatus::AwaitingHuman
             | TaskStatus::Interrupting => {
-                let t = self.task_mut(task_id)?;
-                t.result = Some(text);
-                t.status = TaskStatus::Settled;
-                self.push_fact(Event::TaskSettled { task: task_id });
+                self.task_mut(task_id)?.result = Some(text);
+                self.finish_task(task_id, TaskStatus::Settled)?;
                 self.prune(0);
                 Ok(())
             }
@@ -732,12 +898,7 @@ impl Inner {
         session.closed_at_ms = Some(now_ms);
         let ids = session.tasks.clone();
         for id in ids {
-            if let Some(task) = self.tasks.get_mut(&id) {
-                if task.status.is_in_flight() {
-                    task.status = TaskStatus::Unknown;
-                    self.push_fact(Event::TaskUnknown { task: id });
-                }
-            }
+            self.finish_task(id, TaskStatus::Unknown)?;
         }
         self.drain_effects_for_session(session_id);
         self.push_fact(Event::SessionClosed {
@@ -763,27 +924,89 @@ impl Inner {
         Ok(())
     }
 
-    fn list(&self) -> Vec<SessionSnapshot> {
-        self.sessions
-            .values()
-            .filter_map(|s| self.snapshot(s).ok())
-            .collect()
+    fn list_page(&self, offset: usize) -> Result<Response, String> {
+        let mut agents = Vec::new();
+        let mut bytes = 256;
+        for session in self.sessions.values().skip(offset) {
+            // Lists expose the latest assignment; inspect owns task history.
+            let snapshot =
+                self.snapshot_page(session, session.tasks.len().saturating_sub(1), true)?;
+            let size = serde_json::to_vec(&snapshot)
+                .map_err(|e| e.to_string())?
+                .len()
+                + 1;
+            if !agents.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
+                break;
+            }
+            bytes += size;
+            agents.push(snapshot);
+        }
+        let next = offset.saturating_add(agents.len());
+        Ok(Response::Agents {
+            agents,
+            next_offset: (next < self.sessions.len()).then_some(next),
+        })
+    }
+
+    fn effects_page(&self, cursor: u64) -> Response {
+        let mut effects = Vec::new();
+        let mut bytes = 256;
+        let mut next_cursor = None;
+        for effect in self.effects.iter().filter(|e| e.seq > cursor) {
+            let size = serde_json::to_vec(effect)
+                .map(|line| line.len())
+                .unwrap_or(crate::MAX_LINE_BYTES)
+                + 1;
+            if !effects.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
+                next_cursor = effects.last().map(|e: &Effect| e.seq);
+                break;
+            }
+            bytes += size;
+            effects.push(effect.clone());
+        }
+        Response::Effects {
+            effects,
+            next_cursor,
+        }
     }
 
     fn snapshot(&self, session: &Session) -> Result<SessionSnapshot, String> {
+        self.snapshot_page(session, 0, false)
+    }
+
+    fn snapshot_page(
+        &self,
+        session: &Session,
+        offset: usize,
+        latest_only: bool,
+    ) -> Result<SessionSnapshot, String> {
         let mut tasks = Vec::new();
-        for id in &session.tasks {
+        // Reserve the full encoded session metadata and envelope before history.
+        let mut bytes = 8192;
+        for id in session.tasks.iter().skip(offset) {
             let Some(task) = self.tasks.get(id) else {
                 continue;
             };
-            tasks.push(TaskSnapshot {
+            let summary = TaskSnapshot {
                 task: task.id,
                 session: task.session,
                 status: task.status,
                 accepted_at_ms: task.accepted_at_ms,
-                result: task.result.clone(),
-                detail: task.detail.clone(),
-            });
+                result: None,
+                detail: task
+                    .detail
+                    .as_deref()
+                    .map(|detail| detail.chars().take(80).collect()),
+            };
+            let size = serde_json::to_vec(&summary)
+                .map_err(|e| e.to_string())?
+                .len()
+                + 1;
+            if !tasks.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
+                break;
+            }
+            bytes += size;
+            tasks.push(summary);
         }
         Ok(SessionSnapshot {
             session: session.id,
@@ -793,8 +1016,142 @@ impl Inner {
             writer: session.writer,
             open: session.open,
             pane: session.pane,
+            next_task_offset: (!latest_only && offset + tasks.len() < session.tasks.len())
+                .then_some(offset + tasks.len()),
             tasks,
         })
+    }
+
+    fn wait_result_page(
+        &self,
+        task_id: CoordinationTaskId,
+        status: TaskStatus,
+        result: Option<&str>,
+        detail: Option<&str>,
+        offset: usize,
+    ) -> Result<(Option<String>, Option<usize>), String> {
+        let Some(result) = result else {
+            if offset == 0 {
+                return Ok((None, None));
+            }
+            return Err("result offset out of range".into());
+        };
+
+        let mut boundaries: Vec<usize> = result.char_indices().map(|(i, _)| i).collect();
+        boundaries.push(result.len());
+        let total_chars = boundaries.len().saturating_sub(1);
+        if offset > total_chars {
+            return Err("result offset out of range".into());
+        }
+        if offset == total_chars {
+            return Ok((Some(String::new()), None));
+        }
+
+        if let Some(full) = self.wait_result_candidate(
+            task_id,
+            status,
+            detail,
+            result,
+            &boundaries,
+            offset,
+            total_chars,
+            None,
+        )? {
+            return Ok((Some(full), None));
+        }
+
+        if offset + 1 > total_chars {
+            return Err("wait result page did not advance".into());
+        }
+        if self
+            .wait_result_candidate(
+                task_id,
+                status,
+                detail,
+                result,
+                &boundaries,
+                offset,
+                offset + 1,
+                Some(offset + 1),
+            )?
+            .is_none()
+        {
+            return Err("wait response exceeds line length cap".into());
+        }
+
+        let mut low = offset + 1;
+        let mut high = total_chars;
+        let mut best = offset + 1;
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let next = (mid < total_chars).then_some(mid);
+            if self
+                .wait_result_candidate(
+                    task_id,
+                    status,
+                    detail,
+                    result,
+                    &boundaries,
+                    offset,
+                    mid,
+                    next,
+                )?
+                .is_some()
+            {
+                best = mid;
+                low = mid.saturating_add(1);
+            } else {
+                high = mid.saturating_sub(1);
+            }
+        }
+
+        let next = (best < total_chars).then_some(best);
+        let page = self
+            .wait_result_candidate(
+                task_id,
+                status,
+                detail,
+                result,
+                &boundaries,
+                offset,
+                best,
+                next,
+            )?
+            .ok_or_else(|| "wait result page did not fit".to_string())?;
+        Ok((Some(page), next))
+    }
+
+    fn wait_result_candidate(
+        &self,
+        task_id: CoordinationTaskId,
+        status: TaskStatus,
+        detail: Option<&str>,
+        result: &str,
+        boundaries: &[usize],
+        start: usize,
+        end: usize,
+        next_result_offset: Option<usize>,
+    ) -> Result<Option<String>, String> {
+        let slice = result
+            .get(boundaries[start]..boundaries[end])
+            .ok_or_else(|| "result offset split a code point".to_string())?;
+        let response = WireResponse {
+            id: u64::MAX,
+            body: Response::Wait {
+                task: task_id,
+                status,
+                terminal: status.is_terminal(),
+                result: Some(slice.to_string()),
+                detail: detail.map(str::to_string),
+                next_result_offset,
+            },
+        };
+        let encoded = serde_json::to_vec(&response).map_err(|err| err.to_string())?;
+        if encoded.len() <= crate::MAX_LINE_BYTES {
+            Ok(Some(slice.to_string()))
+        } else {
+            Ok(None)
+        }
     }
 
     fn session(&self, id: AgentSessionId) -> Result<&Session, String> {
@@ -1058,12 +1415,19 @@ impl Inner {
             Some(min) if cursor + 1 < min => min - cursor - 1,
             _ => 0,
         };
-        let facts: Vec<Fact> = self
-            .facts
-            .iter()
-            .filter(|f| f.seq > cursor)
-            .cloned()
-            .collect();
+        let mut facts = Vec::new();
+        let mut bytes = 256;
+        for fact in self.facts.iter().filter(|fact| fact.seq > cursor) {
+            let size = serde_json::to_vec(fact)
+                .map(|line| line.len())
+                .unwrap_or(crate::MAX_LINE_BYTES)
+                + 1;
+            if !facts.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
+                break;
+            }
+            bytes += size;
+            facts.push(fact.clone());
+        }
         let next_cursor = facts.last().map(|f| f.seq).unwrap_or(cursor);
         FactBatch {
             facts,
@@ -1170,7 +1534,7 @@ mod tests {
     fn list_starts_empty() {
         let reg = Registry::new();
         match reg.handle(req(1, Request::List), 0).body {
-            Response::Agents { agents } => assert!(agents.is_empty()),
+            Response::Agents { agents, .. } => assert!(agents.is_empty()),
             other => panic!("{other:?}"),
         }
     }
@@ -1180,7 +1544,7 @@ mod tests {
         let reg = Registry::new();
         let (session, task) = launch(&reg, 10);
         match reg.handle(req(2, Request::List), 10).body {
-            Response::Agents { agents } => {
+            Response::Agents { agents, .. } => {
                 assert_eq!(agents.len(), 1);
                 assert_eq!(agents[0].session, session);
                 assert_eq!(agents[0].writer, Writer::Coordinator);
@@ -1612,7 +1976,150 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_request_does_not_settle_until_delivered() {
+    fn summaries_and_diagnostic_pages_fit_the_wire_cap_at_capacity() {
+        let reg = Registry::new();
+        for i in 0..MAX_SESSIONS {
+            let session = match reg
+                .handle(
+                    req(
+                        i as u64,
+                        Request::Launch {
+                            kind: AgentKind::Codex,
+                            cwd: format!("/{}", "界".repeat(1023)),
+                            name: None,
+                            args: vec![],
+                        },
+                    ),
+                    i as u64,
+                )
+                .body
+            {
+                Response::LaunchAccepted { session, .. } => session,
+                other => panic!("{other:?}"),
+            };
+            assert!(matches!(
+                reg.handle(req(0, Request::Inspect { session }), 0).body,
+                Response::Inspect { .. }
+            ));
+        }
+        for body in [Request::List, Request::Effects] {
+            let reply = reg.handle(req(0, body), 0);
+            assert!(
+                crate::encode_response_line(&reply).unwrap().len() < crate::MAX_LINE_BYTES,
+                "summary/diagnostic page must be transportable at capacity"
+            );
+        }
+    }
+
+    #[test]
+    fn result_retires_pending_interrupt_before_a_new_task() {
+        let reg = Registry::new();
+        let (session, first) = ready(&reg);
+        let first = match reg
+            .handle(
+                req(
+                    1,
+                    Request::Prompt {
+                        session,
+                        text: "first".into(),
+                    },
+                ),
+                1,
+            )
+            .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}; launch was {first:?}"),
+        };
+        reg.handle(req(2, Request::Interrupt { session }), 2);
+        let stale = effect_seq(&reg, |b| matches!(b, EffectBody::InterruptRequested { .. }));
+        reg.apply(
+            AdapterUpdate::TaskResult {
+                task: first,
+                text: "done".into(),
+            },
+            3,
+        )
+        .unwrap();
+        let second = match reg
+            .handle(
+                req(
+                    4,
+                    Request::Prompt {
+                        session,
+                        text: "second".into(),
+                    },
+                ),
+                4,
+            )
+            .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            reg.apply(AdapterUpdate::InterruptDelivered { seq: stale }, 5)
+                .is_err()
+        );
+        assert!(matches!(
+            reg.handle(req(6, Request::Wait { task: second }), 6).body,
+            Response::Wait {
+                status: TaskStatus::Dispatching,
+                ..
+            }
+        ));
+        assert_eq!(reg.peek_effects().len(), 1, "only the new prompt survives");
+    }
+
+    #[test]
+    fn idle_interrupt_does_not_survive_acceptance_of_a_new_prompt() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        reg.handle(req(1, Request::Interrupt { session }), 1);
+        let interrupt = reg.peek_effects()[0].clone();
+        reg.handle(
+            req(
+                2,
+                Request::Prompt {
+                    session,
+                    text: "new work".into(),
+                },
+            ),
+            2,
+        );
+        let mut delivered = false;
+        let claim = reg.deliver(&interrupt, |_| {
+            delivered = true;
+        });
+        assert!(claim.is_err());
+        assert!(
+            !delivered,
+            "an idle interrupt must not hit the next assignment"
+        );
+    }
+
+    #[test]
+    fn failed_launch_closes_the_unbound_session_in_the_registry() {
+        let reg = Registry::with_limits(limits_one());
+        let (session, task) = launch(&reg, 0);
+        let seq = reg.peek_effects()[0].seq;
+        reg.apply(AdapterUpdate::DeliveryFailed { seq }, 1).unwrap();
+        match reg.handle(req(2, Request::Inspect { session }), 2).body {
+            Response::Inspect { session } => assert!(!session.open),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            reg.handle(req(3, Request::Wait { task }), 3).body,
+            Response::Wait {
+                status: TaskStatus::FailedDelivery,
+                ..
+            }
+        ));
+        launch(&reg, 4);
+    }
+
+    #[test]
+    fn interrupt_delivery_retires_target_as_unknown_not_success() {
         let reg = Registry::new();
         let (session, task) = launch(&reg, 0);
         bind(&reg, session, 1, 1);
@@ -1651,7 +2158,7 @@ mod tests {
         }
         let interrupt_seq = effect_seq(
             &reg,
-            |b| matches!(b, EffectBody::InterruptRequested { session: s } if *s == session),
+            |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
         reg.apply(AdapterUpdate::InterruptDelivered { seq: interrupt_seq }, 5)
             .unwrap();
@@ -1662,7 +2169,7 @@ mod tests {
         );
         match reg.handle(req(6, Request::Inspect { session }), 6).body {
             Response::Inspect { session: snap } => {
-                assert_eq!(snap.tasks[0].status, TaskStatus::Settled);
+                assert_eq!(snap.tasks[0].status, TaskStatus::Unknown);
                 assert!(snap.tasks[0].result.is_none());
             }
             other => panic!("{other:?}"),
@@ -1671,7 +2178,7 @@ mod tests {
             Response::Wait {
                 status, terminal, ..
             } => {
-                assert_eq!(status, TaskStatus::Settled);
+                assert_eq!(status, TaskStatus::Unknown);
                 assert!(terminal);
             }
             other => panic!("{other:?}"),
@@ -1680,7 +2187,7 @@ mod tests {
             reg.facts_since(0)
                 .facts
                 .iter()
-                .any(|f| matches!(f.event, Event::TaskSettled { task: t } if t == task))
+                .any(|f| matches!(f.event, Event::TaskUnknown { task: t } if t == task))
         );
         match reg
             .handle(
@@ -1712,7 +2219,7 @@ mod tests {
         ));
         let seq = effect_seq(
             &reg,
-            |b| matches!(b, EffectBody::InterruptRequested { session: s } if *s == session),
+            |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
         reg.apply(AdapterUpdate::DeliveryFailed { seq }, 3).unwrap();
         match reg.handle(req(4, Request::Wait { task }), 4).body {
@@ -1739,7 +2246,7 @@ mod tests {
         ));
         let first_seq = effect_seq(
             &reg,
-            |b| matches!(b, EffectBody::InterruptRequested { session: s } if *s == session),
+            |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
         reg.apply(AdapterUpdate::InterruptDelivered { seq: first_seq }, 3)
             .unwrap();
@@ -1765,7 +2272,7 @@ mod tests {
         ));
         let second_seq = effect_seq(
             &reg,
-            |b| matches!(b, EffectBody::InterruptRequested { session: s } if *s == session),
+            |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
         assert_ne!(first_seq, second_seq);
         match reg.apply(AdapterUpdate::InterruptDelivered { seq: first_seq }, 6) {
@@ -1784,7 +2291,7 @@ mod tests {
             Response::Wait {
                 status, terminal, ..
             } => {
-                assert_eq!(status, TaskStatus::Settled);
+                assert_eq!(status, TaskStatus::Unknown);
                 assert!(terminal);
             }
             other => panic!("{other:?}"),
@@ -2291,7 +2798,7 @@ mod tests {
         let (session, _) = t1.join().unwrap();
         t2.join().unwrap();
         match reg.handle(req(10, Request::List), 1).body {
-            Response::Agents { agents } => {
+            Response::Agents { agents, .. } => {
                 assert!(agents.iter().any(|s| s.session == session));
             }
             other => panic!("{other:?}"),

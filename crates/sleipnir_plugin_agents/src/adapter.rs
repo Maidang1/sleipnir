@@ -340,6 +340,37 @@ impl Adapter {
 
     /// Execute one effect against the host and produce its acknowledgement.
     fn execute(&mut self, effect: Effect, host: &mut dyn HostCalls, now_ms: u64) -> ExecOutcome {
+        let registry = self.registry.clone();
+        let seq = effect.seq;
+        registry
+            .deliver(&effect, |delivery| {
+                match self.execute_claimed(effect.clone(), host, now_ms) {
+                    ExecOutcome::Ack(updates, prompt_task) => {
+                        for update in updates {
+                            if let Err(err) = delivery.apply(update, now_ms) {
+                                eprintln!("agents: coordination ack rejected: {err}");
+                                let _ =
+                                    delivery.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms);
+                                return ExecOutcome::Ack(vec![], None);
+                            }
+                        }
+                        if let Some(task) = prompt_task {
+                            let _ = delivery.apply(AdapterUpdate::TaskRunning { task }, now_ms);
+                        }
+                        ExecOutcome::Ack(vec![], None)
+                    }
+                    ExecOutcome::RateLimited => ExecOutcome::RateLimited,
+                }
+            })
+            .unwrap_or_else(|_| ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None))
+    }
+
+    fn execute_claimed(
+        &mut self,
+        effect: Effect,
+        host: &mut dyn HostCalls,
+        now_ms: u64,
+    ) -> ExecOutcome {
         let seq = effect.seq;
         match effect.body {
             EffectBody::LaunchRequested {
@@ -367,16 +398,8 @@ impl Adapter {
                 Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                 Err(message) => {
                     eprintln!("agents: launch delivery failed: {message}");
-                    // Reap the pane-less session with the failure, or the
-                    // open-session cap fills with zombies a coordinator can
-                    // never close.
-                    ExecOutcome::Ack(
-                        vec![
-                            AdapterUpdate::DeliveryFailed { seq },
-                            AdapterUpdate::SessionClosed { session },
-                        ],
-                        None,
-                    )
+                    // Canonical registry failure also closes an unbound launch session.
+                    ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
                 }
             },
             EffectBody::PromptRequested {
@@ -414,7 +437,7 @@ impl Adapter {
                     }
                 }
             },
-            EffectBody::InterruptRequested { session } => match self.writable_pane(session) {
+            EffectBody::InterruptRequested { session, .. } => match self.writable_pane(session) {
                 None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
                 Some(pane) => match host.send_key(pane, "ctrl-c") {
                     Ok(()) => {
@@ -619,16 +642,7 @@ impl Adapter {
     /// flattened, clipped result excerpt ride along (the panel never dumps
     /// full result text and never claims success).
     pub fn managed_session_rows(&self) -> Vec<crate::view::ManagedSessionRow> {
-        let resp = self.registry.handle(
-            WireRequest {
-                id: 0,
-                body: Request::List,
-            },
-            0,
-        );
-        let Response::Agents { mut agents } = resp.body else {
-            return Vec::new();
-        };
+        let mut agents = self.registry.session_summaries();
         agents.sort_by(|a, b| {
             (!a.open, &a.name, executable_name(a.kind), &a.session).cmp(&(
                 !b.open,
@@ -658,9 +672,9 @@ impl Adapter {
                             .map(|d| display_clip(&d, AWAITING_DETAIL_CLIP_CHARS))
                     }),
                     result_excerpt: latest.and_then(|task| {
-                        task.result
-                            .as_deref()
-                            .map(|r| display_clip(r, RESULT_EXCERPT_CLIP_CHARS))
+                        self.registry
+                            .result_excerpt(task.task, RESULT_EXCERPT_CLIP_CHARS + 1)
+                            .map(|r| display_clip(&r, RESULT_EXCERPT_CLIP_CHARS))
                     }),
                 }
             })
@@ -670,16 +684,7 @@ impl Adapter {
     /// Open sessions whose latest task is `AwaitingHuman` — the strip's
     /// awaiting-human count.
     pub fn awaiting_human_count(&self) -> usize {
-        let resp = self.registry.handle(
-            WireRequest {
-                id: 0,
-                body: Request::List,
-            },
-            0,
-        );
-        let Response::Agents { agents } = resp.body else {
-            return 0;
-        };
+        let agents = self.registry.session_summaries();
         agents
             .iter()
             .filter(|snap| {
@@ -785,6 +790,7 @@ mod tests {
         closes: Vec<PaneKey>,
         fail: Option<String>,
         rate_limit_remaining: usize,
+        delivery_barrier: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     }
 
     impl FakeHost {
@@ -827,6 +833,10 @@ mod tests {
         }
 
         fn send_text_enter(&mut self, pane: PaneKey, text: &str) -> Result<(), String> {
+            if let Some((entered, release)) = self.delivery_barrier.take() {
+                entered.send(()).unwrap();
+                release.recv().unwrap();
+            }
             self.check(())?;
             self.texts.push((pane, text.to_string()));
             Ok(())
@@ -902,6 +912,113 @@ mod tests {
         snapshot(adapter.registry(), session)
             .pane
             .expect("bound pane")
+    }
+
+    #[test]
+    fn awaiting_human_report_prevents_an_older_prompt_from_typing() {
+        let mut adapter = Adapter::new(Registry::new());
+        let mut host = FakeHost::default();
+        let (session, _, _) = launched_and_detected_pane(&mut adapter, &mut host);
+        let task = match call(
+            adapter.registry(),
+            Request::Prompt {
+                session,
+                text: "work".into(),
+            },
+        ) {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        call(
+            adapter.registry(),
+            Request::ReportAwaitingHuman {
+                task,
+                detail: Some("native approval".into()),
+            },
+        );
+        adapter.process_one(&mut host, ms());
+        assert!(
+            host.texts.is_empty(),
+            "never deliver queued input into a native approval"
+        );
+    }
+
+    #[test]
+    fn stale_prompt_snapshot_is_refused_before_host_io() {
+        let mut adapter = Adapter::new(Registry::new());
+        let mut host = FakeHost::default();
+        let (session, _, _) = launched_and_detected_pane(&mut adapter, &mut host);
+        let task = match call(
+            adapter.registry(),
+            Request::Prompt {
+                session,
+                text: "work".into(),
+            },
+        ) {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        let stale = adapter.registry().peek_effects()[0].clone();
+        call(
+            adapter.registry(),
+            Request::ReportResult {
+                task,
+                text: "already done".into(),
+            },
+        );
+        adapter.execute(stale, &mut host, ms());
+        assert!(
+            host.texts.is_empty(),
+            "stale effect must never type into the pane"
+        );
+    }
+
+    #[test]
+    fn takeover_ack_waits_for_prior_host_delivery_without_blocking_reads() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let mut adapter = Adapter::new(Registry::new());
+        let mut host = FakeHost::default();
+        let (session, _, _) = launched_and_detected_pane(&mut adapter, &mut host);
+        call(
+            adapter.registry(),
+            Request::Prompt {
+                session,
+                text: "work".into(),
+            },
+        );
+        let registry = adapter.registry().clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        host.delivery_barrier = Some((entered_tx, release_rx));
+        let delivering = std::thread::spawn(move || adapter.process_one(&mut host, ms()));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // The global registry lock must not be held during blocked host I/O.
+        assert!(matches!(
+            call(&registry, Request::List),
+            Response::Agents { .. }
+        ));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let taking_over = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            ack_tx
+                .send(call(&registry, Request::HumanTakeover { session }))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let early = ack_rx.recv_timeout(Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        delivering.join().unwrap();
+        taking_over.join().unwrap();
+        assert!(
+            early.is_err(),
+            "takeover acknowledged while prior input was still delivering"
+        );
+        assert!(matches!(
+            ack_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Response::TakenOver { .. }
+        ));
     }
 
     #[test]
@@ -1261,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_sends_ctrl_c_and_settles_the_in_flight_prompt() {
+    fn interrupt_sends_ctrl_c_but_cannot_prove_worker_completion() {
         let mut adapter = Adapter::new(Registry::new());
         let mut host = FakeHost::default();
         let (session, _, pane) = launched_and_detected_pane(&mut adapter, &mut host);
@@ -1288,7 +1405,7 @@ mod tests {
         );
         assert!(adapter.process_one(&mut host, ms()));
         assert_eq!(host.keys, vec![(pane, "ctrl-c".into())]);
-        assert_eq!(task_status(adapter.registry(), prompt), TaskStatus::Settled);
+        assert_eq!(task_status(adapter.registry(), prompt), TaskStatus::Unknown);
     }
 
     #[test]
@@ -1361,10 +1478,16 @@ mod tests {
         adapter.foreground_changed(pane, Some("opencode"), ms());
         let snap = snapshot(adapter.registry(), session);
         assert_eq!(snap.tasks[0].status, TaskStatus::Settled);
-        assert_eq!(
-            snap.tasks[0].result.as_deref(),
-            Some(LAUNCH_DETECTED_RESULT)
+        assert!(
+            snap.tasks[0].result.is_none(),
+            "summaries omit result payloads"
         );
+        match call(adapter.registry(), Request::Wait { task }) {
+            Response::Wait { result, .. } => {
+                assert_eq!(result.as_deref(), Some(LAUNCH_DETECTED_RESULT))
+            }
+            other => panic!("{other:?}"),
+        }
         // A re-report must not duplicate.
         adapter.foreground_changed(pane, Some("opencode"), ms());
         let facts = adapter.registry().facts_since(0);
@@ -1457,7 +1580,7 @@ mod tests {
         )
         .unwrap();
         match listed.body {
-            Response::Agents { agents } => {
+            Response::Agents { agents, .. } => {
                 assert_eq!(agents.len(), 1);
                 assert_eq!(agents[0].session, session);
                 assert!(agents[0].pane.is_some(), "adapter bound the pane");

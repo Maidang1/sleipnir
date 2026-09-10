@@ -384,17 +384,7 @@ fn one<'a>(cmd: &str, rest: &'a [String]) -> Result<&'a str, ParseError> {
 }
 
 fn parse_kind(s: &str) -> Result<AgentKind, ParseError> {
-    match s {
-        "codex" => Ok(AgentKind::Codex),
-        "claude" => Ok(AgentKind::Claude),
-        "gemini" => Ok(AgentKind::Gemini),
-        "opencode" => Ok(AgentKind::Opencode),
-        other => Err(ParseError {
-            message: format!(
-                "unknown agent kind {other:?}; expected codex, claude, gemini, or opencode"
-            ),
-        }),
-    }
+    s.parse().map_err(|message| ParseError { message })
 }
 
 fn parse_session(s: &str) -> Result<AgentSessionId, ParseError> {
@@ -813,6 +803,7 @@ pub fn interpret_wait(
             terminal,
             result,
             detail,
+            next_result_offset: _,
         } => {
             if *task != followup.task {
                 return Err(format!(
@@ -1036,7 +1027,10 @@ mod tests {
         assert!(correlation_mismatch(1, &resp).is_some());
         let ok = agent_coordination::WireResponse {
             id: 7,
-            body: agent_coordination::Response::Agents { agents: vec![] },
+            body: agent_coordination::Response::Agents {
+                agents: vec![],
+                next_offset: None,
+            },
         };
         assert!(correlation_mismatch(7, &ok).is_none());
     }
@@ -1124,6 +1118,7 @@ mod tests {
                 terminal: status.is_terminal(),
                 result: result.map(str::to_string),
                 detail: detail.map(str::to_string),
+                next_result_offset: None,
             },
         }
     }
@@ -1268,7 +1263,14 @@ mod tests {
                 .is_err()
         );
         assert!(
-            followup_from_accepted(&Command::List, &Response::Agents { agents: vec![] }).is_err()
+            followup_from_accepted(
+                &Command::List,
+                &Response::Agents {
+                    agents: vec![],
+                    next_offset: None
+                }
+            )
+            .is_err()
         );
     }
 

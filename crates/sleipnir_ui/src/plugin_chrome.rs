@@ -23,6 +23,7 @@
 use plugin_protocol::v2::{Tone, Widget};
 use sleipnir_widget::{Layout, layout};
 use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 
 use crate::pane_tree::PaneKey;
 
@@ -60,11 +61,19 @@ pub struct PaletteContribution {
     pub title: String,
     pub action: String,
     pub arg: Option<String>,
+    pub owner_instance_id: Uuid,
     pub surface_id: uuid::Uuid,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PluginChromeKey {
+    plugin_id: String,
+    owner_instance_id: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct PluginChrome {
+    owner_instance_id: Uuid,
     surface_id: uuid::Uuid,
     tree: Widget,
     hint_pane: Option<PaneKey>,
@@ -102,7 +111,7 @@ pub struct ChromeDrops {
 /// and does not flicker between frames.
 #[derive(Clone, Debug, Default)]
 pub struct ChromeRegistry {
-    plugins: BTreeMap<String, PluginChrome>,
+    plugins: BTreeMap<PluginChromeKey, PluginChrome>,
     status_cache: Option<StatusLayoutCache>,
     cached_palette: Vec<PaletteContribution>,
     pub drops: ChromeDrops,
@@ -117,6 +126,7 @@ impl ChromeRegistry {
     pub fn apply_status(
         &mut self,
         plugin_id: &str,
+        owner_instance_id: Uuid,
         tree: Widget,
         granted: bool,
         hint_pane: Option<PaneKey>,
@@ -124,14 +134,18 @@ impl ChromeRegistry {
         if !granted {
             return ApplyChrome::DeniedGrant;
         }
+        let key = PluginChromeKey {
+            plugin_id: plugin_id.to_string(),
+            owner_instance_id,
+        };
         let surface_id = self
             .plugins
-            .get(plugin_id)
+            .get(&key)
             .map(|p| p.surface_id)
             .unwrap_or_else(uuid::Uuid::new_v4);
         self.plugins.insert(
-            plugin_id.to_string(),
-            derive_plugin(surface_id, tree, hint_pane),
+            key,
+            derive_plugin(owner_instance_id, surface_id, tree, hint_pane),
         );
         self.invalidate_derived();
         ApplyChrome::Applied
@@ -145,7 +159,7 @@ impl ChromeRegistry {
     fn recompute_drops_and_palette(&mut self) {
         let mut drops = ChromeDrops::default();
         let mut palette = Vec::new();
-        for (id, plug) in &self.plugins {
+        for (key, plug) in &self.plugins {
             drops.badge_truncated += plug.drop_badge;
             drops.palette_dropped += plug.drop_palette;
             drops.status_truncated += plug.drop_status;
@@ -155,10 +169,11 @@ impl ChromeRegistry {
                     continue;
                 }
                 palette.push(PaletteContribution {
-                    plugin_id: id.clone(),
-                    title: attributed_title(id, title),
+                    plugin_id: key.plugin_id.clone(),
+                    title: attributed_title(&key.plugin_id, title),
                     action: action.clone(),
                     arg: arg.clone(),
+                    owner_instance_id: key.owner_instance_id,
                     surface_id: plug.surface_id,
                 });
             }
@@ -172,9 +187,10 @@ impl ChromeRegistry {
     /// after the process is gone. (Panel keeps a stale tree because it is a
     /// large host-owned surface; chrome is too small and too trusted.)
     /// Returns true when the set of contributing plugins changed.
-    pub fn sync_live(&mut self, live: &BTreeSet<String>) -> bool {
+    pub fn sync_live(&mut self, live: &BTreeSet<Uuid>) -> bool {
         let before = self.plugins.len();
-        self.plugins.retain(|id, _| live.contains(id));
+        self.plugins
+            .retain(|key, _| live.contains(&key.owner_instance_id));
         let changed = self.plugins.len() != before;
         if changed {
             self.invalidate_derived();
@@ -197,7 +213,7 @@ impl ChromeRegistry {
         tab_is_active: bool,
     ) -> Vec<PluginTabBadge> {
         let mut out = Vec::new();
-        for (id, plug) in &self.plugins {
+        for (key, plug) in &self.plugins {
             let Some((text, tone)) = plug.badges.first() else {
                 continue;
             };
@@ -208,7 +224,7 @@ impl ChromeRegistry {
             };
             if show {
                 out.push(PluginTabBadge {
-                    plugin_id: id.clone(),
+                    plugin_id: key.plugin_id.clone(),
                     text: text.clone(),
                     tone: *tone,
                     pane,
@@ -246,7 +262,7 @@ impl ChromeRegistry {
             self.plugins
                 .keys()
                 .next()
-                .map(|s| s.as_str())
+                .map(|key| key.plugin_id.as_str())
                 .unwrap_or("chrome")
         } else {
             "chrome"
@@ -278,7 +294,12 @@ pub fn attributed_title(plugin_id: &str, title: &str) -> String {
     format!("{plugin_id}: {title}")
 }
 
-fn derive_plugin(surface_id: uuid::Uuid, tree: Widget, hint_pane: Option<PaneKey>) -> PluginChrome {
+fn derive_plugin(
+    owner_instance_id: Uuid,
+    surface_id: uuid::Uuid,
+    tree: Widget,
+    hint_pane: Option<PaneKey>,
+) -> PluginChrome {
     let badges_all = extract_badges(&tree);
     let mut drop_badge = 0u64;
     for (_, _, truncated) in &badges_all {
@@ -302,6 +323,7 @@ fn derive_plugin(surface_id: uuid::Uuid, tree: Widget, hint_pane: Option<PaneKey
     let drop_status = u64::from(leaf_wider_than_status(&tree));
 
     PluginChrome {
+        owner_instance_id,
         surface_id,
         tree,
         hint_pane,
@@ -370,6 +392,10 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    fn owner(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
     fn text(s: &str) -> Widget {
         Widget::Text {
             s: s.into(),
@@ -398,7 +424,7 @@ mod tests {
     fn status_denied_without_grant() {
         let mut reg = ChromeRegistry::new();
         assert_eq!(
-            reg.apply_status("demo", text("hi"), false, None),
+            reg.apply_status("demo", owner(1), text("hi"), false, None),
             ApplyChrome::DeniedGrant
         );
         assert!(reg.is_empty());
@@ -412,7 +438,7 @@ mod tests {
             children: vec![badge("ok", Tone::Ok), btn("Go", "go")],
         };
         assert_eq!(
-            reg.apply_status("demo", tree, false, Some(key(1))),
+            reg.apply_status("demo", owner(1), tree, false, Some(key(1))),
             ApplyChrome::DeniedGrant
         );
         assert!(reg.badges_for_tab(&[key(1)], true).is_empty());
@@ -424,13 +450,13 @@ mod tests {
         // The wash is the ledger's own Failed bool; a plugin badge is only an
         // extra attributed label and can never set or suppress it.
         let mut reg = ChromeRegistry::new();
-        reg.apply_status("demo", badge("ok", Tone::Ok), true, Some(key(1)));
+        reg.apply_status("demo", owner(1), badge("ok", Tone::Ok), true, Some(key(1)));
         let badges = reg.badges_for_tab(&[key(1)], true);
         assert_eq!(badges.len(), 1);
         assert_eq!(badges[0].text, "ok");
         // Plugin Err tone is not a ledger Failed badge type.
         let mut reg = ChromeRegistry::new();
-        reg.apply_status("demo", badge("no", Tone::Err), true, Some(key(1)));
+        reg.apply_status("demo", owner(1), badge("no", Tone::Err), true, Some(key(1)));
         let badges = reg.badges_for_tab(&[key(1)], true);
         assert_ne!(
             format!("{:?}", badges[0]),
@@ -443,6 +469,7 @@ mod tests {
         let mut reg = ChromeRegistry::new();
         reg.apply_status(
             "demo",
+            owner(1),
             btn("Reload Settings", "reload_settings"),
             true,
             None,
@@ -451,6 +478,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "demo: Reload Settings");
         assert_eq!(entries[0].action, "reload_settings");
+        assert_eq!(entries[0].owner_instance_id, owner(1));
         assert!(entries[0].title.starts_with("demo:"));
         // The contribution type is not a CommandId; impersonation is a
         // dispatch concern tested via CommandId::PluginContribution.
@@ -460,7 +488,13 @@ mod tests {
     fn badge_text_cap_truncates_with_marker() {
         let mut reg = ChromeRegistry::new();
         let long: String = std::iter::repeat_n('x', MAX_BADGE_CHARS + 10).collect();
-        reg.apply_status("demo", badge(&long, Tone::Accent), true, Some(key(1)));
+        reg.apply_status(
+            "demo",
+            owner(1),
+            badge(&long, Tone::Accent),
+            true,
+            Some(key(1)),
+        );
         let badges = reg.badges_for_tab(&[key(1)], false);
         assert_eq!(badges[0].text.chars().count(), MAX_BADGE_CHARS);
         assert!(badges[0].text.ends_with(sleipnir_widget::ELLIPSIS));
@@ -472,6 +506,7 @@ mod tests {
         let mut reg = ChromeRegistry::new();
         reg.apply_status(
             "demo",
+            owner(1),
             Widget::Row {
                 gap: 0,
                 children: vec![badge("a", Tone::Fg), badge("b", Tone::Fg)],
@@ -492,7 +527,13 @@ mod tests {
         let children: Vec<Widget> = (0..MAX_PALETTE_PER_PLUGIN + 3)
             .map(|i| btn(&format!("e{i}"), "act"))
             .collect();
-        reg.apply_status("demo", Widget::Col { gap: 0, children }, true, None);
+        reg.apply_status(
+            "demo",
+            owner(1),
+            Widget::Col { gap: 0, children },
+            true,
+            None,
+        );
         let entries = reg.palette_entries();
         assert_eq!(entries.len(), MAX_PALETTE_PER_PLUGIN);
         assert!(reg.drops.palette_dropped >= 3);
@@ -507,6 +548,7 @@ mod tests {
                 .collect();
             reg.apply_status(
                 &format!("p{i}"),
+                owner((i + 1) as u128),
                 Widget::Col { gap: 0, children },
                 true,
                 None,
@@ -521,7 +563,7 @@ mod tests {
     fn status_width_cap_and_layout_cache() {
         let mut reg = ChromeRegistry::new();
         let long: String = std::iter::repeat_n('x', MAX_STATUS_COLS as usize + 20).collect();
-        reg.apply_status("demo", text(&long), true, None);
+        reg.apply_status("demo", owner(1), text(&long), true, None);
         assert!(
             reg.drops.status_truncated > 0,
             "a leaf wider than the status slot must be an accounted drop"
@@ -551,15 +593,15 @@ mod tests {
     #[test]
     fn multi_plugin_order_is_plugin_id() {
         let mut reg = ChromeRegistry::new();
-        reg.apply_status("zeta", btn("Z", "z"), true, None);
-        reg.apply_status("alpha", btn("A", "a"), true, None);
+        reg.apply_status("zeta", owner(2), btn("Z", "z"), true, None);
+        reg.apply_status("alpha", owner(1), btn("A", "a"), true, None);
         let entries = reg.palette_entries();
         assert_eq!(entries[0].plugin_id, "alpha");
         assert_eq!(entries[1].plugin_id, "zeta");
         let badges_tree = {
             let mut r = ChromeRegistry::new();
-            r.apply_status("zeta", badge("z", Tone::Fg), true, Some(key(1)));
-            r.apply_status("alpha", badge("a", Tone::Fg), true, Some(key(1)));
+            r.apply_status("zeta", owner(2), badge("z", Tone::Fg), true, Some(key(1)));
+            r.apply_status("alpha", owner(1), badge("a", Tone::Fg), true, Some(key(1)));
             r.badges_for_tab(&[key(1)], true)
         };
         assert_eq!(badges_tree[0].plugin_id, "alpha");
@@ -571,6 +613,7 @@ mod tests {
         let mut reg = ChromeRegistry::new();
         reg.apply_status(
             "demo",
+            owner(10),
             Widget::Col {
                 gap: 0,
                 children: vec![badge("x", Tone::Warn), btn("Go", "go")],
@@ -581,7 +624,7 @@ mod tests {
         assert!(!reg.badges_for_tab(&[key(1)], true).is_empty());
         assert!(!reg.palette_entries().is_empty());
         let mut live = BTreeSet::new();
-        live.insert("other".into());
+        live.insert(owner(11));
         reg.sync_live(&live);
         assert!(reg.badges_for_tab(&[key(1)], true).is_empty());
         assert!(reg.palette_entries().is_empty());
@@ -603,8 +646,36 @@ mod tests {
     #[test]
     fn global_badge_only_on_active_tab() {
         let mut reg = ChromeRegistry::new();
-        reg.apply_status("demo", badge("hi", Tone::Accent), true, None);
+        reg.apply_status("demo", owner(1), badge("hi", Tone::Accent), true, None);
         assert!(reg.badges_for_tab(&[key(1)], false).is_empty());
         assert_eq!(reg.badges_for_tab(&[key(1)], true).len(), 1);
+    }
+
+    #[test]
+    fn same_plugin_id_keeps_entries_separate_by_owner_instance() {
+        let mut reg = ChromeRegistry::new();
+        reg.apply_status("demo", owner(1), btn("first", "a"), true, None);
+        reg.apply_status("demo", owner(2), btn("second", "b"), true, None);
+        let entries = reg.palette_entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.owner_instance_id, entry.action.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(owner(1), "a"), (owner(2), "b")]
+        );
+    }
+
+    #[test]
+    fn sync_live_drops_dead_owner_even_when_same_plugin_id_is_still_live() {
+        let mut reg = ChromeRegistry::new();
+        reg.apply_status("demo", owner(1), btn("first", "a"), true, None);
+        reg.apply_status("demo", owner(2), btn("second", "b"), true, None);
+        reg.sync_live(&BTreeSet::from([owner(2)]));
+        let entries = reg.palette_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].owner_instance_id, owner(2));
+        assert_eq!(entries[0].action, "b");
     }
 }

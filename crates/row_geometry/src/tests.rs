@@ -463,6 +463,15 @@ fn scrollback_eviction_drops_the_block_with_its_anchor() {
     assert_eq!(g.get(bid(2)).unwrap().anchor.line, 8);
 }
 
+#[test]
+fn explicit_anchor_invalidation_never_guesses_a_rebase() {
+    let mut g = geom(16.0, 40, &[(1, 2, 1), (2, 8, 2)]);
+    g.invalidate_anchors();
+    assert_eq!(g.blocks().count(), 0);
+    assert_eq!(g.y_for(10), 10.0 * 16.0);
+    assert_eq!(g.hit(10.0 * 16.0), cell(10));
+}
+
 // ---------------------------------------------------------------------------
 // Frozen mode pins heights
 // ---------------------------------------------------------------------------

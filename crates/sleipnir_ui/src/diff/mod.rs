@@ -107,19 +107,18 @@ impl DiffSession {
     }
 
     pub fn apply_upgrades(&mut self, files: Vec<upgrade::UpgradedFile>) {
-        for file in files {
-            if let Some(target) = self.parsed.files.get_mut(file.file_ix) {
-                target.hunks = file.hunks;
-                target.additions = file.additions;
-                target.deletions = file.deletions;
+        for mut file in files {
+            let Some(target) = self.parsed.files.get(file.file_ix) else {
+                continue;
+            };
+            if !file.matches_hunks(&target.hunks) {
+                continue;
+            }
+            if let Some(previous) = self.upgrades.get(&file.file_ix) {
+                file.upgrade.expanded.clone_from(&previous.expanded);
             }
             self.upgrades.insert(file.file_ix, file.upgrade);
         }
-        (self.additions, self.deletions) = self
-            .parsed
-            .files
-            .iter()
-            .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
         let file_ix = file_index_at(&self.file_rows, self.cursor).unwrap_or(0);
         self.rebuild_rows();
         self.cursor = self.file_rows.get(file_ix).copied().unwrap_or(0);

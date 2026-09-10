@@ -5,8 +5,8 @@ use gpui::{
     App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
     GlobalElementId, InputHandler, InteractiveElement, IntoElement, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ScrollWheelEvent,
-    StatefulInteractiveElement, TextRun, TextStyle, UTF16Selection, Window, fill, point, px,
-    relative, size,
+    StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle, UTF16Selection,
+    UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use itertools::Itertools;
 use row_geometry::{HitTarget, RowGeometry};
@@ -65,6 +65,7 @@ impl InteractiveElement for TermElement {
 
 impl StatefulInteractiveElement for TermElement {}
 
+#[derive(Clone, Copy)]
 struct LayoutPoint {
     line: i32,
     column: i32,
@@ -74,6 +75,7 @@ struct BatchedTextRun {
     start: LayoutPoint,
     text: String,
     cell_count: usize,
+    column_span: usize,
     style: TextRun,
     font_size: Pixels,
 }
@@ -85,6 +87,31 @@ impl BatchedTextRun {
             && self.style.background_color == other.background_color
             && self.style.underline == other.underline
             && self.style.strikethrough == other.strikethrough
+    }
+
+    fn force_width(&self, cell_width: Pixels) -> Option<Pixels> {
+        if cell_width > px(0.) && self.column_span > 0 {
+            Some(cell_width * self.column_span as f32)
+        } else {
+            None
+        }
+    }
+
+    fn end_column(&self) -> i32 {
+        self.start.column + (self.cell_count * self.column_span) as i32
+    }
+
+    fn can_append_run(&self, point: LayoutPoint, style: &TextRun, column_span: usize) -> bool {
+        self.can_append(style)
+            && self.start.line == point.line
+            && self.column_span == column_span
+            && self.end_column() == point.column
+    }
+
+    fn append_cell_text(&mut self, text: &str) {
+        self.text.push_str(text);
+        self.cell_count += 1;
+        self.style.len += text.len();
     }
 
     fn paint(
@@ -99,18 +126,13 @@ impl BatchedTextRun {
             origin.x + self.start.column as f32 * dimensions.cell_width,
             map.y(origin, self.start.line),
         );
-        let force_width = if dimensions.cell_width > px(0.) {
-            Some(dimensions.cell_width)
-        } else {
-            None
-        };
         if let Err(err) = window
             .text_system()
             .shape_line(
                 self.text.clone().into(),
                 self.font_size,
                 std::slice::from_ref(&self.style),
-                force_width,
+                self.force_width(dimensions.cell_width),
             )
             .paint(
                 pos,
@@ -123,6 +145,79 @@ impl BatchedTextRun {
         {
             log::error!("terminal text paint failed: {err:?}");
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TerminalCellTextStyle {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    undercurl: bool,
+    strikeout: bool,
+}
+
+impl TerminalCellTextStyle {
+    fn from_cell(cell: &Cell) -> Self {
+        Self {
+            bold: cell.is_bold(),
+            italic: cell.is_italic(),
+            underline: cell.has_underline(),
+            undercurl: cell.has_undercurl(),
+            strikeout: cell.has_strikeout(),
+        }
+    }
+}
+
+fn compose_cell_text(base: char, zerowidth: Option<&[char]>) -> String {
+    let mut text = String::new();
+    text.push(base);
+    if let Some(zerowidth) = zerowidth {
+        text.extend(zerowidth.iter().copied());
+    }
+    text
+}
+
+fn cell_column_span(next_is_wide_spacer: bool) -> usize {
+    if next_is_wide_spacer { 2 } else { 1 }
+}
+
+fn build_cell_text_run(
+    text: String,
+    columns: usize,
+    text_style: &TextStyle,
+    color: gpui::Hsla,
+    cell_style: TerminalCellTextStyle,
+) -> BatchedTextRun {
+    let mut font = text_style.font();
+    if cell_style.bold {
+        font.weight = gpui::FontWeight::BOLD;
+    }
+    if cell_style.italic {
+        font.style = gpui::FontStyle::Italic;
+    }
+
+    BatchedTextRun {
+        start: LayoutPoint { line: 0, column: 0 },
+        text: text.clone(),
+        cell_count: 1,
+        column_span: columns,
+        style: TextRun {
+            len: text.len(),
+            font,
+            color,
+            background_color: None,
+            underline: cell_style.underline.then_some(UnderlineStyle {
+                thickness: px(1.0),
+                color: None,
+                wavy: cell_style.undercurl,
+            }),
+            strikethrough: cell_style.strikeout.then_some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: None,
+            }),
+        },
+        font_size: px(0.0),
     }
 }
 
@@ -820,7 +915,7 @@ fn try_block_click(
         // Dead block UI: its buttons render but must not fire.
         return true;
     }
-    crate::plugin_runtime::push_action(&surface.plugin_id, id, hit.action, hit.arg, cx);
+    crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
     true
 }
 
@@ -964,8 +1059,12 @@ fn layout_grid(
             continue;
         }
 
-        for indexed in line {
+        let mut line = line.peekable();
+        while let Some(indexed) = line.next() {
             let cell = &indexed.cell;
+            let columns = cell_column_span(line.peek().is_some_and(|next| {
+                next.point.column == indexed.point.column + 1 && next.cell.is_wide_char_spacer()
+            }));
             let mut fg = cell.foreground();
             let mut bg = cell.background();
             if cell.is_inverse() {
@@ -979,24 +1078,24 @@ fn layout_grid(
                 .is_some_and(|sel| point_in_range(indexed.point, sel));
 
             if selected {
-                let col = indexed.point.column as i32;
-                push_bg(
-                    &mut backgrounds,
-                    display_line,
-                    col,
-                    selection_background(palette),
-                );
+                let base_col = indexed.point.column as i32;
+                let color = selection_background(palette);
+                for offset in 0..columns as i32 {
+                    push_bg(&mut backgrounds, display_line, base_col + offset, color);
+                }
             } else if !is_default_background_color(bg) {
                 let color = convert_color(&bg, palette);
-                let col = indexed.point.column as i32;
-                push_bg(&mut backgrounds, display_line, col, color);
+                let base_col = indexed.point.column as i32;
+                for offset in 0..columns as i32 {
+                    push_bg(&mut backgrounds, display_line, base_col + offset, color);
+                }
             }
 
             if cell.is_wide_char_spacer() || is_blank(cell) {
                 continue;
             }
 
-            let color = convert_color(
+            let mut color = convert_color(
                 &if selected {
                     selection_foreground(palette)
                 } else {
@@ -1004,46 +1103,34 @@ fn layout_grid(
                 },
                 palette,
             );
-            let run = TextRun {
-                len: cell.character().len_utf8(),
-                font: text_style.font(),
+            if cell.is_dim() && !selected {
+                color = color.opacity(0.55);
+            }
+            let text = compose_cell_text(cell.character(), cell.zerowidth());
+            let mut run = build_cell_text_run(
+                text.clone(),
+                columns,
+                text_style,
                 color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
+                TerminalCellTextStyle::from_cell(cell),
+            );
             let point = LayoutPoint {
                 line: display_line,
                 column: indexed.point.column as i32,
             };
+            run.start = point;
+            run.font_size = font_size;
 
             if let Some(ref mut batch) = current {
-                if batch.can_append(&run)
-                    && batch.start.line == point.line
-                    && batch.start.column + batch.cell_count as i32 == point.column
-                {
-                    batch.text.push(cell.character());
-                    batch.cell_count += 1;
-                    batch.style.len += cell.character().len_utf8();
+                if batch.can_append_run(point, &run.style, run.column_span) {
+                    batch.append_cell_text(&text);
                 } else {
                     let old = current.take().unwrap();
                     batches.push(old);
-                    current = Some(BatchedTextRun {
-                        start: point,
-                        text: cell.character().to_string(),
-                        cell_count: 1,
-                        style: run,
-                        font_size,
-                    });
+                    current = Some(run);
                 }
             } else {
-                current = Some(BatchedTextRun {
-                    start: point,
-                    text: cell.character().to_string(),
-                    cell_count: 1,
-                    style: run,
-                    font_size,
-                });
+                current = Some(run);
             }
         }
     }
@@ -1273,7 +1360,11 @@ fn paint_laid_node(
         | LaidOutKind::Sep
         | LaidOutKind::Unknown => palette.foreground,
     };
-    let text = match &node.kind {
+    let mut font = window.text_style().font();
+    if block_is_bold(&node.kind) {
+        font.weight = gpui::FontWeight::BOLD;
+    }
+    let line_texts: Vec<String> = match &node.kind {
         LaidOutKind::Sep => {
             window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.))), color));
             return;
@@ -1290,30 +1381,44 @@ fn paint_laid_node(
             ));
             return;
         }
+        LaidOutKind::Text { lines, .. } => lines.clone(),
+        LaidOutKind::Code { lines } => lines.iter().map(|line| line.text.clone()).collect(),
         kind => match block_text_for(kind) {
-            Some(text) => text,
+            Some(text) => vec![text],
             None => return,
         },
     };
-    if text.is_empty() {
+    if line_texts.is_empty() {
         return;
     }
-    let mut font = window.text_style().font();
-    if block_is_bold(&node.kind) {
-        font.weight = gpui::FontWeight::BOLD;
+    for (line_ix, text) in line_texts.into_iter().enumerate() {
+        debug_assert!(
+            !text.contains('\n'),
+            "block line painter expects one laid-out line at a time"
+        );
+        if text.is_empty() {
+            continue;
+        }
+        let style = TextRun {
+            len: text.len(),
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let _ = window
+            .text_system()
+            .shape_line(text.into(), font_size, &[style], None)
+            .paint(
+                point(x, y + line_h * line_ix as f32),
+                line_h,
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
     }
-    let style = TextRun {
-        len: text.len(),
-        font,
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let _ = window
-        .text_system()
-        .shape_line(text.into(), font_size, &[style], None)
-        .paint(point(x, y), line_h, gpui::TextAlign::Left, None, window, cx);
 }
 
 /// Use the active theme's ANSI red for an unmistakable selected-input fill.
@@ -1533,6 +1638,157 @@ mod tests {
             }),
             "only Text carries bold in the schema"
         );
+    }
+
+    #[test]
+    fn block_text_for_joins_multiline_text_and_code_with_newlines() {
+        use sleipnir_widget::{CodeLine, LaidOutKind, Tone};
+
+        let text = block_text_for(&LaidOutKind::Text {
+            lines: vec!["alpha".into(), "beta".into()],
+            tone: Tone::Fg,
+            bold: false,
+        })
+        .expect("text renders");
+        assert_eq!(text, "alpha\nbeta");
+
+        let code = block_text_for(&LaidOutKind::Code {
+            lines: vec![
+                CodeLine {
+                    text: "let x = 1;".into(),
+                    truncated: false,
+                },
+                CodeLine {
+                    text: "x += 1;".into(),
+                    truncated: false,
+                },
+            ],
+        })
+        .expect("code renders");
+        assert_eq!(code, "let x = 1;\nx += 1;");
+    }
+
+    #[test]
+    fn compose_cell_text_preserves_combining_graphemes() {
+        let text = compose_cell_text('e', Some(&['\u{301}', '\u{20dd}']));
+        assert_eq!(text, "e\u{301}\u{20dd}");
+        assert_eq!(text.chars().count(), 3);
+    }
+
+    #[test]
+    fn build_cell_text_run_maps_terminal_styles_and_wide_columns() {
+        let palette = palette_for_theme(ThemeName::Dracula, Appearance::Dark);
+        let style = TextStyle::default();
+        let run = build_cell_text_run(
+            "好\u{301}".into(),
+            cell_column_span(true),
+            &style,
+            palette.foreground.opacity(0.55),
+            TerminalCellTextStyle {
+                bold: true,
+                italic: true,
+                underline: true,
+                undercurl: true,
+                strikeout: true,
+            },
+        );
+
+        assert_eq!(run.text, "好\u{301}");
+        assert_eq!(run.cell_count, 1, "one grapheme per initial run");
+        assert_eq!(run.column_span, 2, "wide glyph must reserve two columns");
+        assert_eq!(run.style.len, "好\u{301}".len(), "len is utf8 bytes");
+        assert_eq!(run.style.font.weight, gpui::FontWeight::BOLD);
+        assert_eq!(run.style.font.style, gpui::FontStyle::Italic);
+        assert_eq!(
+            run.style.underline,
+            Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: None,
+                wavy: true,
+            })
+        );
+        assert_eq!(
+            run.style.strikethrough,
+            Some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: None,
+            })
+        );
+        assert_eq!(run.style.color, palette.foreground.opacity(0.55));
+    }
+
+    #[test]
+    fn batched_text_run_force_width_uses_per_cell_span_not_total_batch_width() {
+        let mut narrow = build_cell_text_run(
+            "ABC".into(),
+            1,
+            &TextStyle::default(),
+            gpui::Hsla::white(),
+            TerminalCellTextStyle::default(),
+        );
+        narrow.cell_count = 3;
+        assert_eq!(
+            narrow.force_width(px(8.0)),
+            Some(px(8.0)),
+            "ABC across three narrow cells must force one cell per base glyph"
+        );
+
+        let mut wide = build_cell_text_run(
+            "好界".into(),
+            2,
+            &TextStyle::default(),
+            gpui::Hsla::white(),
+            TerminalCellTextStyle::default(),
+        );
+        wide.cell_count = 2;
+        assert_eq!(
+            wide.force_width(px(8.0)),
+            Some(px(16.0)),
+            "wide glyph batches must force two cells per base glyph"
+        );
+    }
+
+    #[test]
+    fn batched_text_run_append_requires_matching_span_and_column_adjacency() {
+        let mut wide = build_cell_text_run(
+            "好".into(),
+            2,
+            &TextStyle::default(),
+            gpui::Hsla::white(),
+            TerminalCellTextStyle::default(),
+        );
+        wide.start = LayoutPoint { line: 0, column: 0 };
+
+        assert!(
+            wide.can_append_run(LayoutPoint { line: 0, column: 2 }, &wide.style, 2),
+            "a second two-column grapheme may follow immediately after the first"
+        );
+        assert!(
+            !wide.can_append_run(LayoutPoint { line: 0, column: 1 }, &wide.style, 2),
+            "wide batches must advance by occupied terminal columns"
+        );
+        assert!(
+            !wide.can_append_run(LayoutPoint { line: 0, column: 2 }, &wide.style, 1),
+            "CJK width 2 and ASCII width 1 must not share a batch"
+        );
+    }
+
+    #[test]
+    fn batched_text_run_append_preserves_combining_cluster_as_single_cell() {
+        let mut run = build_cell_text_run(
+            "e\u{301}".into(),
+            1,
+            &TextStyle::default(),
+            gpui::Hsla::white(),
+            TerminalCellTextStyle::default(),
+        );
+        run.start = LayoutPoint { line: 0, column: 4 };
+
+        assert!(
+            run.can_append_run(LayoutPoint { line: 0, column: 5 }, &run.style, 1),
+            "combining grapheme still occupies exactly one terminal cell"
+        );
+        assert_eq!(run.force_width(px(9.0)), Some(px(9.0)));
     }
 
     #[test]

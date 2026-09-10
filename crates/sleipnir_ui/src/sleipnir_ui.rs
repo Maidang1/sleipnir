@@ -136,6 +136,7 @@ pub struct TermView {
     terminal: TerminalSlot,
     focus_handle: FocusHandle,
     title: SharedString,
+    pane_key: Option<run_ledger::PaneKey>,
     /// Window-scoped font size override from AppShell zoom (not persisted).
     font_size_override: Option<Pixels>,
     /// App-reported cursor blink (DECSCUSR); used with settings for M11 fade.
@@ -253,6 +254,7 @@ impl TermView {
             terminal: TerminalSlot::Loading,
             focus_handle: cx.focus_handle(),
             title: "Sleipnir".into(),
+            pane_key: None,
             font_size_override: None,
             terminal_wants_blink: true,
             last_input_at: Instant::now(),
@@ -406,6 +408,7 @@ impl TermView {
     pub(crate) fn apply_block_render(
         &mut self,
         plugin_id: &str,
+        owner_instance_id: uuid::Uuid,
         run_id: plugin_protocol::v2::RunId,
         tree: plugin_protocol::v2::Widget,
         granted: bool,
@@ -414,16 +417,25 @@ impl TermView {
         cx: &mut Context<Self>,
     ) -> crate::plugin_block::ApplyBlock {
         use crate::plugin_block::ApplyBlock;
-        let out =
-            self.blocks
-                .apply_render(plugin_id, run_id, tree, granted, ledger_anchor, existing_id);
+        let out = self.blocks.apply_render(
+            plugin_id,
+            owner_instance_id,
+            run_id,
+            tree,
+            granted,
+            ledger_anchor,
+            existing_id,
+        );
         if matches!(out, ApplyBlock::Inserted | ApplyBlock::Replaced) {
             self.sync_blocks_to_terminal(cx);
         }
         out
     }
 
-    pub(crate) fn mark_missing_blocks_stale(&mut self, live: &std::collections::BTreeSet<String>) {
+    pub(crate) fn mark_missing_blocks_stale(
+        &mut self,
+        live: &std::collections::BTreeSet<uuid::Uuid>,
+    ) {
         use crate::plugin_surface::StaleRegistry;
         self.blocks.mark_missing_stale(live);
     }
@@ -444,15 +456,20 @@ impl TermView {
         let Some(term) = self.terminal_entity().cloned() else {
             return;
         };
-        // History belongs to the terminal; it already detected this shrink in
-        // `sync` and rebased its own geometry. Rebase the surfaces by the same
-        // amount so the push in `sync_blocks_to_terminal` below does not write
-        // stale absolute lines back over that geometry.
-        let removed = term.update(cx, |term, _| term.take_history_shrink());
-        if removed > 0 {
-            self.blocks.rebase_after_history_shrink(removed);
-        }
+        // History/reflow evidence belongs to the terminal. Consume the
+        // ordered anchor-change stream it published in `sync` so the host
+        // registry applies the same exact rebases, or invalidates outright
+        // when a guessed rebase would be unsafe.
+        let changes = term.update(cx, |term, _| term.take_block_anchor_changes());
+        let pane = self.pane_key;
+        apply_block_anchor_changes(&mut self.blocks, pane, changes, |pane, change| {
+            RunLedgerGlobal::apply_block_anchor_change_in(cx, pane, change)
+        });
         self.sync_blocks_to_terminal(cx);
+    }
+
+    pub(crate) fn bind_pane_key(&mut self, pane: run_ledger::PaneKey) {
+        self.pane_key = Some(pane);
     }
 
     fn sync_blocks_to_terminal(&mut self, cx: &mut Context<Self>) {
@@ -1403,6 +1420,30 @@ fn open_path_like_target(path: &terminal::PathLikeTarget) {
     open_existing_path(&candidate);
 }
 
+fn apply_block_anchor_changes<I, F>(
+    blocks: &mut crate::plugin_block::BlockRegistry,
+    pane: Option<run_ledger::PaneKey>,
+    changes: I,
+    mut on_change: F,
+) where
+    I: IntoIterator<Item = terminal::BlockAnchorChange>,
+    F: FnMut(run_ledger::PaneKey, &terminal::BlockAnchorChange),
+{
+    for change in changes {
+        if let Some(pane) = pane {
+            on_change(pane, &change);
+        }
+        match change {
+            terminal::BlockAnchorChange::Rebase(removed) => {
+                blocks.rebase_after_history_shrink(removed);
+            }
+            terminal::BlockAnchorChange::Invalidate => {
+                *blocks = crate::plugin_block::BlockRegistry::new();
+            }
+        }
+    }
+}
+
 /// Program used to open paths. `None` on Windows (`cmd /C start`).
 pub fn path_opener_program() -> Option<&'static str> {
     path_opener_program_for(cfg!(windows), cfg!(target_os = "linux"))
@@ -1530,6 +1571,9 @@ fn format_external_paths(paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin_block::BlockRegistry;
+    use plugin_protocol::v2::{RunId, Tone, Widget};
+    use run_ledger::{Anchor, LaunchId, Ledger, PaneKey, RunEvent};
 
     fn parse(keystroke: &str) -> Keystroke {
         Keystroke::parse(keystroke).unwrap_or_else(|err| panic!("parse {keystroke:?}: {err}"))
@@ -2101,6 +2145,101 @@ mod tests {
                 .iter()
                 .any(|src| src.contains("render_desktop_titlebar_end")),
             "desktop caption buttons must ship on the chrome band"
+        );
+    }
+
+    fn pane_key(n: u128) -> PaneKey {
+        PaneKey::from_u128(n)
+    }
+
+    fn run_id(n: u128) -> RunId {
+        RunId::from_u128(n)
+    }
+
+    fn text(s: &str) -> Widget {
+        Widget::Text {
+            s: s.into(),
+            fg: Tone::Fg,
+            bold: false,
+        }
+    }
+
+    #[test]
+    fn block_anchor_changes_apply_in_same_order_to_ledger_and_blocks() {
+        let pane = pane_key(1);
+        let other = pane_key(2);
+        let mut ledger = Ledger::new(LaunchId::new_v4());
+        ledger.apply(RunEvent::started_at(
+            pane,
+            "pane-run",
+            None,
+            0,
+            false,
+            Some(Anchor { line: 9, column: 4 }),
+        ));
+        ledger.apply(RunEvent::started_at(
+            other,
+            "other-run",
+            None,
+            1,
+            false,
+            Some(Anchor {
+                line: 12,
+                column: 2,
+            }),
+        ));
+
+        let mut blocks = BlockRegistry::new();
+        assert_eq!(
+            blocks.apply_render(
+                "demo",
+                uuid::Uuid::nil(),
+                run_id(1),
+                text("block"),
+                true,
+                Some(Anchor { line: 9, column: 4 }),
+                None,
+            ),
+            crate::plugin_block::ApplyBlock::Inserted
+        );
+        assert_eq!(blocks.iter().count(), 1);
+
+        let mut seen = Vec::new();
+        apply_block_anchor_changes(
+            &mut blocks,
+            Some(pane),
+            [
+                terminal::BlockAnchorChange::Rebase(5),
+                terminal::BlockAnchorChange::Invalidate,
+            ],
+            |pane, change| {
+                seen.push(format!("{pane}:{change:?}"));
+                match change {
+                    terminal::BlockAnchorChange::Rebase(removed) => {
+                        ledger.rebase_anchors(pane, *removed)
+                    }
+                    terminal::BlockAnchorChange::Invalidate => ledger.clear_anchors(pane),
+                }
+            },
+        );
+
+        assert_eq!(
+            seen,
+            vec![format!("{pane}:Rebase(5)"), format!("{pane}:Invalidate"),]
+        );
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot[0].anchor, None, "target pane anchor cleared");
+        assert_eq!(
+            snapshot[1].anchor,
+            Some(Anchor {
+                line: 12,
+                column: 2
+            }),
+            "other panes stay untouched"
+        );
+        assert!(
+            blocks.iter().next().is_none(),
+            "invalidate clears block registry"
         );
     }
 }

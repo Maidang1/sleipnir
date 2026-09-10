@@ -4608,6 +4608,7 @@ name = "plugin_host"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "libc",
  "log",
  "plugin_protocol",
  "run_ledger",
@@ -4616,6 +4617,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uuid",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -5947,6 +5949,7 @@ name = "sleipnir_settings"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "atomic_write",
  "collections",
  "dirs",
  "gpui",
@@ -5954,6 +5957,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

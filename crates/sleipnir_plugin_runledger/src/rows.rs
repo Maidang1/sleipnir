@@ -53,11 +53,12 @@ pub fn group_label(row: &LedgerRow, now_unix_ms: u64, current_launch: LaunchId) 
     }
 }
 
-/// Jump is only valid while the pane's scrollback still exists: same launch,
-/// not Abandoned. Inferred runs keep their jump: the host degrades it to a
-/// pane focus when there is no scrollback anchor.
+/// Jump is only valid for current-launch rows that this process observed.
+/// Finished and abandoned rows stay jumpable until the pane is closed, pruned,
+/// or cleared. Inferred runs keep their jump: the host degrades it to a pane
+/// focus when there is no scrollback anchor.
 pub fn can_jump(row: &LedgerRow, current_launch: LaunchId) -> bool {
-    row.launch_id == current_launch && row.state != RunState::Abandoned
+    row.launch_id == current_launch
 }
 
 /// `"✗ cargo test  1.2s"` — icon, command, duration.
@@ -184,9 +185,9 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_cannot_jump() {
+    fn abandoned_current_launch_rows_still_jump() {
         let current = launch();
-        assert!(!can_jump(&row(RunState::Abandoned, current, 0), current));
+        assert!(can_jump(&row(RunState::Abandoned, current, 0), current));
     }
 
     #[test]

@@ -63,6 +63,38 @@ pub enum AgentKind {
     Opencode,
 }
 
+impl AgentKind {
+    pub const ALL: [Self; 4] = [Self::Codex, Self::Claude, Self::Gemini, Self::Opencode];
+
+    /// Protocol/display name, not a host executable path.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Gemini => "gemini",
+            Self::Opencode => "opencode",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for AgentKind {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
+            .ok_or_else(|| {
+                format!("unknown agent kind {value:?}; expected codex, claude, gemini, or opencode")
+            })
+    }
+}
+
 /// Who may write into the session's visible pane. Exactly one writer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +151,18 @@ impl TaskStatus {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     List,
+    /// Continue a session summary page. Offsets are snapshots, not stable cursors.
+    ListPage {
+        offset: usize,
+    },
+    InspectPage {
+        session: AgentSessionId,
+        offset: usize,
+    },
+    /// Continue the diagnostic effect stream after the last sequence number.
+    EffectsPage {
+        cursor: u64,
+    },
     Launch {
         kind: AgentKind,
         cwd: String,
@@ -135,6 +179,11 @@ pub enum Request {
     /// Immediate status snapshot. The client owns any real waiting.
     Wait {
         task: CoordinationTaskId,
+    },
+    /// Continue a bounded wait result page after `offset` characters.
+    WaitPage {
+        task: CoordinationTaskId,
+        offset: usize,
     },
     Interrupt {
         session: AgentSessionId,
@@ -202,6 +251,8 @@ pub enum Response {
     },
     Agents {
         agents: Vec<SessionSnapshot>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_offset: Option<usize>,
     },
     LaunchAccepted {
         session: AgentSessionId,
@@ -221,6 +272,9 @@ pub enum Response {
         /// Last `report_awaiting_human` note, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Continue the result text at this character offset, if needed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_result_offset: Option<usize>,
     },
     ReportedRunning {
         task: CoordinationTaskId,
@@ -251,6 +305,8 @@ pub enum Response {
     },
     Effects {
         effects: Vec<Effect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<u64>,
     },
     Facts {
         facts: Vec<Fact>,
@@ -351,6 +407,9 @@ pub enum EffectBody {
     },
     InterruptRequested {
         session: AgentSessionId,
+        /// The assignment targeted when the interrupt was accepted, never a later task.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<CoordinationTaskId>,
     },
     FocusRequested {
         session: AgentSessionId,
@@ -375,7 +434,7 @@ impl EffectBody {
         match self {
             Self::LaunchRequested { session, .. }
             | Self::PromptRequested { session, .. }
-            | Self::InterruptRequested { session }
+            | Self::InterruptRequested { session, .. }
             | Self::FocusRequested { session }
             | Self::CloseRequested { session } => *session,
         }
@@ -447,6 +506,8 @@ pub struct SessionSnapshot {
     pub pane: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<TaskSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_task_offset: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,6 +590,9 @@ mod tests {
         let task = tid(2);
         let cases = [
             Request::List,
+            Request::ListPage { offset: 3 },
+            Request::InspectPage { session, offset: 4 },
+            Request::EffectsPage { cursor: 5 },
             Request::Launch {
                 kind: AgentKind::Codex,
                 cwd: "/work".into(),
@@ -540,6 +604,7 @@ mod tests {
                 text: "do the thing".into(),
             },
             Request::Wait { task },
+            Request::WaitPage { task, offset: 6 },
             Request::Interrupt { session },
             Request::Focus { session },
             Request::Inspect { session },
@@ -608,6 +673,20 @@ mod tests {
                 "{op} must not decode"
             );
         }
+    }
+
+    #[test]
+    fn agent_kind_parse_and_display_share_wire_metadata() {
+        for (kind, name) in [
+            (AgentKind::Codex, "codex"),
+            (AgentKind::Claude, "claude"),
+            (AgentKind::Gemini, "gemini"),
+            (AgentKind::Opencode, "opencode"),
+        ] {
+            assert_eq!(kind.to_string(), name);
+            assert_eq!(name.parse::<AgentKind>().unwrap(), kind);
+        }
+        assert!("not-an-agent".parse::<AgentKind>().is_err());
     }
 
     #[test]
@@ -681,6 +760,7 @@ mod tests {
                 terminal: true,
                 result: Some("files written".into()),
                 detail: None,
+                next_result_offset: None,
             },
         };
         let line = encode_response_line(&wait).unwrap();
@@ -759,6 +839,7 @@ mod tests {
                     open: true,
                     pane: Some(Uuid::from_u128(9)),
                     tasks: vec![],
+                    next_task_offset: None,
                 },
             },
         };

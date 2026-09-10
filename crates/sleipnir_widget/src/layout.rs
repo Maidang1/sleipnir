@@ -14,7 +14,7 @@ use crate::cells::{
     attribution_label, bar_filled, cell_cols, fit_cols, spark_levels, take_chars, wrap_text,
 };
 use crate::geom::{CellPos, CellRect};
-use plugin_protocol::v2::{MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Tone, TreeStats, Widget, measure};
+use plugin_protocol::v2::{MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Tone, TreeStats, Widget};
 
 /// A laid-out widget surface: the plugin tree plus the renderer-owned
 /// attribution band beneath it.
@@ -28,7 +28,8 @@ pub struct Layout {
     pub width: u32,
     /// `root.height + attribution.height`. The Block row count for ADR-0018.
     pub height: u32,
-    /// [`measure`] of the *input* tree, before truncation.
+    /// Input tree statistics, stopping at the first node/depth budget violation.
+    /// Exact for in-budget trees; over-budget counts are bounded lower bounds.
     pub stats: TreeStats,
     /// True when the node/depth budget cut the tree.
     pub truncated: bool,
@@ -159,7 +160,7 @@ impl Budget {
 /// cannot be shown, and leaves must stay visible.
 pub fn layout(tree: &Widget, available_cols: u16, plugin_id: &str) -> Layout {
     let width = u32::from(available_cols).max(1);
-    let stats = measure(tree);
+    let stats = bounded_measure(tree);
     let mut budget = Budget::new();
     let root = layout_node(tree, CellPos::ORIGIN, width, MAX_WIDGET_DEPTH, &mut budget);
     let (plugin_id, label) = attribution_label(plugin_id, width);
@@ -177,6 +178,27 @@ pub fn layout(tree: &Widget, available_cols: u16, plugin_id: &str) -> Layout {
         stats,
         truncated: budget.truncated,
     }
+}
+
+fn bounded_measure(tree: &Widget) -> TreeStats {
+    fn visit(tree: &Widget, depth: usize, stats: &mut TreeStats) -> bool {
+        stats.nodes += 1;
+        stats.depth = stats.depth.max(depth);
+        if !stats.within_budget() {
+            return false;
+        }
+        if let Widget::Col { children, .. } | Widget::Row { children, .. } = tree {
+            for child in children {
+                if !visit(child, depth + 1, stats) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+    let mut stats = TreeStats { nodes: 0, depth: 0 };
+    visit(tree, 1, &mut stats);
+    stats
 }
 
 fn layout_node(
@@ -240,9 +262,7 @@ fn layout_col(
             budget,
         );
         let cut = matches!(kid.kind, LaidOutKind::Truncated);
-        if !cut {
-            y = kid.rect.bottom();
-        }
+        y = kid.rect.bottom();
         kids.push(kid);
         if cut {
             break;
@@ -266,7 +286,16 @@ fn layout_row(
 ) -> LaidOut {
     let gap = u32::from(gap);
     let child_depth = depth_left.saturating_sub(1);
-    let widths = allocate_row_widths(children, avail, gap);
+    // Even minimum-width children need one cell plus their inter-child gap.
+    // Do not inspect/allocate intrinsic widths for a suffix we cannot render.
+    let geometric_limit = ((u64::from(avail) + u64::from(gap)) / (u64::from(gap) + 1)) as usize;
+    let budget_limit = if child_depth == 0 {
+        1
+    } else {
+        budget.nodes_left.saturating_add(1)
+    };
+    let candidates = &children[..children.len().min(geometric_limit).min(budget_limit)];
+    let widths = allocate_row_widths(candidates, avail, gap, children.len() > geometric_limit);
     let dropped = widths.len() < children.len();
     let mut kids = Vec::new();
     let mut x = origin.col;
@@ -357,7 +386,7 @@ fn chip_width(s: &str, avail: u32) -> u32 {
     w.clamp(1, avail.max(1))
 }
 
-fn allocate_row_widths(children: &[Widget], avail: u32, gap: u32) -> Vec<u32> {
+fn allocate_row_widths(children: &[Widget], avail: u32, gap: u32, geometry_cut: bool) -> Vec<u32> {
     let n = children.len();
     if n == 0 {
         return Vec::new();
@@ -365,7 +394,9 @@ fn allocate_row_widths(children: &[Widget], avail: u32, gap: u32) -> Vec<u32> {
     let mut widths: Vec<u32> = children
         .iter()
         .map(|c| {
-            if is_flex(c) {
+            // The original shrink-from-right rule exhausts every reducible
+            // width before dropping a geometrically impossible suffix.
+            if geometry_cut || is_flex(c) {
                 1
             } else {
                 intrinsic_width(c, avail).max(1)
@@ -401,36 +432,22 @@ fn allocate_row_widths(children: &[Widget], avail: u32, gap: u32) -> Vec<u32> {
 }
 
 fn fit_widths(widths: &mut Vec<u32>, avail: u32, gap: u32) {
-    loop {
-        let n = widths.len();
-        if n == 0 {
-            return;
+    let gaps = u64::from(gap) * widths.len().saturating_sub(1) as u64;
+    let sum: u64 = widths.iter().map(|&width| u64::from(width)).sum();
+    let mut excess = (gaps + sum).saturating_sub(u64::from(avail));
+    for width in widths.iter_mut().rev() {
+        let cut = u64::from(width.saturating_sub(1)).min(excess) as u32;
+        *width -= cut;
+        excess -= u64::from(cut);
+    }
+    while excess > 0 && widths.len() > 1 {
+        let width = widths.pop().unwrap();
+        excess = excess.saturating_sub(u64::from(width) + u64::from(gap));
+    }
+    if excess > 0 {
+        if let Some(width) = widths.first_mut() {
+            *width = avail.max(1);
         }
-        let gaps = gap.saturating_mul((n - 1) as u32);
-        let sum = widths.iter().copied().fold(0, u32::saturating_add);
-        let mut excess = gaps.saturating_add(sum).saturating_sub(avail);
-        if excess == 0 {
-            return;
-        }
-        // Shrink from the right, taking as much as possible from each column
-        // before moving left, so the order matches one-cell-at-a-time cuts.
-        for w in widths.iter_mut().rev() {
-            if excess == 0 {
-                break;
-            }
-            let cut = w.saturating_sub(1).min(excess);
-            *w -= cut;
-            excess -= cut;
-        }
-        if excess == 0 {
-            return;
-        }
-        if n > 1 {
-            widths.pop();
-            continue;
-        }
-        widths[0] = avail.max(1);
-        return;
     }
 }
 

@@ -53,6 +53,12 @@ pub(super) type AlacrittyCell = AlacCell;
 pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
 pub(super) type AlacrittyHyperlink = AlacHyperlink;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DamageKind {
+    Full,
+    Partial,
+}
+
 #[derive(Clone)]
 pub(super) struct ZedListener(UnboundedSender<PtyEvent>);
 
@@ -849,6 +855,15 @@ pub(super) fn visible_screen_text(term: &Term<ZedListener>) -> String {
 
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
+}
+
+pub(super) fn take_damage_kind(term: &mut Term<ZedListener>) -> DamageKind {
+    let kind = match term.damage() {
+        alacritty_terminal::term::TermDamage::Full => DamageKind::Full,
+        alacritty_terminal::term::TermDamage::Partial(_) => DamageKind::Partial,
+    };
+    term.reset_damage();
+    kind
 }
 
 pub(super) fn screen_lines(term: &Term<ZedListener>) -> usize {

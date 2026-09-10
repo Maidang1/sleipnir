@@ -10,7 +10,6 @@ use sleipnir_settings::{TerminalPalette, TerminalSettings};
 use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview, TabMenuState};
 use crate::chrome::agent::{self, AgentKind};
 use crate::chrome::pixel;
-use crate::chrome::workspace::{WorkspaceKey, group_tabs};
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::run_ledger_global::RunLedgerGlobal;
 
@@ -28,13 +27,6 @@ impl AppShell {
         let active = self.active;
         let hovered = self.hovered_tab;
 
-        let keys: Vec<WorkspaceKey> = self
-            .tabs
-            .iter()
-            .map(|tab| WorkspaceKey::of(tab.workspace_cwd(cx).as_deref()))
-            .collect();
-        let groups = group_tabs(keys.into_iter().enumerate());
-
         let mut chips: Vec<gpui::AnyElement> = Vec::new();
         // Drop-target bar is only meaningful while a drag is actually live;
         // stale state from an aborted drag must never paint.
@@ -43,41 +35,36 @@ impl AppShell {
         } else {
             None
         };
-        for (_key, indices) in groups {
-            for ix in indices {
-                let Some(tab) = self.tabs.get(ix) else {
-                    continue;
-                };
-                let keys = tab.tree.all_pane_keys();
-                let plugin_badges = self.plugin_badges_for_tab(&keys, ix == active);
-                // The Failed wash is the ledger's own verdict; plugin badges
-                // can never set or suppress it.
-                let failed = tab_has_failed_attention(tab, cx);
-                let agent = if show_icons {
-                    agent::identify_tab(tab, cx)
-                } else {
-                    None
-                };
-                chips.push(render_tab_chip(
-                    tab,
-                    ix,
-                    ix == active,
-                    hovered == Some(tab.id),
-                    drop_target == Some(tab.id),
-                    self.bell_flash_tabs.contains(&tab.id),
-                    self.rename
-                        .as_ref()
-                        .filter(|state| state.tab_id == tab.id)
-                        .map(|state| state.buffer.clone()),
-                    plugin_badges,
-                    failed,
-                    agent,
-                    tokens,
-                    geo,
-                    &palette,
-                    cx,
-                ));
-            }
+        for (ix, tab) in self.tabs.iter().enumerate() {
+            let keys = tab.tree.all_pane_keys();
+            let plugin_badges = self.plugin_badges_for_tab(&keys, ix == active);
+            // The Failed wash is the ledger's own verdict; plugin badges
+            // can never set or suppress it.
+            let failed = tab_has_failed_attention(tab, cx);
+            let agent = if show_icons {
+                agent::identify_tab(tab, cx)
+            } else {
+                None
+            };
+            chips.push(render_tab_chip(
+                tab,
+                ix,
+                ix == active,
+                hovered == Some(tab.id),
+                drop_target == Some(tab.id),
+                self.bell_flash_tabs.contains(&tab.id),
+                self.rename
+                    .as_ref()
+                    .filter(|state| state.tab_id == tab.id)
+                    .map(|state| state.buffer.clone()),
+                plugin_badges,
+                failed,
+                agent,
+                tokens,
+                geo,
+                &palette,
+                cx,
+            ));
         }
 
         div()

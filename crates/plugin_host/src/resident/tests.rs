@@ -229,6 +229,16 @@ fn wait_until(mut pred: impl FnMut() -> bool, what: &str) {
     panic!("{what} never became true");
 }
 
+fn wait_until_value<T>(mut value: impl FnMut() -> Option<T>, what: &str) -> T {
+    for _ in 0..1_000_000 {
+        if let Some(value) = value() {
+            return value;
+        }
+        thread::yield_now();
+    }
+    panic!("{what} never became true");
+}
+
 #[test]
 fn handshake_success() {
     let env = Env::new();
@@ -537,9 +547,14 @@ fn closing_supervisor_revokes_live_and_future_connections() {
     let env = Env::new();
     let plugin = env.spawn_plugin(handshake_and_echo);
     let session = env.sup.connect(&spec()).unwrap();
+    let instance_id = session.instance_id();
     env.sup.close();
     assert!(session.is_dead());
     assert!(!env.sup.has_grant("demo", Capability::ReadCwd));
+    assert!(
+        !env.sup
+            .has_grant_for_instance(instance_id, Capability::ReadCwd)
+    );
     assert!(matches!(
         env.sup.connect(&spec()),
         Err(SessionError::Disconnected)
@@ -587,6 +602,9 @@ fn monitor_and_grant_reads_do_not_wait_for_process_teardown() {
     impl PluginProcess for SlowProcess {
         fn pid(&self) -> Option<u32> {
             self.inner.pid()
+        }
+        fn cancel_io(&mut self) -> std::io::Result<()> {
+            self.inner.cancel_io()
         }
         fn kill(&mut self) -> std::io::Result<()> {
             self.inner.kill()
@@ -642,7 +660,12 @@ fn monitor_and_grant_reads_do_not_wait_for_process_teardown() {
         let supervisor = &supervisor;
         scope.spawn(move || {
             let snapshots = supervisor.snapshots();
-            let granted = supervisor.has_grant("demo", Capability::ReadCwd);
+            let granted = supervisor
+                .live_instances()
+                .first()
+                .is_some_and(|(_, instance_id)| {
+                    supervisor.has_grant_for_instance(*instance_id, Capability::ReadCwd)
+                });
             monitor_tx.send((snapshots, granted)).unwrap();
         });
         let observed = monitor_rx.recv_timeout(Duration::from_secs(2));
@@ -864,8 +887,13 @@ fn restart_backoff_caps_at_ceiling_then_disables() {
 fn idle_eviction_shuts_down_resident_plugin() {
     let env = Env::new();
     let plugin = env.spawn_plugin(handshake_and_echo);
-    env.sup.connect(&spec()).unwrap();
+    let session = env.sup.connect(&spec()).unwrap();
+    let instance_id = session.instance_id();
     assert!(env.sup.snapshot("demo").is_some());
+    assert!(
+        env.sup
+            .has_grant_for_instance(instance_id, Capability::ReadCwd)
+    );
     env.clock.advance(1_000);
     env.sup.tick();
     assert!(
@@ -875,6 +903,11 @@ fn idle_eviction_shuts_down_resident_plugin() {
                 .snapshot("demo")
                 .is_some_and(|s| s.state != ConnectionState::Live)
     );
+    assert!(
+        !env.sup
+            .has_grant_for_instance(instance_id, Capability::ReadCwd)
+    );
+    assert!(env.sup.live_instances().is_empty());
     // A fresh connect after eviction must handshake again.
     env.clock.advance(10_000);
     let plugin2 = env.spawn_plugin(handshake_and_echo);
@@ -916,6 +949,438 @@ fn resident_reuses_connection_ondemand_does_not() {
 
     drop(env.sup);
     let _ = plugin.join();
+}
+
+#[test]
+fn concurrent_ondemand_calls_and_replies_route_by_exact_session_identity() {
+    let env = Env::new();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let spawn = |label: &'static str| {
+        let ready_tx = ready_tx.clone();
+        let reply_tx = reply_tx.clone();
+        env.spawn_plugin(move |ep| {
+            ep.handshake(&good_ready()).unwrap();
+            let HostMessage::Invoke { id: invoke_id, .. } = ep.recv().unwrap() else {
+                panic!("expected invoke");
+            };
+            let call_id = if label == "a" { 101 } else { 202 };
+            ep.send(&PluginMessage::Call {
+                id: call_id,
+                call: HostCall::ListPanes,
+            })
+            .unwrap();
+            ready_tx.send(label).unwrap();
+            let HostMessage::Reply { id, result } = ep.recv().unwrap() else {
+                panic!("expected reply");
+            };
+            reply_tx.send((label, id, result)).unwrap();
+            ep.send(&invoked(invoke_id)).unwrap();
+            serve_until_eof(ep);
+        })
+    };
+    let plugin_a = spawn("a");
+    let plugin_b = spawn("b");
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+
+    let pending_a = env
+        .sup
+        .begin_invoke(&spec, "run-a", InvokeContext::default())
+        .unwrap();
+    let pending_b = env
+        .sup
+        .begin_invoke(&spec, "run-b", InvokeContext::default())
+        .unwrap();
+
+    ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let mut inbound = Vec::new();
+    wait_until(
+        || {
+            inbound.extend(env.sup.drain_all_inbound());
+            inbound.len() == 2
+        },
+        "expected one host call from each on-demand session",
+    );
+    assert_eq!(inbound.len(), 2, "expected one host call from each invoke");
+    assert!(
+        inbound.iter().all(|envelope| envelope.plugin_id == "demo"
+            && matches!(
+                envelope.message,
+                Inbound::Call {
+                    call: HostCall::ListPanes,
+                    ..
+                }
+            )),
+        "unexpected inbound envelopes: {inbound:?}"
+    );
+    assert_ne!(inbound[0].instance_id, inbound[1].instance_id);
+
+    for envelope in &inbound {
+        let Inbound::Call { id, .. } = envelope.message else {
+            panic!("expected call envelope");
+        };
+        env.sup
+            .reply_to_instance(
+                envelope.instance_id,
+                id,
+                v2::HostCallResult::Error {
+                    message: format!("reply-{}", id),
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        pending_a.wait(Duration::from_secs(2)).unwrap(),
+        Output::Ignore
+    );
+    assert_eq!(
+        pending_b.wait(Duration::from_secs(2)).unwrap(),
+        Output::Ignore
+    );
+    wait_until(
+        || env.sup.live_instances().is_empty(),
+        "on-demand sessions should unregister after invoke completion",
+    );
+
+    let mut replies = vec![
+        reply_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        reply_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    ];
+    replies.sort_by_key(|(label, _, _)| *label);
+    assert!(matches!(
+        replies.as_slice(),
+        [
+            ("a", 101, v2::HostCallResult::Error { .. }),
+            ("b", 202, v2::HostCallResult::Error { .. })
+        ]
+    ));
+
+    plugin_a.join().unwrap();
+    plugin_b.join().unwrap();
+}
+
+#[test]
+fn on_demand_grants_are_checked_per_active_instance() {
+    let env = Env::new();
+    let plugin = env.spawn_plugin(|ep| {
+        ep.handshake(&ready(
+            v2::PROTOCOL_VERSION,
+            vec![Capability::ReadCwd, Capability::HostCallListPanes],
+        ))
+        .unwrap();
+        let HostMessage::Invoke { id, .. } = ep.recv().unwrap() else {
+            panic!("expected invoke");
+        };
+        ep.send(&PluginMessage::Call {
+            id: 77,
+            call: HostCall::ListPanes,
+        })
+        .unwrap();
+        ep.send(&invoked(id)).unwrap();
+        serve_until_eof(ep);
+    });
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    spec.declared_capabilities
+        .insert(Capability::HostCallListPanes);
+    spec.granted = vec![Capability::ReadCwd, Capability::HostCallListPanes];
+
+    let pending = env
+        .sup
+        .begin_invoke(&spec, "run", InvokeContext::default())
+        .unwrap();
+    let envelope = loop {
+        if let Some(envelope) = env.sup.drain_all_inbound().into_iter().next() {
+            break envelope;
+        }
+        thread::yield_now();
+    };
+    assert!(matches!(
+        envelope.message,
+        Inbound::Call {
+            id: 77,
+            call: HostCall::ListPanes,
+        }
+    ));
+    assert!(
+        env.sup
+            .has_grant_for_instance(envelope.instance_id, Capability::HostCallListPanes)
+    );
+    assert!(!env.sup.has_grant("demo", Capability::HostCallListPanes));
+
+    drop(envelope);
+    assert_eq!(
+        pending.wait(Duration::from_secs(2)).unwrap(),
+        Output::Ignore
+    );
+    plugin.join().unwrap();
+}
+
+#[test]
+fn shutdown_all_cancels_all_active_ondemand_sessions() {
+    let env = Env::new();
+    let (invoked_tx, invoked_rx) = mpsc::channel();
+    let plugin_a = env.spawn_plugin({
+        let invoked_tx = invoked_tx.clone();
+        move |ep| {
+            ep.handshake(&good_ready()).unwrap();
+            let HostMessage::Invoke { .. } = ep.recv().unwrap() else {
+                panic!("expected invoke");
+            };
+            invoked_tx.send("a").unwrap();
+            serve_until_eof(ep);
+        }
+    });
+    let plugin_b = env.spawn_plugin(move |ep| {
+        ep.handshake(&good_ready()).unwrap();
+        let HostMessage::Invoke { .. } = ep.recv().unwrap() else {
+            panic!("expected invoke");
+        };
+        invoked_tx.send("b").unwrap();
+        serve_until_eof(ep);
+    });
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    let pending_a = env
+        .sup
+        .begin_invoke(&spec, "run-a", InvokeContext::default())
+        .unwrap();
+    let pending_b = env
+        .sup
+        .begin_invoke(&spec, "run-b", InvokeContext::default())
+        .unwrap();
+
+    let observed = vec![
+        invoked_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        invoked_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    ];
+    assert!(
+        observed.contains(&"a") && observed.contains(&"b"),
+        "expected both plugin endpoints to observe invoke before shutdown_all: {observed:?}"
+    );
+    wait_until(
+        || env.sup.live_instances().len() == 2,
+        "both on-demand sessions should be active before shutdown_all",
+    );
+    env.sup.shutdown_all();
+    assert_eq!(
+        pending_a.wait(Duration::from_secs(2)).unwrap_err(),
+        SessionError::Disconnected
+    );
+    assert_eq!(
+        pending_b.wait(Duration::from_secs(2)).unwrap_err(),
+        SessionError::Disconnected
+    );
+    assert!(env.sup.live_instances().is_empty());
+
+    plugin_a.join().unwrap();
+    plugin_b.join().unwrap();
+}
+
+#[test]
+fn close_rejects_late_active_registration_from_inflight_ondemand_connect() {
+    let env = Env::new();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finish_tx, finish_rx) = mpsc::channel();
+    let plugin = env.spawn_plugin(move |endpoint| {
+        assert!(matches!(
+            endpoint.recv().unwrap(),
+            HostMessage::Hello { .. }
+        ));
+        started_tx.send(()).unwrap();
+        finish_rx.recv().unwrap();
+        endpoint.send(&good_ready()).unwrap();
+        serve_until_eof(endpoint);
+    });
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    thread::scope(|scope| {
+        let pending = scope.spawn(|| env.sup.begin_invoke(&spec, "run", InvokeContext::default()));
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        env.sup.close();
+        finish_tx.send(()).unwrap();
+        assert!(matches!(
+            pending.join().unwrap(),
+            Err(SessionError::Disconnected)
+        ));
+    });
+    assert!(env.sup.live_instances().is_empty());
+    assert!(env.sup.drain_all_inbound().is_empty());
+    plugin.join().unwrap();
+}
+
+#[test]
+fn disconnect_cancels_all_active_sessions_for_plugin_id() {
+    let env = Env::new();
+    let (invoked_tx, invoked_rx) = mpsc::channel();
+    let plugin_a = env.spawn_plugin({
+        let invoked_tx = invoked_tx.clone();
+        move |ep| {
+            ep.handshake(&good_ready()).unwrap();
+            let HostMessage::Invoke { .. } = ep.recv().unwrap() else {
+                panic!("expected invoke");
+            };
+            invoked_tx.send("a").unwrap();
+            serve_until_eof(ep);
+        }
+    });
+    let plugin_b = env.spawn_plugin(move |ep| {
+        ep.handshake(&good_ready()).unwrap();
+        let HostMessage::Invoke { .. } = ep.recv().unwrap() else {
+            panic!("expected invoke");
+        };
+        invoked_tx.send("b").unwrap();
+        serve_until_eof(ep);
+    });
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    let pending_a = env
+        .sup
+        .begin_invoke(&spec, "run-a", InvokeContext::default())
+        .unwrap();
+    let pending_b = env
+        .sup
+        .begin_invoke(&spec, "run-b", InvokeContext::default())
+        .unwrap();
+
+    let observed = vec![
+        invoked_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        invoked_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    ];
+    assert!(
+        observed.contains(&"a") && observed.contains(&"b"),
+        "expected both plugin endpoints to observe invoke before disconnect: {observed:?}"
+    );
+    wait_until(
+        || env.sup.live_instances().len() == 2,
+        "both on-demand sessions should be active before disconnect",
+    );
+    let sessions = env.sup.disconnect("demo");
+    assert_eq!(sessions.len(), 2);
+    for session in &sessions {
+        session.teardown(env.sup.config().shutdown_grace);
+    }
+    assert!(env.sup.live_instances().is_empty());
+    assert_eq!(
+        pending_a.wait(Duration::from_secs(2)).unwrap_err(),
+        SessionError::Disconnected
+    );
+    assert_eq!(
+        pending_b.wait(Duration::from_secs(2)).unwrap_err(),
+        SessionError::Disconnected
+    );
+
+    plugin_a.join().unwrap();
+    plugin_b.join().unwrap();
+}
+
+#[test]
+fn same_plugin_same_host_call_id_does_not_swap_replies_between_instances() {
+    let env = Env::new();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let spawn = |label: &'static str| {
+        let ready_tx = ready_tx.clone();
+        let reply_tx = reply_tx.clone();
+        env.spawn_plugin(move |ep| {
+            ep.handshake(&good_ready()).unwrap();
+            let HostMessage::Invoke { id: invoke_id, .. } = ep.recv().unwrap() else {
+                panic!("expected invoke");
+            };
+            ep.send(&PluginMessage::Call {
+                id: 500,
+                call: HostCall::ListPanes,
+            })
+            .unwrap();
+            ready_tx.send(label).unwrap();
+            let HostMessage::Reply { id, result } = ep.recv().unwrap() else {
+                panic!("expected reply");
+            };
+            reply_tx.send((label, id, result)).unwrap();
+            ep.send(&invoked(invoke_id)).unwrap();
+            serve_until_eof(ep);
+        })
+    };
+    let plugin_a = spawn("a");
+    let plugin_b = spawn("b");
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    let pending_a = env
+        .sup
+        .begin_invoke(&spec, "run-a", InvokeContext::default())
+        .unwrap();
+    let pending_b = env
+        .sup
+        .begin_invoke(&spec, "run-b", InvokeContext::default())
+        .unwrap();
+
+    ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let mut inbound = Vec::new();
+    wait_until(
+        || {
+            inbound.extend(env.sup.drain_all_inbound());
+            inbound.len() == 2
+        },
+        "expected one host call from each on-demand session",
+    );
+    assert_eq!(inbound.len(), 2);
+    assert!(inbound.iter().all(|envelope| matches!(
+        envelope.message,
+        Inbound::Call {
+            id: 500,
+            call: HostCall::ListPanes,
+        }
+    )));
+    assert_ne!(inbound[0].instance_id, inbound[1].instance_id);
+
+    for envelope in &inbound {
+        env.sup
+            .reply_to_instance(
+                envelope.instance_id,
+                500,
+                v2::HostCallResult::Error {
+                    message: format!("reply-{}", envelope.instance_id),
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        pending_a.wait(Duration::from_secs(2)).unwrap(),
+        Output::Ignore
+    );
+    assert_eq!(
+        pending_b.wait(Duration::from_secs(2)).unwrap(),
+        Output::Ignore
+    );
+
+    let mut replies = vec![
+        reply_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        reply_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    ];
+    replies.sort_by_key(|(label, _, _)| *label);
+    assert!(matches!(
+        replies.as_slice(),
+        [
+            ("a", 500, v2::HostCallResult::Error { .. }),
+            ("b", 500, v2::HostCallResult::Error { .. })
+        ]
+    ));
+
+    plugin_a.join().unwrap();
+    plugin_b.join().unwrap();
 }
 
 #[test]
@@ -1126,6 +1591,75 @@ fn snapshots_report_inflight_and_restarts() {
 }
 
 #[test]
+fn dropping_pending_invoke_removes_waiter_without_stopping_resident() {
+    let env = Env::new();
+    let plugin = env.spawn_plugin(|ep| {
+        ep.handshake(&good_ready()).unwrap();
+        let HostMessage::Invoke { .. } = ep.recv().unwrap() else {
+            panic!("expected invoke");
+        };
+        let HostMessage::Invoke { id, .. } = ep.recv().unwrap() else {
+            panic!("expected second invoke");
+        };
+        ep.send(&invoked(id)).unwrap();
+        serve_until_eof(ep);
+    });
+
+    let spec = spec();
+    let session = env.sup.connect(&spec).unwrap();
+    let pending = env
+        .sup
+        .begin_invoke(&spec, "run", InvokeContext::default())
+        .unwrap();
+    wait_until(
+        || env.sup.snapshot("demo").is_some_and(|s| s.in_flight == 1),
+        "resident invoke should be registered as in-flight",
+    );
+    drop(pending);
+    wait_until(
+        || env.sup.snapshot("demo").is_some_and(|s| s.in_flight == 0),
+        "dropping the waiter must remove it from the session",
+    );
+    assert!(!session.is_dead(), "resident session must stay alive");
+
+    env.sup
+        .invoke(&spec, "run-again", InvokeContext::default())
+        .unwrap();
+    env.sup.shutdown("demo");
+    plugin.join().unwrap();
+}
+
+#[test]
+fn dropping_pending_invoke_cleans_up_ondemand_session() {
+    let env = Env::new();
+    let plugin = env.spawn_plugin(|ep| {
+        ep.handshake(&good_ready()).unwrap();
+        match ep.recv() {
+            Ok(HostMessage::Invoke { .. }) | Err(_) => {}
+            Ok(other) => panic!("expected invoke, got {other:?}"),
+        }
+    });
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    let pending = env
+        .sup
+        .begin_invoke(&spec, "run", InvokeContext::default())
+        .unwrap();
+    wait_until(
+        || env.sup.live_instances().len() == 1,
+        "on-demand invoke should register an active session",
+    );
+    drop(pending);
+    wait_until(
+        || env.sup.live_instances().is_empty(),
+        "dropping an on-demand waiter must clean up the active session",
+    );
+
+    plugin.join().unwrap();
+}
+
+#[test]
 fn snapshots_hold_at_most_one_entry_per_plugin_id() {
     // Load-bearing for the shell's staleness sweep
     // (`app_shell/plugins.rs::poll_plugin_inbound`): it derives the live set
@@ -1181,6 +1715,150 @@ fn snapshots_hold_at_most_one_entry_per_plugin_id() {
     env.sup.shutdown_all();
     let _ = dead.join();
     let _ = live_plugin.join();
+}
+
+#[test]
+fn snapshots_include_active_ondemand_instance_while_it_is_alive() {
+    let env = Env::new();
+    let (invoked_tx, invoked_rx) = mpsc::channel();
+    let plugin = env.spawn_plugin(move |ep| {
+        ep.handshake(&good_ready()).unwrap();
+        let HostMessage::Invoke { .. } = ep.recv().unwrap() else {
+            panic!("expected invoke");
+        };
+        invoked_tx.send(()).unwrap();
+        serve_until_eof(ep);
+    });
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    let pending = env
+        .sup
+        .begin_invoke(&spec, "run", InvokeContext::default())
+        .unwrap();
+
+    invoked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let instance_id = wait_until_value(
+        || {
+            env.sup
+                .live_instances()
+                .into_iter()
+                .next()
+                .map(|(_, instance_id)| instance_id)
+        },
+        "on-demand instance should become active",
+    );
+    let snaps = env.sup.snapshots();
+    assert!(
+        snaps
+            .iter()
+            .any(|snap| snap.instance_id == instance_id && snap.state == ConnectionState::Live),
+        "expected live on-demand instance in snapshots: {snaps:?}"
+    );
+
+    drop(pending);
+    wait_until(
+        || env.sup.live_instances().is_empty(),
+        "dropping on-demand waiter should unregister the active instance",
+    );
+    plugin.join().unwrap();
+}
+
+#[test]
+fn push_action_targets_exact_active_instance_for_ondemand_plugin() {
+    let env = Env::new();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let spawn = |label: &'static str| {
+        let ready_tx = ready_tx.clone();
+        let event_tx = event_tx.clone();
+        env.spawn_plugin(move |ep| {
+            let HostMessage::Hello {
+                plugin_instance_id, ..
+            } = ep.handshake(&good_ready()).unwrap()
+            else {
+                panic!("expected hello");
+            };
+            let HostMessage::Invoke { .. } = ep.recv().unwrap() else {
+                panic!("expected invoke");
+            };
+            ready_tx.send((label, plugin_instance_id)).unwrap();
+            loop {
+                match ep.recv() {
+                    Ok(HostMessage::Action {
+                        block_id,
+                        action,
+                        arg,
+                        ..
+                    }) => {
+                        event_tx
+                            .send((label, plugin_instance_id, Some((block_id, action, arg))))
+                            .unwrap();
+                    }
+                    Ok(HostMessage::Shutdown) | Err(_) => {
+                        event_tx.send((label, plugin_instance_id, None)).unwrap();
+                        break;
+                    }
+                    Ok(other) => panic!("expected action or shutdown, got {other:?}"),
+                }
+            }
+        })
+    };
+    let plugin_a = spawn("a");
+    let plugin_b = spawn("b");
+
+    let mut spec = spec();
+    spec.lifecycle = PluginLifecycle::OnDemand;
+    let pending_a = env
+        .sup
+        .begin_invoke(&spec, "run-a", InvokeContext::default())
+        .unwrap();
+    let pending_b = env
+        .sup
+        .begin_invoke(&spec, "run-b", InvokeContext::default())
+        .unwrap();
+
+    let mut ready = [
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    ];
+    ready.sort_by_key(|(label, _)| *label);
+    assert_ne!(ready[0].1, ready[1].1);
+
+    let target_block = uuid::Uuid::from_u128(77);
+    env.sup
+        .push_action_to_instance(ready[1].1, target_block, "go".into(), Some("now".into()))
+        .unwrap();
+
+    let (label, instance_id, payload) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (block_id, action, arg) =
+        payload.expect("action must arrive before invocation is canceled");
+    let mut action_events = vec![(label, instance_id, block_id, action, arg)];
+    drop(pending_a);
+    drop(pending_b);
+    let mut closes = 0usize;
+    while closes < 2 {
+        let (label, instance_id, payload) = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        match payload {
+            Some((block_id, action, arg)) => {
+                action_events.push((label, instance_id, block_id, action, arg));
+            }
+            None => closes += 1,
+        }
+    }
+    assert_eq!(
+        action_events.len(),
+        1,
+        "unexpected action events: {action_events:?}"
+    );
+    let delivered = &action_events[0];
+    assert_eq!(delivered.0, "b");
+    assert_eq!(delivered.1, ready[1].1);
+    assert_eq!(delivered.2, target_block);
+    assert_eq!(delivered.3, "go");
+    assert_eq!(delivered.4.as_deref(), Some("now"));
+    plugin_a.join().unwrap();
+    plugin_b.join().unwrap();
 }
 
 #[test]

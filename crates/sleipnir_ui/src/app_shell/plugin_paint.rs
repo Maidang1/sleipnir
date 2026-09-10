@@ -51,7 +51,7 @@ impl AppShell {
         };
         let laid = layout_surface(surface, cols);
         let stale = surface.stale;
-        let plugin_id = surface.plugin_id.clone();
+        let owner_instance_id = surface.owner_instance_id;
         let surface_id = surface.surface_id;
         let panel_scene = surface.scene.clone();
         let mut body = div()
@@ -132,7 +132,6 @@ impl AppShell {
             .get(pane_key)
             .map(|s| s.scene.is_some())
             .unwrap_or(false);
-        let down_plugin_id = plugin_id;
         body = body.on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -165,7 +164,7 @@ impl AppShell {
                     // on top of the scene.
                     if let Some(hit) = action_at(&laid, pos.col, pos.row) {
                         crate::plugin_runtime::push_action(
-                            &down_plugin_id,
+                            owner_instance_id,
                             surface_id,
                             hit.action,
                             hit.arg,
@@ -181,7 +180,7 @@ impl AppShell {
                     if surface.scene.is_some() {
                         this.panel_drag = Some(super::PanelDrag {
                             pane_key,
-                            plugin_id: down_plugin_id.clone(),
+                            owner_instance_id,
                             surface_id,
                             last: ev.position,
                         });

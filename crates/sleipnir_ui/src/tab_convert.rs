@@ -34,6 +34,19 @@ pub(crate) struct Tab<T = PaneNode> {
     pub(crate) zoomed_pane: Option<PaneId>,
 }
 
+impl<T: ConvertTree> Tab<T> {
+    /// Keep focus and zoom consistent with the live tree, never cached layout.
+    pub(crate) fn reconcile_pane_focus(&mut self) {
+        if !self.tree.contains_leaf(self.active_pane) {
+            self.active_pane = self.tree.first_leaf_id();
+        }
+        self.zoomed_pane = self
+            .zoomed_pane
+            .filter(|id| self.tree.contains_leaf(*id))
+            .map(|_| self.active_pane);
+    }
+}
+
 /// Tree surgery needed to merge or extract without creating new sessions.
 pub trait ConvertTree: Sized {
     fn leaf_count(&self) -> usize;

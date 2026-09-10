@@ -185,6 +185,31 @@ impl RunLedgerGlobal {
         self.core.ledger.mark_run_seen(id);
     }
 
+    pub fn rebase_anchors(&mut self, pane: PaneKey, removed: i32) {
+        if self.core.mode == RunLedgerMode::Off {
+            return;
+        }
+        self.core.ledger.rebase_anchors(pane, removed);
+    }
+
+    pub fn clear_anchors(&mut self, pane: PaneKey) {
+        if self.core.mode == RunLedgerMode::Off {
+            return;
+        }
+        self.core.ledger.clear_anchors(pane);
+    }
+
+    pub fn apply_block_anchor_change(
+        &mut self,
+        pane: PaneKey,
+        change: &terminal::BlockAnchorChange,
+    ) {
+        match change {
+            terminal::BlockAnchorChange::Rebase(removed) => self.rebase_anchors(pane, *removed),
+            terminal::BlockAnchorChange::Invalidate => self.clear_anchors(pane),
+        }
+    }
+
     pub fn set_focus(&mut self, pane: Option<PaneKey>, window_active: bool) {
         self.core.ledger.set_focus(pane, window_active);
     }
@@ -205,6 +230,33 @@ impl RunLedgerGlobal {
             return;
         }
         cx.update_global(|this: &mut RunLedgerGlobal, cx| this.reload_settings(cx));
+    }
+
+    pub fn rebase_anchors_in(cx: &mut App, pane: PaneKey, removed: i32) {
+        if !cx.has_global::<Self>() {
+            return;
+        }
+        cx.update_global(|this: &mut RunLedgerGlobal, _cx| this.rebase_anchors(pane, removed));
+    }
+
+    pub fn clear_anchors_in(cx: &mut App, pane: PaneKey) {
+        if !cx.has_global::<Self>() {
+            return;
+        }
+        cx.update_global(|this: &mut RunLedgerGlobal, _cx| this.clear_anchors(pane));
+    }
+
+    pub fn apply_block_anchor_change_in(
+        cx: &mut App,
+        pane: PaneKey,
+        change: &terminal::BlockAnchorChange,
+    ) {
+        if !cx.has_global::<Self>() {
+            return;
+        }
+        cx.update_global(|this: &mut RunLedgerGlobal, _cx| {
+            this.apply_block_anchor_change(pane, change)
+        });
     }
 }
 
@@ -263,12 +315,162 @@ mod tests {
     }
 
     #[test]
-    fn apply_prunes_to_the_in_memory_cap() {
+    fn apply_prunes_finished_history_to_the_in_memory_cap() {
         let mut core = LedgerCore::new(RunLedgerMode::Memory, true, 5);
         for i in 0..(PRUNE_EVERY * 10) {
-            core.apply(RunEvent::started(pane(), &format!("c{i}"), None, i));
+            let pane = pane();
+            core.apply(RunEvent::started(pane, &format!("c{i}"), None, i * 2));
+            core.apply(RunEvent::finished(pane, Some(0), i * 2 + 1));
         }
         assert_eq!(core.ledger.runs().count(), Retention::default().max_runs);
+        assert!(
+            core.ledger
+                .runs()
+                .all(|run| run.state == RunState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn apply_keeps_active_runs_beyond_the_history_cap() {
+        let mut core = LedgerCore::new(RunLedgerMode::Memory, true, 5);
+        let count = PRUNE_EVERY * 10;
+        for i in 0..count {
+            core.apply(RunEvent::started(pane(), &format!("c{i}"), None, i));
+        }
+        assert_eq!(core.ledger.runs().count(), count as usize);
         assert!(core.ledger.runs().all(|run| run.state == RunState::Running));
+    }
+
+    #[test]
+    fn rebase_anchors_preserves_other_panes() {
+        let pane = pane();
+        let other = PaneKey::new_v4();
+        let mut global = RunLedgerGlobal {
+            core: LedgerCore::new(RunLedgerMode::Memory, true, 5),
+            started_at: Instant::now(),
+        };
+        global.apply(RunEvent::Started {
+            pane,
+            command: "first".into(),
+            cwd: None,
+            at_ms: 0,
+            inferred: false,
+            anchor: Some(run_ledger::Anchor { line: 2, column: 0 }),
+        });
+        global.apply(RunEvent::Started {
+            pane,
+            command: "second".into(),
+            cwd: None,
+            at_ms: 1,
+            inferred: false,
+            anchor: Some(run_ledger::Anchor { line: 8, column: 4 }),
+        });
+        global.apply(RunEvent::Started {
+            pane: other,
+            command: "other".into(),
+            cwd: None,
+            at_ms: 2,
+            inferred: false,
+            anchor: Some(run_ledger::Anchor {
+                line: 11,
+                column: 7,
+            }),
+        });
+
+        global.rebase_anchors(pane, 5);
+
+        let snapshot = global.snapshot();
+        assert_eq!(snapshot[0].anchor, None);
+        assert_eq!(
+            snapshot[1].anchor,
+            Some(run_ledger::Anchor { line: 3, column: 4 })
+        );
+        assert_eq!(
+            snapshot[2].anchor,
+            Some(run_ledger::Anchor {
+                line: 11,
+                column: 7
+            })
+        );
+    }
+
+    #[test]
+    fn clear_anchors_clears_one_pane_only() {
+        let pane = pane();
+        let other = PaneKey::new_v4();
+        let mut global = RunLedgerGlobal {
+            core: LedgerCore::new(RunLedgerMode::Memory, true, 5),
+            started_at: Instant::now(),
+        };
+        global.apply(RunEvent::Started {
+            pane,
+            command: "clear".into(),
+            cwd: None,
+            at_ms: 0,
+            inferred: false,
+            anchor: Some(run_ledger::Anchor { line: 4, column: 2 }),
+        });
+        global.apply(RunEvent::Started {
+            pane: other,
+            command: "keep".into(),
+            cwd: None,
+            at_ms: 1,
+            inferred: false,
+            anchor: Some(run_ledger::Anchor { line: 6, column: 3 }),
+        });
+
+        global.clear_anchors(pane);
+
+        let snapshot = global.snapshot();
+        assert_eq!(snapshot[0].anchor, None);
+        assert_eq!(
+            snapshot[1].anchor,
+            Some(run_ledger::Anchor { line: 6, column: 3 })
+        );
+    }
+
+    #[test]
+    fn block_anchor_change_wrapper_matches_rebase_and_clear() {
+        let pane = pane();
+        let other = PaneKey::new_v4();
+        let mut global = RunLedgerGlobal {
+            core: LedgerCore::new(RunLedgerMode::Memory, true, 5),
+            started_at: Instant::now(),
+        };
+        global.apply(RunEvent::Started {
+            pane,
+            command: "pane".into(),
+            cwd: None,
+            at_ms: 0,
+            inferred: false,
+            anchor: Some(run_ledger::Anchor { line: 7, column: 1 }),
+        });
+        global.apply(RunEvent::Started {
+            pane: other,
+            command: "other".into(),
+            cwd: None,
+            at_ms: 1,
+            inferred: false,
+            anchor: Some(run_ledger::Anchor { line: 9, column: 2 }),
+        });
+
+        global.apply_block_anchor_change(pane, &terminal::BlockAnchorChange::Rebase(5));
+        let snapshot = global.snapshot();
+        assert_eq!(
+            snapshot[0].anchor,
+            Some(run_ledger::Anchor { line: 2, column: 1 })
+        );
+        assert_eq!(
+            snapshot[1].anchor,
+            Some(run_ledger::Anchor { line: 9, column: 2 })
+        );
+
+        global.apply_block_anchor_change(pane, &terminal::BlockAnchorChange::Invalidate);
+        let snapshot = global.snapshot();
+        assert_eq!(snapshot[0].anchor, None);
+        assert_eq!(
+            snapshot[1].anchor,
+            Some(run_ledger::Anchor { line: 9, column: 2 })
+        );
     }
 }

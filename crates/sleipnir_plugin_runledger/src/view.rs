@@ -248,13 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_and_foreign_launch_rows_are_text_not_buttons() {
+    fn only_foreign_launch_rows_are_text_not_buttons() {
         let current = LaunchId::new_v4();
         let host = RunId::new_v4();
         let abandoned = panel_row(RunState::Abandoned, current, TODAY, Some(host));
         let foreign = panel_row(RunState::Failed, LaunchId::new_v4(), TODAY, Some(host));
         let (_, btns, _) = parts(&panel_tree(&[abandoned, foreign], TODAY, current));
-        assert!(btns.is_empty(), "neither row may offer a jump");
+        assert_eq!(btns.len(), 1, "current-launch abandoned rows stay jumpable");
+        assert_eq!(btns[0].2, Some(host.to_string()));
     }
 
     #[test]

@@ -1,26 +1,6 @@
-//! Derived workspace identity: git work tree of a pane cwd.
+//! Workspace helpers derived from a pane cwd.
 
 use std::path::{Path, PathBuf};
-
-/// Grouping key for tabs. Derived at render time; not persisted.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum WorkspaceKey {
-    /// A directory — the git work tree if one exists, otherwise the cwd itself.
-    Path(PathBuf),
-    /// No cwd is known (fresh pane, vanished restore path).
-    Home,
-}
-
-impl WorkspaceKey {
-    /// Group key for a pane cwd. Walks up for `.git`; falls back to the cwd
-    /// itself; `None` becomes [`WorkspaceKey::Home`].
-    pub fn of(cwd: Option<&Path>) -> Self {
-        match cwd {
-            Some(path) => Self::Path(git_root(path).unwrap_or_else(|| path.to_path_buf())),
-            None => Self::Home,
-        }
-    }
-}
 
 /// Tab-chip path: last two cwd components, e.g. `/Users/me/src/app` → `src/app`.
 /// No cwd → `~`.
@@ -64,23 +44,6 @@ pub fn git_root_in(cwd: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf
     None
 }
 
-/// Cluster tabs by workspace, preserving first-seen group order and
-/// relative tab order inside each group. `items` is `(tab_index, key)`.
-pub fn group_tabs<I>(items: I) -> Vec<(WorkspaceKey, Vec<usize>)>
-where
-    I: IntoIterator<Item = (usize, WorkspaceKey)>,
-{
-    let mut groups: Vec<(WorkspaceKey, Vec<usize>)> = Vec::new();
-    for (index, key) in items {
-        if let Some((_, tabs)) = groups.iter_mut().find(|(existing, _)| existing == &key) {
-            tabs.push(index);
-        } else {
-            groups.push((key, vec![index]));
-        }
-    }
-    groups
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,15 +75,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_of_uses_git_root_then_cwd_then_home() {
-        assert_eq!(WorkspaceKey::of(None), WorkspaceKey::Home);
-        assert_eq!(
-            WorkspaceKey::of(Some(Path::new("/tmp/scratch"))),
-            WorkspaceKey::Path(PathBuf::from("/tmp/scratch"))
-        );
-    }
-
-    #[test]
     fn tab_path_label_uses_last_two_components() {
         assert_eq!(tab_path_label(None), "~");
         assert_eq!(tab_path_label(Some(Path::new("/"))), "~");
@@ -148,13 +102,5 @@ mod tests {
         // No real .git here, so spawn_cwd returns the input.
         let path = Path::new("/tmp/not-a-repo");
         assert_eq!(spawn_cwd(path), path.to_path_buf());
-    }
-
-    #[test]
-    fn group_tabs_keeps_relative_order_and_first_seen_groups() {
-        let harbor = WorkspaceKey::Path(PathBuf::from("/src/harbor"));
-        let other = WorkspaceKey::Path(PathBuf::from("/src/other"));
-        let groups = group_tabs([(0, harbor.clone()), (1, other.clone()), (2, harbor.clone())]);
-        assert_eq!(groups, vec![(harbor, vec![0, 2]), (other, vec![1])]);
     }
 }

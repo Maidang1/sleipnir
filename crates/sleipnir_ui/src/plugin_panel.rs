@@ -26,6 +26,7 @@ pub type PanelScene = SceneData;
 #[derive(Clone, Debug, PartialEq)]
 pub struct PanelSurface {
     pub plugin_id: String,
+    pub owner_instance_id: Uuid,
     pub pane_key: PaneKey,
     /// Forwarded as `Action.block_id`. Stable for the life of this surface.
     pub surface_id: Uuid,
@@ -37,8 +38,8 @@ pub struct PanelSurface {
 }
 
 impl Surface for PanelSurface {
-    fn plugin_id(&self) -> &str {
-        &self.plugin_id
+    fn owner_instance_id(&self) -> Uuid {
+        self.owner_instance_id
     }
     fn set_stale(&mut self, stale: bool) {
         self.stale = stale;
@@ -58,6 +59,10 @@ pub enum ApplyPanel {
     DeniedTerminal,
     /// Another plugin already owns this pane_key.
     DeniedOccupied,
+    /// The same plugin id already has a live panel here, but from a different
+    /// plugin instance. Only a stale surface may be reclaimed by a new
+    /// instance.
+    DeniedOwnerInstance,
 }
 
 /// Host-side registry of panel surfaces, keyed by [`PaneKey`].
@@ -71,8 +76,24 @@ impl PanelRegistry {
         Self::default()
     }
 
+    pub fn insert_surface(&mut self, surface: PanelSurface) {
+        self.surfaces.insert(surface.pane_key, surface);
+    }
+
+    pub fn insert_surfaces(&mut self, surfaces: impl IntoIterator<Item = PanelSurface>) {
+        for surface in surfaces {
+            self.insert_surface(surface);
+        }
+    }
+
     pub fn get(&self, pane: PaneKey) -> Option<&PanelSurface> {
         self.surfaces.get(&pane)
+    }
+
+    pub fn clone_surfaces(&self, keys: impl IntoIterator<Item = PaneKey>) -> Vec<PanelSurface> {
+        keys.into_iter()
+            .filter_map(|key| self.surfaces.get(&key).cloned())
+            .collect()
     }
 
     pub fn remove(&mut self, pane: PaneKey) -> Option<PanelSurface> {
@@ -91,6 +112,7 @@ impl PanelRegistry {
     pub fn apply_render(
         &mut self,
         plugin_id: &str,
+        owner_instance_id: Uuid,
         pane: PaneKey,
         tree: Widget,
         granted: bool,
@@ -104,8 +126,18 @@ impl PanelRegistry {
         }
         match self.surfaces.get_mut(&pane) {
             Some(existing) if existing.plugin_id != plugin_id => ApplyPanel::DeniedOccupied,
+            Some(existing)
+                if existing.owner_instance_id != owner_instance_id && !existing.stale =>
+            {
+                ApplyPanel::DeniedOwnerInstance
+            }
             Some(existing) => {
                 existing.tree = tree;
+                if existing.owner_instance_id != owner_instance_id {
+                    existing.owner_instance_id = owner_instance_id;
+                    existing.surface_id = Uuid::new_v4();
+                    existing.scene = None;
+                }
                 existing.stale = false;
                 ApplyPanel::Replace { pane_key: pane }
             }
@@ -114,6 +146,7 @@ impl PanelRegistry {
                     pane,
                     PanelSurface {
                         plugin_id: plugin_id.to_string(),
+                        owner_instance_id,
                         pane_key: pane,
                         surface_id: Uuid::new_v4(),
                         tree,
@@ -128,9 +161,19 @@ impl PanelRegistry {
 
     /// Store a 3D scene on a panel surface owned by `plugin_id`. Returns `true`
     /// if the scene was accepted.
-    pub fn set_scene(&mut self, pane: PaneKey, plugin_id: &str, scene: PanelScene) -> bool {
+    pub fn set_scene(
+        &mut self,
+        pane: PaneKey,
+        plugin_id: &str,
+        owner_instance_id: Uuid,
+        scene: PanelScene,
+    ) -> bool {
         match self.surfaces.get_mut(&pane) {
-            Some(surface) if surface.plugin_id == plugin_id => {
+            Some(surface)
+                if !surface.stale
+                    && surface.plugin_id == plugin_id
+                    && surface.owner_instance_id == owner_instance_id =>
+            {
                 surface.scene = Some(scene);
                 true
             }
@@ -280,7 +323,7 @@ mod tests {
     fn render_panel_grant_is_required() {
         let mut reg = PanelRegistry::new();
         let terminals = BTreeSet::new();
-        let out = reg.apply_render("demo", key(1), text("hi"), false, &terminals);
+        let out = reg.apply_render("demo", Uuid::nil(), key(1), text("hi"), false, &terminals);
         assert_eq!(out, ApplyPanel::DeniedGrant);
         assert!(reg.get(key(1)).is_none());
     }
@@ -290,7 +333,7 @@ mod tests {
         let mut reg = PanelRegistry::new();
         let mut terminals = BTreeSet::new();
         terminals.insert(key(7));
-        let out = reg.apply_render("demo", key(7), text("hi"), true, &terminals);
+        let out = reg.apply_render("demo", Uuid::nil(), key(7), text("hi"), true, &terminals);
         assert_eq!(out, ApplyPanel::DeniedTerminal);
         assert!(reg.get(key(7)).is_none());
     }
@@ -300,35 +343,87 @@ mod tests {
         let mut reg = PanelRegistry::new();
         let terminals = BTreeSet::new();
         assert!(matches!(
-            reg.apply_render("demo", key(1), text("one"), true, &terminals),
+            reg.apply_render(
+                "demo",
+                Uuid::from_u128(1),
+                key(1),
+                text("one"),
+                true,
+                &terminals
+            ),
             ApplyPanel::Create { .. }
         ));
+        let original_surface_id = reg.get(key(1)).unwrap().surface_id;
         reg.mark_missing_stale(&BTreeSet::new());
         assert!(reg.get(key(1)).unwrap().stale);
-        let out = reg.apply_render("demo", key(1), text("two"), true, &terminals);
+        let out = reg.apply_render(
+            "demo",
+            Uuid::from_u128(2),
+            key(1),
+            text("two"),
+            true,
+            &terminals,
+        );
         assert_eq!(out, ApplyPanel::Replace { pane_key: key(1) });
         let surface = reg.get(key(1)).unwrap();
         assert!(!surface.stale);
+        assert_eq!(surface.owner_instance_id, Uuid::from_u128(2));
         assert_eq!(surface.tree, text("two"));
+        assert_ne!(
+            surface.surface_id, original_surface_id,
+            "stale reclaim must mint a fresh surface id"
+        );
     }
 
     #[test]
     fn another_plugin_cannot_occupy_an_existing_panel() {
         let mut reg = PanelRegistry::new();
         let terminals = BTreeSet::new();
-        reg.apply_render("a", key(1), text("a"), true, &terminals);
-        let out = reg.apply_render("b", key(1), text("b"), true, &terminals);
+        reg.apply_render("a", Uuid::nil(), key(1), text("a"), true, &terminals);
+        let out = reg.apply_render("b", Uuid::nil(), key(1), text("b"), true, &terminals);
         assert_eq!(out, ApplyPanel::DeniedOccupied);
         assert_eq!(reg.get(key(1)).unwrap().plugin_id, "a");
+    }
+
+    #[test]
+    fn same_plugin_live_different_instance_cannot_take_panel() {
+        let mut reg = PanelRegistry::new();
+        let terminals = BTreeSet::new();
+        reg.apply_render(
+            "demo",
+            Uuid::from_u128(1),
+            key(1),
+            text("one"),
+            true,
+            &terminals,
+        );
+        let original = reg.get(key(1)).unwrap().clone();
+        let out = reg.apply_render(
+            "demo",
+            Uuid::from_u128(2),
+            key(1),
+            text("two"),
+            true,
+            &terminals,
+        );
+        assert_eq!(out, ApplyPanel::DeniedOwnerInstance);
+        assert_eq!(reg.get(key(1)), Some(&original));
     }
 
     #[test]
     fn death_marks_stale_without_dropping_the_tree() {
         let mut reg = PanelRegistry::new();
         let terminals = BTreeSet::new();
-        reg.apply_render("demo", key(1), text("keep"), true, &terminals);
+        reg.apply_render(
+            "demo",
+            Uuid::from_u128(10),
+            key(1),
+            text("keep"),
+            true,
+            &terminals,
+        );
         let mut live = BTreeSet::new();
-        live.insert("other".into());
+        live.insert(Uuid::from_u128(11));
         reg.mark_missing_stale(&live);
         let surface = reg.get(key(1)).unwrap();
         assert!(surface.stale);
@@ -339,6 +434,7 @@ mod tests {
     fn hit_test_routes_btn_to_action() {
         let surface = PanelSurface {
             plugin_id: "demo".into(),
+            owner_instance_id: Uuid::nil(),
             pane_key: key(1),
             surface_id: Uuid::nil(),
             tree: btn("Go", "retry"),
@@ -355,6 +451,7 @@ mod tests {
     fn layout_is_the_shared_crate_and_keeps_attribution() {
         let surface = PanelSurface {
             plugin_id: "honest".into(),
+            owner_instance_id: Uuid::nil(),
             pane_key: key(1),
             surface_id: Uuid::nil(),
             tree: text("plugin:evil"),
@@ -392,7 +489,8 @@ mod tests {
         use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
         let mut reg = PanelRegistry::new();
         let terminals = BTreeSet::new();
-        reg.apply_render("demo", key(1), text("hi"), true, &terminals);
+        let owner = Uuid::from_u128(1);
+        reg.apply_render("demo", owner, key(1), text("hi"), true, &terminals);
         let scene = SceneData {
             cols: 1,
             rows: 1,
@@ -411,8 +509,9 @@ mod tests {
             }],
         };
         // A different plugin cannot write into this surface.
-        assert!(!reg.set_scene(key(1), "other", scene.clone()));
-        assert!(reg.set_scene(key(1), "demo", scene));
+        assert!(!reg.set_scene(key(1), "other", owner, scene.clone()));
+        assert!(!reg.set_scene(key(1), "demo", Uuid::from_u128(2), scene.clone()));
+        assert!(reg.set_scene(key(1), "demo", owner, scene));
         assert!(reg.scene(key(1)).is_some());
         // Camera-only update keeps the geometry and just moves the view.
         let cam = SceneCamera {
@@ -421,11 +520,115 @@ mod tests {
             zoom: 2.0,
         };
         assert!(reg.set_scene_camera(key(1), cam));
-        let scene = reg.scene(key(1)).unwrap();
-        assert_eq!(scene.camera, cam);
-        assert_eq!(scene.bars.len(), 1);
+        let updated_scene = reg.scene(key(1)).unwrap().clone();
+        assert_eq!(updated_scene.camera, cam);
+        assert_eq!(updated_scene.bars.len(), 1);
         // No scene on a fresh pane means no camera to move.
-        reg.apply_render("demo", key(2), text("x"), true, &terminals);
+        reg.apply_render("demo", Uuid::nil(), key(2), text("x"), true, &terminals);
         assert!(!reg.set_scene_camera(key(2), cam));
+        reg.mark_missing_stale(&BTreeSet::new());
+        assert!(
+            !reg.set_scene(key(1), "demo", owner, updated_scene),
+            "stale surfaces must not accept a new scene"
+        );
+    }
+
+    #[test]
+    fn stale_reclaim_clears_old_scene() {
+        use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
+
+        let mut reg = PanelRegistry::new();
+        let terminals = BTreeSet::new();
+        let first_owner = Uuid::from_u128(1);
+        let second_owner = Uuid::from_u128(2);
+        reg.apply_render("demo", first_owner, key(1), text("one"), true, &terminals);
+        assert!(reg.set_scene(
+            key(1),
+            "demo",
+            first_owner,
+            SceneData {
+                cols: 1,
+                rows: 1,
+                floor: [0, 0, 0],
+                camera: SceneCamera {
+                    yaw: 0.1,
+                    pitch: 0.2,
+                    zoom: 1.0,
+                },
+                bars: vec![SceneBar {
+                    gx: 0,
+                    gz: 0,
+                    height: 1.0,
+                    color: [1, 2, 3],
+                    selected: false,
+                }],
+            }
+        ));
+        reg.mark_missing_stale(&BTreeSet::new());
+        assert_eq!(
+            reg.apply_render("demo", second_owner, key(1), text("two"), true, &terminals),
+            ApplyPanel::Replace { pane_key: key(1) }
+        );
+        let surface = reg.get(key(1)).unwrap();
+        assert_eq!(surface.owner_instance_id, second_owner);
+        assert!(
+            surface.scene.is_none(),
+            "new owner must not inherit old scene"
+        );
+    }
+
+    #[test]
+    fn clone_and_insert_surfaces_preserve_surface_identity_and_scene() {
+        use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
+
+        let mut source = PanelRegistry::new();
+        let mut target = PanelRegistry::new();
+        let terminals = BTreeSet::new();
+        source.apply_render(
+            "demo",
+            Uuid::from_u128(1),
+            key(1),
+            text("one"),
+            true,
+            &terminals,
+        );
+        source.apply_render(
+            "demo",
+            Uuid::from_u128(2),
+            key(2),
+            text("two"),
+            true,
+            &terminals,
+        );
+        source.set_scene(
+            key(1),
+            "demo",
+            Uuid::from_u128(1),
+            SceneData {
+                cols: 1,
+                rows: 1,
+                floor: [0, 0, 0],
+                camera: SceneCamera {
+                    yaw: 0.2,
+                    pitch: 0.3,
+                    zoom: 1.4,
+                },
+                bars: vec![SceneBar {
+                    gx: 1,
+                    gz: 2,
+                    height: 3.0,
+                    color: [4, 5, 6],
+                    selected: false,
+                }],
+            },
+        );
+        let original = source.get(key(1)).expect("source surface").clone();
+
+        let moved = source.clone_surfaces([key(1)]);
+        assert_eq!(moved, vec![original.clone()]);
+
+        target.insert_surfaces(moved);
+        assert_eq!(target.get(key(1)), Some(&original));
+        assert!(target.get(key(2)).is_none());
     }
 }

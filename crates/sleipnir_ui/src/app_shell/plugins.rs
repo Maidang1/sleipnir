@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::plugin_surface::StaleRegistry;
+use plugin_protocol::v2::HostCallResult;
 
 /// Enough to finish a launch after the user approves. The dialog itself
 /// renders [`crate::plugin_monitor_panel::ConsentPrompt`] only.
@@ -38,6 +39,20 @@ fn resolve_cwd(raw: &str) -> Option<PathBuf> {
             .filter(|p| p.is_dir())
             .map(|p| p.to_path_buf())
             .or_else(dirs::home_dir)
+    }
+}
+
+fn apply_draw_scene_call(
+    plugin_panels: &mut crate::plugin_panel::PanelRegistry,
+    plugin_id: &str,
+    instance_id: uuid::Uuid,
+    pane: PaneKey,
+    scene: plugin_protocol::v2::SceneData,
+) -> HostCallResult {
+    if plugin_panels.set_scene(pane, plugin_id, instance_id, scene) {
+        HostCallResult::SceneOk
+    } else {
+        crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
     }
 }
 
@@ -105,6 +120,7 @@ impl AppShell {
     pub(crate) fn apply_plugin_inbound(
         &mut self,
         plugin_id: &str,
+        instance_id: uuid::Uuid,
         message: plugin_host::resident::Inbound,
         live_panes: &[(PaneKey, Entity<TermView>)],
         window: &mut Window,
@@ -117,34 +133,30 @@ impl AppShell {
                 target: RenderTarget::Panel { pane },
                 tree,
                 ..
-            } => self.apply_panel_render(plugin_id, pane, tree, window, cx),
+            } => self.apply_panel_render(plugin_id, instance_id, pane, tree, window, cx),
             Inbound::Render {
                 target: RenderTarget::Status,
                 tree,
                 ..
-            } => self.apply_chrome_status(plugin_id, tree, cx),
+            } => self.apply_chrome_status(plugin_id, instance_id, tree, cx),
             Inbound::Render {
                 target: RenderTarget::Block { anchor },
                 tree,
                 ..
-            } => self.apply_block_render(plugin_id, anchor, tree, cx),
+            } => self.apply_block_render(plugin_id, instance_id, anchor, tree, cx),
             Inbound::Call { id, call } => {
-                self.handle_host_call(plugin_id, id, call, live_panes, window, cx)
+                self.handle_host_call(plugin_id, instance_id, id, call, live_panes, window, cx)
             }
         }
     }
     pub(crate) fn sync_plugin_surfaces(&mut self, cx: &mut Context<Self>) {
         use plugin_host::resident::ConnectionState;
         let snapshots = crate::plugin_runtime::snapshots(cx);
-        let live: std::collections::BTreeSet<String> = snapshots
+        let live: std::collections::BTreeSet<uuid::Uuid> = snapshots
             .into_iter()
             .filter(|snap| snap.state == ConnectionState::Live)
-            .map(|snap| snap.plugin_id)
+            .map(|snap| snap.instance_id)
             .collect();
-        // One sweep per mount, driven by `live` alone. Marking each non-live
-        // snapshot individually first would be redundant: snapshots hold at
-        // most one entry per plugin_id, so a non-live plugin is by definition
-        // absent from `live` and the sweep already covers it.
         self.plugin_panels.mark_missing_stale(&live);
         self.mark_missing_blocks_stale(&live, cx);
         // Chrome is the exception: transient decoration is dropped, not
@@ -157,6 +169,7 @@ impl AppShell {
     pub(super) fn apply_panel_render(
         &mut self,
         plugin_id: &str,
+        instance_id: uuid::Uuid,
         pane: PaneKey,
         tree: plugin_protocol::v2::Widget,
         window: &mut Window,
@@ -165,7 +178,8 @@ impl AppShell {
         use crate::plugin_panel::ApplyPanel;
         use plugin_protocol::v2::Capability;
         // Same source as the event bus: Hello.granted, not "the plugin asked".
-        let granted = crate::plugin_runtime::has_grant(plugin_id, Capability::RenderPanel, cx);
+        let granted =
+            crate::plugin_runtime::has_grant_for_instance(instance_id, Capability::RenderPanel, cx);
         let mut terminals = std::collections::BTreeSet::new();
         for tab in &self.tabs {
             let mut out = Vec::new();
@@ -174,10 +188,14 @@ impl AppShell {
                 terminals.insert(key);
             }
         }
-        match self
-            .plugin_panels
-            .apply_render(plugin_id, pane, tree, granted, &terminals)
-        {
+        match self.plugin_panels.apply_render(
+            plugin_id,
+            instance_id,
+            pane,
+            tree,
+            granted,
+            &terminals,
+        ) {
             ApplyPanel::Create { pane_key } => {
                 if !self.insert_panel_leaf(pane_key, plugin_id, window, cx) {
                     self.plugin_panels.remove(pane_key);
@@ -193,18 +211,25 @@ impl AppShell {
             ApplyPanel::DeniedOccupied => {
                 log::warn!("plugin {plugin_id} tried to take another plugin's panel");
             }
+            ApplyPanel::DeniedOwnerInstance => {
+                log::warn!(
+                    "plugin {plugin_id} instance {instance_id} tried to take a live panel owned by another instance"
+                );
+            }
         }
     }
     pub(super) fn apply_block_render(
         &mut self,
         plugin_id: &str,
+        instance_id: uuid::Uuid,
         run_id: plugin_protocol::v2::RunId,
         tree: plugin_protocol::v2::Widget,
         cx: &mut Context<Self>,
     ) {
         use crate::plugin_block::ApplyBlock;
         use plugin_protocol::v2::Capability;
-        let granted = crate::plugin_runtime::has_grant(plugin_id, Capability::RenderBlock, cx);
+        let granted =
+            crate::plugin_runtime::has_grant_for_instance(instance_id, Capability::RenderBlock, cx);
         let (pane, ledger_anchor, existing) = if cx.has_global::<RunLedgerGlobal>() {
             let snap = cx.global::<RunLedgerGlobal>().snapshot();
             snap.into_iter()
@@ -214,7 +239,11 @@ impl AppShell {
                         v.read(cx)
                             .blocks()
                             .iter()
-                            .find(|s| s.run_id == run_id && s.plugin_id == plugin_id)
+                            .find(|s| {
+                                s.run_id == run_id
+                                    && s.plugin_id == plugin_id
+                                    && s.owner_instance_id == instance_id
+                            })
                             .map(|s| s.block_id)
                     });
                     (Some(r.pane), r.anchor, existing)
@@ -234,6 +263,7 @@ impl AppShell {
         let out = view.update(cx, |v, cx| {
             v.apply_block_render(
                 plugin_id,
+                instance_id,
                 run_id,
                 tree,
                 granted,
@@ -254,7 +284,7 @@ impl AppShell {
     }
     pub(super) fn mark_missing_blocks_stale(
         &mut self,
-        live: &std::collections::BTreeSet<String>,
+        live: &std::collections::BTreeSet<uuid::Uuid>,
         cx: &mut Context<Self>,
     ) {
         for (_, view) in self.all_live_panes() {
@@ -269,16 +299,21 @@ impl AppShell {
     pub(super) fn apply_chrome_status(
         &mut self,
         plugin_id: &str,
+        instance_id: uuid::Uuid,
         tree: plugin_protocol::v2::Widget,
         cx: &mut Context<Self>,
     ) {
         use crate::plugin_chrome::ApplyChrome;
         use plugin_protocol::v2::Capability;
-        let granted = crate::plugin_runtime::has_grant(plugin_id, Capability::RenderStatus, cx);
+        let granted = crate::plugin_runtime::has_grant_for_instance(
+            instance_id,
+            Capability::RenderStatus,
+            cx,
+        );
         let hint = self.active_pane_key();
         match self
             .plugin_chrome
-            .apply_status(plugin_id, tree, granted, hint)
+            .apply_status(plugin_id, instance_id, tree, granted, hint)
         {
             ApplyChrome::Applied => {
                 self.rebuild_palette_items();
@@ -321,6 +356,7 @@ impl AppShell {
     pub(super) fn handle_host_call(
         &mut self,
         plugin_id: &str,
+        instance_id: uuid::Uuid,
         id: plugin_protocol::v2::MessageId,
         call: plugin_protocol::v2::HostCall,
         live_panes: &[(PaneKey, Entity<TermView>)],
@@ -331,7 +367,7 @@ impl AppShell {
             CallPlan, cap_screen, error_result, filter_listed_panes, read_screen_access,
             send_key_ready, send_text_result,
         };
-        use plugin_protocol::v2::{Capability, HostCallResult, PaneInfo};
+        use plugin_protocol::v2::{Capability, PaneInfo};
         let granted: Vec<Capability> = [
             Capability::HostCallNotify,
             Capability::HostCallReadScreen,
@@ -345,7 +381,7 @@ impl AppShell {
             Capability::HostCallRequestClosePane,
         ]
         .into_iter()
-        .filter(|cap| crate::plugin_runtime::has_grant(plugin_id, *cap, cx))
+        .filter(|cap| crate::plugin_runtime::has_grant_for_instance(instance_id, *cap, cx))
         .collect();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -400,12 +436,17 @@ impl AppShell {
                 // rescan, cd) keep the view in sync. Host-driven camera moves go
                 // the other way and never resend the scene (see the camera
                 // action path), so this cannot fight an in-progress drag.
-                if self.plugin_panels.set_scene(pane, plugin_id, scene) {
+                let result = apply_draw_scene_call(
+                    &mut self.plugin_panels,
+                    plugin_id,
+                    instance_id,
+                    pane,
+                    scene,
+                );
+                if matches!(result, HostCallResult::SceneOk) {
                     window.refresh();
-                    HostCallResult::SceneOk
-                } else {
-                    error_result("pane not found or not owned by this plugin")
                 }
+                result
             }
             CallPlan::ScrollToRun { run_id } => {
                 let pane = if cx.has_global::<RunLedgerGlobal>() {
@@ -483,7 +524,7 @@ impl AppShell {
                 }
             }
         };
-        if !crate::plugin_runtime::reply_host_call(plugin_id, id, result, cx) {
+        if !crate::plugin_runtime::reply_host_call_to_instance(instance_id, id, result, cx) {
             log::debug!("plugin {plugin_id} Call {id} reply dropped (session gone)");
         }
     }
@@ -582,16 +623,16 @@ impl AppShell {
         if !force && now.saturating_sub(self.panel_camera_last_ms) < THROTTLE_MS {
             return;
         }
-        let Some((plugin_id, surface_id)) = self
+        let Some((owner_instance_id, surface_id)) = self
             .panel_drag
             .as_ref()
             .filter(|d| d.pane_key == pane_key)
-            .map(|d| (d.plugin_id.clone(), d.surface_id))
+            .map(|d| (d.owner_instance_id, d.surface_id))
             .or_else(|| {
                 // Wheel zoom has no active drag; look the surface up directly.
                 self.plugin_panels
                     .get(pane_key)
-                    .map(|s| (s.plugin_id.clone(), s.surface_id))
+                    .map(|s| (s.owner_instance_id, s.surface_id))
             })
         else {
             return;
@@ -605,7 +646,7 @@ impl AppShell {
         let arg = serde_json::to_string(&camera).unwrap_or_default();
         self.panel_camera_last_ms = now;
         crate::plugin_runtime::push_action(
-            &plugin_id,
+            owner_instance_id,
             surface_id,
             "camera".to_string(),
             Some(arg),
@@ -700,7 +741,7 @@ impl AppShell {
             return;
         };
         crate::plugin_runtime::push_action(
-            &entry.plugin_id,
+            entry.owner_instance_id,
             entry.surface_id,
             entry.action,
             entry.arg,
@@ -1008,6 +1049,37 @@ pub(super) fn run_event_to_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin_panel::PanelSurface;
+    use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData, Tone, Widget};
+    use uuid::Uuid;
+
+    fn text(s: &str) -> Widget {
+        Widget::Text {
+            s: s.into(),
+            fg: Tone::Fg,
+            bold: false,
+        }
+    }
+
+    fn scene(yaw: f32) -> SceneData {
+        SceneData {
+            cols: 1,
+            rows: 1,
+            floor: [1, 2, 3],
+            camera: SceneCamera {
+                yaw,
+                pitch: 0.2,
+                zoom: 1.0,
+            },
+            bars: vec![SceneBar {
+                gx: 0,
+                gz: 0,
+                height: 1.0,
+                color: [9, 8, 7],
+                selected: false,
+            }],
+        }
+    }
 
     #[test]
     fn run_started_host_event_uses_ledger_redacted_command() {
@@ -1057,5 +1129,61 @@ mod tests {
         let event = run_ledger::RunEvent::PaneClosed { pane, at_ms: 10 };
         let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
         assert_eq!(host, plugin_protocol::v2::HostEvent::PaneClosed { pane });
+    }
+
+    #[test]
+    fn draw_scene_rejects_same_plugin_different_live_owner() {
+        let pane = PaneKey::from_u128(11);
+        let old_owner = Uuid::from_u128(1);
+        let new_owner = Uuid::from_u128(2);
+        let old_surface_id = Uuid::from_u128(101);
+        let mut panels = crate::plugin_panel::PanelRegistry::new();
+        panels.insert_surface(PanelSurface {
+            plugin_id: "demo".into(),
+            owner_instance_id: old_owner,
+            pane_key: pane,
+            surface_id: old_surface_id,
+            tree: text("one"),
+            stale: false,
+            scene: Some(scene(0.1)),
+        });
+
+        let result = apply_draw_scene_call(&mut panels, "demo", new_owner, pane, scene(0.9));
+        assert_eq!(
+            result,
+            crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
+        );
+        let surface = panels.get(pane).expect("surface remains");
+        assert_eq!(surface.owner_instance_id, old_owner);
+        assert_eq!(surface.surface_id, old_surface_id);
+        assert_eq!(surface.scene.as_ref().map(|s| s.camera.yaw), Some(0.1));
+    }
+
+    #[test]
+    fn draw_scene_rejects_stale_surface_until_reclaimed_by_render() {
+        let pane = PaneKey::from_u128(12);
+        let old_owner = Uuid::from_u128(3);
+        let new_owner = Uuid::from_u128(4);
+        let old_surface_id = Uuid::from_u128(102);
+        let mut panels = crate::plugin_panel::PanelRegistry::new();
+        panels.insert_surface(PanelSurface {
+            plugin_id: "demo".into(),
+            owner_instance_id: old_owner,
+            pane_key: pane,
+            surface_id: old_surface_id,
+            tree: text("stale"),
+            stale: true,
+            scene: Some(scene(0.2)),
+        });
+
+        let result = apply_draw_scene_call(&mut panels, "demo", new_owner, pane, scene(0.8));
+        assert_eq!(
+            result,
+            crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
+        );
+        let surface = panels.get(pane).expect("surface remains");
+        assert_eq!(surface.owner_instance_id, old_owner);
+        assert_eq!(surface.surface_id, old_surface_id);
+        assert_eq!(surface.scene.as_ref().map(|s| s.camera.yaw), Some(0.2));
     }
 }

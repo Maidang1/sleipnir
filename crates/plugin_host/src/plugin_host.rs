@@ -21,8 +21,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
-use std::ffi::OsString;
+use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 pub mod resident;
@@ -170,6 +171,7 @@ pub struct PluginCommand {
 pub struct LoadedPlugin {
     pub manifest: PluginManifest,
     pub directory: PathBuf,
+    pub resolved_binary: PathBuf,
 }
 
 impl LoadedPlugin {
@@ -185,6 +187,7 @@ pub struct LoadedPluginCommand {
     pub plugin_version: String,
     pub lifecycle: PluginLifecycle,
     pub binary: String,
+    pub resolved_binary: PathBuf,
     pub args: Vec<String>,
     pub command: PluginCommand,
     pub directory: PathBuf,
@@ -295,6 +298,18 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
                             .push(format!("duplicate plugin id: {}", manifest.id));
                         continue;
                     }
+                    let resolved_binary = match resolve_plugin_binary(&directory, &manifest.binary)
+                    {
+                        Ok(path) => path,
+                        Err(err) => {
+                            catalog.diagnostics.push(format!(
+                                "{}: failed to resolve plugin binary {:?}: {err}",
+                                manifest_path.display(),
+                                manifest.binary
+                            ));
+                            continue;
+                        }
+                    };
                     for command in &manifest.commands {
                         let qualified = format!("{}.{}", manifest.id, command.id);
                         if !seen_commands.insert(qualified.clone()) {
@@ -309,6 +324,7 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
                             plugin_version: manifest.version.clone(),
                             lifecycle: manifest.lifecycle,
                             binary: manifest.binary.clone(),
+                            resolved_binary: resolved_binary.clone(),
                             args: manifest.args.clone(),
                             command: command.clone(),
                             directory: directory.clone(),
@@ -317,6 +333,7 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
                     catalog.plugins.push(LoadedPlugin {
                         manifest,
                         directory: directory.clone(),
+                        resolved_binary,
                     });
                 }
                 Err(err) => catalog
@@ -394,23 +411,211 @@ fn validate_id(label: &str, id: &str) -> Result<(), PluginError> {
     }
 }
 
-pub(crate) fn resolve_binary(directory: &Path, binary: &str) -> OsString {
+pub fn resolve_plugin_binary(directory: &Path, binary: &str) -> io::Result<PathBuf> {
+    if binary.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "plugin binary must not be empty",
+        ));
+    }
     let path = Path::new(binary);
     if path.is_absolute() || binary.contains('/') || binary.contains('\\') {
-        directory.join(path).into_os_string()
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            directory.join(path)
+        };
+        resolve_explicit_binary(&candidate)
     } else {
-        OsString::from(binary)
+        resolve_binary_from_path(binary)
     }
+}
+
+fn resolve_explicit_binary(path: &Path) -> io::Result<PathBuf> {
+    let mut saw_non_executable = false;
+    for candidate in executable_candidates(path) {
+        match executable_file_state(&candidate)? {
+            ExecutableFileState::Executable => return fs::canonicalize(candidate),
+            ExecutableFileState::NonExecutable => saw_non_executable = true,
+            ExecutableFileState::Missing => {}
+        }
+    }
+    let kind = if saw_non_executable {
+        io::ErrorKind::PermissionDenied
+    } else {
+        io::ErrorKind::NotFound
+    };
+    Err(io::Error::new(
+        kind,
+        format!("plugin binary not executable: {}", path.display()),
+    ))
+}
+
+fn resolve_binary_from_path(binary: &str) -> io::Result<PathBuf> {
+    let Some(path_env) = env::var_os("PATH") else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("plugin binary {binary:?} not found in PATH"),
+        ));
+    };
+    let mut saw_non_executable = false;
+    for dir in env::split_paths(&path_env) {
+        for candidate in executable_candidates(&dir.join(binary)) {
+            match executable_file_state(&candidate)? {
+                ExecutableFileState::Executable => return fs::canonicalize(candidate),
+                ExecutableFileState::NonExecutable => saw_non_executable = true,
+                ExecutableFileState::Missing => {}
+            }
+        }
+    }
+    let kind = if saw_non_executable {
+        io::ErrorKind::PermissionDenied
+    } else {
+        io::ErrorKind::NotFound
+    };
+    Err(io::Error::new(
+        kind,
+        format!("plugin binary {binary:?} not found in PATH"),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutableFileState {
+    Missing,
+    NonExecutable,
+    Executable,
+}
+
+fn executable_file_state(path: &Path) -> io::Result<ExecutableFileState> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(ExecutableFileState::Missing);
+        }
+        Err(err) => return Err(err),
+    };
+    if !metadata.is_file() {
+        return Ok(ExecutableFileState::Missing);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        return Ok(if metadata.permissions().mode() & 0o111 != 0 {
+            ExecutableFileState::Executable
+        } else {
+            ExecutableFileState::NonExecutable
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(ExecutableFileState::Executable)
+    }
+}
+
+#[cfg(windows)]
+fn executable_candidates(path: &Path) -> Vec<PathBuf> {
+    if path.extension().is_some() {
+        return vec![path.to_path_buf()];
+    }
+    let mut candidates = vec![path.to_path_buf()];
+    let exts =
+        env::var_os("PATHEXT").unwrap_or_else(|| std::ffi::OsString::from(".COM;.EXE;.BAT;.CMD"));
+    for ext in exts
+        .to_string_lossy()
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+    {
+        let suffix = ext.trim();
+        if suffix.is_empty() {
+            continue;
+        }
+        let suffix = if suffix.starts_with('.') {
+            suffix.to_string()
+        } else {
+            format!(".{suffix}")
+        };
+        candidates.push(PathBuf::from(format!("{}{}", path.display(), suffix)));
+    }
+    candidates
+}
+
+#[cfg(not(windows))]
+fn executable_candidates(path: &Path) -> Vec<PathBuf> {
+    vec![path.to_path_buf()]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+    use std::sync::{Mutex, OnceLock};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     fn write_plugin(root: &Path, dir: &str, manifest: &str) {
         let directory = root.join(dir);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join(MANIFEST_FILE), manifest).unwrap();
+    }
+
+    fn path_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_path(path: &OsStr, f: impl FnOnce()) {
+        let _guard = path_lock().lock().unwrap();
+        let previous = env::var_os("PATH");
+        unsafe { env::set_var("PATH", path) };
+        f();
+        match previous {
+            Some(previous) => unsafe { env::set_var("PATH", previous) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+    }
+
+    fn write_binary(path: &Path, executable: bool) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mode = if executable { 0o755 } else { 0o644 };
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(mode);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = executable;
+    }
+
+    fn resolver_relative_binary() -> &'static str {
+        #[cfg(windows)]
+        {
+            ".\\demo.exe"
+        }
+        #[cfg(not(windows))]
+        {
+            "./demo"
+        }
+    }
+
+    fn path_binary_name() -> &'static str {
+        "demo-path"
+    }
+
+    fn path_binary_file(dir: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            dir.join("demo-path.exe")
+        }
+        #[cfg(not(windows))]
+        {
+            dir.join("demo-path")
+        }
     }
 
     #[test]
@@ -434,13 +639,15 @@ mod tests {
         write_plugin(
             temp.path(),
             "b",
-            r#"{"id":"beta","name":"Beta","version":"1","api_version":2,"binary":"x","commands":[{"id":"run","title":"Run"}]}"#,
+            r#"{"id":"beta","name":"Beta","version":"1","api_version":2,"binary":"./x","commands":[{"id":"run","title":"Run"}]}"#,
         );
+        write_binary(&temp.path().join("b").join("x"), true);
         write_plugin(
             temp.path(),
             "a",
-            r#"{"id":"alpha","name":"Alpha","version":"1","api_version":2,"binary":"x","commands":[{"id":"run","title":"Run"}]}"#,
+            r#"{"id":"alpha","name":"Alpha","version":"1","api_version":2,"binary":"./x","commands":[{"id":"run","title":"Run"}]}"#,
         );
+        write_binary(&temp.path().join("a").join("x"), true);
         let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
         assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
         assert_eq!(
@@ -472,13 +679,15 @@ mod tests {
         write_plugin(
             temp.path(),
             "res",
-            r#"{"id":"res","name":"Res","version":"1","api_version":2,"binary":"x","lifecycle":"resident","commands":[{"id":"run","title":"Run"}]}"#,
+            r#"{"id":"res","name":"Res","version":"1","api_version":2,"binary":"./x","lifecycle":"resident","commands":[{"id":"run","title":"Run"}]}"#,
         );
+        write_binary(&temp.path().join("res").join("x"), true);
         write_plugin(
             temp.path(),
             "def",
-            r#"{"id":"def","name":"Def","version":"1","api_version":2,"binary":"x","commands":[{"id":"run","title":"Run"}]}"#,
+            r#"{"id":"def","name":"Def","version":"1","api_version":2,"binary":"./x","commands":[{"id":"run","title":"Run"}]}"#,
         );
+        write_binary(&temp.path().join("def").join("x"), true);
         let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
         let res = catalog
             .commands
@@ -546,6 +755,10 @@ mod tests {
                 "permissions":["subscribe_events","render_block","read_cwd"]
             }"#,
         );
+        write_binary(
+            &temp.path().join("demo-resident").join("demo-resident"),
+            true,
+        );
         let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
         assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
         assert_eq!(catalog.plugins.len(), 1);
@@ -588,7 +801,7 @@ mod tests {
                 "version":"1",
                 "api_version":2,
                 "lifecycle":"resident",
-                "binary":"x",
+                "binary":"./x",
                 "permissions":[
                     "resident",
                     "render_panel",
@@ -604,6 +817,7 @@ mod tests {
                 ]
             }"#,
         );
+        write_binary(&temp.path().join("calls").join("x"), true);
         let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
         assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
         let perms = &catalog.plugins[0].manifest.permissions;
@@ -649,5 +863,60 @@ mod tests {
             "{:?}",
             catalog.diagnostics
         );
+    }
+
+    #[test]
+    fn bare_binary_resolves_from_path_not_adjacent_manifest_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let manifest_dir = root.join("plugin");
+        let path_dir = root.join("bin");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::create_dir_all(&path_dir).unwrap();
+        write_binary(&manifest_dir.join(path_binary_name()), false);
+        let resolved = path_binary_file(&path_dir);
+        write_binary(&resolved, true);
+
+        with_path(path_dir.as_os_str(), || {
+            let actual = resolve_plugin_binary(&manifest_dir, path_binary_name()).unwrap();
+            assert_eq!(actual, fs::canonicalize(&resolved).unwrap());
+        });
+    }
+
+    #[test]
+    fn relative_binary_resolves_from_manifest_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let manifest_dir = temp.path().join("plugin");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        let expected = manifest_dir.join("demo");
+        #[cfg(windows)]
+        let expected = manifest_dir.join("demo.exe");
+        write_binary(&expected, true);
+
+        let actual = resolve_plugin_binary(&manifest_dir, resolver_relative_binary()).unwrap();
+        assert_eq!(actual, fs::canonicalize(&expected).unwrap());
+    }
+
+    #[test]
+    fn missing_binary_returns_error() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let manifest_dir = temp.path().join("plugin");
+        fs::create_dir_all(&manifest_dir).unwrap();
+
+        let err = resolve_plugin_binary(&manifest_dir, resolver_relative_binary()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn full_path_binary_resolves_to_exact_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let expected = temp.path().join("tool");
+        #[cfg(windows)]
+        let expected = temp.path().join("tool.exe");
+        write_binary(&expected, true);
+
+        let actual =
+            resolve_plugin_binary(temp.path(), expected.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(actual, fs::canonicalize(&expected).unwrap());
     }
 }

@@ -4,16 +4,16 @@
 //! A child module of `app_shell` so it can mutate the shell's private tab list
 //! and rename state without widening them to the crate.
 
-use gpui::{Context, Entity, Focusable as _, SharedString, Window};
+use gpui::{AppContext as _, Context, Entity, Focusable as _, SharedString, Window};
 use std::path::PathBuf;
 
 use super::{
-    AppShell, CloseConfirmState, ClosedTab, ConfirmKind, RenameState, Tab,
-    open_sleipnir_window_with_tab, rebase_detached_tab, reorder_insert_index,
+    AppShell, CloseConfirmState, ClosedTab, ConfirmKind, RenameState, Tab, log_window_open_error,
+    rebase_detached_tab, reorder_insert_index, terminal_window_options,
 };
 use crate::TermView;
 use crate::chrome::active_after_close;
-use crate::pane_tree::{PaneId, PaneNode};
+use crate::pane_tree::{PaneId, PaneKey, PaneNode};
 use crate::tab_convert::{extract_pane, merge_tab};
 
 const CLOSED_TAB_HISTORY_LIMIT: usize = 10;
@@ -23,6 +23,28 @@ fn push_closed_tab(history: &mut Vec<ClosedTab>, closed: ClosedTab) {
         history.remove(0);
     }
     history.push(closed);
+}
+
+fn next_detached_pane_id(tree: &PaneNode) -> PaneId {
+    let mut leaves = Vec::new();
+    tree.walk_leaves(&mut leaves);
+    leaves
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn transferred_panel_surfaces(
+    panels: &crate::plugin_panel::PanelRegistry,
+    pane_keys: impl IntoIterator<Item = PaneKey>,
+) -> Vec<crate::plugin_panel::PanelSurface> {
+    panels.clone_surfaces(pane_keys)
+}
+
+fn can_extract_terminal_pane(tab: &Tab, pane_id: PaneId) -> bool {
+    tab.tree.is_terminal_leaf(pane_id) && tab.tree.terminal_count() > 1
 }
 
 impl AppShell {
@@ -292,10 +314,26 @@ impl AppShell {
         let Some(new_active) = active_after_close(self.active, idx, self.tabs.len()) else {
             return;
         };
-        let tab = self.tabs.remove(idx);
-        self.active = new_active;
-        self.commit_workspace(window, cx);
-        open_sleipnir_window_with_tab(tab, cx);
+        let tab = self.tabs[idx].clone();
+        let panel_surfaces =
+            transferred_panel_surfaces(&self.plugin_panels, tab.tree.all_pane_keys());
+        let options = terminal_window_options(cx);
+        match cx.open_window(options, move |window, cx| {
+            let tab = tab.clone();
+            cx.new(|cx| {
+                let mut shell = AppShell::new(window, cx);
+                shell.adopt_tab_with_panels(tab, panel_surfaces, window, cx);
+                shell
+            })
+        }) {
+            Ok(_) => {
+                let removed = self.tabs.remove(idx);
+                self.plugin_panels.remove_all(removed.tree.all_pane_keys());
+                self.active = new_active;
+                self.commit_workspace(window, cx);
+            }
+            Err(err) => log_window_open_error(&err),
+        }
     }
 
     /// Tab dropped on the visible pane area: a *different* tab merges in as a
@@ -342,13 +380,13 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let new_id = self.next_id;
-        let extractable = self
-            .tabs
-            .iter()
-            .any(|tab| tab.tree.is_terminal_leaf(pane_id));
-        if !extractable {
+        let Some(source) = self.tabs.iter().find(|tab| tab.tree.contains_leaf(pane_id)) else {
+            return;
+        };
+        if !can_extract_terminal_pane(source, pane_id) {
             // A Panel extracted into its own tab would be a workspace with no
-            // shell. Panels stay attached to the tab that hosts them.
+            // shell. The source must also keep at least one terminal even if
+            // panels remain attached to it.
             return;
         }
         let Ok(idx) = extract_pane(&mut self.tabs, pane_id, insert_at, new_id) else {
@@ -360,20 +398,24 @@ impl AppShell {
         self.commit_workspace(window, cx);
     }
 
-    /// Replace this window's placeholder tab with a detached `tab` and re-wire
-    /// each pane's observers to route events here.
-    pub(super) fn adopt_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+    fn adopt_tab_with_panels(
+        &mut self,
+        tab: Tab,
+        panel_surfaces: Vec<crate::plugin_panel::PanelSurface>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Drop the placeholder tab `new` created (its shell exits).
         self.tabs.clear();
         let mut tab = tab;
         let mut leaves = Vec::new();
         tab.tree.leaves(&mut leaves);
-        let max_pane = leaves.iter().map(|(id, _)| *id).max().unwrap_or(0);
-        let adopted = rebase_detached_tab(max_pane);
+        let adopted = rebase_detached_tab(next_detached_pane_id(&tab.tree).saturating_sub(1));
         tab.id = adopted.tab_id;
         self.next_id = adopted.next_id;
         self.next_pane_id = adopted.next_pane_id;
         let views: Vec<Entity<TermView>> = leaves.into_iter().map(|(_, v)| v.clone()).collect();
+        self.plugin_panels.insert_surfaces(panel_surfaces);
         self.tabs.push(tab);
         self.active = 0;
         for view in &views {
@@ -416,6 +458,10 @@ impl AppShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane_tree::{LeafContent, SplitAxis};
+    use crate::plugin_panel::PanelSurface;
+    use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData, Tone, Widget};
+    use uuid::Uuid;
 
     fn closed_tab(index: usize) -> ClosedTab {
         ClosedTab {
@@ -438,6 +484,120 @@ mod tests {
         assert_eq!(
             history.last().and_then(|tab| tab.title.as_deref()),
             Some("tab 11")
+        );
+    }
+
+    fn panel_tab(id: u64, panes: &[(PaneId, PaneKey)]) -> Tab {
+        let tree = panes
+            .iter()
+            .copied()
+            .map(|(pane_id, key)| PaneNode::panel_leaf(pane_id, key, "demo"))
+            .reduce(|first, second| PaneNode::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 0.5,
+                first: Box::new(first),
+                second: Box::new(second),
+            })
+            .expect("at least one pane");
+        Tab {
+            id,
+            tree,
+            active_pane: panes[0].0,
+            custom_title: None,
+            zoomed_pane: None,
+        }
+    }
+
+    #[test]
+    fn next_detached_pane_id_uses_panel_leaves_too() {
+        let tab = panel_tab(
+            7,
+            &[
+                (3, Uuid::from_u128(1)),
+                (11, Uuid::from_u128(2)),
+                (9, Uuid::from_u128(3)),
+            ],
+        );
+        assert_eq!(next_detached_pane_id(&tab.tree), 12);
+    }
+
+    #[test]
+    fn transferred_panel_surfaces_keep_surface_tree_and_scene() {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let mut panels = crate::plugin_panel::PanelRegistry::new();
+        panels.insert_surfaces([
+            PanelSurface {
+                plugin_id: "demo".into(),
+                owner_instance_id: Uuid::from_u128(101),
+                pane_key: first,
+                surface_id: Uuid::from_u128(11),
+                tree: Widget::Text {
+                    s: "alpha".into(),
+                    fg: Tone::Fg,
+                    bold: false,
+                },
+                stale: false,
+                scene: Some(SceneData {
+                    cols: 1,
+                    rows: 1,
+                    floor: [1, 2, 3],
+                    camera: SceneCamera {
+                        yaw: 0.1,
+                        pitch: 0.2,
+                        zoom: 0.3,
+                    },
+                    bars: vec![SceneBar {
+                        gx: 0,
+                        gz: 1,
+                        height: 2.0,
+                        color: [3, 4, 5],
+                        selected: true,
+                    }],
+                }),
+            },
+            PanelSurface {
+                plugin_id: "demo".into(),
+                owner_instance_id: Uuid::from_u128(102),
+                pane_key: second,
+                surface_id: Uuid::from_u128(12),
+                tree: Widget::Text {
+                    s: "beta".into(),
+                    fg: Tone::Fg,
+                    bold: false,
+                },
+                stale: true,
+                scene: None,
+            },
+        ]);
+
+        let moved = transferred_panel_surfaces(&panels, [second, first]);
+        assert_eq!(moved.len(), 2);
+        assert_eq!(moved[0].pane_key, second);
+        assert_eq!(moved[0].surface_id, Uuid::from_u128(12));
+        assert_eq!(moved[1].pane_key, first);
+        assert_eq!(moved[1].surface_id, Uuid::from_u128(11));
+        assert!(matches!(moved[1].tree, Widget::Text { .. }));
+        assert!(moved[1].scene.is_some());
+    }
+
+    #[test]
+    fn can_extract_terminal_pane_requires_another_terminal_to_remain() {
+        let tab = panel_tab(1, &[(10, Uuid::from_u128(1)), (20, Uuid::from_u128(2))]);
+        assert!(!can_extract_terminal_pane(&tab, 10));
+
+        let mixed = PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneNode::panel_leaf(10, Uuid::from_u128(1), "demo")),
+            second: Box::new(PaneNode::panel_leaf(20, Uuid::from_u128(2), "demo")),
+        };
+        let mut leaves = Vec::new();
+        mixed.walk_leaves(&mut leaves);
+        assert!(
+            leaves
+                .iter()
+                .all(|(_, _, content)| matches!(content, LeafContent::Panel { .. }))
         );
     }
 }

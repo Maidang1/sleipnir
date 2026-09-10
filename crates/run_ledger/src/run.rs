@@ -149,8 +149,30 @@ impl Run {
         unix_ms: u64,
         inferred: bool,
     ) -> Self {
+        Self::start_with_id(
+            RunId::new_v4(),
+            launch_id,
+            pane,
+            command,
+            cwd,
+            mono_ms,
+            unix_ms,
+            inferred,
+        )
+    }
+
+    pub(crate) fn start_with_id(
+        id: RunId,
+        launch_id: LaunchId,
+        pane: PaneKey,
+        command: String,
+        cwd: Option<String>,
+        mono_ms: u64,
+        unix_ms: u64,
+        inferred: bool,
+    ) -> Self {
         Self {
-            id: RunId::new_v4(),
+            id,
             launch_id,
             pane,
             command,
@@ -167,7 +189,14 @@ impl Run {
     }
 
     pub(crate) fn finish(&mut self, exit_code: Option<i32>, mono_ms: u64) {
-        self.duration = Duration::from_millis(mono_ms.saturating_sub(self.started_at_mono_ms));
+        self.finish_with_duration(
+            exit_code,
+            Duration::from_millis(mono_ms.saturating_sub(self.started_at_mono_ms)),
+        );
+    }
+
+    pub(crate) fn finish_with_duration(&mut self, exit_code: Option<i32>, duration: Duration) {
+        self.duration = duration;
         self.exit_code = exit_code;
         self.state = match exit_code {
             Some(0) => RunState::Succeeded,

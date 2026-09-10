@@ -76,6 +76,13 @@ fn run_bounded(
     })
 }
 
+/// Bounded output for best-effort Git enrichment. Oversized children are killed
+/// and reaped by the same reader used for patches.
+pub(crate) fn git_output_bounded(command: &mut Command, limit: usize) -> Option<Vec<u8>> {
+    let output = run_bounded(command, limit, MAX_GIT_ERROR_BYTES).ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
 fn read_up_to(mut reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
     reader.by_ref().take(limit as u64).read_to_end(&mut bytes)?;

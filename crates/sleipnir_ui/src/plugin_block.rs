@@ -23,6 +23,7 @@ use crate::plugin_surface::{StaleRegistry, Surface};
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockSurface {
     pub plugin_id: String,
+    pub owner_instance_id: uuid::Uuid,
     pub block_id: BlockId,
     pub run_id: RunId,
     pub anchor: Anchor,
@@ -33,8 +34,8 @@ pub struct BlockSurface {
 }
 
 impl Surface for BlockSurface {
-    fn plugin_id(&self) -> &str {
-        &self.plugin_id
+    fn owner_instance_id(&self) -> uuid::Uuid {
+        self.owner_instance_id
     }
     fn set_stale(&mut self, stale: bool) {
         self.stale = stale;
@@ -75,6 +76,7 @@ impl BlockRegistry {
     pub fn apply_render(
         &mut self,
         plugin_id: &str,
+        owner_instance_id: uuid::Uuid,
         run_id: RunId,
         tree: Widget,
         granted: bool,
@@ -93,18 +95,28 @@ impl BlockRegistry {
         };
         if let Some(id) = existing_id {
             if let Some(existing) = self.surfaces.get_mut(&id) {
-                existing.tree = tree;
-                existing.anchor = anchor;
-                existing.stale = false;
-                existing.laid = None;
-                return ApplyBlock::Replaced;
+                if existing.owner_instance_id == owner_instance_id
+                    || (existing.stale && existing.plugin_id == plugin_id)
+                {
+                    existing.tree = tree;
+                    existing.anchor = anchor;
+                    existing.owner_instance_id = owner_instance_id;
+                    existing.stale = false;
+                    existing.laid = None;
+                    return ApplyBlock::Replaced;
+                }
             }
         }
-        let id = existing_id.unwrap_or_else(BlockId::new_v4);
+        let id = if existing_id.is_some_and(|id| self.surfaces.contains_key(&id)) {
+            BlockId::new_v4()
+        } else {
+            existing_id.unwrap_or_else(BlockId::new_v4)
+        };
         self.surfaces.insert(
             id,
             BlockSurface {
                 plugin_id: plugin_id.to_string(),
+                owner_instance_id,
                 block_id: id,
                 run_id,
                 anchor,
@@ -245,7 +257,15 @@ mod tests {
     #[test]
     fn render_block_grant_is_required() {
         let mut reg = BlockRegistry::new();
-        let out = reg.apply_render("demo", run(1), text("hi"), false, Some(anchor(4)), None);
+        let out = reg.apply_render(
+            "demo",
+            uuid::Uuid::nil(),
+            run(1),
+            text("hi"),
+            false,
+            Some(anchor(4)),
+            None,
+        );
         assert_eq!(out, ApplyBlock::DeniedGrant);
         assert!(reg.iter().next().is_none());
     }
@@ -253,7 +273,15 @@ mod tests {
     #[test]
     fn missing_anchor_is_denied() {
         let mut reg = BlockRegistry::new();
-        let out = reg.apply_render("demo", run(1), text("hi"), true, None, None);
+        let out = reg.apply_render(
+            "demo",
+            uuid::Uuid::nil(),
+            run(1),
+            text("hi"),
+            true,
+            None,
+            None,
+        );
         assert_eq!(out, ApplyBlock::DeniedAnchor);
     }
 
@@ -261,25 +289,93 @@ mod tests {
     fn whole_tree_replacement_overwrites_and_clears_stale() {
         let mut reg = BlockRegistry::new();
         assert_eq!(
-            reg.apply_render("demo", run(1), text("one"), true, Some(anchor(4)), None),
+            reg.apply_render(
+                "demo",
+                uuid::Uuid::from_u128(1),
+                run(1),
+                text("one"),
+                true,
+                Some(anchor(4)),
+                None,
+            ),
             ApplyBlock::Inserted
         );
         let id = reg.iter().next().unwrap().block_id;
         reg.mark_missing_stale(&BTreeSet::new());
         assert!(reg.get(id).unwrap().stale);
-        let out = reg.apply_render("demo", run(1), text("two"), true, Some(anchor(4)), Some(id));
+        let out = reg.apply_render(
+            "demo",
+            uuid::Uuid::from_u128(2),
+            run(1),
+            text("two"),
+            true,
+            Some(anchor(4)),
+            Some(id),
+        );
         assert_eq!(out, ApplyBlock::Replaced);
         let s = reg.get(id).unwrap();
         assert!(!s.stale);
+        assert_eq!(s.owner_instance_id, uuid::Uuid::from_u128(2));
         assert_eq!(s.tree, text("two"));
+    }
+
+    #[test]
+    fn live_different_owner_existing_id_does_not_overwrite_block() {
+        let mut reg = BlockRegistry::new();
+        assert_eq!(
+            reg.apply_render(
+                "demo",
+                uuid::Uuid::from_u128(1),
+                run(1),
+                text("one"),
+                true,
+                Some(anchor(4)),
+                None,
+            ),
+            ApplyBlock::Inserted
+        );
+        let original = reg.iter().next().unwrap().clone();
+        assert_eq!(
+            reg.apply_render(
+                "demo",
+                uuid::Uuid::from_u128(2),
+                run(1),
+                text("two"),
+                true,
+                Some(anchor(8)),
+                Some(original.block_id),
+            ),
+            ApplyBlock::Inserted
+        );
+        let surfaces: Vec<_> = reg.iter().cloned().collect();
+        assert_eq!(surfaces.len(), 2);
+        assert!(
+            surfaces.iter().any(|surface| surface == &original),
+            "existing live block must not be overwritten"
+        );
+        let replacement = surfaces
+            .iter()
+            .find(|surface| surface.owner_instance_id == uuid::Uuid::from_u128(2))
+            .expect("new owner gets an independent block");
+        assert_ne!(replacement.block_id, original.block_id);
+        assert_eq!(replacement.anchor.line, 8);
+        assert_eq!(replacement.tree, text("two"));
     }
 
     #[test]
     fn death_marks_stale_without_dropping_the_tree() {
         let mut reg = BlockRegistry::new();
-        reg.apply_render("demo", run(1), text("keep"), true, Some(anchor(3)), None);
+        reg.apply_render(
+            "demo",
+            uuid::Uuid::from_u128(10),
+            run(1),
+            text("keep"),
+            true,
+            Some(anchor(3)),
+            None,
+        );
         let mut live = BTreeSet::new();
-        live.insert("other".into());
+        live.insert(uuid::Uuid::from_u128(11));
         reg.mark_missing_stale(&live);
         let s = reg.iter().next().unwrap();
         assert!(s.stale);
@@ -289,7 +385,15 @@ mod tests {
     #[test]
     fn history_shrink_drops_the_surface_with_its_anchor() {
         let mut reg = BlockRegistry::new();
-        reg.apply_render("demo", run(1), text("gone"), true, Some(anchor(2)), None);
+        reg.apply_render(
+            "demo",
+            uuid::Uuid::nil(),
+            run(1),
+            text("gone"),
+            true,
+            Some(anchor(2)),
+            None,
+        );
         let id = reg.iter().next().unwrap().block_id;
         // The anchor sits inside the removed region, so the Block goes with it.
         reg.rebase_after_history_shrink(5);
@@ -299,7 +403,15 @@ mod tests {
     #[test]
     fn layouts_are_cached_until_width_changes_or_invalidated() {
         let mut reg = BlockRegistry::new();
-        reg.apply_render("demo", run(1), text("hi"), true, Some(anchor(0)), None);
+        reg.apply_render(
+            "demo",
+            uuid::Uuid::nil(),
+            run(1),
+            text("hi"),
+            true,
+            Some(anchor(0)),
+            None,
+        );
         reg.relayout(20, false);
         let ptr = reg.iter().next().unwrap().laid.as_ref().map(|l| l.height);
         reg.relayout(20, false);
@@ -319,6 +431,7 @@ mod tests {
         let mut reg = BlockRegistry::new();
         reg.apply_render(
             "demo",
+            uuid::Uuid::nil(),
             run(1),
             btn("Go", "retry"),
             true,
@@ -352,6 +465,7 @@ mod tests {
         let mut reg = BlockRegistry::new();
         reg.apply_render(
             "honest",
+            uuid::Uuid::nil(),
             run(1),
             text("plugin:evil"),
             true,
@@ -380,7 +494,15 @@ mod tests {
     #[test]
     fn frozen_skips_relayout() {
         let mut reg = BlockRegistry::new();
-        reg.apply_render("demo", run(1), text("a"), true, Some(anchor(0)), None);
+        reg.apply_render(
+            "demo",
+            uuid::Uuid::nil(),
+            run(1),
+            text("a"),
+            true,
+            Some(anchor(0)),
+            None,
+        );
         reg.relayout(10, false);
         let h = reg.iter().next().unwrap().laid.as_ref().unwrap().height;
         // Simulate a width change while frozen: cache must stay.
@@ -404,8 +526,24 @@ mod tests {
         use row_geometry::RowGeometry;
 
         let mut reg = BlockRegistry::new();
-        reg.apply_render("demo", run(1), text("doomed"), true, Some(anchor(2)), None);
-        reg.apply_render("demo", run(2), text("kept"), true, Some(anchor(9)), None);
+        reg.apply_render(
+            "demo",
+            uuid::Uuid::nil(),
+            run(1),
+            text("doomed"),
+            true,
+            Some(anchor(2)),
+            None,
+        );
+        reg.apply_render(
+            "demo",
+            uuid::Uuid::nil(),
+            run(2),
+            text("kept"),
+            true,
+            Some(anchor(9)),
+            None,
+        );
         reg.relayout(20, false);
 
         let mut geom = RowGeometry::new(16.0);

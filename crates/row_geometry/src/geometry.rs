@@ -165,6 +165,16 @@ impl RowGeometry {
         self.spans.clear();
     }
 
+    /// Explicit invalidation when absolute anchors can no longer be trusted
+    /// (for example width reflow or capped churn where the consumed history is
+    /// not observable). This is intentionally not a guessed rebase.
+    pub fn invalidate_anchors(&mut self) {
+        if self.spans.is_empty() {
+            return;
+        }
+        self.spans.clear();
+    }
+
     /// History shrink (`clear`, `ED 3`). Same rule as
     /// `rebase_markers_after_history_shrink` in `osc133.rs`: survivors shift
     /// down by `removed`; a Block whose anchor fell inside the removed

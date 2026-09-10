@@ -154,10 +154,12 @@ impl Plugin for RunLedger {
                 self.redraw(ctx);
             }
             HostEvent::RunFinished {
-                pane, exit_code, ..
+                run_id,
+                exit_code,
+                duration_ms,
+                ..
             } => {
-                let at_ms = self.now_ms();
-                self.state.apply_finished(pane, exit_code, at_ms);
+                self.state.apply_finished(run_id, exit_code, duration_ms);
                 self.save();
                 self.redraw(ctx);
             }

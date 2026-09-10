@@ -9,7 +9,7 @@ mod run_tracker;
 mod shell_semantics;
 pub mod terminal_settings;
 
-pub use osc_notify::{OscNotify, OscNotifyScanner, scan_osc_notify};
+pub use osc_notify::{OscNotify, scan_osc_notify};
 pub use osc133::{
     GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
     gutter_marks_from_markers, rebase_markers_after_history_shrink,
@@ -74,13 +74,13 @@ use gpui::{
 use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
-    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
+    AlacrittyTermConfig, AlacrittyTermLock, DamageKind, HyperlinkMatch, PtySender, RegexSearches,
     clear_saved_screen, content_text, display_offset, find_from_terminal_point, grid_text_range,
     make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
     scroll_display, scroll_to_point, search_matches, selection_text,
-    set_selection as set_term_selection, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode,
-    total_lines, update_selection as update_term_selection, update_selection_to_vi_cursor,
-    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    set_selection as set_term_selection, spawn_event_loop, take_damage_kind,
+    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
+    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
     visible_screen_text as term_visible_screen_text,
 };
 use crate::mappings::colors::to_vte_rgb;
@@ -541,6 +541,12 @@ pub enum Event {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockAnchorChange {
+    Rebase(i32),
+    Invalidate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathLikeTarget {
     /// File system path, absolute or relative, existing or not.
     /// Might have line and column number(s) attached as `file.rs:1:23`
@@ -917,10 +923,9 @@ impl TerminalBuilder {
                 mouse_down_hyperlink: None,
                 child_exited: None,
                 keyboard_input_sent: false,
-                osc133: Osc133Scanner::new(),
                 last_history_size: 0,
-                pending_history_shrink: 0,
-                osc_notify: OscNotifyScanner::new(),
+                pending_block_anchor_changes: Vec::new(),
+                pending_backend_wakeup: false,
                 prompt_markers: Vec::new(),
                 last_busy: false,
                 busy_since: None,
@@ -1088,15 +1093,14 @@ pub struct Terminal {
     mouse_down_hyperlink: Option<HyperlinkMatch>,
     child_exited: Option<ExitStatus>,
     keyboard_input_sent: bool,
-    /// OSC 133 scanner (M14 shell integration detect).
-    osc133: Osc133Scanner,
     /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) means
     /// gutter marker lines must be rebased.
     last_history_size: usize,
-    /// Rows dropped from scrollback since the Block mount last looked.
-    /// Accumulates across syncs so a shrink cannot be missed between paints.
-    pending_history_shrink: i32,
-    osc_notify: OscNotifyScanner,
+    /// Ordered block-anchor lifecycle updates published to the host mount.
+    pending_block_anchor_changes: Vec<BlockAnchorChange>,
+    /// Set when the current sync followed a backend wakeup, which distinguishes
+    /// PTY-driven churn from user-only viewport moves.
+    pending_backend_wakeup: bool,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
     /// Last known busy state for command-finish notify (M14).
@@ -1180,6 +1184,7 @@ impl Terminal {
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
                     info.emit_title_changed_if_changed(cx);
                 }
+                self.pending_backend_wakeup = true;
             }
             TerminalBackendEvent::ColorRequest(index, format) => {
                 // It's important that the color request is processed here to retain relative order
@@ -1234,8 +1239,7 @@ impl Terminal {
                 let new_bounds = normalize_terminal_bounds(new_bounds);
                 trace!("Resizing: new_bounds={new_bounds:?}");
 
-                let columns_changed =
-                    self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
+                let columns_changed = term.columns() != new_bounds.columns();
                 self.last_content.terminal_bounds = new_bounds;
 
                 if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
@@ -1244,7 +1248,7 @@ impl Terminal {
 
                 resize(term, new_bounds);
                 if columns_changed {
-                    self.reset_cwd_history();
+                    self.invalidate_terminal_anchors();
                 }
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
@@ -1256,7 +1260,7 @@ impl Terminal {
             InternalEvent::Clear => {
                 trace!("Clearing");
                 clear_saved_screen(term);
-                self.reset_cwd_history();
+                self.invalidate_terminal_anchors();
                 cx.emit(Event::Wakeup);
             }
             InternalEvent::Scroll(scroll) => {
@@ -1542,15 +1546,14 @@ impl Terminal {
         self.row_geometry.set_frozen(frozen);
     }
 
-    /// Rows dropped from scrollback since the last call, then reset to zero.
+    /// Ordered anchor-lifecycle changes for the host block registry.
     ///
-    /// History belongs to the terminal, so the shrink is detected here once
-    /// (`sync`) rather than re-derived by every mount that stores absolute
-    /// lines. The Block mount consumes this to rebase its own surfaces, which
-    /// are then pushed back over `row_geometry` — so both sides shift by the
-    /// same amount and geometry never keeps a stale absolute line.
-    pub fn take_history_shrink(&mut self) -> i32 {
-        std::mem::take(&mut self.pending_history_shrink)
+    /// Producers canonicalize before publish so a host that has not consumed
+    /// yet never sees an unbounded queue: rebases fold into one saturating
+    /// delta, and any invalidation subsumes all older and future rebases until
+    /// the next take.
+    pub fn take_block_anchor_changes(&mut self) -> Vec<BlockAnchorChange> {
+        std::mem::take(&mut self.pending_block_anchor_changes)
     }
 
     /// Replace the Block set from the mount point. Heights are integer rows
@@ -1561,13 +1564,6 @@ impl Terminal {
 
     pub fn remove_block(&mut self, id: row_geometry::BlockId) {
         self.row_geometry.remove(id);
-    }
-
-    /// Feed OSC 133 scanner and record prompt markers at the current cursor line.
-    pub fn ingest_osc133(&mut self, bytes: &[u8]) {
-        for kind in self.osc133.push(bytes) {
-            self.record_osc133_marker(kind);
-        }
     }
 
     /// Record a parsed OSC 133 marker against the current cursor line.
@@ -1688,14 +1684,6 @@ impl Terminal {
             None
         } else {
             Some(text)
-        }
-    }
-
-    /// Feed OSC 9 / 777 desktop-notification requests from a byte stream,
-    /// emitting `Event::Notify` for each.
-    pub fn ingest_osc_notify(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        for n in self.osc_notify.push(bytes) {
-            cx.emit(Event::Notify(n.message));
         }
     }
 
@@ -1927,7 +1915,10 @@ impl Terminal {
     }
 
     pub fn clear(&mut self) {
-        self.events.push_back(InternalEvent::Clear)
+        match self.events.back() {
+            Some(InternalEvent::Clear) => {}
+            _ => self.events.push_back(InternalEvent::Clear),
+        }
     }
 
     pub fn scroll_line_up(&mut self) {
@@ -1976,7 +1967,6 @@ impl Terminal {
         let new_bounds = normalize_terminal_bounds(new_bounds);
 
         let old_bounds = self.last_content.terminal_bounds;
-        self.last_content.terminal_bounds = new_bounds;
 
         // Avoid spamming PTY resizes on pixel-level size changes (e.g. while dragging edges),
         // since those can generate excessive SIGWINCH/reflows and cause visible flicker.
@@ -1986,9 +1976,11 @@ impl Terminal {
             || old_bounds.line_height != new_bounds.line_height;
 
         if !requires_resize {
+            self.last_content.terminal_bounds = new_bounds;
             return;
         }
 
+        self.last_content.terminal_bounds = new_bounds;
         match self.events.back_mut() {
             Some(InternalEvent::Resize(pending_bounds)) => *pending_bounds = new_bounds,
             _ => self.events.push_back(InternalEvent::Resize(new_bounds)),
@@ -2214,23 +2206,25 @@ impl Terminal {
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
+        let prev_alt = self.last_content.mode.contains(Modes::ALT_SCREEN);
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
 
-        // A shrinking scrollback (e.g. `clear` sends `ED 3`, or an app clear
-        // dropped saved lines) invalidates the absolute lines stored in the
-        // gutter markers; rebase them so triangles don't strand on wrong rows.
+        // A shrinking scrollback (e.g. `clear` sends `ED 3`) gives a real
+        // consumed amount and can be rebased exactly. Reflow/capped churn
+        // cannot: if wrapped lines were rearranged or old history was evicted
+        // without changing `history_size`, guessed rebases strand anchors on
+        // the wrong rows. Publish explicit invalidation in those cases.
         let history_size = terminal.history_size();
+        let damage = take_damage_kind(&mut terminal);
+        let capped_history = history_size >= self.term_config.scrolling_history;
         let removed = crate::row_map::history_shrink(self.last_history_size, history_size);
         if removed > 0 {
             rebase_markers_after_history_shrink(&mut self.prompt_markers, removed);
             self.row_geometry.rebase_after_history_shrink(removed);
-            // Published for the Block mount, which owns the surfaces this
-            // geometry is rebuilt from and must rebase them by the same
-            // amount. Consumed (and cleared) by `take_history_shrink`.
-            self.pending_history_shrink = self.pending_history_shrink.saturating_add(removed);
+            self.publish_rebase(removed);
         }
         self.last_history_size = history_size;
         let screen_lines = terminal.screen_lines();
@@ -2245,6 +2239,19 @@ impl Terminal {
         if alt {
             self.viewport.sub = 0.0;
         }
+
+        let alt_transitioned = (!prev_alt && alt) || (prev_alt && !alt);
+        if alt_transitioned {
+            self.invalidate_terminal_anchors();
+        }
+        let capped_churn_without_delta = removed == 0
+            && capped_history
+            && self.pending_backend_wakeup
+            && matches!(damage, DamageKind::Full);
+        if capped_churn_without_delta {
+            self.invalidate_terminal_anchors();
+        }
+        self.pending_backend_wakeup = false;
         drop(terminal);
 
         // A frozen "select all" must survive alacritty's internal selection
@@ -2773,6 +2780,36 @@ impl Terminal {
             .unwrap_or_default();
     }
 
+    fn publish_rebase(&mut self, removed: i32) {
+        if removed <= 0 {
+            return;
+        }
+
+        match self.pending_block_anchor_changes.as_mut_slice() {
+            [BlockAnchorChange::Invalidate] => {}
+            [BlockAnchorChange::Rebase(total)] => {
+                *total = total.saturating_add(removed);
+            }
+            [] => self
+                .pending_block_anchor_changes
+                .push(BlockAnchorChange::Rebase(removed)),
+            _ => unreachable!("block anchor change queue is producer-canonicalized"),
+        }
+    }
+
+    fn publish_invalidate(&mut self) {
+        self.pending_block_anchor_changes.clear();
+        self.pending_block_anchor_changes
+            .push(BlockAnchorChange::Invalidate);
+    }
+
+    fn invalidate_terminal_anchors(&mut self) {
+        self.reset_cwd_history();
+        self.prompt_markers.clear();
+        self.row_geometry.invalidate_anchors();
+        self.publish_invalidate();
+    }
+
     fn cwd_at_line(&self, line: i32, history_size: usize) -> Option<PathBuf> {
         // Once the scrollback cap is reached, evictions move retained lines without changing
         // `history_size`, so stored row offsets no longer identify their original lines.
@@ -3020,55 +3057,38 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{accumulate_uniform_wheel, terminal_looks_busy};
-    use gpui::px;
+    use super::{
+        BlockAnchorChange, Content, CwdHistoryEntry, InternalEvent, PtyEvent, SelectionPhase,
+        Terminal, TerminalBounds, TerminalType, accumulate_uniform_wheel,
+        normalize_terminal_bounds, terminal_looks_busy,
+    };
+    use crate::{
+        Osc133Kind,
+        alacritty::{RegexSearches, new_term, pty_term_config, resize, take_damage_kind},
+        terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
+    };
+    use alacritty_terminal::grid::Dimensions as _;
+    use collections::VecDeque;
+    use futures::channel::mpsc::unbounded;
+    use gpui::{AppContext as _, Bounds, Context, Empty, Render, Size, TestAppContext, Window, px};
+    use row_geometry::{Anchor, Block, RowGeometry, ViewportPosition};
+    use std::{path::PathBuf, time::Instant};
+    use util::paths::PathStyle;
+    use vte::ansi::Handler;
 
-    /// Regression (ADR-0018 integration): `sync` holds the terminal lock across
-    /// `process_terminal_event`, which is handed `term: &mut AlacrittyTerm`.
-    /// Routing coordinates through `pointer_map` there re-entered
-    /// `FairMutex::lock_unfair` on the same thread and parked forever — a 100%
-    /// CPU hang reproducible by opening Settings. Paths under the held lock must
-    /// use `pointer_map_locked`, which takes the borrow instead of re-locking.
-    ///
-    /// A runtime test would have to deadlock to fail, so this inspects the
-    /// source: inside `process_terminal_event` there must be no `pointer_map()`
-    /// call and no `self.term.lock_unfair()`.
-    #[test]
-    fn process_terminal_event_never_relocks_the_terminal() {
-        let src = include_str!("terminal.rs");
-        let start = src
-            .find("fn process_terminal_event(")
-            .expect("process_terminal_event exists");
-        // The next `fn` at the same indentation ends the body. Anything the
-        // mouse path adds between process_terminal_event and pointer_map
-        // (e.g. link_target_at) is out of scope: it never runs under the
-        // held lock.
-        let body_start = start + "fn process_terminal_event(".len();
-        let end = ["\n    fn ", "\n    pub fn ", "\n    pub(crate) fn "]
-            .iter()
-            .filter_map(|needle| src[body_start..].find(needle))
-            .map(|off| body_start + off)
-            .min()
-            .expect("another method follows process_terminal_event");
-        let body = &src[start..end];
-        assert!(
-            !body.contains("self.pointer_map()"),
-            "process_terminal_event must use pointer_map_locked; \
-             pointer_map() re-locks and self-deadlocks"
-        );
-        assert!(
-            !body.contains("self.term.lock_unfair()"),
-            "the lock is already held for this call"
-        );
-        assert!(
-            body.contains("pointer_map_locked(term)"),
-            "coordinates must still route through RowGeometry"
-        );
+    #[derive(Default)]
+    struct TestRoot;
+
+    impl Render for TestRoot {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl gpui::IntoElement {
+            Empty
+        }
     }
 
-    /// Regression: v0.4.1 accumulated fractional uniform-grid wheel movement
-    /// without feeding it into the paint transform. Opposite fractional
-    /// gestures must cancel while dispatching the same whole-row movement.
     #[test]
     fn uniform_wheel_preserves_v0_4_1_accumulation() {
         let line_height = px(16.0);
@@ -3083,11 +3103,8 @@ mod tests {
         assert_eq!(scroll_px, px(0.0));
     }
 
-    // M1: full integration tests disabled (Zed settings stack removed)
-
     #[test]
     fn idle_shell_is_not_busy() {
-        // Foreground process group equals the shell child.
         assert!(!terminal_looks_busy(Some(42), 42));
         assert!(!terminal_looks_busy(None, 42));
         assert!(!terminal_looks_busy(Some(0), 42));
@@ -3096,38 +3113,260 @@ mod tests {
 
     #[test]
     fn foreground_job_is_busy() {
-        // e.g. shell pid 100, `sleep` in pgid 200.
         assert!(terminal_looks_busy(Some(200), 100));
         assert!(terminal_looks_busy(Some(1), 2));
     }
 
-    /// Regression: modal overlays (settings, palette, …) swallow mouse_down
-    /// via stop_propagation, but TermElement's window-level listener still
-    /// forwards drag moves from above the overlay. `mouse_drag` must bail
-    /// when no terminal mouse-down anchors the drag, otherwise dragging over
-    /// an open menu starts a selection from a stale anchor behind it.
-    ///
-    /// A runtime test needs a full gpui window, so this inspects the source:
-    /// `mouse_drag` must gate on `mouse_down_position` before entering
-    /// `SelectionPhase::Selecting`.
     #[test]
-    fn mouse_drag_requires_a_terminal_mouse_down() {
-        let src = include_str!("terminal.rs");
-        let start = src.find("fn mouse_drag(").expect("mouse_drag exists");
-        let end = src[start..]
-            .find("fn drag_line_delta(")
-            .map(|off| start + off)
-            .expect("drag_line_delta follows mouse_drag");
-        let body = &src[start..end];
-        let gate = body
-            .find("let Some(mouse_down_position) = self.mouse_down_position else")
-            .expect("mouse_drag must bail when mouse_down_position is None");
-        let selecting = body
-            .find("self.selection_phase = SelectionPhase::Selecting")
-            .expect("mouse_drag enters Selecting");
+    fn resize_uses_live_term_columns_before_pending_bounds_overwrite() {
+        let mut terminal = test_terminal();
+        let term = terminal.term.clone();
+        let mut term = term.lock_unfair();
+
+        let old_pending = bounds_with_cols(120);
+        let live = bounds_with_cols(100);
+        let new_bounds = bounds_with_cols(80);
+
+        terminal.last_content.terminal_bounds = old_pending;
+        resize(&mut term, live);
+
+        let columns_changed = term.columns() != new_bounds.columns();
+        terminal.last_content.terminal_bounds = new_bounds;
+        if columns_changed {
+            terminal.invalidate_terminal_anchors();
+        }
+
         assert!(
-            gate < selecting,
-            "the mouse_down_position gate must precede SelectionPhase::Selecting"
+            columns_changed,
+            "must compare against live term columns, not pending bounds"
         );
+        assert_eq!(terminal.prompt_markers, Vec::new());
+        assert_eq!(
+            terminal.take_block_anchor_changes(),
+            vec![BlockAnchorChange::Invalidate]
+        );
+    }
+
+    #[test]
+    fn invalidate_terminal_anchors_clears_markers_geometry_and_cwd_state() {
+        let mut terminal = test_terminal();
+        terminal.prompt_markers.push(crate::Osc133Marker {
+            kind: Osc133Kind::PromptStart,
+            line: Some(7),
+            column: Some(2),
+        });
+        terminal.record_cwd_change(PathBuf::from("/tmp/child"));
+        terminal.row_geometry.upsert(Block {
+            id: Default::default(),
+            run_id: Default::default(),
+            anchor: Anchor { line: 7, column: 0 },
+            height: 3,
+        });
+
+        terminal.invalidate_terminal_anchors();
+
+        assert!(terminal.prompt_markers.is_empty());
+        assert!(terminal.row_geometry.blocks().next().is_none());
+        assert_eq!(terminal.pending_cwd_boundary, None);
+        assert!(terminal.cwd_history.is_empty());
+        assert_eq!(
+            terminal.take_block_anchor_changes(),
+            vec![BlockAnchorChange::Invalidate]
+        );
+    }
+
+    #[test]
+    fn publish_rebase_combines_deltas_before_consume() {
+        let mut terminal = test_terminal();
+        terminal.publish_rebase(2);
+        terminal.publish_rebase(1);
+        terminal.publish_rebase(i32::MAX);
+
+        assert_eq!(
+            terminal.take_block_anchor_changes(),
+            vec![BlockAnchorChange::Rebase(i32::MAX)]
+        );
+        assert!(terminal.pending_block_anchor_changes.is_empty());
+    }
+
+    #[test]
+    fn publish_invalidate_subsumes_older_and_future_rebases_until_consume() {
+        let mut terminal = test_terminal();
+        terminal.publish_rebase(2);
+        terminal.publish_rebase(1);
+        terminal.publish_invalidate();
+        terminal.publish_rebase(9);
+        terminal.publish_invalidate();
+        terminal.publish_rebase(4);
+
+        assert_eq!(
+            terminal.pending_block_anchor_changes,
+            vec![BlockAnchorChange::Invalidate]
+        );
+        assert_eq!(
+            terminal.take_block_anchor_changes(),
+            vec![BlockAnchorChange::Invalidate]
+        );
+        assert!(terminal.pending_block_anchor_changes.is_empty());
+    }
+
+    #[test]
+    fn clear_queue_coalesces_duplicate_clear_events() {
+        let mut terminal = test_terminal();
+        terminal.clear();
+        terminal.clear();
+        terminal.clear();
+
+        assert_eq!(terminal.events.len(), 1);
+        assert!(matches!(
+            terminal.events.front(),
+            Some(InternalEvent::Clear)
+        ));
+    }
+
+    #[test]
+    fn capped_history_full_damage_requires_conservative_invalidate_evidence() {
+        let config = pty_term_config(8, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = unbounded();
+        let term = new_term(
+            &config,
+            TerminalBounds::default(),
+            events_tx,
+            AlternateScroll::Off,
+        );
+        let mut term = term.lock_unfair();
+
+        for i in 0..80 {
+            for c in format!("line{i}").chars() {
+                term.input(c);
+            }
+            term.input('\r');
+            term.input('\n');
+        }
+
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(1));
+        assert_eq!(
+            take_damage_kind(&mut term),
+            crate::alacritty::DamageKind::Full
+        );
+    }
+
+    #[gpui::test]
+    async fn sync_alt_transition_invalidates_anchor_state(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        let mut terminal = test_terminal();
+        terminal.prompt_markers.push(crate::Osc133Marker {
+            kind: Osc133Kind::PromptStart,
+            line: Some(3),
+            column: Some(0),
+        });
+        terminal.row_geometry.upsert(Block {
+            id: Default::default(),
+            run_id: Default::default(),
+            anchor: Anchor { line: 3, column: 0 },
+            height: 2,
+        });
+        terminal.last_content.mode = super::Modes::empty();
+        {
+            let term = terminal.term.clone();
+            let mut term = term.lock_unfair();
+            term.set_private_mode(alacritty_terminal::vte::ansi::PrivateMode::Named(
+                alacritty_terminal::vte::ansi::NamedPrivateMode::SwapScreenAndSetRestoreCursor,
+            ));
+        }
+
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| terminal);
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+            });
+            entity.update(cx, |terminal, _| {
+                assert!(terminal.prompt_markers.is_empty());
+                assert!(terminal.row_geometry.blocks().next().is_none());
+                assert_eq!(
+                    terminal.take_block_anchor_changes(),
+                    vec![BlockAnchorChange::Invalidate]
+                );
+            });
+        });
+    }
+
+    fn test_terminal() -> Terminal {
+        let config = pty_term_config(64, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = unbounded::<PtyEvent>();
+        let term = new_term(
+            &config,
+            TerminalBounds::default(),
+            events_tx,
+            AlternateScroll::Off,
+        );
+
+        let working_directory = PathBuf::from("/tmp/root");
+        let mut terminal = Terminal {
+            terminal_type: TerminalType::Closed,
+            term,
+            term_config: config,
+            events: VecDeque::new(),
+            last_mouse: None,
+            mouse_down_position: None,
+            matches: Vec::new(),
+            active_match: None,
+            last_content: Content::default(),
+            selection_head: None,
+            frozen_selection: None,
+            title_override: None,
+            scroll_px: px(0.0),
+            viewport: ViewportPosition::new(0),
+            row_geometry: RowGeometry::new(16.0),
+            next_link_id: 0,
+            selection_phase: SelectionPhase::Ended,
+            hyperlink_regex_searches: RegexSearches::default(),
+            vi_mode_enabled: false,
+            last_mouse_move_time: Instant::now(),
+            last_hyperlink_search_position: None,
+            mouse_down_hyperlink: None,
+            child_exited: None,
+            keyboard_input_sent: false,
+            last_history_size: 0,
+            pending_block_anchor_changes: Vec::new(),
+            pending_backend_wakeup: false,
+            prompt_markers: Vec::new(),
+            last_busy: false,
+            busy_since: None,
+            run_tracker: Default::default(),
+            started_at: Instant::now(),
+            event_loop_task: gpui::Task::ready(Ok(())),
+            background_executor: TestAppContext::single().executor(),
+            path_style: PathStyle::local(),
+            cwd_history: vec![CwdHistoryEntry {
+                scrollback_position: i32::MIN,
+                working_directory,
+            }],
+            pending_cwd_boundary: None,
+            input_log: Vec::new(),
+            pty_write_log: Default::default(),
+        };
+        terminal.last_content.terminal_bounds = TerminalBounds::default();
+        terminal
+    }
+
+    fn bounds_with_cols(columns: usize) -> TerminalBounds {
+        normalize_terminal_bounds(TerminalBounds::new(
+            px(16.0),
+            px(8.0),
+            Bounds {
+                origin: Default::default(),
+                size: Size {
+                    width: px((columns as f32) * 8.0),
+                    height: px(16.0 * 24.0),
+                },
+            },
+        ))
+    }
+
+    #[test]
+    fn block_anchor_change_debug_shape_is_stable() {
+        assert_eq!(format!("{:?}", BlockAnchorChange::Rebase(3)), "Rebase(3)");
+        assert_eq!(format!("{:?}", BlockAnchorChange::Invalidate), "Invalidate");
     }
 }

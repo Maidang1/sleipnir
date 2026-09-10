@@ -106,7 +106,10 @@ impl PluginDispatcher {
                 );
             }
         }
-        for (plugin_id, message) in inbound {
+        for envelope in inbound {
+            let plugin_id = envelope.plugin_id.clone();
+            let instance_id = envelope.instance_id;
+            let message = envelope.message;
             let destinations = routes.destinations(&message);
             let call_id = match &message {
                 Inbound::Call { id, .. } => Some(*id),
@@ -114,8 +117,8 @@ impl PluginDispatcher {
             };
             if destinations.is_empty() {
                 if let Some(id) = call_id {
-                    plugin_runtime::reply_host_call(
-                        &plugin_id,
+                    plugin_runtime::reply_host_call_to_instance(
+                        instance_id,
                         id,
                         HostCallResult::Error {
                             message: "target pane or window is no longer available".into(),
@@ -143,6 +146,7 @@ impl PluginDispatcher {
                 let applied = windows[index].update(cx, |shell, window, cx| {
                     shell.apply_plugin_inbound(
                         &plugin_id,
+                        instance_id,
                         message.clone(),
                         &live_panes,
                         window,
@@ -163,8 +167,8 @@ impl PluginDispatcher {
                     }
                     Err(_) => {
                         if let Some(id) = call_id {
-                            plugin_runtime::reply_host_call(
-                                &plugin_id,
+                            plugin_runtime::reply_host_call_to_instance(
+                                instance_id,
                                 id,
                                 HostCallResult::Error {
                                     message: "target window closed".into(),

@@ -123,6 +123,7 @@ mod tests {
         let manifest = verify_and_parse(&bytes, &signature, &key).unwrap();
         assert_eq!(manifest.version.to_string(), "0.3.2");
         assert_eq!(manifest.artifact, "Sleipnir-0.3.2-macos.dmg");
+        assert_eq!(manifest.minimum_macos, "14.0");
     }
 
     #[test]

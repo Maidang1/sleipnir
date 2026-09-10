@@ -293,9 +293,21 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, registry: Registry)
                 let reply = match decode_request_line(&line) {
                     Ok(req) => {
                         let resp = registry.handle(req, now_ms());
-                        encode_response_line(&resp).unwrap_or_else(|err| error_json(resp.id, &err))
+                        match encode_response_line(&resp) {
+                            Ok(line) if line.len() <= MAX_LINE_BYTES => line,
+                            Ok(_) => error_json(
+                                resp.id,
+                                "response exceeds line length cap; result is retained without truncation",
+                            ),
+                            Err(err) => error_json(resp.id, &err),
+                        }
                     }
                     Err(err) => error_json(salvage_id(&line), &format!("malformed request: {err}")),
+                };
+                let reply = if reply.len() > MAX_LINE_BYTES {
+                    error_json(salvage_id(&line), "response exceeds line length cap")
+                } else {
+                    reply
                 };
                 if writeln!(writer, "{reply}").is_err() {
                     break;
@@ -407,7 +419,7 @@ mod tests {
         let list = call(&path, &req(1, Request::List)).unwrap();
         assert_eq!(list.id, 1);
         match list.body {
-            Response::Agents { agents } => assert!(agents.is_empty()),
+            Response::Agents { agents, .. } => assert!(agents.is_empty()),
             other => panic!("{other:?}"),
         }
         let launched = call(
@@ -439,7 +451,7 @@ mod tests {
         }
         let effects = call(&path, &req(4, Request::Effects)).unwrap();
         match effects.body {
-            Response::Effects { effects } => {
+            Response::Effects { effects, .. } => {
                 assert!(
                     effects
                         .iter()
@@ -488,6 +500,228 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn large_results_are_retrieved_by_wait_not_session_summaries() {
+        use crate::call;
+        let registry = Registry::new();
+        let path = test_sock();
+        let server = Server::bind(registry, &path).unwrap();
+        let session = match call(
+            &path,
+            &req(
+                1,
+                Request::Launch {
+                    kind: crate::AgentKind::Codex,
+                    cwd: "/tmp".into(),
+                    name: None,
+                    args: vec![],
+                },
+            ),
+        )
+        .unwrap()
+        .body
+        {
+            Response::LaunchAccepted { session, task } => {
+                call(
+                    &path,
+                    &req(
+                        2,
+                        Request::ReportResult {
+                            task,
+                            text: "x".repeat(40 * 1024),
+                        },
+                    ),
+                )
+                .unwrap();
+                session
+            }
+            other => panic!("{other:?}"),
+        };
+        let task = match call(
+            &path,
+            &req(
+                3,
+                Request::Prompt {
+                    session,
+                    text: "next".into(),
+                },
+            ),
+        )
+        .unwrap()
+        .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        call(
+            &path,
+            &req(
+                4,
+                Request::ReportResult {
+                    task,
+                    text: "y".repeat(40 * 1024),
+                },
+            ),
+        )
+        .unwrap();
+        for request in [Request::Inspect { session }, Request::List] {
+            let reply = call(&path, &req(5, request))
+                .expect("summaries must fit the official client's frame cap");
+            let encoded = crate::encode_response_line(&reply).unwrap();
+            assert!(
+                !encoded.contains("yyyyyyyyyy"),
+                "summary must omit the result payload"
+            );
+        }
+        match call(&path, &req(6, Request::Wait { task })).unwrap().body {
+            Response::Wait {
+                result,
+                next_result_offset,
+                ..
+            } => {
+                assert_eq!(result.unwrap(), "y".repeat(40 * 1024));
+                assert!(next_result_offset.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        server.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn official_client_collects_all_summary_and_diagnostic_pages() {
+        let registry = Registry::new();
+        for i in 0..crate::registry::MAX_SESSIONS {
+            registry.handle(
+                req(
+                    i as u64,
+                    Request::Launch {
+                        kind: crate::AgentKind::Codex,
+                        cwd: format!("/{}", "界".repeat(1023)),
+                        name: None,
+                        args: vec![],
+                    },
+                ),
+                i as u64,
+            );
+        }
+        let path = test_sock();
+        let server = Server::bind(registry, &path).unwrap();
+        match crate::call(&path, &req(1, Request::List)).unwrap().body {
+            Response::Agents {
+                agents,
+                next_offset,
+            } => {
+                assert_eq!(agents.len(), crate::registry::MAX_SESSIONS);
+                assert!(next_offset.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match crate::call(&path, &req(2, Request::Effects)).unwrap().body {
+            Response::Effects {
+                effects,
+                next_cursor,
+            } => {
+                assert_eq!(effects.len(), crate::registry::MAX_SESSIONS);
+                assert!(next_cursor.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        server.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_request_error_also_obeys_response_byte_cap() {
+        use std::io::{BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        let path = test_sock();
+        let server = Server::bind(Registry::new(), &path).unwrap();
+        let mut socket = UnixStream::connect(&path).unwrap();
+        let request = format!(
+            "{{\"id\":7,\"op\":\"{}\"}}",
+            "x".repeat(crate::MAX_LINE_BYTES - 20)
+        );
+        assert!(request.len() <= crate::MAX_LINE_BYTES);
+        writeln!(socket, "{request}").unwrap();
+        match crate::line::read_bounded_line(&mut BufReader::new(socket), crate::MAX_LINE_BYTES)
+            .unwrap()
+        {
+            crate::line::BoundedRead::Line(line) => assert!(matches!(
+                crate::decode_response_line(&line).unwrap().body,
+                Response::Error { .. }
+            )),
+            other => panic!("error itself must be bounded: {other:?}"),
+        }
+        server.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_wait_results_are_retrieved_losslessly_in_unicode_pages() {
+        use crate::call;
+        let registry = Registry::new();
+        let task = match registry
+            .handle(
+                req(
+                    1,
+                    Request::Launch {
+                        kind: crate::AgentKind::Codex,
+                        cwd: "/tmp".into(),
+                        name: None,
+                        args: vec![],
+                    },
+                ),
+                0,
+            )
+            .body
+        {
+            Response::LaunchAccepted { task, .. } => task,
+            other => panic!("{other:?}"),
+        };
+        let payload = "界".repeat(30 * 1024);
+        registry
+            .apply(
+                crate::AdapterUpdate::TaskResult {
+                    task,
+                    text: payload.clone(),
+                },
+                1,
+            )
+            .unwrap();
+        let path = test_sock();
+        let server = Server::bind(registry.clone(), &path).unwrap();
+        match call(&path, &req(7, Request::Wait { task }))
+            .expect("paged wait response")
+            .body
+        {
+            Response::Wait {
+                result,
+                detail,
+                next_result_offset,
+                ..
+            } => {
+                assert_eq!(result, Some(payload));
+                assert!(detail.is_none());
+                assert!(next_result_offset.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match registry.handle(req(8, Request::Wait { task }), 2).body {
+            Response::Wait {
+                result,
+                next_result_offset,
+                ..
+            } => {
+                assert!(result.is_some());
+                assert!(next_result_offset.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+        server.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn concurrent_clients_share_the_registry() {
         use crate::call;
         use std::thread;
@@ -514,7 +748,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let resp = call(&path, &req(10 + i, Request::List)).unwrap();
                 match resp.body {
-                    Response::Agents { agents } => assert_eq!(agents.len(), 1),
+                    Response::Agents { agents, .. } => assert_eq!(agents.len(), 1),
                     other => panic!("{other:?}"),
                 }
             }));

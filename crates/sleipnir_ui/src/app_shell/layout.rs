@@ -198,6 +198,14 @@ impl AppShell {
         }
     }
 
+    /// Navigation uses the current tree, not rectangles left by an older render
+    /// (in particular, a different tab or the zoomed-only render).
+    pub(super) fn navigation_rects(tree: &PaneNode, area: Bounds<Pixels>) -> Vec<PaneRect> {
+        let mut panes = Vec::new();
+        Self::compute_layout(tree, area, SplitPath::new(), &mut panes, &mut Vec::new());
+        panes
+    }
+
     pub(super) fn render_content(
         &mut self,
         tokens: &ChromeTokens,
@@ -223,6 +231,10 @@ impl AppShell {
         // Pane zoom (M13): only the zoomed leaf is shown full-size.
         if let Some(zid) = zoomed {
             if let Some((id, key, content)) = leaves.iter().find(|(id, _, _)| *id == zid) {
+                self.pane_rects = self
+                    .content_bounds
+                    .map(|bounds| vec![PaneRect { id: *id, bounds }])
+                    .unwrap_or_default();
                 return div()
                     .id("pane-area-zoomed")
                     .flex_1()
@@ -236,6 +248,26 @@ impl AppShell {
                             .left_0()
                             .size_full()
                             .child(self.leaf_element(*id, *key, content, tokens, window, cx)),
+                    )
+                    .child(
+                        canvas(
+                            {
+                                let shell = cx.weak_entity();
+                                move |bounds, _window, cx| {
+                                    let _ = shell.update(cx, |this, cx| {
+                                        if this.content_bounds != Some(bounds) {
+                                            this.content_bounds = Some(bounds);
+                                            cx.notify();
+                                        }
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
                     )
                     .child(
                         div()
@@ -297,7 +329,7 @@ impl AppShell {
 
         // Single pane: render the view directly, still capturing bounds.
         let single = leaves.len() == 1;
-        let allow_pane_extract = leaves.len() > 1;
+        let allow_pane_extract = tab.tree.terminal_count() > 1;
 
         // Measure the content area with a full-size absolute canvas (Zed pattern).
         // Without size_full the canvas collapses to 0×0, which makes multi-pane

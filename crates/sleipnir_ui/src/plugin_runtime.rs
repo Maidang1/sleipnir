@@ -10,7 +10,7 @@ use plugin_host::{LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, 
 use plugin_protocol::v2::{Capability, HostEvent, InvokeContext, Output};
 use sleipnir_settings::TerminalSettings;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -232,31 +232,15 @@ pub fn requested_capabilities(plugin: &LoadedPluginCommand) -> Vec<Capability> {
 }
 
 pub fn plugin_binary_hash(plugin: &LoadedPluginCommand) -> Option<plugin_grants::BinaryHash> {
-    hash_plugin_binary(&plugin.directory, &plugin.binary)
+    hash_plugin_binary(&plugin.resolved_binary)
 }
 
 pub fn loaded_plugin_hash(plugin: &LoadedPlugin) -> Option<plugin_grants::BinaryHash> {
-    hash_plugin_binary(&plugin.directory, &plugin.manifest.binary)
+    hash_plugin_binary(&plugin.resolved_binary)
 }
 
-fn hash_plugin_binary(directory: &Path, binary: &str) -> Option<plugin_grants::BinaryHash> {
-    let path = plugin_binary_path(directory, binary)?;
-    plugin_grants::hash_binary(&path).ok()
-}
-
-fn plugin_binary_path(directory: &Path, binary: &str) -> Option<PathBuf> {
-    let bin = Path::new(binary);
-    let candidate = if bin.is_absolute() || binary.contains('/') || binary.contains('\\') {
-        directory.join(bin)
-    } else {
-        let next_to_manifest = directory.join(binary);
-        if next_to_manifest.is_file() {
-            next_to_manifest
-        } else {
-            PathBuf::from(binary)
-        }
-    };
-    candidate.is_file().then_some(candidate)
+fn hash_plugin_binary(path: &Path) -> Option<plugin_grants::BinaryHash> {
+    plugin_grants::hash_binary(path).ok()
 }
 
 /// Full declared set from `plugin.json`. This is what Ready.requests is
@@ -268,7 +252,12 @@ pub fn requested_capabilities_for_plugin(plugin: &LoadedPlugin) -> Vec<Capabilit
 }
 
 pub fn launch_spec(plugin: &LoadedPlugin, granted: Vec<Capability>) -> LaunchSpec {
-    LaunchSpec::from_plugin(&plugin.manifest, &plugin.directory, granted)
+    LaunchSpec::from_plugin(
+        &plugin.manifest,
+        &plugin.resolved_binary,
+        &plugin.directory,
+        granted,
+    )
 }
 
 pub fn supervisor(cx: &App) -> Option<Arc<Supervisor>> {
@@ -334,10 +323,15 @@ pub fn snapshots(cx: &App) -> Vec<ConnectionSnapshot> {
 
 pub fn kill_plugin(plugin_id: &str, cx: &App) {
     if let Some(rt) = cx.try_global::<PluginRuntime>() {
-        if let Some(session) = rt.supervisor.disconnect(plugin_id) {
+        let sessions = rt.supervisor.disconnect(plugin_id);
+        if !sessions.is_empty() {
             let grace = rt.supervisor.config().shutdown_grace;
             cx.background_executor()
-                .spawn(async move { session.teardown(grace) })
+                .spawn(async move {
+                    for session in sessions {
+                        session.teardown(grace);
+                    }
+                })
                 .detach();
         }
     }
@@ -350,9 +344,9 @@ pub fn broadcast_event(event: HostEvent, cx: &App) -> BroadcastReport {
         .unwrap_or_default()
 }
 
-pub fn has_grant(plugin_id: &str, cap: Capability, cx: &App) -> bool {
+pub fn has_grant_for_instance(instance_id: uuid::Uuid, cap: Capability, cx: &App) -> bool {
     cx.try_global::<PluginRuntime>()
-        .is_some_and(|rt| rt.supervisor.has_grant(plugin_id, cap))
+        .is_some_and(|rt| rt.supervisor.has_grant_for_instance(instance_id, cap))
 }
 
 pub fn plan_host_call(
@@ -376,7 +370,7 @@ pub fn dropped_calls(cx: &App) -> BTreeMap<String, u64> {
 }
 
 pub fn push_action(
-    plugin_id: &str,
+    instance_id: uuid::Uuid,
     block_id: plugin_protocol::v2::BlockId,
     action: String,
     arg: Option<String>,
@@ -385,23 +379,24 @@ pub fn push_action(
     cx.try_global::<PluginRuntime>()
         .and_then(|rt| {
             rt.supervisor
-                .push_action(plugin_id, block_id, action, arg)
+                .push_action_to_instance(instance_id, block_id, action, arg)
                 .ok()
         })
         .is_some()
 }
 
-/// Always attempt a Reply for a Call id. A dead session returns false; that
-/// is a lost write, not a hang — the Call itself is already off the inbound
-/// queue.
-pub fn reply_host_call(
-    plugin_id: &str,
+pub fn reply_host_call_to_instance(
+    instance_id: uuid::Uuid,
     id: plugin_protocol::v2::MessageId,
     result: plugin_protocol::v2::HostCallResult,
     cx: &App,
 ) -> bool {
     cx.try_global::<PluginRuntime>()
-        .and_then(|rt| rt.supervisor.reply(plugin_id, id, result).ok())
+        .and_then(|rt| {
+            rt.supervisor
+                .reply_to_instance(instance_id, id, result.clone())
+                .ok()
+        })
         .is_some()
 }
 
@@ -433,11 +428,15 @@ pub fn save_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn runtime_with_plugin() -> PluginRuntime {
+        let resolved_binary = PathBuf::from("/resolved/demo");
         let plugin = LoadedPlugin {
             manifest: serde_json::from_str(r#"{"id":"demo","name":"Demo","version":"1","api_version":2,"lifecycle":"resident","binary":"./demo"}"#).unwrap(),
             directory: PathBuf::from("demo"),
+            resolved_binary,
         };
         PluginRuntime {
             catalog: PluginCatalog {
@@ -461,6 +460,13 @@ mod tests {
             _pump: Task::ready(()),
             _housekeeping: Task::ready(()),
         }
+    }
+
+    #[test]
+    fn launch_spec_uses_resolved_binary_path() {
+        let runtime = runtime_with_plugin();
+        let launch = launch_spec(&runtime.catalog.plugins[0], vec![Capability::Resident]);
+        assert_eq!(launch.binary, OsString::from("/resolved/demo"));
     }
 
     #[test]

@@ -10,12 +10,6 @@ mod supervisor;
 mod swap;
 
 #[cfg(target_os = "macos")]
-use std::fs::OpenOptions;
-#[cfg(target_os = "macos")]
-use std::os::fd::AsRawFd as _;
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::OpenOptionsExt as _;
-#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -23,43 +17,6 @@ use std::time::Duration;
 use supervisor::{AppLauncher, Clock, FileSystem, ProcessWatcher, Supervisor};
 #[cfg(target_os = "macos")]
 use updater::transaction::{self, HealthMarker, Phase, Transaction, TransactionError};
-
-#[cfg(target_os = "macos")]
-struct TransactionLock(std::fs::File);
-
-#[cfg(target_os = "macos")]
-impl TransactionLock {
-    fn acquire(transaction_path: &Path) -> Result<Self, String> {
-        let root = updater::install::updates_root()?;
-        let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
-        let metadata = std::fs::symlink_metadata(transaction_path).map_err(|e| e.to_string())?;
-        if metadata.file_type().is_symlink()
-            || transaction_path.file_name().and_then(|name| name.to_str())
-                != Some("transaction.json")
-            || !std::fs::canonicalize(transaction_path)
-                .map_err(|e| e.to_string())?
-                .starts_with(&canonical_root)
-        {
-            return Err("transaction path is outside the update root or is a symlink".into());
-        }
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).mode(0o600);
-        let file = options.open(root.join("lock")).map_err(|e| e.to_string())?;
-        // SAFETY: flock operates on this process-owned descriptor.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err("another update supervisor owns the transaction lock".into());
-        }
-        Ok(Self(file))
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for TransactionLock {
-    fn drop(&mut self) {
-        // SAFETY: unlocks the descriptor retained by this guard.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
 
 #[cfg(target_os = "macos")]
 struct RealFileSystem {
@@ -165,7 +122,7 @@ fn parse_transaction_arg() -> Result<PathBuf, String> {
 #[cfg(target_os = "macos")]
 fn run() -> Result<(), String> {
     let transaction_path = parse_transaction_arg()?;
-    let _lock = TransactionLock::acquire(&transaction_path)?;
+    let _lock = updater::install::UpdateLock::acquire_for_transaction(&transaction_path)?;
     let parent = transaction_path
         .parent()
         .ok_or_else(|| "transaction path has no parent".to_string())?

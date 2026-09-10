@@ -1,40 +1,7 @@
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
-const RENAME_SWAP: u32 = 0x0000_0002;
-const AT_FDCWD: i32 = -2;
-
-unsafe extern "C" {
-    fn renameatx_np(
-        from_fd: libc::c_int,
-        from: *const libc::c_char,
-        to_fd: libc::c_int,
-        to: *const libc::c_char,
-        flags: libc::c_uint,
-    ) -> libc::c_int;
-}
-
 pub fn swap_paths(first: &Path, second: &Path) -> Result<(), String> {
-    let first = CString::new(first.as_os_str().as_bytes())
-        .map_err(|_| "first path contains NUL".to_string())?;
-    let second = CString::new(second.as_os_str().as_bytes())
-        .map_err(|_| "second path contains NUL".to_string())?;
-    // SAFETY: both C strings are NUL terminated and remain alive for the call.
-    let result = unsafe {
-        renameatx_np(
-            AT_FDCWD,
-            first.as_ptr(),
-            AT_FDCWD,
-            second.as_ptr(),
-            RENAME_SWAP,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().to_string())
-    }
+    updater::install::swap_paths(first, second)
 }
 
 #[cfg(test)]

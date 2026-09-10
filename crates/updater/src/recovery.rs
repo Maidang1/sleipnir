@@ -8,14 +8,18 @@ pub struct RecoveryEvidence {
     pub installed_version: Option<String>,
     pub adjacent_version: Option<String>,
     pub helper_alive: bool,
+    pub candidate_alive: bool,
+    pub old_pid_alive: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryAction {
-    RetainPrepared,
+    CleanPreparedState,
     WaitForSupervisor,
+    WaitForCandidateExit,
     RestoreOldBySwap,
     FinishCommittedCleanup,
+    FinalizeRolledBack,
     RecoveryRequired,
     None,
 }
@@ -24,18 +28,34 @@ pub fn decide(evidence: &RecoveryEvidence) -> RecoveryAction {
     if evidence.helper_alive {
         return RecoveryAction::WaitForSupervisor;
     }
+    if evidence.candidate_alive {
+        return RecoveryAction::WaitForCandidateExit;
+    }
     use Phase::*;
     match evidence.phase {
+        Prepared if evidence.old_pid_alive => RecoveryAction::WaitForSupervisor,
         Downloaded | Prepared | WaitingForOldExit
             if evidence.installed_version.as_deref() == Some(evidence.old_version.as_str()) =>
         {
-            RecoveryAction::RetainPrepared
+            RecoveryAction::CleanPreparedState
+        }
+        Swapping
+            if evidence.installed_version.as_deref() == Some(evidence.old_version.as_str())
+                && evidence.adjacent_version.as_deref() == Some(evidence.new_version.as_str()) =>
+        {
+            RecoveryAction::CleanPreparedState
         }
         Swapping | LaunchingCandidate | AwaitingHealth | RollingBack
             if evidence.installed_version.as_deref() == Some(evidence.new_version.as_str())
                 && evidence.adjacent_version.as_deref() == Some(evidence.old_version.as_str()) =>
         {
             RecoveryAction::RestoreOldBySwap
+        }
+        RollingBack
+            if evidence.installed_version.as_deref() == Some(evidence.old_version.as_str())
+                && evidence.adjacent_version.as_deref() == Some(evidence.new_version.as_str()) =>
+        {
+            RecoveryAction::FinalizeRolledBack
         }
         Committed
             if evidence.installed_version.as_deref() == Some(evidence.new_version.as_str()) =>
@@ -65,18 +85,31 @@ mod tests {
             installed_version: installed.map(str::to_owned),
             adjacent_version: adjacent.map(str::to_owned),
             helper_alive: false,
+            candidate_alive: false,
+            old_pid_alive: false,
         }
     }
 
     #[test]
-    fn prepared_and_waiting_transactions_never_modify_old_install() {
+    fn prepared_before_helper_handoff_waits_for_old_process_owner() {
+        let mut facts = evidence(Phase::Prepared, Some("0.3.1"), None);
+        facts.old_pid_alive = true;
+        assert_eq!(decide(&facts), RecoveryAction::WaitForSupervisor);
+    }
+
+    #[test]
+    fn prepared_waiting_and_pre_swap_transactions_can_be_cleaned_without_touching_old_install() {
         assert_eq!(
             decide(&evidence(Phase::Prepared, Some("0.3.1"), None)),
-            RecoveryAction::RetainPrepared
+            RecoveryAction::CleanPreparedState
         );
         assert_eq!(
             decide(&evidence(Phase::WaitingForOldExit, Some("0.3.1"), None)),
-            RecoveryAction::RetainPrepared
+            RecoveryAction::CleanPreparedState
+        );
+        assert_eq!(
+            decide(&evidence(Phase::Swapping, Some("0.3.1"), Some("0.3.2"))),
+            RecoveryAction::CleanPreparedState
         );
     }
 
@@ -96,6 +129,14 @@ mod tests {
     }
 
     #[test]
+    fn rollback_after_swap_is_finalized_without_swapping_again() {
+        assert_eq!(
+            decide(&evidence(Phase::RollingBack, Some("0.3.1"), Some("0.3.2"))),
+            RecoveryAction::FinalizeRolledBack
+        );
+    }
+
+    #[test]
     fn committed_candidate_is_kept_and_cleaned() {
         assert_eq!(
             decide(&evidence(Phase::Committed, Some("0.3.2"), Some("0.3.1"))),
@@ -104,10 +145,14 @@ mod tests {
     }
 
     #[test]
-    fn live_helper_is_never_raced() {
+    fn live_supervisor_or_candidate_is_never_raced() {
         let mut facts = evidence(Phase::AwaitingHealth, Some("0.3.2"), Some("0.3.1"));
         facts.helper_alive = true;
         assert_eq!(decide(&facts), RecoveryAction::WaitForSupervisor);
+
+        let mut facts = evidence(Phase::AwaitingHealth, Some("0.3.2"), Some("0.3.1"));
+        facts.candidate_alive = true;
+        assert_eq!(decide(&facts), RecoveryAction::WaitForCandidateExit);
     }
 
     #[test]

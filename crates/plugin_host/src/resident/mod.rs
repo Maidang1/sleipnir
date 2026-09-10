@@ -42,6 +42,7 @@ use std::time::Duration;
 
 pub use event_bus::{BroadcastReport, Delivery};
 pub use session::{ConnectionSnapshot, ConnectionState, Inbound, PendingInvoke, Session};
+pub use supervisor::InboundEnvelope;
 pub use supervisor::Supervisor;
 pub use transport::{
     Launcher, LineSink, LineSource, MemoryLauncher, PluginEndpoint, PluginProcess, ProcessLauncher,
@@ -65,6 +66,7 @@ pub struct LaunchSpec {
 impl LaunchSpec {
     pub fn from_plugin(
         manifest: &PluginManifest,
+        resolved_binary: &Path,
         directory: &Path,
         granted: Vec<Capability>,
     ) -> Self {
@@ -73,7 +75,7 @@ impl LaunchSpec {
             lifecycle: manifest.lifecycle,
             declared_capabilities: declared_capabilities(manifest),
             granted,
-            binary: crate::resolve_binary(directory, &manifest.binary),
+            binary: resolved_binary.as_os_str().to_os_string(),
             args: manifest.args.clone(),
             cwd: directory.to_path_buf(),
         }

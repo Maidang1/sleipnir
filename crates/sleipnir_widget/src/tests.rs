@@ -225,6 +225,44 @@ fn over_node_tree_is_truncated_with_visible_marker() {
 }
 
 #[test]
+fn truncated_columns_contain_markers_and_exclude_attribution() {
+    let mut deep = Widget::Sep;
+    for _ in 0..MAX_WIDGET_DEPTH + 2 {
+        deep = col(2, vec![deep]);
+    }
+    for tree in [deep, col(1, vec![Widget::Sep; MAX_WIDGET_NODES + 1])] {
+        let laid = lay(&tree);
+        for node in laid.walk() {
+            assert!(node.rect.bottom() <= laid.attribution.rect.row, "{node:?}");
+            for child in &node.children {
+                assert!(child.rect.bottom() <= node.rect.bottom(), "{node:?}");
+                assert!(child.rect.right() <= node.rect.right());
+            }
+        }
+        assert!(laid.content_height() > 0);
+    }
+}
+
+#[test]
+fn huge_tree_measurement_and_layout_are_budget_bounded() {
+    let wide = row(0, vec![Widget::Unknown; 100_000]);
+    let laid = layout(&wide, 3, "p");
+    assert!(laid.truncated);
+    assert!(laid.stats.nodes <= MAX_WIDGET_NODES + 1);
+    assert!(laid.root.children.len() <= 3);
+    assert_eq!(laid.root.children[0].rect.width, 1);
+
+    let mut deep = Widget::Unknown;
+    for _ in 0..1_000 {
+        deep = col(0, vec![deep]);
+    }
+    let laid = lay(&deep);
+    assert!(laid.truncated);
+    assert!(laid.stats.depth <= MAX_WIDGET_DEPTH + 1);
+    assert!(laid.walk().count() <= MAX_WIDGET_DEPTH + 1);
+}
+
+#[test]
 fn within_budget_tree_is_not_truncated() {
     let tree = col(1, vec![text("a"), btn("b", "b")]);
     let laid = lay(&tree);

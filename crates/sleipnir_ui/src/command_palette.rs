@@ -602,6 +602,7 @@ mod tests {
             title: "demo: Reload Settings".into(),
             action: "reload_settings".into(),
             arg: None,
+            owner_instance_id: uuid::Uuid::nil(),
             surface_id: uuid::Uuid::nil(),
         }];
         let items = contribution_items(&entries);

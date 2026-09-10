@@ -89,6 +89,7 @@ impl AppShell {
                                 sha256_url: info.sha256_url,
                                 expected_sha256: info.expected_sha256,
                                 expected_size: info.expected_size,
+                                minimum_macos: info.minimum_macos,
                             });
                     }
                     Ok(updater::UpdateStatus::UpToDate) => {
@@ -131,6 +132,7 @@ impl AppShell {
             sha256_url: update.sha256_url.clone(),
             expected_sha256: update.expected_sha256.clone(),
             expected_size: update.expected_size,
+            minimum_macos: update.minimum_macos.clone(),
         };
         let dest = std::env::temp_dir().join(format!("sleipnir-update-{}", std::process::id()));
 
@@ -140,10 +142,10 @@ impl AppShell {
                 .await;
             this.update(cx, |_this, cx| {
                 match result {
-                    Ok(dmg_path) => {
-                        // Remember where the verified dmg landed so a restart
-                        // can install it.
-                        cx.global_mut::<UpdateModel>().staged_dmg = Some(dmg_path);
+                    Ok(artifact) => {
+                        // Remember the verified artifact identity so install
+                        // can use signed version/minimum macOS evidence.
+                        cx.global_mut::<UpdateModel>().verified_artifact = Some(artifact);
                         cx.global_mut::<UpdateModel>().state =
                             UpdateUiState::ReadyToRestart(update.clone());
                     }
@@ -163,7 +165,7 @@ impl AppShell {
     /// Hand the staged update to the transactional supervisor and quit only
     /// after it has durably registered its old-process exit watch.
     fn install_and_restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dmg) = cx.global::<UpdateModel>().staged_dmg.clone() else {
+        let Some(artifact) = cx.global::<UpdateModel>().verified_artifact.clone() else {
             return;
         };
         let update = match &cx.global::<UpdateModel>().state {
@@ -172,7 +174,7 @@ impl AppShell {
         };
         let Some(app) = updater::current_app_bundle_path() else {
             cx.global_mut::<UpdateModel>().state = UpdateUiState::ManualInstallRequired {
-                artifact: dmg,
+                artifact: artifact.path,
                 message: "This build is not running from an application bundle.".into(),
             };
             cx.notify();
@@ -181,16 +183,19 @@ impl AppShell {
         cx.global_mut::<UpdateModel>().state = UpdateUiState::WaitingForHelper(update);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let install_dmg = dmg.clone();
+            let install_artifact = artifact.clone();
+            let install_request = install_artifact.clone();
             let result = cx
-                .background_spawn(async move { updater::install_and_relaunch(&install_dmg, &app) })
+                .background_spawn(
+                    async move { updater::install_and_relaunch(&install_request, &app) },
+                )
                 .await;
             this.update(cx, |_this, cx| match result {
                 Ok(()) => cx.quit(),
                 Err(err) => {
                     log::warn!("install failed: {err:#}");
                     cx.global_mut::<UpdateModel>().state = UpdateUiState::ManualInstallRequired {
-                        artifact: dmg,
+                        artifact: install_artifact.path.clone(),
                         message: format!("Automatic install failed: {err}"),
                     };
                     cx.notify();

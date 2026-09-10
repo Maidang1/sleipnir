@@ -19,11 +19,12 @@
 //! [`BlockId`]: plugin_protocol::v2::BlockId
 
 use std::collections::BTreeSet;
+use uuid::Uuid;
 
 /// One host-owned plugin surface, viewed only through what staleness needs.
 pub trait Surface {
-    /// The plugin that drew this surface.
-    fn plugin_id(&self) -> &str;
+    /// The exact plugin process instance that owns this surface.
+    fn owner_instance_id(&self) -> Uuid;
     fn set_stale(&mut self, stale: bool);
 }
 
@@ -35,17 +36,15 @@ pub trait StaleRegistry {
 
     fn surfaces_mut(&mut self) -> impl Iterator<Item = &mut Self::Surface>;
 
-    /// Any surface whose plugin is absent from `live` is stale.
+    /// Any surface whose owning plugin instance is absent from `live` is stale.
     ///
     /// This is the whole policy. There is deliberately no per-plugin variant:
-    /// the shell polls a snapshot list that holds at most one entry per
-    /// `plugin_id`, so "this plugin died" is already expressible as "it is not
-    /// in `live`", and a second entry point would be a way for the two to
-    /// disagree. See `plugin_host::resident::tests`
-    /// `snapshots_hold_at_most_one_entry_per_plugin_id`.
-    fn mark_missing_stale(&mut self, live: &BTreeSet<String>) {
+    /// stale UI must now follow the exact owner instance, not just `plugin_id`:
+    /// on-demand sessions and resident restarts can leave one instance dead
+    /// while another with the same plugin id is alive.
+    fn mark_missing_stale(&mut self, live: &BTreeSet<Uuid>) {
         for surface in self.surfaces_mut() {
-            if !live.contains(surface.plugin_id()) {
+            if !live.contains(&surface.owner_instance_id()) {
                 surface.set_stale(true);
             }
         }
@@ -59,12 +58,13 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct Fake {
         plugin_id: String,
+        owner_instance_id: Uuid,
         stale: bool,
     }
 
     impl Surface for Fake {
-        fn plugin_id(&self) -> &str {
-            &self.plugin_id
+        fn owner_instance_id(&self) -> Uuid {
+            self.owner_instance_id
         }
         fn set_stale(&mut self, stale: bool) {
             self.stale = stale;
@@ -89,6 +89,7 @@ mod tests {
                 .iter()
                 .map(|id| Fake {
                     plugin_id: (*id).into(),
+                    owner_instance_id: Uuid::new_v4(),
                     stale: false,
                 })
                 .collect(),
@@ -99,10 +100,36 @@ mod tests {
     fn mark_missing_stale_spares_the_live_set() {
         let mut reg = registry(&["a", "b"]);
         let mut live = BTreeSet::new();
-        live.insert("a".to_string());
+        live.insert(reg.surfaces[0].owner_instance_id);
         reg.mark_missing_stale(&live);
         let stale: Vec<bool> = reg.surfaces.iter().map(|s| s.stale).collect();
         assert_eq!(stale, vec![false, true]);
+    }
+
+    #[test]
+    fn same_plugin_id_different_owner_instances_do_not_keep_each_other_fresh() {
+        let owner_a = Uuid::new_v4();
+        let owner_b = Uuid::new_v4();
+        let mut reg = FakeRegistry {
+            surfaces: vec![
+                Fake {
+                    plugin_id: "demo".into(),
+                    owner_instance_id: owner_a,
+                    stale: false,
+                },
+                Fake {
+                    plugin_id: "demo".into(),
+                    owner_instance_id: owner_b,
+                    stale: false,
+                },
+            ],
+        };
+        let live = BTreeSet::from([owner_b]);
+        reg.mark_missing_stale(&live);
+        assert_eq!(
+            reg.surfaces.iter().map(|s| s.stale).collect::<Vec<_>>(),
+            vec![true, false]
+        );
     }
 
     /// The load-bearing half of the policy: marking never removes.

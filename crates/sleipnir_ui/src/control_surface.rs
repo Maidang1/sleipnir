@@ -3,6 +3,7 @@
 use gpui::{App, Global, Task};
 use sleipnir_ctl::enabled;
 use sleipnir_settings::TerminalSettings;
+use std::io;
 use std::sync::mpsc;
 
 use crate::TermView;
@@ -18,9 +19,11 @@ use sleipnir_ctl::{
     ControlRequest, ControlResponse, PaneSnap, WaitUntil, socket_path, wait_matches,
 };
 #[cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use std::os::unix::{fs::FileTypeExt, fs::MetadataExt};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
@@ -32,9 +35,36 @@ struct Job {
 
 #[cfg(unix)]
 const MAX_PENDING_WAITS: usize = 64;
+#[cfg(unix)]
+const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
+const MAX_REQUEST_LINE_BYTES: usize = 1024 * 1024;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ListenerHandle {
+    stop: mpsc::Sender<()>,
+    join: std::thread::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl ListenerHandle {
+    fn stop(self) {
+        let _ = self.stop.send(());
+        let _ = self.join.join();
+    }
+}
 
 pub struct ControlSurface {
-    stop: Option<mpsc::Sender<()>>,
+    #[cfg(unix)]
+    listener: Option<ListenerHandle>,
     _pump: Task<()>,
 }
 
@@ -43,7 +73,8 @@ impl Global for ControlSurface {}
 pub fn init(cx: &mut App) {
     if !cx.has_global::<ControlSurface>() {
         cx.set_global(ControlSurface {
-            stop: None,
+            #[cfg(unix)]
+            listener: None,
             _pump: Task::ready(()),
         });
     }
@@ -56,7 +87,10 @@ pub fn reload(cx: &mut App) {
         return;
     }
     let want = enabled(TerminalSettings::get_global(cx).control_surface);
-    let running = cx.global::<ControlSurface>().stop.is_some();
+    #[cfg(unix)]
+    let running = cx.global::<ControlSurface>().listener.is_some();
+    #[cfg(not(unix))]
+    let running = false;
     if want && !running {
         start(cx);
     } else if !want && running {
@@ -78,47 +112,36 @@ fn start(cx: &mut App) {
 #[cfg(unix)]
 fn start_unix(cx: &mut App) {
     let path = socket_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
+    let (job_tx, job_rx) = async_channel::unbounded::<Job>();
+    let listener = match spawn_listener(&path, job_tx) {
+        Ok(listener) => listener,
         Err(err) => {
             log::warn!("control surface bind failed ({}): {err}", path.display());
             return;
         }
     };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    let _ = listener.set_nonblocking(true);
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let (job_tx, job_rx) = async_channel::unbounded::<Job>();
-    let sock_path = path.clone();
-    std::thread::Builder::new()
-        .name("sleipnir-ctl".into())
-        .spawn(move || accept_loop(listener, stop_rx, job_tx, sock_path))
-        .ok();
     let pump = cx.spawn(async move |cx| pump_jobs(cx, job_rx).await);
     let g = cx.global_mut::<ControlSurface>();
-    g.stop = Some(stop_tx);
+    g.listener = Some(listener);
     g._pump = pump;
     log::info!("control surface listening on {}", path.display());
 }
 
 fn stop(cx: &mut App) {
-    let g = cx.global_mut::<ControlSurface>();
-    if let Some(stop) = g.stop.take() {
-        let _ = stop.send(());
-    }
-    g._pump = Task::ready(());
     #[cfg(unix)]
+    let listener = {
+        let g = cx.global_mut::<ControlSurface>();
+        let listener = g.listener.take();
+        g._pump = Task::ready(());
+        listener
+    };
+    #[cfg(not(unix))]
     {
-        let path = socket_path();
-        let _ = std::fs::remove_file(&path);
+        cx.global_mut::<ControlSurface>()._pump = Task::ready(());
+    }
+    #[cfg(unix)]
+    if let Some(listener) = listener {
+        listener.stop();
     }
 }
 
@@ -128,15 +151,19 @@ fn accept_loop(
     stop: mpsc::Receiver<()>,
     jobs: async_channel::Sender<Job>,
     path: std::path::PathBuf,
+    identity: SocketIdentity,
 ) {
     loop {
-        if stop.try_recv().is_ok() {
-            break;
+        match stop.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {}
         }
         match listener.accept() {
             Ok((stream, _)) => {
                 let jobs = jobs.clone();
-                std::thread::spawn(move || handle_connection(stream, jobs));
+                let _ = std::thread::Builder::new()
+                    .name("sleipnir-ctl-conn".into())
+                    .spawn(move || handle_connection(stream, jobs));
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -144,23 +171,44 @@ fn accept_loop(
             Err(_) => break,
         }
     }
-    let _ = std::fs::remove_file(path);
+    let _ = remove_socket_if_matches(&path, Some(identity));
 }
 
 #[cfg(unix)]
 fn handle_connection(mut stream: UnixStream, jobs: async_channel::Sender<Job>) {
+    let _ = stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
     let Ok(clone) = stream.try_clone() else {
         return;
     };
     let mut reader = BufReader::new(clone);
-    let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
+        let line = match read_capped_line(&mut reader, MAX_REQUEST_LINE_BYTES) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(ReadLineError::TooLong) => {
+                let _ = write_json_line(
+                    &mut stream,
+                    &ControlResponse::Error {
+                        message: format!(
+                            "bad request: line exceeds {MAX_REQUEST_LINE_BYTES} bytes"
+                        ),
+                    },
+                );
+                break;
+            }
+            Err(ReadLineError::Io(err)) if err.kind() == io::ErrorKind::TimedOut => break,
+            Err(ReadLineError::Io(_)) => break,
+            Err(ReadLineError::InvalidUtf8(err)) => {
+                let _ = write_json_line(
+                    &mut stream,
+                    &ControlResponse::Error {
+                        message: format!("bad request: {err}"),
+                    },
+                );
+                continue;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -168,13 +216,11 @@ fn handle_connection(mut stream: UnixStream, jobs: async_channel::Sender<Job>) {
         let req = match serde_json::from_str::<ControlRequest>(trimmed) {
             Ok(req) => req,
             Err(err) => {
-                let resp = ControlResponse::Error {
-                    message: format!("bad request: {err}"),
-                };
-                let _ = writeln!(
-                    stream,
-                    "{}",
-                    serde_json::to_string(&resp).unwrap_or_default()
+                let _ = write_json_line(
+                    &mut stream,
+                    &ControlResponse::Error {
+                        message: format!("bad request: {err}"),
+                    },
                 );
                 continue;
             }
@@ -198,16 +244,156 @@ fn handle_connection(mut stream: UnixStream, jobs: async_channel::Sender<Job>) {
             .unwrap_or(ControlResponse::Error {
                 message: "timeout".into(),
             });
-        if writeln!(
-            stream,
-            "{}",
-            serde_json::to_string(&resp).unwrap_or_default()
-        )
-        .is_err()
-        {
+        if write_json_line(&mut stream, &resp).is_err() {
             break;
         }
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+enum ReadLineError {
+    Io(io::Error),
+    InvalidUtf8(std::string::FromUtf8Error),
+    TooLong,
+}
+
+#[cfg(unix)]
+fn read_capped_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, ReadLineError> {
+    let mut bytes = Vec::new();
+    let read = reader
+        .by_ref()
+        .take((max_bytes + 1) as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(ReadLineError::Io)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if bytes.len() > max_bytes {
+        return Err(ReadLineError::TooLong);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(ReadLineError::InvalidUtf8)
+}
+
+#[cfg(unix)]
+fn write_json_line(stream: &mut UnixStream, response: &ControlResponse) -> io::Result<()> {
+    writeln!(
+        stream,
+        "{}",
+        serde_json::to_string(response).unwrap_or_default()
+    )
+}
+
+#[cfg(unix)]
+fn spawn_listener(
+    path: &std::path::Path,
+    jobs: async_channel::Sender<Job>,
+) -> io::Result<ListenerHandle> {
+    prepare_socket_path(path)?;
+    let listener = UnixListener::bind(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    listener.set_nonblocking(true)?;
+    let identity = socket_identity(path)?;
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let listener_path = path.to_path_buf();
+    let join = match std::thread::Builder::new()
+        .name("sleipnir-ctl".into())
+        .spawn(move || accept_loop(listener, stop_rx, jobs, listener_path, identity))
+    {
+        Ok(join) => join,
+        Err(err) => {
+            let _ = remove_socket_if_matches(path, Some(identity));
+            return Err(err);
+        }
+    };
+    Ok(ListenerHandle {
+        stop: stop_tx,
+        join,
+    })
+}
+
+#[cfg(unix)]
+fn prepare_socket_path(path: &std::path::Path) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to replace non-socket control surface path: {}",
+                path.display()
+            ),
+        ));
+    }
+    match UnixStream::connect(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("control surface already active at {}", path.display()),
+        )),
+        Err(err) if stale_socket_connect_error(&err) => {
+            remove_socket_if_matches(path, None)?;
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(unix)]
+fn stale_socket_connect_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound | io::ErrorKind::ConnectionReset
+    )
+}
+
+#[cfg(unix)]
+fn socket_identity(path: &std::path::Path) -> io::Result<SocketIdentity> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok(SocketIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+#[cfg(unix)]
+fn remove_socket_if_matches(
+    path: &std::path::Path,
+    expected: Option<SocketIdentity>,
+) -> io::Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    if !metadata.file_type().is_socket() {
+        return Ok(false);
+    }
+    if let Some(expected) = expected {
+        let actual = SocketIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        };
+        if actual != expected {
+            return Ok(false);
+        }
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -394,6 +580,8 @@ mod tests {
     use super::*;
     use futures::FutureExt as _;
     use std::pin::pin;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn enqueue(
         jobs: &async_channel::Sender<Job>,
@@ -402,6 +590,25 @@ mod tests {
         let (reply, receiver) = mpsc::channel();
         jobs.try_send(Job { req, reply }).unwrap();
         receiver
+    }
+
+    fn temp_socket_path(name: &str) -> std::path::PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::path::PathBuf::from("/tmp").join(format!(
+            "slctl-{name}-{}-{unique}.sock",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_test_path(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 
     #[test]
@@ -640,5 +847,86 @@ mod tests {
         sending.join().unwrap();
         waiting_server.join().unwrap();
         sending_server.join().unwrap();
+    }
+
+    #[test]
+    fn start_reclaims_stale_socket_and_stop_does_not_unlink_rebound_path() {
+        let path = temp_socket_path("restart-safe");
+        let stale = UnixListener::bind(&path).unwrap();
+        let stale_identity = socket_identity(&path).unwrap();
+        drop(stale);
+
+        let (jobs, _receiver) = async_channel::unbounded();
+        let listener = spawn_listener(&path, jobs).unwrap();
+        let active_identity = socket_identity(&path).unwrap();
+        assert_ne!(stale_identity, active_identity);
+
+        listener.stop();
+        assert!(!path.exists());
+
+        let replacement = UnixListener::bind(&path).unwrap();
+        assert!(path.exists());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(path.exists());
+        drop(replacement);
+
+        cleanup_test_path(&path);
+    }
+
+    #[test]
+    fn live_listener_refusal_preserves_existing_socket() {
+        let path = temp_socket_path("live-refusal");
+        let existing = UnixListener::bind(&path).unwrap();
+        let existing_identity = socket_identity(&path).unwrap();
+
+        let (jobs, _receiver) = async_channel::unbounded();
+        let err = spawn_listener(&path, jobs).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(socket_identity(&path).unwrap(), existing_identity);
+
+        drop(existing);
+        let _ = remove_socket_if_matches(&path, Some(existing_identity));
+        cleanup_test_path(&path);
+    }
+
+    #[test]
+    fn start_refuses_to_replace_unrelated_file() {
+        let path = temp_socket_path("preserve-file");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, b"not a socket").unwrap();
+
+        let (jobs, _receiver) = async_channel::unbounded();
+        let err = spawn_listener(&path, jobs).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
+
+        cleanup_test_path(&path);
+    }
+
+    #[test]
+    fn oversized_request_line_returns_error() {
+        let (jobs, _receiver) = async_channel::unbounded();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let server_thread = std::thread::spawn(move || handle_connection(server, jobs));
+        let oversized = "x".repeat(MAX_REQUEST_LINE_BYTES + 1);
+        writeln!(client, "{oversized}").unwrap();
+
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        let response = serde_json::from_str::<ControlResponse>(&line).unwrap();
+        assert_eq!(
+            response,
+            ControlResponse::Error {
+                message: format!("bad request: line exceeds {MAX_REQUEST_LINE_BYTES} bytes"),
+            }
+        );
+
+        server_thread.join().unwrap();
     }
 }
