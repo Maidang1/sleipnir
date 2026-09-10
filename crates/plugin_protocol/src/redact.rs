@@ -1,4 +1,7 @@
-//! Command-line redaction applied at capture time (spec §4).
+//! Command-line redaction: the single implementation behind the v2
+//! wire-safety invariant "plugins never see the raw command line"
+//! (ADR-0016 §2). The ledger applies it at capture time and the plugin host
+//! applies it again at the wire choke point; both call this module.
 //!
 //! This is a heuristic, not a guarantee. It drops obvious secret shapes
 //! (env values, known flags, Authorization headers, URL userinfo / secret

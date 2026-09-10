@@ -1,6 +1,6 @@
 //! The Ledger: every Run this app has seen, plus the rules for what to show.
 
-use crate::redact::redact_command;
+use crate::redact_command;
 use crate::run::{Anchor, LaunchId, PaneKey, Run, RunEvent, RunId, RunState};
 use std::time::Duration;
 

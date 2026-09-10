@@ -1,3 +1,13 @@
+//! Terminal emulation core: the forked alacritty backend (ADR-0005) plus the
+//! shell-semantics layer the rest of the app builds on — OSC 133 run
+//! tracking (`osc133`, `run_tracker`), OSC 9/777 notifications
+//! (`osc_notify`), PTY process facts (`pty_info`), mouse/key mappings, and
+//! the display-line geometry helpers (`row_map`) that route every y
+//! coordinate through `row_geometry`.
+//!
+//! No GPUI rendering lives here; the crate stops at terminal state and
+//! events. `sleipnir_ui` owns painting.
+
 mod mappings;
 mod row_map;
 

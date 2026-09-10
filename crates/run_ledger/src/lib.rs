@@ -3,11 +3,13 @@
 //! Pure data + state machine — no gpui, no terminal, no I/O beyond `store`.
 
 pub mod ledger;
-pub mod redact;
 pub mod run;
 pub mod store;
 
 pub use ledger::{Badge, BadgeKind, Ledger, Retention};
-pub use redact::redact_command;
+// The implementation lives in `plugin_protocol::redact` (the wire-safety
+// invariant's single home); re-exported here so the capture-time call sites
+// and existing references keep working.
+pub use plugin_protocol::redact_command;
 pub use run::{Anchor, LaunchId, PaneKey, Run, RunEvent, RunId, RunState};
 pub use store::{RUNS_VERSION, RunsFile, default_runs_path, load_runs, save_runs};

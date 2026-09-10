@@ -8,9 +8,6 @@ license = "Apache-2.0"
 [lints]
 workspace = true
 
-[lib]
-path = "src/gpui_platform.rs"
-
 [features]
 default = []
 # macOS always enables font-kit on the target dep below. Kept so older

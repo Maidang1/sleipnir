@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn platform_entry_selects_a_backend_per_os() {
-        let src = include_str!("gpui_platform.rs");
+        let src = include_str!("lib.rs");
         let impl_src = src.split("#[cfg(test)]").next().expect("impl before tests");
         assert!(
             impl_src.contains("gpui_macos::MacPlatform"),

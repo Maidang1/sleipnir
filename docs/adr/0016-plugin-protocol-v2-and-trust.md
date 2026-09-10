@@ -103,7 +103,10 @@ enum HostEvent {
 Every source is already computed: `run_ledger` for runs, `pane_facts` for ports,
 `agent.rs` for agent identity. v2 opens an outlet; it does not add
 instrumentation. `command` in `RunStarted` is the **redacted** form — the ledger
-redacts at capture time (`run_ledger::redact`) and plugins never see the raw
+redacts at capture time and the host redacts again at the wire choke point,
+both through the single implementation in `plugin_protocol::redact` (moved
+there from `run_ledger::redact` so the wire-safety invariant lives with the
+wire contract; `run_ledger` re-exports it), and plugins never see the raw
 line.
 
 ### 3. Host calls: a plugin-initiated back-channel

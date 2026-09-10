@@ -3,7 +3,7 @@ name = "sleipnir"
 version = "0.6.3"
 edition.workspace = true
 publish = false
-license = "GPL-3.0-or-later"
+license.workspace = true
 
 [lints]
 workspace = true

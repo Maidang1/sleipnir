@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
-pub type RunId = Uuid;
-/// Identifies one Pane within a process launch.
-pub type PaneKey = Uuid;
+// Single-sourced from the wire protocol so the ledger, the host, and every
+// plugin speak the same id types (they are plain `Uuid` aliases).
+pub use plugin_protocol::v2::{PaneKey, RunId};
 /// Identifies one process launch; jumping is only valid within the current one.
 pub type LaunchId = Uuid;
 

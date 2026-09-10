@@ -165,7 +165,8 @@ pub enum EventKind {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum HostEvent {
     /// `command` is the **redacted** form. The ledger redacts at capture time
-    /// (`run_ledger::redact`); plugins never see the raw command line.
+    /// and the host redacts again at the wire choke point, both via
+    /// [`crate::redact`]; plugins never see the raw command line.
     RunStarted {
         run_id: RunId,
         pane: PaneKey,

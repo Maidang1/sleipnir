@@ -2013,7 +2013,7 @@ mod tests {
             .join("..")
             .join("terminal")
             .join("src");
-        for name in ["mappings/mouse.rs", "terminal.rs"] {
+        for name in ["mappings/mouse.rs", "lib.rs"] {
             let src = std::fs::read_to_string(terminal_dir.join(name)).unwrap();
             assert!(
                 !src.contains("pos.y / cur_size.line_height")
@@ -2022,7 +2022,7 @@ mod tests {
             );
         }
         assert!(
-            !std::fs::read_to_string(terminal_dir.join("terminal.rs"))
+            !std::fs::read_to_string(terminal_dir.join("lib.rs"))
                 .unwrap()
                 .contains("scroll_px %="),
             "scroll remainder must be retained, not discarded with modulo"
@@ -2041,7 +2041,7 @@ mod tests {
             }
         }
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let this = src.join("sleipnir_ui.rs");
+        let this = src.join("lib.rs");
         let mut out = Vec::new();
         walk(&src, &this, &mut out);
         assert!(!out.is_empty(), "no sources found under {}", src.display());

@@ -3,7 +3,7 @@ name = "parse_bench"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-license = "GPL-3.0-or-later"
+license.workspace = true
 description = "Headless alacritty_terminal parser-throughput benchmark (Sleipnir emulation core)"
 
 [[bin]]

@@ -3,13 +3,10 @@ name = "updater"
 version = "0.1.1"
 edition.workspace = true
 publish = false
-license = "GPL-3.0-or-later"
+license.workspace = true
 
 [lints]
 workspace = true
-
-[lib]
-path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true

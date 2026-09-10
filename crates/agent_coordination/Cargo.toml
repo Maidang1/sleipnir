@@ -3,13 +3,10 @@ name = "agent_coordination"
 version = "0.1.0"
 edition.workspace = true
 publish = false
-license = "GPL-3.0-or-later"
+license.workspace = true
 
 [lints]
 workspace = true
-
-[lib]
-path = "src/agent_coordination.rs"
 
 [dependencies]
 dirs.workspace = true

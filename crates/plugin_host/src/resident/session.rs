@@ -354,7 +354,7 @@ impl Session {
 
     /// Offer one event to this connection. Never blocks.
     ///
-    /// `RunStarted.command` is redacted with `run_ledger::redact` here — the
+    /// `RunStarted.command` is redacted with `plugin_protocol::redact` here — the
     /// only wire choke point — so a missed redact at the capture site cannot
     /// leak a secret onto the wire. A plugin without
     /// [`Capability::SubscribeEvents`] is Filtered, not Delivered — that is the
@@ -715,7 +715,7 @@ fn redact_run_started(event: v2::HostEvent) -> v2::HostEvent {
         } => v2::HostEvent::RunStarted {
             run_id,
             pane,
-            command: run_ledger::redact_command(&command),
+            command: plugin_protocol::redact::redact_command(&command),
             cwd,
             inferred,
         },

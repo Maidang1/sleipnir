@@ -3,7 +3,7 @@ name = "terminal"
 version = "0.1.1"
 edition.workspace = true
 publish = false
-license = "GPL-3.0-or-later"
+license.workspace = true
 
 [features]
 test-support = ["collections/test-support", "gpui/test-support"]
@@ -12,7 +12,6 @@ test-support = ["collections/test-support", "gpui/test-support"]
 workspace = true
 
 [lib]
-path = "src/terminal.rs"
 doctest = false
 
 [dependencies]
@@ -36,7 +35,6 @@ urlencoding.workspace = true
 vte.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
-run_ledger.workspace = true
 row_geometry.workspace = true
 
 [target.'cfg(unix)'.dependencies]
