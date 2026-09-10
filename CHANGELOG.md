@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.4
+
+### Changes
+- The macOS release dmg is now a universal build that runs natively on both Apple Silicon and Intel Macs (previously Apple Silicon only).
+
 ## 0.6.3
 
 ### Fixes
