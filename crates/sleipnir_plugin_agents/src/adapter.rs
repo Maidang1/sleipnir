@@ -778,6 +778,20 @@ mod tests {
         1_000
     }
 
+    /// Platform-absolute cwd for launch requests: Unix paths verbatim,
+    /// `C:\...` on Windows where a leading `/` is not absolute.
+    fn abs(path: &str) -> String {
+        if cfg!(windows) {
+            if let Some(rest) = path.strip_prefix('/') {
+                format!(r"C:\{}", rest.replace('/', "\\"))
+            } else {
+                path.to_string()
+            }
+        } else {
+            path.to_string()
+        }
+    }
+
     /// Records every call; `fail` makes each host call error with that
     /// message; `rate_limit_remaining` makes the next N calls fail with the
     /// host's exact rate-limit message. Each open gets a fresh pane key.
@@ -870,7 +884,7 @@ mod tests {
             reg,
             Request::Launch {
                 kind,
-                cwd: "/work/repo".into(),
+                cwd: abs("/work/repo"),
                 name: Some("w".into()),
                 args: vec!["--fast".into()],
             },
@@ -1558,7 +1572,7 @@ mod tests {
                 id: 1,
                 body: Request::Launch {
                     kind: AgentKind::Codex,
-                    cwd: "/work".into(),
+                    cwd: abs("/work"),
                     name: None,
                     args: vec![],
                 },
