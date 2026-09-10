@@ -909,15 +909,21 @@ mod tests {
 
     #[test]
     fn oversized_request_line_returns_error() {
-        let (jobs, _receiver) = async_channel::unbounded();
+        let (jobs, receiver) = async_channel::unbounded();
         let (mut client, server) = UnixStream::pair().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
 
         let server_thread = std::thread::spawn(move || handle_connection(server, jobs));
         let oversized = "x".repeat(MAX_REQUEST_LINE_BYTES + 1);
-        writeln!(client, "{oversized}").unwrap();
+        // The server rejects as soon as the cap is exceeded, without waiting
+        // for a newline. writeln! may write the newline separately after the
+        // server has closed the socket, racing with a BrokenPipe error.
+        client.write_all(oversized.as_bytes()).unwrap();
 
         let mut line = String::new();
         BufReader::new(client).read_line(&mut line).unwrap();
@@ -930,5 +936,9 @@ mod tests {
         );
 
         server_thread.join().unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(async_channel::TryRecvError::Closed)
+        ));
     }
 }
