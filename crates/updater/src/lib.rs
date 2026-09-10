@@ -919,6 +919,7 @@ mod tests {
         assert_eq!(artifact.minimum_macos, "14.0");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn minimum_macos_gate_compares_dotted_versions() {
         assert!(host_meets_minimum_macos_version("14.6.1", "14.0").unwrap());
