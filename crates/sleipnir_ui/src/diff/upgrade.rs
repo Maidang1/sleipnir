@@ -221,6 +221,10 @@ mod tests {
             fs::create_dir_all(dir.join(".git/objects")).unwrap();
             fs::create_dir_all(dir.join(".git/refs/heads")).unwrap();
             fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            // Keep fixture bytes stable across host Git installations. Git for
+            // Windows commonly defaults core.autocrlf=true, which otherwise
+            // normalizes the staged LF blob and can erase newline-only edits.
+            fs::write(dir.join(".git/config"), "[core]\n\tautocrlf = false\n").unwrap();
             return true;
         }
         if args.first() == Some(&"commit") {
