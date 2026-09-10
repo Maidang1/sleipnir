@@ -1985,7 +1985,11 @@ mod tests {
                         i as u64,
                         Request::Launch {
                             kind: AgentKind::Codex,
-                            cwd: format!("/{}", "界".repeat(1023)),
+                            cwd: {
+                                let prefix = abs("/");
+                                let fill = MAX_CWD_CHARS - prefix.chars().count();
+                                format!("{}{}", prefix, "界".repeat(fill))
+                            },
                             name: None,
                             args: vec![],
                         },
