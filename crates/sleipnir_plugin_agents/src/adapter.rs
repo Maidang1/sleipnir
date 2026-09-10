@@ -1056,7 +1056,7 @@ mod tests {
         assert_eq!(
             host.opened,
             vec![(
-                Some("/work/repo".into()),
+                Some(abs("/work/repo")),
                 "codex".into(),
                 vec!["--fast".into()]
             )]
