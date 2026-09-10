@@ -67,6 +67,7 @@ pub fn default_socket_path() -> PathBuf {
     }
 }
 
+#[derive(Debug)]
 pub struct Server {
     path: PathBuf,
     /// `(dev, ino)` of the socket we bound. Drop unlinks only when the path

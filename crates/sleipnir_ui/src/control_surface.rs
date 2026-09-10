@@ -853,13 +853,15 @@ mod tests {
     fn start_reclaims_stale_socket_and_stop_does_not_unlink_rebound_path() {
         let path = temp_socket_path("restart-safe");
         let stale = UnixListener::bind(&path).unwrap();
-        let stale_identity = socket_identity(&path).unwrap();
         drop(stale);
 
         let (jobs, _receiver) = async_channel::unbounded();
         let listener = spawn_listener(&path, jobs).unwrap();
-        let active_identity = socket_identity(&path).unwrap();
-        assert_ne!(stale_identity, active_identity);
+        // Reclaim is proven functionally: the stale listener is gone, so a
+        // successful connect means the path is owned by the new listener.
+        // Do not compare (dev, ino) socket identities here — Linux
+        // filesystems may immediately recycle the unlinked inode number.
+        UnixStream::connect(&path).unwrap();
 
         listener.stop();
         assert!(!path.exists());
