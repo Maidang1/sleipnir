@@ -15,6 +15,18 @@ application restart.
 - `restore_session`, `tab_placement`, and `ui_style` are removed and ignored.
 - `show_tombstone` remains accepted for compatibility but has no effect:
   there is no restored-session banner.
+- `terminal.starfield` (default `false`) draws sparse, subtle stars behind
+  terminal text, including over application-supplied background colors.
+  Enable **Settings > General > Starfield**, or set `"starfield": true` inside
+  the `terminal` object and reload settings. The UI toggle saves immediately
+  and refreshes all windows. Stars use the theme's foreground color and keep
+  stable anchors within each pane while scrolling or resizing. Each star gently
+  brightens, dims, and moves 0.8-2.4 pixels around its anchor with independent
+  5-9 second brightness cycles and 7-13 second position cycles. Animation
+  requests at most 20 refreshes per second per visible pane, stops when the
+  window is inactive or the pane is hidden, and stays static when GPUI's
+  reduced-motion preference is enabled. Selection, search highlights, and the
+  cursor stay above them.
 
 ## Command facts and persistent history
 

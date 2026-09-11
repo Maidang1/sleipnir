@@ -23,6 +23,7 @@ mod plugin_panel;
 mod plugin_runtime;
 mod plugin_surface;
 mod run_ledger_global;
+mod starfield;
 mod tab_convert;
 mod term_element;
 mod ui_mode;
@@ -143,6 +144,7 @@ pub struct TermView {
     terminal_wants_blink: bool,
     /// Last keystroke / input time — cursor stays solid briefly after typing.
     last_input_at: Instant,
+    starfield_animation: starfield::Animation,
     /// Bottom toast after copy / copy-on-select.
     copy_toast: Option<CopyToast>,
     /// Last time `render` ran, i.e. the last time this pane was actually in the
@@ -258,6 +260,7 @@ impl TermView {
             font_size_override: None,
             terminal_wants_blink: true,
             last_input_at: Instant::now(),
+            starfield_animation: starfield::Animation::default(),
             copy_toast: None,
             last_render_at: None,
             last_offscreen_notify_at: None,
@@ -989,6 +992,11 @@ impl Render for TermView {
         // Being rendered *is* the visibility signal: only panes that
         // `AppShell::render_content` emits get here (see `looks_onscreen`).
         self.last_render_at = Some(Instant::now());
+        let starfield_enabled = TerminalSettings::get_global(cx).starfield
+            && matches!(self.terminal, TerminalSlot::Ready(_));
+        let starfield_time = self
+            .starfield_animation
+            .frame(starfield_enabled, window, cx);
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
@@ -1090,15 +1098,18 @@ impl Render for TermView {
                         body
                     };
 
-                    body.child(TermElement::new(
-                        terminal.clone(),
-                        cx.entity(),
-                        self.focus_handle.clone(),
-                        focused,
-                        self.font_size_override,
-                        self.last_input_at,
-                        self.terminal_wants_blink,
-                    ))
+                    body.child(
+                        TermElement::new(
+                            terminal.clone(),
+                            cx.entity(),
+                            self.focus_handle.clone(),
+                            focused,
+                            self.font_size_override,
+                            self.last_input_at,
+                            self.terminal_wants_blink,
+                        )
+                        .with_starfield_time(starfield_time),
+                    )
                     .into_any_element()
                 }
             })

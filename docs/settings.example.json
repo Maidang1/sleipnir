@@ -50,6 +50,7 @@
     "font_size": 14,
     "font_family": "Menlo",
     "font_ligatures": false,
+    "starfield": false,
     "line_height": 1.3,
     "cursor_shape": "block",
     "option_as_meta": true,

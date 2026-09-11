@@ -12,7 +12,7 @@ use itertools::Itertools;
 use row_geometry::{HitTarget, RowGeometry};
 use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use terminal::{
     Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
     Rgb, Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
@@ -30,6 +30,7 @@ pub struct TermElement {
     last_input_at: Instant,
     /// App-reported blink preference (M11).
     terminal_wants_blink: bool,
+    starfield_time: Duration,
     interactivity: gpui::Interactivity,
 }
 
@@ -51,9 +52,15 @@ impl TermElement {
             font_size_override,
             last_input_at,
             terminal_wants_blink,
+            starfield_time: Duration::ZERO,
             interactivity: Default::default(),
         }
         .track_focus(&focus)
+    }
+
+    pub(crate) fn with_starfield_time(mut self, elapsed: Duration) -> Self {
+        self.starfield_time = elapsed;
+        self
     }
 }
 
@@ -264,6 +271,7 @@ pub struct LayoutState {
     dimensions: TerminalBounds,
     batches: Vec<BatchedTextRun>,
     backgrounds: Vec<BgRect>,
+    selection_backgrounds: Vec<BgRect>,
     search_rects: Vec<BgRect>,
     /// Underlines for the hovered hyperlink (M11).
     hover_underlines: Vec<BgRect>,
@@ -441,7 +449,7 @@ impl Element for TermElement {
                 };
 
                 let selection_range = content.selection.map(|sel| sel.point_range());
-                let (batches, backgrounds) = layout_grid(
+                let (batches, backgrounds, selection_backgrounds) = layout_grid(
                     &content.cells,
                     &text_style,
                     font_size,
@@ -460,9 +468,8 @@ impl Element for TermElement {
                     content.cursor.point.column,
                 );
 
-                // Selection is now rendered as reverse-video inside layout_grid
-                // (glyph recolored over a selection-colored cell), so there is
-                // no separate selection overlay layer.
+                // Selection uses reverse-video text from layout_grid. Its
+                // opaque backgrounds paint after the decorative starfield.
 
                 // Search highlights (M10): paint under selection, above cell bg.
                 // The match the find bar points at gets the cursor color so the
@@ -588,6 +595,7 @@ impl Element for TermElement {
                     dimensions,
                     batches,
                     backgrounds,
+                    selection_backgrounds,
                     search_rects,
                     hover_underlines,
                     background_color: {
@@ -648,6 +656,19 @@ impl Element for TermElement {
                     window.set_cursor_style(cursor_style, &layout.hitbox);
 
                     for bg in &layout.backgrounds {
+                        paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
+                    }
+                    if TerminalSettings::get_global(cx).starfield {
+                        let palette = TerminalPalette::get_global(cx);
+                        crate::starfield::paint(
+                            bounds,
+                            self.terminal.entity_id().as_u64(),
+                            palette.foreground,
+                            self.starfield_time,
+                            window,
+                        );
+                    }
+                    for bg in &layout.selection_backgrounds {
                         paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
                     }
                     for bg in &layout.search_rects {
@@ -1044,9 +1065,10 @@ fn layout_grid(
     palette: &TerminalPalette,
     selection: Option<TerminalRange>,
     skip_lines: &std::collections::HashSet<i32>,
-) -> (Vec<BatchedTextRun>, Vec<BgRect>) {
+) -> (Vec<BatchedTextRun>, Vec<BgRect>, Vec<BgRect>) {
     let mut batches: Vec<BatchedTextRun> = Vec::new();
     let mut backgrounds: Vec<BgRect> = Vec::new();
+    let mut selection_backgrounds: Vec<BgRect> = Vec::new();
     let mut current: Option<BatchedTextRun> = None;
 
     let linegroups = cells.iter().chunk_by(|c| c.point.line);
@@ -1081,7 +1103,12 @@ fn layout_grid(
                 let base_col = indexed.point.column as i32;
                 let color = selection_background(palette);
                 for offset in 0..columns as i32 {
-                    push_bg(&mut backgrounds, display_line, base_col + offset, color);
+                    push_bg(
+                        &mut selection_backgrounds,
+                        display_line,
+                        base_col + offset,
+                        color,
+                    );
                 }
             } else if !is_default_background_color(bg) {
                 let color = convert_color(&bg, palette);
@@ -1137,7 +1164,7 @@ fn layout_grid(
     if let Some(batch) = current {
         batches.push(batch);
     }
-    (batches, backgrounds)
+    (batches, backgrounds, selection_backgrounds)
 }
 
 /// Paint the terminal cell cursor. Caller must already filter out `Hidden`.
@@ -1537,6 +1564,44 @@ struct TerminalInputHandler {
 mod tests {
     use super::*;
     use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
+
+    #[test]
+    fn selection_backgrounds_are_separate_from_starfield_underlay() {
+        let palette = palette_for_theme(ThemeName::Dracula, Appearance::Dark);
+        let cells: Vec<_> = (0..3)
+            .map(|column| IndexedCell {
+                point: terminal::Point { line: 0, column },
+                cell: Cell::default(),
+            })
+            .collect();
+        let selection = TerminalRange::new(cells[0].point, cells[1].point);
+        let (_, backgrounds, selected) = layout_grid(
+            &cells,
+            &TextStyle::default(),
+            px(14.0),
+            &palette,
+            Some(selection),
+            &Default::default(),
+        );
+        assert!(
+            backgrounds.is_empty(),
+            "selection must not paint below stars"
+        );
+        assert_eq!(selected.len(), 1, "adjacent selected cells still coalesce");
+        assert_eq!(selected[0].start_col, 0);
+        assert_eq!(selected[0].end_col, 1);
+        assert_eq!(selected[0].color, selection_background(&palette));
+
+        let (_, _, selected) = layout_grid(
+            &cells,
+            &TextStyle::default(),
+            px(14.0),
+            &palette,
+            None,
+            &Default::default(),
+        );
+        assert!(selected.is_empty());
+    }
 
     /// Both mount points render one schema (ADR-0017), so a variant the Panel
     /// painter draws and the Block painter drops is an invisible failure:
