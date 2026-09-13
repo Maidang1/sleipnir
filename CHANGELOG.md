@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.5
+
+### Changes
+- Add breathing terminal starfield effect.
+
 ## 0.6.4
 
 ### Changes
