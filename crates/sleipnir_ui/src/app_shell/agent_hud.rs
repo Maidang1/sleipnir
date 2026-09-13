@@ -1,27 +1,33 @@
-//! The bottom-right agent HUD: a minimal, collapsible readout of which panes
-//! run a known coding agent.
+//! Right-side agent status panel: a squeezed sidebar that shows running
+//! agents with their coordination status, driven by the plugin hook data.
 //!
-//! A child module of `app_shell` so it can read the shell's private tab/pane
-//! state without widening it to the crate.
+//! When `plugins.agent_panel` is true and at least one agent is running,
+//! the panel is rendered as a fixed-width column on the right side of the
+//! content area (squeezing the terminal panes). When no agents are
+//! running the panel disappears and the terminal reclaims the full width.
 //!
-//! This is deliberately the *host's* smallest honest view: it reports only
-//! process status ("this pane's foreground command is a known agent"), never
-//! turn or task progress. It derives its rows the same way the tab chips do —
-//! [`crate::chrome::agent::identify`] on each leaf's foreground command — so it
-//! needs no plugin, no socket, and no protocol round-trip. The richer built-in
-//! Agents panel (opened from the command palette) stays available for
-//! coordination; this corner panel is just the always-on status glance the
-//! user asked for. Clicking a row jumps to the pane that runs it.
+//! Process identity comes from `chrome::agent::identify` on each leaf's
+//! foreground command. Running status comes from the Run Ledger: if the
+//! pane has a `Running` run, the agent is running; otherwise it has
+//! exited or its status is unknown.
 
 use gpui::{
     ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px, svg,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px, svg,
 };
 
 use super::AppShell;
 use crate::chrome::ChromeTokens;
 use crate::chrome::agent::{self};
 use crate::pane_tree::PaneId;
+use crate::run_ledger_global::RunLedgerGlobal;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentRunStatus {
+    Running,
+    Exited,
+    Unknown,
+}
 
 /// One running agent, resolved to the tab/pane that hosts it. Pure data so the
 /// row computation is unit-testable without a window.
@@ -38,12 +44,15 @@ pub(crate) struct AgentHudRow {
     pub color: Hsla,
     /// Short label: the tab's path label, so several agents stay distinct.
     pub label: String,
+    /// Running status derived from the Run Ledger.
+    pub status: AgentRunStatus,
 }
 
 impl AppShell {
     /// Every pane whose foreground command is a known coding agent, in tab then
     /// tree order. One row per agent pane.
     pub(crate) fn agent_hud_rows(&self, cx: &gpui::App) -> Vec<AgentHudRow> {
+        let ledger = cx.try_global::<RunLedgerGlobal>();
         let mut rows = Vec::new();
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let mut leaves = Vec::new();
@@ -58,6 +67,24 @@ impl AppShell {
                 else {
                     continue;
                 };
+                let pane_key = tab.tree.pane_key_for_id(pane_id);
+                let status = match (ledger, pane_key) {
+                    (Some(lg), Some(pk)) => {
+                        let runs: Vec<_> = lg.snapshot();
+                        let pane_runs: Vec<_> = runs
+                            .iter()
+                            .filter(|r| r.pane == pk)
+                            .collect();
+                        if pane_runs.iter().any(|r| r.state == run_ledger::RunState::Running) {
+                            AgentRunStatus::Running
+                        } else if pane_runs.iter().any(|r| r.state.is_finished()) {
+                            AgentRunStatus::Exited
+                        } else {
+                            AgentRunStatus::Unknown
+                        }
+                    }
+                    _ => AgentRunStatus::Unknown,
+                };
                 rows.push(AgentHudRow {
                     tab_index,
                     pane_id,
@@ -65,16 +92,16 @@ impl AppShell {
                     icon: kind.icon,
                     color: kind.color,
                     label: label.clone(),
+                    status,
                 });
             }
         }
         rows
     }
 
-    /// The minimal bottom-right HUD. Nothing renders when no agent is running,
-    /// so the corner is empty in the common case. Collapsed shows one dot +
-    /// count; expanded lists one clickable row per agent pane.
-    pub(super) fn render_agent_hud(
+    /// The right-side squeezed agent panel. Renders a fixed-width column with
+    /// a header and one clickable row per agent pane.
+    pub(super) fn render_agent_panel(
         &self,
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
@@ -83,114 +110,142 @@ impl AppShell {
         if rows.is_empty() {
             return div().into_any_element();
         }
-        let collapsed = self.agent_hud_collapsed;
+
+        let border_w = crate::chrome::pixel::PIXEL_BORDER;
+
+        let running_count = rows
+            .iter()
+            .filter(|r| r.status == AgentRunStatus::Running)
+            .count();
+        let header_label = if running_count > 0 && running_count < rows.len() {
+            format!("Agents · {} ({} running)", rows.len(), running_count)
+        } else {
+            format!("Agents · {}", rows.len())
+        };
 
         let header = div()
-            .id("agent-hud-header")
+            .id("agent-panel-header")
             .flex()
             .flex_row()
             .items_center()
             .gap_1p5()
             .px_2()
-            .py_1()
-            .cursor_pointer()
-            .hover(|el| el.bg(tokens.hover))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.toggle_agent_hud(cx);
-            }))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.accent)
-                    .child(if collapsed { "▸" } else { "▾" }),
-            )
+            .py_1p5()
+            .border_b(border_w)
+            .border_color(tokens.border)
             .child(
                 div()
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(tokens.fg)
-                    .child(format!("Agents · {}", rows.len())),
+                    .child(header_label),
             );
 
-        let mut panel = div()
-            .id("agent-hud-panel")
+        let mut list = div()
+            .id("agent-panel-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .py_1()
+            .overflow_y_scroll();
+        for row in rows {
+            let tab_index = row.tab_index;
+            let pane_id = row.pane_id;
+
+            let (status_dot, status_color, status_label) = match row.status {
+                AgentRunStatus::Running => ("●", tokens.accent, "running"),
+                AgentRunStatus::Exited => ("○", tokens.fg_muted, "exited"),
+                AgentRunStatus::Unknown => ("?", tokens.fg_muted, "unknown"),
+            };
+
+            list = list.child(
+                div()
+                    .id(("agent-panel-row", agent_panel_row_id(tab_index, pane_id)))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tokens.hover))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.reveal_agent_pane(tab_index, pane_id, window, cx);
+                    }))
+                    .child(
+                        svg()
+                            .path(row.icon)
+                            .flex_shrink_0()
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .text_color(row.color),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(tokens.fg)
+                                            .whitespace_nowrap()
+                                            .child(row.agent_id.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(3.0))
+                                            .child(
+                                                div()
+                                                    .text_size(px(8.0))
+                                                    .text_color(status_color)
+                                                    .child(status_dot),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(status_color)
+                                                    .child(status_label),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.fg_muted)
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(row.label),
+                            ),
+                    ),
+            );
+        }
+
+        div()
+            .id("agent-panel")
+            .flex_shrink_0()
+            .w(px(200.0))
+            .h_full()
             .flex()
             .flex_col()
             .bg(tokens.surface)
-            .border_1()
+            .border_l(border_w)
             .border_color(tokens.border)
-            .shadow(crate::chrome::pixel::hard_shadow())
-            .overflow_hidden()
-            .child(header);
-
-        if !collapsed {
-            let mut list = div().flex().flex_col().pb_1();
-            for row in rows {
-                let tab_index = row.tab_index;
-                let pane_id = row.pane_id;
-                list = list.child(
-                    div()
-                        .id(("agent-hud-row", agent_hud_row_id(tab_index, pane_id)))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .px_2()
-                        .py_0p5()
-                        .cursor_pointer()
-                        .hover(|el| el.bg(tokens.hover))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.reveal_agent_pane(tab_index, pane_id, window, cx);
-                        }))
-                        .child(
-                            svg()
-                                .path(row.icon)
-                                .flex_shrink_0()
-                                .w(px(11.0))
-                                .h(px(11.0))
-                                .text_color(row.color),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(tokens.fg)
-                                .whitespace_nowrap()
-                                .child(row.agent_id.to_string()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_xs()
-                                .text_color(tokens.fg_muted)
-                                .child(row.label),
-                        ),
-                );
-            }
-            panel = panel.child(list);
-        }
-
-        // Deferred so the corner panel paints above the terminal content but
-        // stays a sibling (never an ancestor) of the panes underneath.
-        deferred(
-            div()
-                .absolute()
-                .bottom(px(12.0))
-                .right(px(12.0))
-                .flex()
-                .justify_end()
-                .child(panel.min_w(px(160.0)).max_w(px(280.0)).occlude()),
-        )
-        .into_any_element()
-    }
-
-    /// Flip the HUD between the one-line summary and the full row list.
-    pub(super) fn toggle_agent_hud(&mut self, cx: &mut Context<Self>) {
-        self.agent_hud_collapsed = !self.agent_hud_collapsed;
-        cx.notify();
+            .child(header)
+            .child(list)
+            .into_any_element()
     }
 
     /// Activate the tab that owns `pane_id` and focus that leaf.
@@ -215,9 +270,10 @@ impl AppShell {
     }
 }
 
-/// Stable element id for a HUD row: tab and pane ids are both small and unique
-/// within a window, so packing them keeps rows distinct across re-renders.
-fn agent_hud_row_id(tab_index: usize, pane_id: PaneId) -> u64 {
+/// Stable element id for a panel row: tab and pane ids are both small and
+/// unique within a window, so packing them keeps rows distinct across
+/// re-renders.
+fn agent_panel_row_id(tab_index: usize, pane_id: PaneId) -> u64 {
     ((tab_index as u64) << 32) | (pane_id as u64 & 0xffff_ffff)
 }
 
@@ -227,8 +283,8 @@ mod tests {
 
     #[test]
     fn row_ids_are_unique_per_tab_and_pane() {
-        assert_ne!(agent_hud_row_id(0, 1), agent_hud_row_id(1, 1));
-        assert_ne!(agent_hud_row_id(0, 1), agent_hud_row_id(0, 2));
-        assert_eq!(agent_hud_row_id(2, 5), agent_hud_row_id(2, 5));
+        assert_ne!(agent_panel_row_id(0, 1), agent_panel_row_id(1, 1));
+        assert_ne!(agent_panel_row_id(0, 1), agent_panel_row_id(0, 2));
+        assert_eq!(agent_panel_row_id(2, 5), agent_panel_row_id(2, 5));
     }
 }

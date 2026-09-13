@@ -4,6 +4,7 @@
 //! Path: `config_path()` — `~/.config/sleipnir/settings.json` on macOS/Unix,
 //! `%APPDATA%\sleipnir\settings.json` on Windows.
 
+pub mod agent_hooks;
 mod themes;
 
 pub use themes::{
@@ -213,6 +214,8 @@ pub struct PluginSettings {
     pub enabled: bool,
     /// First-party Agents runs by default, independently of external plugins.
     pub builtin_agents: bool,
+    /// Show the agent status panel on the right side of the terminal area.
+    pub agent_panel: bool,
     /// Extra plugin roots layered after the platform config directory.
     pub directories: Vec<PathBuf>,
 }
@@ -222,6 +225,7 @@ impl Default for PluginSettings {
         Self {
             enabled: false,
             builtin_agents: true,
+            agent_panel: true,
             directories: Vec::new(),
         }
     }
@@ -421,6 +425,30 @@ impl TerminalSettings {
         } else {
             apply_loaded(settings, cx);
             log::info!("copy_on_select -> {enabled} (persisted)");
+        }
+    }
+
+    /// Toggle the agent panel and persist under `plugins.agent_panel`.
+    pub fn set_agent_panel(enabled: bool, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.plugins.agent_panel = enabled;
+        if let Err(err) = persist_plugins_bool("agent_panel", enabled) {
+            log::warn!("failed to persist agent_panel={enabled}: {err}");
+        } else {
+            apply_loaded(settings, cx);
+            log::info!("agent_panel -> {enabled} (persisted)");
+        }
+    }
+
+    /// Toggle the built-in agents plugin and persist under `plugins.builtin_agents`.
+    pub fn set_builtin_agents(enabled: bool, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.plugins.builtin_agents = enabled;
+        if let Err(err) = persist_plugins_bool("builtin_agents", enabled) {
+            log::warn!("failed to persist builtin_agents={enabled}: {err}");
+        } else {
+            apply_loaded(settings, cx);
+            log::info!("builtin_agents -> {enabled} (persisted)");
         }
     }
 
@@ -964,6 +992,18 @@ fn patch_terminal_bool_document(doc: &mut serde_json::Value, key: &str, value: b
     if let Some(terminal) = doc.get_mut("terminal").and_then(|t| t.as_object_mut()) {
         terminal.insert(key.to_string(), serde_json::Value::Bool(value));
     }
+}
+
+fn persist_plugins_bool(key: &str, value: bool) -> anyhow::Result<()> {
+    let path = config_path();
+    patch_settings_file_at_path(&path, |doc| {
+        if !doc.get("plugins").map(|p| p.is_object()).unwrap_or(false) {
+            doc["plugins"] = serde_json::json!({});
+        }
+        if let Some(plugins) = doc.get_mut("plugins").and_then(|p| p.as_object_mut()) {
+            plugins.insert(key.to_string(), serde_json::Value::Bool(value));
+        }
+    })
 }
 
 pub fn init(cx: &mut App) {

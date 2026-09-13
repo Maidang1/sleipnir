@@ -256,6 +256,8 @@ enum SettingsSection {
     Theme,
     /// Session restore, ligatures, and other app/terminal toggles.
     General,
+    /// Agent panel and built-in agents toggles.
+    Agents,
     /// Read-only reference for the shortcuts shipped on the current platform.
     Shortcuts,
 }
@@ -264,6 +266,7 @@ impl SettingsSection {
     const ALL: &'static [SettingsSection] = &[
         SettingsSection::Theme,
         SettingsSection::General,
+        SettingsSection::Agents,
         SettingsSection::Shortcuts,
     ];
 
@@ -271,6 +274,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Theme => "theme",
             SettingsSection::General => "general",
+            SettingsSection::Agents => "agents",
             SettingsSection::Shortcuts => "shortcuts",
         }
     }
@@ -279,6 +283,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Theme => "theme",
             SettingsSection::General => "general",
+            SettingsSection::Agents => "agents",
             SettingsSection::Shortcuts => "shortcuts",
         }
     }
@@ -407,8 +412,6 @@ pub struct AppShell {
     plugin_panels: crate::plugin_panel::PanelRegistry,
     /// Chrome contributions (ADR-0017 status mount).
     plugin_chrome: crate::plugin_chrome::ChromeRegistry,
-    /// Whether the bottom-right agent HUD is collapsed to its one-line summary.
-    agent_hud_collapsed: bool,
 }
 
 /// What the shared confirm dialog is asking about.
@@ -610,7 +613,6 @@ impl AppShell {
             plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
             plugin_panels: crate::plugin_panel::PanelRegistry::new(),
             plugin_chrome: crate::plugin_chrome::ChromeRegistry::new(),
-            agent_hud_collapsed: false,
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -2339,7 +2341,29 @@ impl Render for AppShell {
                     .when(self.mode.find_open, |el| {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
-                    .child(self.render_content(&tokens, window, cx))
+                    .child({
+                        let agent_panel_enabled =
+                            sleipnir_settings::TerminalSettings::get_global(cx)
+                                .plugins
+                                .agent_panel;
+                        let has_agents = agent_panel_enabled
+                            && !self.agent_hud_rows(cx).is_empty();
+                        let content = self.render_content(&tokens, window, cx);
+                        if has_agents {
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .flex_row()
+                                .child(
+                                    div().flex_1().min_w_0().size_full().child(content),
+                                )
+                                .child(self.render_agent_panel(&tokens, cx))
+                                .into_any_element()
+                        } else {
+                            content
+                        }
+                    })
             })
             .when(self.broadcast, |el| {
                 el.child(
@@ -2423,7 +2447,6 @@ impl Render for AppShell {
             .when(self.mode.is(OverlayKind::Diff), |el| {
                 el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
             })
-            .child(self.render_agent_hud(&tokens, cx))
     }
 }
 
