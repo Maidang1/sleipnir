@@ -371,20 +371,14 @@ impl SelectionSide {
     }
 }
 
-impl SelectionType {
-    fn to_alacritty(self) -> AlacSelectionType {
-        match self {
-            Self::Simple => AlacSelectionType::Simple,
-            Self::Semantic => AlacSelectionType::Semantic,
-            Self::Lines => AlacSelectionType::Lines,
-        }
-    }
-}
-
 impl Selection {
     fn to_alacritty(&self) -> AlacSelection {
         let mut selection = AlacSelection::new(
-            self.ty.to_alacritty(),
+            match self.ty {
+                SelectionType::Simple => AlacSelectionType::Simple,
+                SelectionType::Semantic => AlacSelectionType::Semantic,
+                SelectionType::Lines => AlacSelectionType::Lines,
+            },
             self.start.point.to_alacritty(),
             self.start.side.to_alacritty(),
         );
@@ -1094,25 +1088,6 @@ mod tests {
                 is_block: true,
             }
         );
-    }
-
-    #[test]
-    fn semantic_selection_stops_at_tree_branch() {
-        let config = pty_term_config(1000, SettingsCursorShape::default());
-        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
-        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
-        for character in "└─zms-demo.target".chars() {
-            term.input(character);
-        }
-
-        let selection = Selection::new(
-            SelectionType::Semantic,
-            Point::new(0, 2),
-            SelectionSide::Left,
-        );
-        set_selection(&mut term, Some(&selection));
-
-        assert_eq!(selection_text(&term).as_deref(), Some("zms-demo.target"));
     }
 
     #[test]

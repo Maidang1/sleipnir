@@ -12,7 +12,7 @@ use sleipnir_ui::{
     ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
     TogglePluginMonitor, ToggleQuickSelect,
 };
-use terminal::{Clear, Copy, Paste, PasteText, SelectAll, ToggleViMode};
+use terminal::{Clear, Copy, Paste, PasteText, ToggleViMode};
 
 actions!(
     sleipnir_app,
@@ -58,8 +58,6 @@ fn shared_edit_view_window() -> [Menu; 3] {
             MenuItem::action("Copy", Copy),
             MenuItem::action("Paste", Paste),
             MenuItem::action("Paste Text Only", PasteText),
-            MenuItem::separator(),
-            MenuItem::action("Select All", SelectAll),
         ]),
         Menu::new("View").items([
             MenuItem::action("Settings…", OpenSettings),

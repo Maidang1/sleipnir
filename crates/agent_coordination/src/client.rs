@@ -31,7 +31,7 @@ impl std::fmt::Display for ClientError {
             Self::Connect { path, message } => write!(
                 f,
                 "agent-control socket not available at {path}: {message} \
-                 (the host must start the coordination server; execution still awaits an adapter)"
+                 (start Sleipnir with its built-in Agents service enabled)"
             ),
             Self::Io(err) => write!(f, "agent-control I/O error: {err}"),
             Self::Oversize => write!(f, "server response exceeds line length cap"),

@@ -10,6 +10,7 @@ use crate::TermView;
 const TILE_SIZE: f32 = 48.0;
 const MAX_TILES_PER_AXIS: usize = 256;
 const MAX_STARS: usize = 2048;
+const STAR_DIAMETER_SCALE: f32 = 1.5;
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const MIN_BRIGHTNESS: f32 = 0.28;
 const MIN_DRIFT: f32 = 0.8;
@@ -154,7 +155,7 @@ fn stars(width: f32, height: f32, seed: u64) -> impl Iterator<Item = Star> {
             }
             let unit = |shift: u32| ((bits >> shift) & 0xffff_u64) as f32 / 65535.0;
             let bright = (bits >> 4) & 7 == 0;
-            let diameter = if bright { 1.6 } else { 0.7 + unit(40) * 0.5 };
+            let diameter = (if bright { 1.6 } else { 0.7 + unit(40) * 0.5 }) * STAR_DIAMETER_SCALE;
             let motion = hash(bits ^ 0xd1b54a32d192ed03);
             let motion_unit = |shift: u32| ((motion >> shift) & 0xffff) as f64 / 65535.0;
             let angle = std::f64::consts::TAU * motion_unit(32);
@@ -227,7 +228,10 @@ mod tests {
     fn stars_stay_inside_the_viewport_and_remain_subtle() {
         for (width, height) in [(1.0, 1.0), (375.0, 250.0), (1024.0, 768.0)] {
             for star in stars(width, height, 42) {
-                assert!((0.7..=1.6).contains(&star.diameter));
+                assert!(
+                    (0.7 * STAR_DIAMETER_SCALE..=1.6 * STAR_DIAMETER_SCALE)
+                        .contains(&star.diameter)
+                );
                 assert!((0.1..=0.38).contains(&star.opacity));
                 for seconds in [0.0, 1.0, 4.0, 9.0, 27.0] {
                     let (x, y) = star.position_at(Duration::from_secs_f64(seconds));
@@ -236,6 +240,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn larger_stars_preserve_the_dim_and_bright_size_tiers() {
+        let stars: Vec<_> = stars(1000.0, 600.0, 42).collect();
+        let bright: Vec<_> = stars.iter().filter(|star| star.opacity > 0.3).collect();
+        let dim: Vec<_> = stars.iter().filter(|star| star.opacity <= 0.3).collect();
+        assert!(!bright.is_empty() && !dim.is_empty());
+        assert!(
+            bright
+                .iter()
+                .all(|star| (star.diameter - 2.4).abs() < 0.001)
+        );
+        assert!(
+            dim.iter()
+                .all(|star| star.diameter >= 1.049 && star.diameter <= 1.801)
+        );
     }
 
     #[test]

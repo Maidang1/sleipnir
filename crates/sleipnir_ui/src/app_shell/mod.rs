@@ -2,6 +2,7 @@
 
 /// Maps `CommandId` to canonical shell actions. A child module so it can reach
 /// `AppShell`'s private methods without widening them to the whole crate.
+mod agent_hud;
 mod command_dispatch;
 mod diff;
 mod find;
@@ -406,6 +407,8 @@ pub struct AppShell {
     plugin_panels: crate::plugin_panel::PanelRegistry,
     /// Chrome contributions (ADR-0017 status mount).
     plugin_chrome: crate::plugin_chrome::ChromeRegistry,
+    /// Whether the bottom-right agent HUD is collapsed to its one-line summary.
+    agent_hud_collapsed: bool,
 }
 
 /// What the shared confirm dialog is asking about.
@@ -607,6 +610,7 @@ impl AppShell {
             plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
             plugin_panels: crate::plugin_panel::PanelRegistry::new(),
             plugin_chrome: crate::plugin_chrome::ChromeRegistry::new(),
+            agent_hud_collapsed: false,
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -2419,6 +2423,7 @@ impl Render for AppShell {
             .when(self.mode.is(OverlayKind::Diff), |el| {
                 el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
             })
+            .child(self.render_agent_hud(&tokens, cx))
     }
 }
 

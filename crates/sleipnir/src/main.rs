@@ -28,11 +28,21 @@ use sleipnir_ui::{
 };
 use terminal::{
     Clear, Copy, Paste, PasteText, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
-    ScrollToBottom, ScrollToTop, SelectAll, SendKeystroke, SendText, ShowCharacterPalette,
-    ToggleViMode,
+    ScrollToBottom, ScrollToTop, SendKeystroke, SendText, ShowCharacterPalette, ToggleViMode,
 };
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    // Dispatch before GPUI, settings, or logging: the same shipped executable
+    // also serves as an isolated built-in plugin and a headless socket client.
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("--builtin-agents") => {
+            sleipnir_plugin_agents::run_builtin();
+            return std::process::ExitCode::SUCCESS;
+        }
+        Some("agentctl") => return sleipnir_agentctl::run_cli(args),
+        _ => {}
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let app = application().with_assets(sleipnir_ui::AgentAssets);
@@ -119,6 +129,7 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         let _ = opened;
     });
+    std::process::ExitCode::SUCCESS
 }
 
 #[cfg(target_os = "macos")]
@@ -178,7 +189,6 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::Copy => KeyBinding::new(key, Copy, context),
         BuiltinAction::Paste => KeyBinding::new(key, Paste, context),
         BuiltinAction::PasteText => KeyBinding::new(key, PasteText, context),
-        BuiltinAction::SelectAll => KeyBinding::new(key, SelectAll, context),
         BuiltinAction::Clear => KeyBinding::new(key, Clear, context),
         BuiltinAction::ShowCharacterPalette => KeyBinding::new(key, ShowCharacterPalette, context),
         BuiltinAction::ToggleViMode => KeyBinding::new(key, ToggleViMode, context),
@@ -292,7 +302,6 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "copy" => KeyBinding::new(&spec.key, Copy, Some(ctx)),
             "paste" => KeyBinding::new(&spec.key, Paste, Some(ctx)),
             "paste_text" => KeyBinding::new(&spec.key, PasteText, Some(ctx)),
-            "select_all" => KeyBinding::new(&spec.key, SelectAll, Some(ctx)),
             "clear" => KeyBinding::new(&spec.key, Clear, Some(ctx)),
             "scroll_line_up" => KeyBinding::new(&spec.key, ScrollLineUp, Some(ctx)),
             "scroll_line_down" => KeyBinding::new(&spec.key, ScrollLineDown, Some(ctx)),
@@ -321,4 +330,21 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
         out.push(kb);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_selection_action_cannot_be_bound_from_settings() {
+        for context in [None, Some("Terminal"), Some("AppShell")] {
+            let spec = KeyBindingSpec {
+                key: "cmd-a".into(),
+                action: "select_all".into(),
+                context: context.map(str::to_owned),
+            };
+            assert!(key_bindings_for_spec(&spec).is_empty());
+        }
+    }
 }

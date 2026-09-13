@@ -202,17 +202,29 @@ pub struct TerminalSettings {
     pub keybinding_preset: KeybindingPreset,
     /// Legacy compatibility field; session restore and its banner were removed.
     pub show_tombstone: bool,
-    /// External command plugin discovery and permission policy.
+    /// Built-in service policy and external command plugin discovery.
     pub plugins: PluginSettings,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default)]
 pub struct PluginSettings {
-    /// Master switch. Disabled means no manifests are read and no plugin runs.
+    /// External plugins only. Disabled means no user manifests are read.
     pub enabled: bool,
+    /// First-party Agents runs by default, independently of external plugins.
+    pub builtin_agents: bool,
     /// Extra plugin roots layered after the platform config directory.
     pub directories: Vec<PathBuf>,
+}
+
+impl Default for PluginSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            builtin_agents: true,
+            directories: Vec::new(),
+        }
+    }
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -1456,11 +1468,28 @@ mod tests {
         let file: SettingsFile = serde_json::from_str(raw).expect("parse plugins");
         let mut settings = TerminalSettings::default();
         assert!(!settings.plugins.enabled);
+        assert!(settings.plugins.builtin_agents);
         merge_file(&mut settings, file);
         assert!(settings.plugins.enabled);
+        assert!(settings.plugins.builtin_agents);
         assert_eq!(
             settings.plugins.directories,
             vec![PathBuf::from("/opt/sleipnir-plugins")]
+        );
+    }
+
+    #[test]
+    fn builtin_agents_can_be_disabled_without_enabling_external_plugins() {
+        let file: SettingsFile =
+            serde_json::from_str(r#"{"plugins":{"builtin_agents":false}}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert!(!settings.plugins.enabled);
+        assert!(!settings.plugins.builtin_agents);
+        let old: PluginSettings = serde_json::from_str(r#"{"enabled":false}"#).unwrap();
+        assert!(
+            old.builtin_agents,
+            "old configs also get the built-in default"
         );
     }
 
