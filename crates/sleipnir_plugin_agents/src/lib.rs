@@ -34,5 +34,8 @@
 //!   abstraction, so delivery logic is unit testable without a live host.
 
 pub mod adapter;
+mod session;
 pub mod state;
 pub mod view;
+
+pub use session::{run_builtin, run_plugin};

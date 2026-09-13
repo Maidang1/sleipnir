@@ -23,6 +23,7 @@ mod plugin_panel;
 mod plugin_runtime;
 mod plugin_surface;
 mod run_ledger_global;
+mod starfield;
 mod tab_convert;
 mod term_element;
 mod ui_mode;
@@ -73,8 +74,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use terminal::{
     Clear, Copy, Event, MaybeNavigationTarget, Modes, Paste, PasteText, ScrollLineDown,
-    ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
-    SendKeystroke, SendText, ShowCharacterPalette, Terminal, TerminalBuilder, ToggleViMode,
+    ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SendKeystroke,
+    SendText, ShowCharacterPalette, Terminal, TerminalBuilder, ToggleViMode,
 };
 use util::paths::PathStyle;
 use util::shell::Shell;
@@ -143,6 +144,7 @@ pub struct TermView {
     terminal_wants_blink: bool,
     /// Last keystroke / input time — cursor stays solid briefly after typing.
     last_input_at: Instant,
+    starfield_animation: starfield::Animation,
     /// Bottom toast after copy / copy-on-select.
     copy_toast: Option<CopyToast>,
     /// Last time `render` ran, i.e. the last time this pane was actually in the
@@ -210,6 +212,14 @@ impl TermView {
         for (k, v) in &settings.env {
             env.insert(k.clone(), v.clone());
         }
+        // Works even when a GUI launch did not put the app bundle on PATH.
+        // No shell startup files or global environment are rewritten.
+        if let Ok(executable) = std::env::current_exe() {
+            env.insert(
+                "SLEIPNIR_BIN".into(),
+                executable.to_string_lossy().into_owned(),
+            );
+        }
         let shell = match command {
             Some((program, args)) => Shell::WithArguments {
                 program,
@@ -258,6 +268,7 @@ impl TermView {
             font_size_override: None,
             terminal_wants_blink: true,
             last_input_at: Instant::now(),
+            starfield_animation: starfield::Animation::default(),
             copy_toast: None,
             last_render_at: None,
             last_offscreen_notify_at: None,
@@ -797,13 +808,6 @@ impl TermView {
         }
     }
 
-    fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(terminal) = self.terminal_entity().cloned() {
-            terminal.update(cx, |term, _| term.select_all());
-            cx.notify();
-        }
-    }
-
     fn scroll_line_up(&mut self, _: &ScrollLineUp, _window: &mut Window, cx: &mut Context<Self>) {
         if self.is_alt_screen(cx) {
             return;
@@ -989,6 +993,11 @@ impl Render for TermView {
         // Being rendered *is* the visibility signal: only panes that
         // `AppShell::render_content` emits get here (see `looks_onscreen`).
         self.last_render_at = Some(Instant::now());
+        let starfield_enabled = TerminalSettings::get_global(cx).starfield
+            && matches!(self.terminal, TerminalSlot::Ready(_));
+        let starfield_time = self
+            .starfield_animation
+            .frame(starfield_enabled, window, cx);
         let palette = TerminalPalette::get_global(cx);
         let focused = self.focus_handle.is_focused(window);
         let show_copy_toast = self.copy_toast.is_some();
@@ -1022,7 +1031,6 @@ impl Render for TermView {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::paste_text))
             .on_action(cx.listener(Self::clear))
-            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::scroll_line_up))
             .on_action(cx.listener(Self::scroll_line_down))
             .on_action(cx.listener(Self::scroll_page_up))
@@ -1090,15 +1098,18 @@ impl Render for TermView {
                         body
                     };
 
-                    body.child(TermElement::new(
-                        terminal.clone(),
-                        cx.entity(),
-                        self.focus_handle.clone(),
-                        focused,
-                        self.font_size_override,
-                        self.last_input_at,
-                        self.terminal_wants_blink,
-                    ))
+                    body.child(
+                        TermElement::new(
+                            terminal.clone(),
+                            cx.entity(),
+                            self.focus_handle.clone(),
+                            focused,
+                            self.font_size_override,
+                            self.last_input_at,
+                            self.terminal_wants_blink,
+                        )
+                        .with_starfield_time(starfield_time),
+                    )
                     .into_any_element()
                 }
             })
@@ -1918,6 +1929,32 @@ mod tests {
     /// ADR-0016 §7 requires an indicator a *plugin* cannot suppress. The host
     /// still owns the zero case, and "0 plugins" is chrome spent on the state
     /// that carries no information, so the chip is hidden at zero.
+    #[test]
+    fn titlebar_status_uses_native_metrics_and_dispatches_button_actions() {
+        let src = include_str!("app_shell/plugin_paint.rs");
+        let start = src
+            .find("pub(super) fn render_plugin_chrome_status(")
+            .unwrap();
+        let end = src[start..]
+            .find("pub(super) fn panel_cell_metrics(")
+            .unwrap()
+            + start;
+        let chrome = &src[start..end];
+        assert!(!chrome.contains("panel_cell_metrics("));
+        assert!(!chrome.contains("paint_laid_out("));
+        assert!(!chrome.contains("font_size_override"));
+        assert!(chrome.contains(".text_size(px(12.0))"));
+        assert!(chrome.contains(".line_height(px(16.0))"));
+        assert!(chrome.contains(".items_center()"));
+        assert!(chrome.contains(".whitespace_nowrap()"));
+        assert!(chrome.contains("push_action("));
+        assert!(chrome.contains("PluginSource::BuiltInAgents"));
+        assert!(
+            chrome.contains(".tooltip("),
+            "provenance must remain discoverable"
+        );
+    }
+
     #[test]
     fn plugin_status_chip_is_hidden_when_no_plugins_run() {
         let sources = all_ui_sources();

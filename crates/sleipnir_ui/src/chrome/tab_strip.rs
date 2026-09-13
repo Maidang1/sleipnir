@@ -24,6 +24,7 @@ impl AppShell {
         let palette = TerminalPalette::get_global(cx);
         let settings = TerminalSettings::get_global(cx);
         let show_icons = settings.agent_icons;
+        let filter_agents_badge = settings.plugins.agent_panel;
         let active = self.active;
         let hovered = self.hovered_tab;
 
@@ -37,7 +38,16 @@ impl AppShell {
         };
         for (ix, tab) in self.tabs.iter().enumerate() {
             let keys = tab.tree.all_pane_keys();
-            let plugin_badges = self.plugin_badges_for_tab(&keys, ix == active);
+            let plugin_badges = if filter_agents_badge {
+                // Agent status lives in the squeezed right panel; suppress the
+                // built-in agents plugin badge from the tab chip.
+                self.plugin_badges_for_tab(&keys, ix == active)
+                    .into_iter()
+                    .filter(|b| b.plugin_id != "agents")
+                    .collect()
+            } else {
+                self.plugin_badges_for_tab(&keys, ix == active)
+            };
             // The Failed wash is the ledger's own verdict; plugin badges
             // can never set or suppress it.
             let failed = tab_has_failed_attention(tab, cx);

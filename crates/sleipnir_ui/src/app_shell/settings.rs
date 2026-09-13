@@ -6,7 +6,7 @@
 use gpui::{
     ClickEvent, Context, ElementId, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    deferred, div, prelude::FluentBuilder as _, px,
+    deferred, div, hsla, prelude::FluentBuilder as _, px,
 };
 use sleipnir_settings::{
     TerminalSettings, ThemeName, ThemeSetting, default_font_family, palette_for_theme,
@@ -232,6 +232,9 @@ impl AppShell {
             SettingsSection::General => self
                 .render_settings_general_section(tokens, cx)
                 .into_any_element(),
+            SettingsSection::Agents => self
+                .render_settings_agents_section(tokens, cx)
+                .into_any_element(),
             SettingsSection::Shortcuts => self
                 .render_settings_shortcuts_section(tokens)
                 .into_any_element(),
@@ -401,7 +404,7 @@ impl AppShell {
         )
     }
 
-    /// General section: ligatures, copy-on-select, and pointers for advanced config.
+    /// General section: terminal toggles and pointers for advanced config.
     fn render_settings_general_section(
         &self,
         tokens: &ChromeTokens,
@@ -477,6 +480,25 @@ impl AppShell {
                                     TerminalSettings::set_copy_on_select(next, cx);
                                     cx.notify();
                                 },
+                            ))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pl(px(14.0))
+                                    .child(div().w_full().h(px(1.0)).bg(tokens.border)),
+                            )
+                            .child(self.settings_toggle_row(
+                                "starfield",
+                                "Starfield",
+                                "Stars gently brighten, dim, and drift behind terminal text. Pauses in inactive windows.",
+                                TerminalSettings::get_global(cx).starfield,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).starfield;
+                                    TerminalSettings::set_starfield(next, cx);
+                                    cx.notify();
+                                },
                             )),
                     ),
             )
@@ -522,6 +544,275 @@ impl AppShell {
                                     .child(sleipnir_settings::config_path().display().to_string()),
                             ),
                     ),
+            )
+    }
+
+    /// Agents section: agent panel toggle, built-in agents toggle, and hook installer.
+    fn render_settings_agents_section(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use sleipnir_settings::agent_hooks;
+
+        let settings = TerminalSettings::get_global(cx);
+        let agent_panel = settings.plugins.agent_panel;
+        let builtin_agents = settings.plugins.builtin_agents;
+        let border_w = pixel::PIXEL_BORDER;
+        let card_bg = tokens.hover;
+
+        let targets = agent_hooks::supported_targets();
+        let mut hooks_card = div()
+            .bg(card_bg)
+            .border(border_w)
+            .border_color(tokens.border)
+            .overflow_hidden();
+
+        for (i, target) in targets.iter().enumerate() {
+            let status = agent_hooks::check_hook_status(target);
+            let (_status_label, can_install) = match status {
+                agent_hooks::HookStatus::Installed => ("[ok]", false),
+                agent_hooks::HookStatus::Outdated => ("[update]", true),
+                agent_hooks::HookStatus::NotInstalled => ("[--]", true),
+                agent_hooks::HookStatus::DirMissing => ("[--]", true),
+            };
+
+            let label = target.label;
+            let target_id = target.id;
+
+            if i > 0 {
+                hooks_card = hooks_card.child(
+                    div()
+                        .w_full()
+                        .pl(px(14.0))
+                        .child(div().w_full().h(px(1.0)).bg(tokens.border)),
+                );
+            }
+
+            let mut row = div()
+                .id(("hook-row", i))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .w_full()
+                .px(px(14.0))
+                .py(px(10.0));
+
+            row = row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(tokens.fg)
+                            .child(SharedString::from(label)),
+                    )
+                    .child(div().text_size(px(11.0)).text_color(tokens.fg_muted).child(
+                        SharedString::from(format!("Hook for {label} agent lifecycle events")),
+                    )),
+            );
+
+            if can_install {
+                row = row
+                    .cursor_pointer()
+                    .hover(|el| el.bg(Hsla::white().opacity(0.03)))
+                    .on_click(cx.listener(move |_this, _: &ClickEvent, _window, cx| {
+                        let targets = agent_hooks::supported_targets();
+                        if let Some(t) = targets.iter().find(|t| t.id == target_id) {
+                            match agent_hooks::install_hooks(t) {
+                                Ok(()) => log::info!("installed hook for {}", t.label),
+                                Err(err) => {
+                                    log::warn!("failed to install hook for {}: {err}", t.label)
+                                }
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .bg(tokens.accent.opacity(0.15))
+                            .border(border_w)
+                            .border_color(tokens.accent.opacity(0.4))
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.accent)
+                            .child("install"),
+                    );
+            } else {
+                let danger = hsla(0.0, 0.65, 0.55, 1.0);
+                row = row.child(
+                    div()
+                        .id(("hook-uninstall", i))
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .bg(danger.opacity(0.12))
+                        .border(border_w)
+                        .border_color(danger.opacity(0.35))
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(danger)
+                        .hover(|el| el.bg(hsla(0.0, 0.65, 0.55, 0.25)))
+                        .on_click(cx.listener(move |_this, _: &ClickEvent, _window, cx| {
+                            let targets = agent_hooks::supported_targets();
+                            if let Some(t) = targets.iter().find(|t| t.id == target_id) {
+                                match agent_hooks::uninstall_hook(t) {
+                                    Ok(()) => log::info!("uninstalled hook for {}", t.label),
+                                    Err(err) => log::warn!(
+                                        "failed to uninstall hook for {}: {err}",
+                                        t.label
+                                    ),
+                                }
+                            }
+                            cx.notify();
+                        }))
+                        .child("uninstall"),
+                );
+            }
+
+            hooks_card = hooks_card.child(row);
+        }
+
+        let mut install_all_targets: Vec<&'static str> = Vec::new();
+        for target in &targets {
+            if matches!(
+                agent_hooks::check_hook_status(target),
+                agent_hooks::HookStatus::NotInstalled
+                    | agent_hooks::HookStatus::Outdated
+                    | agent_hooks::HookStatus::DirMissing
+            ) {
+                install_all_targets.push(target.id);
+            }
+        }
+        let has_installable = !install_all_targets.is_empty();
+
+        div()
+            .id("settings-agents")
+            .flex()
+            .flex_col()
+            .gap(px(20.0))
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(tokens.fg_muted)
+                            .pl(px(2.0))
+                            .child("# AGENTS"),
+                    )
+                    .child(
+                        div()
+                            .bg(card_bg)
+                            .border(border_w)
+                            .border_color(tokens.border)
+                            .overflow_hidden()
+                            .child(self.settings_toggle_row(
+                                "agent-panel",
+                                "Agent panel",
+                                "Show the agent status panel on the right side of the terminal area",
+                                agent_panel,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).plugins.agent_panel;
+                                    TerminalSettings::set_agent_panel(next, cx);
+                                    cx.notify();
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pl(px(14.0))
+                                    .child(div().w_full().h(px(1.0)).bg(tokens.border)),
+                            )
+                            .child(self.settings_toggle_row(
+                                "builtin-agents",
+                                "Built-in agents plugin",
+                                "Run the first-party Agents plugin for coordination and status tracking",
+                                builtin_agents,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next =
+                                        !TerminalSettings::get_global(cx).plugins.builtin_agents;
+                                    TerminalSettings::set_builtin_agents(next, cx);
+                                    cx.notify();
+                                },
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(tokens.fg_muted)
+                                    .pl(px(2.0))
+                                    .child("# AGENT HOOKS"),
+                            )
+                            .when(has_installable, |el| {
+                                let accent = tokens.accent;
+                                el.child(
+                                    div()
+                                        .id("install-all-hooks")
+                                        .cursor_pointer()
+                                        .px(px(8.0))
+                                        .py(px(3.0))
+                                        .bg(accent.opacity(0.15))
+                                        .border(border_w)
+                                        .border_color(accent.opacity(0.4))
+                                        .text_size(px(11.0))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(accent)
+                                        .hover(|el| el.bg(accent.opacity(0.25)))
+                                        .on_click(cx.listener(
+                                            move |_this, _: &ClickEvent, _window, cx| {
+                                                let results = agent_hooks::install_all_hooks();
+                                                for (label, result) in &results {
+                                                    match result {
+                                                        Ok(()) => log::info!("installed hook for {label}"),
+                                                        Err(err) => log::warn!("failed: {label}: {err}"),
+                                                    }
+                                                }
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child("install all"),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(tokens.fg_muted)
+                            .pl(px(2.0))
+                            .child("Install hooks into coding agents to report running status back to the terminal."),
+                    )
+                    .child(hooks_card),
             )
     }
 

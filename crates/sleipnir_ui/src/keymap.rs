@@ -23,7 +23,6 @@ pub enum BuiltinAction {
     Copy,
     Paste,
     PasteText,
-    SelectAll,
     Clear,
     ShowCharacterPalette,
     ToggleViMode,
@@ -147,10 +146,6 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
         b("ctrl-shift-c", BuiltinAction::Copy, Terminal),
         b("ctrl-shift-v", BuiltinAction::Paste, Terminal),
         b("ctrl-cmd-v", BuiltinAction::PasteText, Terminal),
-        b("cmd-a", BuiltinAction::SelectAll, Terminal),
-        // Editor-style select-all. Shell readline beginning-of-line stays
-        // reachable via cmd-left (which sends ctrl-a to the PTY).
-        b("ctrl-a", BuiltinAction::SelectAll, Terminal),
         b("cmd-k", BuiltinAction::Clear, Terminal),
         b(
             "ctrl-cmd-space",
@@ -244,7 +239,6 @@ fn desktop_static_bindings() -> Vec<BuiltinBinding> {
         b("ctrl-shift-v", BuiltinAction::Paste, Terminal),
         b("shift-insert", BuiltinAction::Paste, Terminal),
         b("ctrl-alt-v", BuiltinAction::PasteText, Terminal),
-        b("ctrl-shift-a", BuiltinAction::SelectAll, Terminal),
         b("ctrl-shift-k", BuiltinAction::Clear, Terminal),
         b("ctrl-shift-space", BuiltinAction::ToggleViMode, Terminal),
         // Scrolling
@@ -493,17 +487,28 @@ mod tests {
     }
 
     #[test]
-    fn macos_binds_ctrl_a_and_cmd_a_to_select_all() {
-        let select_all: Vec<_> = builtin_bindings_for(true, false)
-            .into_iter()
-            .filter(|b| b.action == BuiltinAction::SelectAll)
-            .map(|b| b.key)
-            .collect();
-        assert!(select_all.contains(&"cmd-a".to_string()));
-        assert!(
-            select_all.contains(&"ctrl-a".to_string()),
-            "ctrl-a should select all (editor-style): {select_all:?}"
-        );
+    fn removed_selection_shortcuts_are_not_bound_on_any_platform() {
+        for (macos, linux) in [(true, false), (false, false), (false, true)] {
+            for binding in builtin_bindings_for(macos, linux)
+                .into_iter()
+                .chain(tmux_preset_bindings())
+            {
+                assert!(
+                    !matches!(binding.key.as_str(), "cmd-a" | "ctrl-a" | "ctrl-shift-a"),
+                    "removed shortcut {} is bound (macos={macos}, linux={linux})",
+                    binding.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn macos_cmd_left_still_sends_readline_beginning_of_line() {
+        assert!(builtin_bindings_for(true, false).iter().any(|binding| {
+            binding.key == "cmd-left"
+                && binding.action == BuiltinAction::SendKeystroke("ctrl-a")
+                && binding.context == BindingContext::Terminal
+        }));
     }
 
     #[test]

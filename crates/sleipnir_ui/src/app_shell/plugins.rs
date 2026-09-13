@@ -59,12 +59,15 @@ fn apply_draw_scene_call(
 impl AppShell {
     pub(super) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
-        if !TerminalSettings::get_global(cx).plugins.enabled {
-            return;
-        }
         if !self
             .plugin_watch
             .due(std::time::Instant::now(), std::time::Duration::from_secs(1))
+        {
+            return;
+        }
+        if crate::plugin_runtime::snapshots(cx)
+            .iter()
+            .all(|snapshot| snapshot.state != plugin_host::resident::ConnectionState::Live)
         {
             return;
         }
@@ -90,6 +93,10 @@ impl AppShell {
         }
         for ev in self.plugin_watch.ingest_ui(focus, &facts) {
             crate::plugin_runtime::broadcast_event(ev, cx);
+        }
+        // The built-in Agents observer does not subscribe to port events.
+        if !TerminalSettings::get_global(cx).plugins.enabled {
+            return;
         }
         if self.plugin_watch.ports_inflight {
             return;
@@ -817,6 +824,10 @@ impl AppShell {
         if !crate::plugin_runtime::PluginRuntime::commands(cx).contains(&plugin) {
             return;
         }
+        if plugin.source == plugin_host::PluginSource::BuiltInAgents {
+            self.invoke_plugin_command(plugin, cx);
+            return;
+        }
         let request = crate::plugin_runtime::requested_capabilities(&plugin);
         let Some(hash) = crate::plugin_runtime::plugin_binary_hash(&plugin) else {
             log::warn!(
@@ -900,11 +911,14 @@ impl AppShell {
             return;
         };
         let grants = crate::plugin_runtime::grants();
-        let granted: Vec<plugin_protocol::v2::Capability> = grants
-            .grants
-            .get(&plugin.plugin_id)
-            .map(|r| r.granted.iter().copied().collect())
-            .unwrap_or_else(|| crate::plugin_runtime::requested_capabilities(&plugin));
+        let granted: Vec<plugin_protocol::v2::Capability> =
+            crate::plugin_runtime::builtin_grants(&loaded).unwrap_or_else(|| {
+                grants
+                    .grants
+                    .get(&plugin.plugin_id)
+                    .map(|r| r.granted.iter().copied().collect())
+                    .unwrap_or_else(|| crate::plugin_runtime::requested_capabilities(&plugin))
+            });
         let spec = crate::plugin_runtime::launch_spec(&loaded, granted);
         let Some(sup) = crate::plugin_runtime::supervisor(cx) else {
             return;
@@ -912,7 +926,9 @@ impl AppShell {
         let command_id = plugin.command.id.clone();
         let qualified_id = plugin.qualified_id();
         let granted = spec.granted.clone();
+        let retirement = crate::plugin_runtime::retirement(cx);
         cx.spawn(async move |this, cx| {
+            retirement.await;
             let invocation_supervisor = std::sync::Arc::clone(&sup);
             let result = cx
                 .background_spawn(async move {
@@ -932,8 +948,8 @@ impl AppShell {
         })
         .detach();
     }
-    /// Handshake every granted resident. First-run / binary-change / new-cap
-    /// gaps become a consent prompt; nothing is launched without a grant.
+    /// Handshake every resident. Built-ins use their compiled capability set;
+    /// external first-run / binary-change / new-cap gaps need explicit consent.
     pub(super) fn start_resident_plugins(&mut self, cx: &mut Context<Self>) {
         if self.plugin_consent.is_some() {
             return;
@@ -943,6 +959,10 @@ impl AppShell {
                 continue;
             }
             if crate::plugin_runtime::is_plugin_live(&plugin.manifest.id, cx) {
+                continue;
+            }
+            if let Some(granted) = crate::plugin_runtime::builtin_grants(&plugin) {
+                self.connect_resident(plugin, granted, cx);
                 continue;
             }
             let request = crate::plugin_runtime::requested_capabilities_for_plugin(&plugin);
@@ -993,7 +1013,9 @@ impl AppShell {
             return;
         }
         log::info!("plugin: starting resident {id}");
+        let retirement = crate::plugin_runtime::retirement(cx);
         cx.spawn(async move |_this, cx| {
+            retirement.await;
             let connecting_supervisor = std::sync::Arc::clone(&sup);
             let result = cx
                 .background_spawn(async move { connecting_supervisor.connect(&spec) })

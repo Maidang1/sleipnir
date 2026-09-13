@@ -69,6 +69,7 @@ plugin_protocol = { path = "crates/plugin_protocol" }
 plugin_grants = { path = "crates/plugin_grants" }
 agent_coordination = { path = "crates/agent_coordination" }
 sleipnir_agentctl = { path = "crates/sleipnir_agentctl" }
+sleipnir_plugin_agents = { path = "crates/sleipnir_plugin_agents" }
 atomic_write = { path = "crates/atomic_write" }
 sleipnir-plugin = { path = "crates/sleipnir_plugin_sdk" }
 sleipnir_widget = { path = "crates/sleipnir_widget" }

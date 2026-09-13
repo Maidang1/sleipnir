@@ -357,6 +357,7 @@ impl Supervisor {
             }
 
             let idle = session.lifecycle == PluginLifecycle::Resident
+                && !session.keep_alive
                 && session.in_flight() == 0
                 && now.saturating_sub(session.last_activity_ms()) >= idle_ms;
             if idle {
@@ -376,6 +377,14 @@ impl Supervisor {
 
     pub fn shutdown_all(&self) {
         self.close();
+        // A connect still handshaking is not in `active` yet. Wait for its
+        // per-plugin lock so shutdown cannot return while that child still
+        // owns a service socket that the replacement is about to bind.
+        // New connects see `closed` before launching anything.
+        let locks: Vec<_> = mutex_lock(&self.plugin_locks).values().cloned().collect();
+        for lock in locks {
+            drop(mutex_lock(&lock));
+        }
         let sessions: Vec<Arc<Session>> = {
             let mut inner = mutex_lock(&self.inner);
             let sessions = inner.active.drain().map(|(_, s)| s).collect();

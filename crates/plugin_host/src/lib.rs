@@ -26,6 +26,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub mod builtin;
 pub mod resident;
 
 /// The only manifest / protocol version this host speaks (ADR-0016).
@@ -169,9 +170,18 @@ pub struct PluginCommand {
 /// catalog has to retain them or they are invisible to auto-start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedPlugin {
+    pub source: PluginSource,
     pub manifest: PluginManifest,
     pub directory: PathBuf,
     pub resolved_binary: PathBuf,
+}
+
+/// Host-owned provenance, never deserialized from a user manifest. An id or
+/// a stored grant tier alone must not confer built-in trust.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginSource {
+    External,
+    BuiltInAgents,
 }
 
 impl LoadedPlugin {
@@ -182,6 +192,7 @@ impl LoadedPlugin {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedPluginCommand {
+    pub source: PluginSource,
     pub plugin_id: String,
     pub plugin_name: String,
     pub plugin_version: String,
@@ -319,6 +330,7 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
                             continue;
                         }
                         catalog.commands.push(LoadedPluginCommand {
+                            source: PluginSource::External,
                             plugin_id: manifest.id.clone(),
                             plugin_name: manifest.name.clone(),
                             plugin_version: manifest.version.clone(),
@@ -331,6 +343,7 @@ pub fn load_catalog_from_roots(roots: &[PathBuf]) -> PluginCatalog {
                         });
                     }
                     catalog.plugins.push(LoadedPlugin {
+                        source: PluginSource::External,
                         manifest,
                         directory: directory.clone(),
                         resolved_binary,
