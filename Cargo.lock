@@ -5868,15 +5868,22 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 name = "sleipnir"
 version = "0.6.4"
 dependencies = [
+ "agent_coordination",
  "env_logger",
  "gpui",
  "gpui_platform",
  "log",
+ "plugin_protocol",
  "release_channel",
+ "serde_json",
+ "sleipnir_agentctl",
+ "sleipnir_plugin_agents",
  "sleipnir_settings",
  "sleipnir_ui",
+ "tempfile",
  "terminal",
  "updater",
+ "uuid",
 ]
 
 [[package]]
@@ -5929,6 +5936,8 @@ name = "sleipnir_plugin_agents"
 version = "0.1.0"
 dependencies = [
  "agent_coordination",
+ "plugin_host",
+ "serde_json",
  "sleipnir-plugin",
  "uuid",
 ]

@@ -5,10 +5,11 @@ an existing **Coordinator agent** to discover, launch, prompt, wait on,
 interrupt, focus, and close **Worker** agents that each occupy a visible
 Sleipnir pane.
 
-`sleipnir-agentctl` speaks the dialect below to this server. Requests
+`sleipnir agentctl` (or standalone `sleipnir-agentctl`) speaks the dialect below to this server. Requests
 acknowledge **acceptance** only. This crate does not call a model, spawn a
-shell, drive a PTY, or consume adapter effects — execution awaits an
-adapter wired into the Agents plugin/host.
+shell, drive a PTY, or consume adapter effects — execution is delivered by the adapter in the built-in Agents plugin.
+The terminal starts that plugin by default; this crate has no independent
+enable switch. See [Agents](../sleipnir_plugin_agents/README.md).
 
 Windows builds compile; `Server::bind` returns a clear unsupported error.
 
@@ -167,8 +168,10 @@ Diagnostic coordinator ops: `effects` (peek) and `facts` (cursor).
 
 ## Security
 
-This surface is an attack surface, in the same family as the default-off
-control socket ([ADR-0011](../../docs/adr/0011-control-surface.md)).
+This surface is an attack surface. Unlike the separate default-off general
+control socket, it starts with the built-in Agents plugin by default. Disable
+it with `plugins.builtin_agents: false` when local agent coordination is not
+wanted.
 
 - **Local only.** User-private Unix socket, never a network listener.
   Bind refuses to steal a live path. Same-user access is `0600` on the
@@ -197,10 +200,9 @@ control socket ([ADR-0011](../../docs/adr/0011-control-surface.md)).
 - Model/provider APIs, credentials, network
 - TCP or a Windows named-pipe listener
 
-## Next wiring contract
+## Adapter boundary
 
-The remaining blocker is an adapter consumer inside the Agents
-plugin/host that shares this `Registry`:
+The built-in Agents plugin consumes effects and shares this `Registry`:
 
 - `LaunchRequested` → open a visible pane → `BindPane { seq, session, pane }`
 - `PromptRequested` → host `SendText` if coordinator owns that session → `PromptDelivered { seq }`

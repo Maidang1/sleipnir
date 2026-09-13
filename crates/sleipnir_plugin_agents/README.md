@@ -239,30 +239,57 @@ shell interlude — replaces the cached run and is adopted normally.
   the session exited and output is ready to review — never success, never
   task completion, never approval state.
 
-## Build & install
+## Built in; enabled by default
 
-```sh
-cargo build --release -p sleipnir_plugin_agents
+Agents is compiled into `sleipnir` and automatically started as an isolated
+child process (`sleipnir --builtin-agents`). A normal `cargo build -p sleipnir`
+or packaged release includes it: no extra binary, plugin directory, manifest
+copy, settings edit, or first-run plugin consent is required. Open
+**Agents: Open panel** from the command palette to see the panel; opening it
+is not required for the coordination service to run.
 
-mkdir -p ~/.config/sleipnir/plugins/agents
-cp target/release/sleipnir-plugin-agents ~/.config/sleipnir/plugins/agents/
-cp crates/sleipnir_plugin_agents/plugin.json ~/.config/sleipnir/plugins/agents/
-```
+The host supplies only the capability set from the compiled-in manifest.
+Host-side permission checks, request validation, rate limits, coordinator /
+human ownership, and native agent approval boundaries still apply. Built-in
+trust comes from host-owned provenance, never a user manifest or a matching
+plugin id. The `agents` id is reserved; an old external installation is ignored.
+The Plugin Monitor labels the service **built-in** and can stop it.
 
-Plugins are off by default; enable them in `~/.config/sleipnir/settings.json`:
+External plugins remain off by default. `plugins.enabled` controls only
+external discovery. To explicitly disable the built-in service, merge this
+into `settings.json` and reload settings (or restart):
 
 ```json
-{ "plugins": { "enabled": true } }
+{ "plugins": { "builtin_agents": false } }
 ```
 
-Start Sleipnir and approve the consent prompt (`resident`,
-`subscribe_events`, `render_panel`, `render_status`,
-`host_call_scroll_to_run`, `host_call_notify`, `host_call_open_pane`,
-`host_call_focus_pane`, `host_call_send_text`, `host_call_send_key`,
-`host_call_request_close_pane`). Consent is asked once per binary +
-permission set; a rebuilt binary or a widened permission list re-prompts.
-Without the five delivery grants the coordination socket stays off and the
-plugin runs observer-only.
+The socket is local and user-private, but any process running as the same
+OS user can connect and issue coordinator requests. It is not an OS sandbox
+or a model service. Windows currently runs observer-only because the
+coordination transport is Unix-only. Socket bind failures also degrade to
+observer-only and appear in the Plugin Monitor's stderr log.
+
+## Built-in client
+
+No separate `sleipnir-agentctl` installation is needed:
+
+```sh
+sleipnir agentctl list
+sleipnir agentctl launch-wait codex /absolute/repo --name worker --timeout-ms 20000
+```
+
+Sleipnir panes export `SLEIPNIR_BIN`, so GUI launches work even when the app
+is not on PATH:
+
+```sh
+"$SLEIPNIR_BIN" agentctl list
+```
+
+Worker prompt envelopes use the shell-quoted absolute terminal executable
+with the `agentctl` subcommand. External agent CLIs (`codex`, `claude`,
+`gemini`, `opencode`) must still be installed separately. The standalone
+`sleipnir-plugin-agents` and `sleipnir-agentctl` binaries remain buildable for
+SDK testing and tooling; normal terminal installation needs neither.
 
 ## Protocol capabilities used
 

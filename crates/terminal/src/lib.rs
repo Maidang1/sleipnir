@@ -28,10 +28,8 @@ pub(crate) use row_map::PointerMap;
 pub use row_map::{hit_display, viewport_top_abs, y_for_display};
 pub use run_tracker::{RunTracker, TrackerOut, UNRECOGNIZED_COMMAND, normalize_command};
 pub use shell_semantics::{
-    ClickToMove, InjectShell, TripleClickKind, absolute_to_grid_line, apply_inject_to_shell,
-    clear_input_line_sequence, click_to_move_sequence, command_input_selection_range,
-    command_output_range, inject_script, triple_click_kind, wrap_shell_for_inject,
-    wrap_shell_for_inject_in,
+    ClickToMove, InjectShell, absolute_to_grid_line, apply_inject_to_shell, click_to_move_sequence,
+    inject_script, wrap_shell_for_inject, wrap_shell_for_inject_in,
 };
 
 #[cfg(not(windows))]
@@ -184,11 +182,17 @@ enum SelectionType {
     Lines,
 }
 
+/// A selection gesture must start on this terminal, not an overlay above it.
+struct MouseSelection {
+    origin: GpuiPoint<Pixels>,
+    dragging: bool,
+}
+
 impl Selection {
-    fn new(selection_type: SelectionType, point: Point, side: SelectionSide) -> Self {
+    fn new(ty: SelectionType, point: Point, side: SelectionSide) -> Self {
         let anchor = SelectionAnchor { point, side };
         Self {
-            ty: selection_type,
+            ty,
             start: anchor,
             end: anchor,
             head: point,
@@ -427,12 +431,6 @@ impl Default for Content {
     }
 }
 
-#[derive(PartialEq, Eq)]
-enum SelectionPhase {
-    Selecting,
-    Ended,
-}
-
 #[cfg(test)]
 mod domain_tests {
     use super::*;
@@ -484,8 +482,6 @@ actions!(
         ScrollToBottom,
         /// Toggles vi mode in the terminal.
         ToggleViMode,
-        /// Selects all text in the terminal.
-        SelectAll,
     ]
 );
 
@@ -913,16 +909,14 @@ impl TerminalBuilder {
                 events: VecDeque::with_capacity(10),
                 last_content: Default::default(),
                 last_mouse: None,
-                mouse_down_position: None,
+                mouse_selection: None,
                 matches: Vec::new(),
                 active_match: None,
                 selection_head: None,
-                frozen_selection: None,
                 scroll_px: px(0.),
                 viewport: ViewportPosition::new(0),
                 row_geometry: RowGeometry::new(16.0),
                 next_link_id: 0,
-                selection_phase: SelectionPhase::Ended,
                 hyperlink_regex_searches: RegexSearches::new(
                     &path_hyperlink_regexes,
                     path_hyperlink_timeout_ms,
@@ -1075,19 +1069,13 @@ pub struct Terminal {
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
     last_mouse: Option<(Point, SelectionSide)>,
-    /// Window-relative position of the most recent left mouse-down. Used to
-    /// apply a drag threshold before starting a selection (see #58970).
-    mouse_down_position: Option<GpuiPoint<Pixels>>,
+    mouse_selection: Option<MouseSelection>,
     pub matches: Vec<Range>,
     /// The match the find UI currently points at, so paint can distinguish it
     /// from the other highlights. Cleared together with `matches`.
     pub active_match: Option<Range>,
     pub last_content: Content,
     pub selection_head: Option<Point>,
-    /// Frozen "select all" range that survives alacritty's internal selection
-    /// clearing (shells frequently erase lines which drops the selection).
-    /// Cleared on next user input or explicit click.
-    frozen_selection: Option<SelectionRange>,
     title_override: Option<String>,
     scroll_px: Pixels,
     /// Host-side sub-row remainder (ADR-0018 decision 2). Never sent to the grid.
@@ -1095,7 +1083,6 @@ pub struct Terminal {
     /// Block heights and the mapping both paint and hit-testing use.
     row_geometry: RowGeometry,
     next_link_id: usize,
-    selection_phase: SelectionPhase,
     hyperlink_regex_searches: RegexSearches,
     vi_mode_enabled: bool,
     last_mouse_move_time: Instant,
@@ -1140,11 +1127,6 @@ struct CwdHistoryEntry {
 }
 
 const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
-
-/// Minimum pointer movement before a left click begins a selection. This keeps
-/// a click that jitters by a pixel or two (such as the window-focusing click)
-/// from starting a selection and, with `copy_on_select` enabled, clobbering the
-/// clipboard. Mirrors the drag threshold used by gpui's `div` element.
 const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
 impl Terminal {
@@ -1307,18 +1289,7 @@ impl Terminal {
 
             InternalEvent::Copy(keep_selection) => {
                 trace!("Copying selection: keep_selection={keep_selection:?}");
-                let txt = selection_text(term).or_else(|| {
-                    // Alacritty's selection was cleared; use the frozen range.
-                    let frozen = self.frozen_selection?;
-                    Some(grid_text_range(
-                        term,
-                        frozen.start.line,
-                        frozen.start.column,
-                        frozen.end.line,
-                        frozen.end.column,
-                    ))
-                });
-                if let Some(txt) = txt {
+                if let Some(txt) = selection_text(term) {
                     if !txt.is_empty() {
                         cx.write_to_clipboard(ClipboardItem::new_string(txt));
                         cx.emit(Event::CopiedToClipboard);
@@ -1327,7 +1298,6 @@ impl Terminal {
                         let settings = TerminalSettings::get_global(cx);
                         settings.keep_selection_on_copy
                     }) {
-                        self.frozen_selection = None;
                         self.events.push_back(InternalEvent::SetSelection(None));
                     }
                 }
@@ -1864,57 +1834,6 @@ impl Terminal {
         }
     }
 
-    pub fn select_all(&mut self) {
-        // This action is editor-style select-all for the active command input.
-        // It must never delegate to alacritty's full-buffer select-all fallback.
-        let Some(range) = self.command_input_range() else {
-            self.frozen_selection = None;
-            self.set_selection(None);
-            return;
-        };
-        // Freeze so it survives alacritty's internal line-erase/scroll clearing.
-        let sel_range = SelectionRange {
-            start: range.start(),
-            end: range.end(),
-            is_block: false,
-        };
-        self.frozen_selection = Some(sel_range);
-        self.set_selection(Some(Selection::simple_range(range)));
-    }
-
-    /// Grid range of the active command input. OSC 133 supplies the precise
-    /// prompt boundary; without it, selection stays on the cursor's occupied row.
-    fn command_input_range(&self) -> Option<Range> {
-        let term = self.term.lock_unfair();
-        let history = term.history_size() as i32;
-        let cursor = Point::new(
-            term.grid().cursor.point.line.0,
-            term.grid().cursor.point.column.0,
-        );
-        let occupied_columns = self
-            .last_content
-            .cells
-            .iter()
-            .filter(|cell| cell.point.line == cursor.line && cell.character() != ' ')
-            .map(|cell| cell.point.column + 1)
-            .max()
-            .unwrap_or(0);
-        let command_start = self
-            .prompt_markers
-            .iter()
-            .rev()
-            .find(|marker| matches!(marker.kind, Osc133Kind::CommandStart))
-            .and_then(|marker| {
-                Some(Point::new(
-                    absolute_to_grid_line(marker.line?, history),
-                    marker.column.unwrap_or(0),
-                ))
-            });
-        drop(term);
-
-        command_input_selection_range(command_start, cursor, occupied_columns)
-    }
-
     fn set_selection(&mut self, selection: Option<Selection>) {
         self.events
             .push_back(InternalEvent::SetSelection(selection));
@@ -2022,8 +1941,6 @@ impl Terminal {
 
     fn write_input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         let input = input.into();
-        // Any user input clears the frozen select-all range.
-        self.frozen_selection = None;
         if input.contains(&b'\r') {
             let term = self.term.lock_unfair();
             self.pending_cwd_boundary = Some(Self::scrollback_position(
@@ -2126,9 +2043,8 @@ impl Terminal {
         match key.as_ref() {
             "v" => {
                 let point = self.last_content.cursor.point;
-                let selection_type = SelectionType::Simple;
                 let side = SelectionSide::Right;
-                let selection = Selection::new(selection_type, point, side);
+                let selection = Selection::new(SelectionType::Simple, point, side);
                 self.events
                     .push_back(InternalEvent::SetSelection(Some(selection)));
             }
@@ -2153,22 +2069,6 @@ impl Terminal {
         if self.vi_mode_enabled {
             self.vi_motion(keystroke);
             return true;
-        }
-
-        // When the command input is fully selected (select-all) and the user
-        // presses Backspace/Delete, clear the whole input line at once
-        // (readline ctrl-u), matching editor-style "delete selection".
-        if self.frozen_selection.is_some() {
-            let key = keystroke.key.as_str();
-            let plain = !keystroke.modifiers.control
-                && !keystroke.modifiers.alt
-                && !keystroke.modifiers.platform
-                && !keystroke.modifiers.function;
-            if plain && matches!(key, "backspace" | "delete") {
-                self.frozen_selection = None;
-                self.input(clear_input_line_sequence());
-                return true;
-            }
         }
 
         // Keep default terminal behavior
@@ -2262,24 +2162,6 @@ impl Terminal {
             self.invalidate_terminal_anchors();
         }
         self.pending_backend_wakeup = false;
-        drop(terminal);
-
-        // A frozen "select all" must survive alacritty's internal selection
-        // mutation (shells constantly erase/scroll the prompt line, which drops
-        // or rotates the native selection). While frozen, own the selection
-        // outright regardless of alacritty's current state.
-        if let Some(frozen) = self.frozen_selection {
-            self.last_content.selection = Some(frozen);
-            let term = self.term.lock_unfair();
-            self.last_content.selection_text = Some(grid_text_range(
-                &term,
-                frozen.start.line,
-                frozen.start.column,
-                frozen.end.line,
-                frozen.end.column,
-            ));
-            drop(term);
-        }
     }
 
     pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
@@ -2347,6 +2229,9 @@ impl Terminal {
                 }
             }
         } else {
+            if e.dragging() {
+                self.update_mouse_selection(e);
+            }
             self.schedule_find_hyperlink(e.modifiers, e.position);
         }
         cx.notify();
@@ -2357,7 +2242,10 @@ impl Terminal {
         // links exist; opening still honors click semantics. The modifier is
         // kept in the signature because callers pass event state through.
         let _ = modifiers;
-        if self.selection_phase == SelectionPhase::Selecting
+        if self
+            .mouse_selection
+            .as_ref()
+            .is_some_and(|selection| selection.dragging)
             || !self.last_content.terminal_bounds.bounds.contains(&position)
         {
             self.last_content.last_hovered_word = None;
@@ -2386,99 +2274,60 @@ impl Terminal {
         }
     }
 
-    pub fn mouse_drag(
-        &mut self,
-        e: &MouseMoveEvent,
-        region: Bounds<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        if !self.mouse_mode(e.modifiers.shift) {
-            if let Some(hyperlink) = &self.mouse_down_hyperlink {
-                let point = self.pointer_map().grid_point(position);
+    fn update_mouse_selection(&mut self, e: &MouseMoveEvent) {
+        let Some(selection) = self.mouse_selection.as_mut() else {
+            return;
+        };
+        if !selection.dragging
+            && (e.position - selection.origin).magnitude() <= SELECTION_DRAG_THRESHOLD
+        {
+            return;
+        }
+        selection.dragging = true;
+        let bounds = self.last_content.terminal_bounds.bounds;
+        self.events
+            .push_back(InternalEvent::UpdateSelection(e.position - bounds.origin));
 
-                if !hyperlink.range.contains(point) {
-                    self.mouse_down_hyperlink = None;
-                } else {
-                    return;
-                }
-            }
-
-            // A drag only belongs to the terminal when it began with a left
-            // mouse-down on the terminal itself. Modal overlays (settings,
-            // palette, …) swallow mouse_down via stop_propagation, but
-            // TermElement's window-level mouse listener still forwards drag
-            // moves from above the overlay — without this gate, dragging over
-            // an open menu starts a selection from a stale anchor behind it.
-            let Some(mouse_down_position) = self.mouse_down_position else {
+        if !self.last_content.mode.contains(Modes::ALT_SCREEN) {
+            let delta = if e.position.y < bounds.origin.y {
+                (bounds.origin.y - e.position.y).pow(1.1)
+            } else if e.position.y > bounds.bottom_left().y {
+                -(e.position.y - bounds.bottom_left().y).pow(1.1)
+            } else {
                 return;
             };
-
-            // Ignore tiny pointer movements so that a click that jitters by a
-            // pixel or two (e.g. the window-focusing click) does not begin a
-            // selection. Mirrors the drag threshold used by gpui's `div`.
-            if self.selection_phase != SelectionPhase::Selecting
-                && (e.position - mouse_down_position).magnitude() <= SELECTION_DRAG_THRESHOLD
-            {
-                return;
-            }
-
-            self.selection_phase = SelectionPhase::Selecting;
-            // Alacritty has the same ordering, of first updating the selection
-            // then scrolling 15ms later
+            let lines = delta / self.last_content.terminal_bounds.line_height;
+            let lines = if lines > 0.0 {
+                lines.ceil()
+            } else {
+                lines.floor()
+            } as i32;
             self.events
-                .push_back(InternalEvent::UpdateSelection(position));
-
-            // Doesn't make sense to scroll the alt screen
-            if !self.last_content.mode.contains(Modes::ALT_SCREEN) {
-                let scroll_lines = match self.drag_line_delta(e, region) {
-                    Some(value) => value,
-                    None => return,
-                };
-
-                self.events
-                    .push_back(InternalEvent::Scroll(Scroll::Delta(scroll_lines)));
-            }
-
-            cx.notify();
+                .push_back(InternalEvent::Scroll(Scroll::Delta(lines.clamp(-3, 3))));
         }
     }
 
-    fn drag_line_delta(&self, e: &MouseMoveEvent, region: Bounds<Pixels>) -> Option<i32> {
-        let top = region.origin.y;
-        let bottom = region.bottom_left().y;
-
-        let scroll_lines = if e.position.y < top {
-            let scroll_delta = (top - e.position.y).pow(1.1);
-            (scroll_delta / self.last_content.terminal_bounds.line_height).ceil() as i32
-        } else if e.position.y > bottom {
-            let scroll_delta = -((e.position.y - bottom).pow(1.1));
-            (scroll_delta / self.last_content.terminal_bounds.line_height).floor() as i32
-        } else {
-            return None;
-        };
-
-        Some(scroll_lines.clamp(-3, 3))
-    }
-
     pub fn mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
-        // Any mouse interaction clears the frozen select-all.
-        self.frozen_selection = None;
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         let point = self.pointer_map().grid_point(position);
 
-        if e.button == MouseButton::Left && !e.modifiers.secondary() {
-            // Alt+Click always attempts cursor move (original behavior).
-            // Plain single click on the prompt line also moves the cursor
-            // instead of starting a selection, giving a text-editor-like feel.
-            let try_move = e.modifiers.alt || (!e.modifiers.shift && e.click_count == 1);
-            if try_move {
-                if let Some(bytes) = self.click_to_move_bytes(point) {
-                    if !bytes.is_empty() {
-                        self.write_to_pty(bytes);
-                    }
-                    return;
+        if e.button == MouseButton::Left {
+            self.mouse_selection = None;
+            self.mouse_down_hyperlink = None;
+        }
+
+        // Only Alt+click moves the shell cursor. A plain click anchors a
+        // selection even on the active input line, so dragging never edits it.
+        if e.button == MouseButton::Left
+            && e.modifiers.alt
+            && !e.modifiers.secondary()
+            && !self.mouse_mode(e.modifiers.shift)
+        {
+            if let Some(bytes) = self.click_to_move_bytes(point) {
+                if !bytes.is_empty() {
+                    self.write_to_pty(bytes);
                 }
+                return;
             }
         }
 
@@ -2501,83 +2350,51 @@ impl Terminal {
             if let Some(bytes) = bytes {
                 self.write_to_pty(bytes);
             }
-        } else {
-            match e.button {
-                MouseButton::Left => {
-                    self.mouse_down_position = Some(e.position);
-                    let (point, side) = self.pointer_map().grid_point_and_side(position);
-
-                    let selection_type = match e.click_count {
-                        0 => return, //This is a release
-                        1 => Some(SelectionType::Simple),
-                        2 => Some(SelectionType::Semantic),
-                        3 => {
-                            if e.modifiers.secondary() {
-                                let last_col = self
-                                    .last_content
-                                    .terminal_bounds
-                                    .num_columns()
-                                    .saturating_sub(1);
-                                let history_size = self.term.lock_unfair().history_size() as i32;
-                                if let TripleClickKind::CommandOutput(range) = triple_click_kind(
-                                    true,
-                                    &self.prompt_markers,
-                                    point.line,
-                                    last_col,
-                                    history_size,
-                                ) {
-                                    self.events.push_back(InternalEvent::SetSelection(Some(
-                                        Selection::simple_range(Range::new(range.start, range.end)),
-                                    )));
-                                    return;
-                                }
-                            }
-                            Some(SelectionType::Lines)
-                        }
-                        _ => None,
-                    };
-
-                    if selection_type == Some(SelectionType::Simple) && e.modifiers.shift {
-                        if self.last_content.selection.is_some() {
-                            // Shift+click extends the existing selection to this point.
-                            self.events
-                                .push_back(InternalEvent::UpdateSelection(position));
-                        } else {
-                            // With no selection yet, Shift is the escape hatch for
-                            // selecting text while an app has mouse tracking enabled,
-                            // so anchor a selection here for the drag to extend.
-                            self.events.push_back(InternalEvent::SetSelection(Some(
-                                Selection::new(SelectionType::Simple, point, side),
-                            )));
-                        }
-                        return;
-                    }
-
-                    let selection = selection_type
-                        .map(|selection_type| Selection::new(selection_type, point, side));
-
-                    if let Some(selection) = selection {
-                        self.events
-                            .push_back(InternalEvent::SetSelection(Some(selection)));
-                    }
+        } else if e.button == MouseButton::Left && e.click_count > 0 {
+            let (point, side) = self.pointer_map().grid_point_and_side(position);
+            self.mouse_selection = Some(MouseSelection {
+                origin: e.position,
+                dragging: false,
+            });
+            if e.click_count == 1 && e.modifiers.shift && self.last_content.selection.is_some() {
+                self.events
+                    .push_back(InternalEvent::UpdateSelection(position));
+            } else {
+                let ty = match e.click_count {
+                    1 => SelectionType::Simple,
+                    2 => SelectionType::Semantic,
+                    _ => SelectionType::Lines,
+                };
+                self.set_selection(Some(Selection::new(ty, point, side)));
+            }
+        } else if e.button == MouseButton::Middle {
+            // X11-style middle-click paste (normal mouse mode only;
+            // mouse-reporting apps already received the button above).
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                if !text.is_empty() {
+                    self.paste(&text);
                 }
-                MouseButton::Middle => {
-                    // X11-style middle-click paste (normal mouse mode only;
-                    // mouse-reporting apps already received the button above).
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        if !text.is_empty() {
-                            self.paste(&text);
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
 
     pub fn mouse_up(&mut self, e: &MouseUpEvent, cx: &Context<Self>) {
-        let setting = TerminalSettings::get_global(cx);
+        self.mouse_up_with_settings(e, TerminalSettings::get_global(cx), cx);
+    }
 
+    fn mouse_up_with_settings(
+        &mut self,
+        e: &MouseUpEvent,
+        settings: &TerminalSettings,
+        cx: &Context<Self>,
+    ) {
+        let dragged = if e.button == MouseButton::Left {
+            self.mouse_selection
+                .take()
+                .is_some_and(|selection| selection.dragging)
+        } else {
+            false
+        };
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if let Some(mouse_down_hyperlink) = self.mouse_down_hyperlink.take() {
             let point = self.pointer_map().grid_point(position);
@@ -2588,16 +2405,12 @@ impl Terminal {
             {
                 self.events
                     .push_back(InternalEvent::ProcessHyperlink(mouse_down_hyperlink, true));
-                self.selection_phase = SelectionPhase::Ended;
                 self.last_mouse = None;
-                self.mouse_down_position = None;
                 return;
             }
 
             if self.mouse_mode(e.modifiers.shift) {
-                self.selection_phase = SelectionPhase::Ended;
                 self.last_mouse = None;
-                self.mouse_down_position = None;
                 return;
             }
         }
@@ -2612,12 +2425,12 @@ impl Terminal {
                 self.write_to_pty(bytes);
             }
         } else {
-            if e.button == MouseButton::Left && setting.copy_on_select {
+            if e.button == MouseButton::Left && settings.copy_on_select {
                 self.copy(Some(true));
             }
 
             //Hyperlinks
-            if self.selection_phase == SelectionPhase::Ended {
+            if e.button == MouseButton::Left && !dragged && e.click_count == 1 {
                 let mouse_cell_index = self.pointer_map().content_index(position);
                 if let Some(link) = self
                     .last_content
@@ -2633,9 +2446,7 @@ impl Terminal {
             }
         }
 
-        self.selection_phase = SelectionPhase::Ended;
         self.last_mouse = None;
-        self.mouse_down_position = None;
     }
 
     ///Scroll the terminal
@@ -3068,9 +2879,9 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockAnchorChange, Content, CwdHistoryEntry, InternalEvent, PtyEvent, SelectionPhase,
-        Terminal, TerminalBounds, TerminalType, accumulate_uniform_wheel,
-        normalize_terminal_bounds, terminal_looks_busy,
+        BlockAnchorChange, Content, CwdHistoryEntry, InternalEvent, PtyEvent, Terminal,
+        TerminalBounds, TerminalType, accumulate_uniform_wheel, normalize_terminal_bounds,
+        terminal_looks_busy,
     };
     use crate::{
         Osc133Kind,
@@ -3235,6 +3046,510 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_a_is_forwarded_to_the_shell() {
+        let mut terminal = test_terminal();
+        assert!(terminal.try_keystroke(&gpui::Keystroke::parse("ctrl-a").unwrap(), false));
+        assert_eq!(terminal.take_input_log(), vec![vec![0x01]]);
+    }
+
+    #[test]
+    fn cmd_a_does_not_select_or_write_input() {
+        let mut terminal = test_terminal();
+        assert!(!terminal.try_keystroke(&gpui::Keystroke::parse("cmd-a").unwrap(), false));
+        assert!(terminal.take_input_log().is_empty());
+        assert!(terminal.events.is_empty());
+        assert!(terminal.last_content.selection.is_none());
+    }
+
+    #[test]
+    fn deletion_keys_keep_terminal_sequences_with_a_selection() {
+        for (key, expected) in [("backspace", b"\x7f".as_slice()), ("delete", b"\x1b[3~")] {
+            let mut terminal = test_terminal();
+            let selection = super::Selection::simple_range(super::Range::new(
+                super::Point::new(0, 0),
+                super::Point::new(0, 3),
+            ));
+            {
+                let mut term = terminal.term.lock_unfair();
+                super::set_term_selection(&mut term, Some(&selection));
+                terminal.last_content = super::make_content(&term, &terminal.last_content);
+            }
+            assert!(terminal.last_content.selection.is_some());
+
+            assert!(terminal.try_keystroke(&gpui::Keystroke::parse(key).unwrap(), false));
+            assert_eq!(terminal.take_input_log(), vec![expected.to_vec()], "{key}");
+            assert!(matches!(
+                terminal.events.back(),
+                Some(InternalEvent::SetSelection(None))
+            ));
+        }
+    }
+
+    #[gpui::test]
+    async fn search_selection_copies_and_clears_with_backend_state(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        let mut terminal = test_terminal();
+        {
+            let mut term = terminal.term.lock_unfair();
+            for character in "hello world".chars() {
+                term.input(character);
+            }
+        }
+        let range = super::Range::new(super::Point::new(0, 0), super::Point::new(0, 4));
+        terminal.matches.push(range.clone());
+        terminal.activate_match(0);
+
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| terminal);
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+                assert_eq!(terminal.active_match, Some(range));
+                assert_eq!(
+                    terminal.last_content.selection_text.as_deref(),
+                    Some("hello")
+                );
+
+                terminal.copy(Some(true));
+                terminal.sync(window, cx);
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some("hello")
+                );
+                assert!(terminal.last_content.selection.is_some());
+
+                super::set_term_selection(&mut terminal.term.lock_unfair(), None);
+                terminal.sync(window, cx);
+                assert!(terminal.last_content.selection.is_none());
+                assert!(terminal.last_content.selection_text.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn dragging_on_command_input_selects_text_without_moving_shell_cursor(
+        cx: &mut TestAppContext,
+    ) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                {
+                    let mut term = terminal.term.lock_unfair();
+                    for character in "1111111111111111".chars() {
+                        term.input(character);
+                    }
+                }
+                terminal.sync(window, cx);
+                let down = gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: gpui::point(px(11.0), px(2.0)),
+                    click_count: 1,
+                    ..Default::default()
+                };
+                terminal.mouse_down(&down, cx);
+                terminal.sync(window, cx);
+                let end = gpui::point(px(31.0), px(2.0));
+                terminal.mouse_move(
+                    &gpui::MouseMoveEvent {
+                        position: end,
+                        pressed_button: Some(gpui::MouseButton::Left),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                terminal.sync(window, cx);
+                assert_eq!(
+                    terminal.last_content.selection_text.as_deref(),
+                    Some("1111")
+                );
+                assert!(
+                    terminal.take_pty_write_log().is_empty(),
+                    "dragging must not send cursor-motion bytes to the shell"
+                );
+
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("unchanged".into()));
+                terminal.mouse_up_with_settings(
+                    &gpui::MouseUpEvent {
+                        button: down.button,
+                        position: end,
+                        click_count: 1,
+                        ..Default::default()
+                    },
+                    &super::TerminalSettings {
+                        copy_on_select: true,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                terminal.sync(window, cx);
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some("1111")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn mouse_selection_supports_words_lines_and_shift_click(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            for (click_count, expected) in [(2, "hello"), (3, "hello world\n")] {
+                let entity = cx.new(|_| test_terminal());
+                entity.update(cx, |terminal, cx| {
+                    {
+                        let mut term = terminal.term.lock_unfair();
+                        for character in "hello world".chars() {
+                            term.input(character);
+                        }
+                    }
+                    terminal.sync(window, cx);
+                    terminal.mouse_down(
+                        &gpui::MouseDownEvent {
+                            button: gpui::MouseButton::Left,
+                            position: gpui::point(px(11.0), px(2.0)),
+                            click_count,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                    terminal.sync(window, cx);
+                    assert_eq!(
+                        terminal.last_content.selection_text.as_deref(),
+                        Some(expected)
+                    );
+                    assert!(terminal.take_pty_write_log().is_empty());
+                });
+            }
+
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                {
+                    let mut term = terminal.term.lock_unfair();
+                    for character in "hello world".chars() {
+                        term.input(character);
+                    }
+                }
+                terminal.matches.push(super::Range::new(
+                    super::Point::new(0, 0),
+                    super::Point::new(0, 4),
+                ));
+                terminal.activate_match(0);
+                terminal.sync(window, cx);
+                terminal.mouse_down(
+                    &gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: gpui::point(px(51.0), px(2.0)),
+                        modifiers: gpui::Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                        click_count: 1,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                terminal.sync(window, cx);
+                assert_eq!(
+                    terminal.last_content.selection_text.as_deref(),
+                    Some("hello worl")
+                );
+                assert!(terminal.take_pty_write_log().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn reverse_drag_selects_wide_characters(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                {
+                    let mut term = terminal.term.lock_unfair();
+                    for character in "\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}".chars() {
+                        term.input(character);
+                    }
+                }
+                terminal.sync(window, cx);
+                terminal.mouse_down(
+                    &gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: gpui::point(px(41.0), px(2.0)),
+                        click_count: 1,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                terminal.sync(window, cx);
+                terminal.mouse_move(
+                    &gpui::MouseMoveEvent {
+                        position: gpui::point(px(1.0), px(2.0)),
+                        pressed_button: Some(gpui::MouseButton::Left),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                terminal.sync(window, cx);
+                assert_eq!(
+                    terminal.last_content.selection_text.as_deref(),
+                    Some("\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}")
+                );
+                assert!(terminal.take_pty_write_log().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn mouse_selection_requires_a_local_press_and_ignores_click_jitter(
+        cx: &mut TestAppContext,
+    ) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+                // A window-level move may have started over a menu or overlay.
+                let movement = gpui::MouseMoveEvent {
+                    position: gpui::point(px(40.0), px(60.0)),
+                    pressed_button: Some(gpui::MouseButton::Left),
+                    ..Default::default()
+                };
+                terminal.mouse_move(&movement, cx);
+                assert!(terminal.events.iter().all(|event| !matches!(event,
+                    InternalEvent::SetSelection(_) | InternalEvent::UpdateSelection(_) | InternalEvent::Scroll(_)
+                )));
+
+                terminal.mouse_down(&gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: gpui::point(px(11.0), px(2.0)),
+                    click_count: 1,
+                    ..Default::default()
+                }, cx);
+                terminal.sync(window, cx);
+                terminal.mouse_move(&gpui::MouseMoveEvent {
+                    position: gpui::point(px(12.0), px(2.0)),
+                    pressed_button: Some(gpui::MouseButton::Left),
+                    ..Default::default()
+                }, cx);
+                assert!(terminal.events.iter().all(|event| !matches!(event, InternalEvent::UpdateSelection(_))));
+                terminal.sync(window, cx);
+                assert!(terminal.last_content.selection.is_none());
+
+                terminal.mouse_move(&movement, cx);
+                assert!(terminal.events.iter().any(|event| matches!(event, InternalEvent::UpdateSelection(_))));
+                assert!(terminal.events.iter().any(|event| matches!(event, InternalEvent::Scroll(super::Scroll::Delta(lines)) if *lines < 0)));
+                terminal.mouse_up_with_settings(&gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position: movement.position,
+                    click_count: 1,
+                    ..Default::default()
+                }, &super::TerminalSettings::default(), cx);
+                terminal.events.clear();
+                terminal.mouse_move(&movement, cx);
+                assert!(terminal.events.iter().all(|event| !matches!(event, InternalEvent::UpdateSelection(_) | InternalEvent::Scroll(_))));
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn alt_click_keeps_shell_cursor_movement_without_starting_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                {
+                    let mut term = terminal.term.lock_unfair();
+                    for character in "hello".chars() {
+                        term.input(character);
+                    }
+                }
+                terminal.sync(window, cx);
+                terminal.mouse_down(
+                    &gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: gpui::point(px(11.0), px(2.0)),
+                        click_count: 1,
+                        modifiers: gpui::Modifiers {
+                            alt: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert_eq!(terminal.take_pty_write_log(), vec![b"\x1b[D".repeat(3)]);
+                assert!(terminal.mouse_selection.is_none());
+                assert!(terminal.events.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn mouse_release_keeps_optional_copy_of_existing_selection(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            for copy_on_select in [false, true] {
+                for button in [gpui::MouseButton::Left, gpui::MouseButton::Right] {
+                    for selected in [false, true] {
+                        let entity = cx.new(|_| test_terminal());
+                        entity.update(cx, |terminal, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                "unchanged".into(),
+                            ));
+                            {
+                                let mut term = terminal.term.lock_unfair();
+                                for character in "hello world".chars() {
+                                    term.input(character);
+                                }
+                            }
+                            if selected {
+                                terminal.matches.push(super::Range::new(
+                                    super::Point::new(0, 0),
+                                    super::Point::new(0, 4),
+                                ));
+                                terminal.activate_match(0);
+                            }
+                            terminal.sync(window, cx);
+                            let original = terminal.last_content.selection;
+                            let settings = super::TerminalSettings {
+                                copy_on_select,
+                                ..Default::default()
+                            };
+                            terminal.mouse_up_with_settings(
+                                &gpui::MouseUpEvent {
+                                    button,
+                                    position: gpui::point(px(40.0), px(7.0)),
+                                    click_count: 1,
+                                    ..Default::default()
+                                },
+                                &settings,
+                                cx,
+                            );
+                            terminal.sync(window, cx);
+                            let expected = if copy_on_select
+                                && selected
+                                && button == gpui::MouseButton::Left
+                            {
+                                "hello"
+                            } else {
+                                "unchanged"
+                            };
+                            assert_eq!(
+                                cx.read_from_clipboard()
+                                    .and_then(|item| item.text())
+                                    .as_deref(),
+                                Some(expected)
+                            );
+                            assert_eq!(terminal.last_content.selection, original);
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn mouse_reporting_keeps_press_drag_release_sequences(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+                terminal.last_content.mode =
+                    super::Modes::ALT_SCREEN | super::Modes::SGR_MOUSE | super::Modes::MOUSE_DRAG;
+                for (button, code) in [
+                    (gpui::MouseButton::Left, 0),
+                    (gpui::MouseButton::Middle, 1),
+                    (gpui::MouseButton::Right, 2),
+                ] {
+                    terminal.mouse_down(
+                        &gpui::MouseDownEvent {
+                            button,
+                            position: gpui::point(px(12.0), px(7.0)),
+                            click_count: 1,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                    terminal.mouse_move(
+                        &gpui::MouseMoveEvent {
+                            position: gpui::point(px(22.0), px(12.0)),
+                            pressed_button: Some(button),
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                    terminal.mouse_up_with_settings(
+                        &gpui::MouseUpEvent {
+                            button,
+                            position: gpui::point(px(22.0), px(12.0)),
+                            click_count: 1,
+                            ..Default::default()
+                        },
+                        &super::TerminalSettings {
+                            copy_on_select: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                    assert_eq!(
+                        terminal.take_pty_write_log(),
+                        vec![
+                            format!("\x1b[<{code};3;2M").into_bytes(),
+                            format!("\x1b[<{};5;3M", code + 32).into_bytes(),
+                            format!("\x1b[<{code};5;3m").into_bytes(),
+                        ]
+                    );
+                    assert!(terminal.events.is_empty());
+                    assert!(terminal.last_content.selection.is_none());
+                }
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn modifier_link_click_still_opens_without_reporting_an_unmatched_gesture(
+        cx: &mut TestAppContext,
+    ) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|_, cx| {
+            super::TerminalSettings::init(cx);
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                {
+                    let mut term = terminal.term.lock_unfair();
+                    for character in "https://example.com".chars() {
+                        term.input(character);
+                    }
+                }
+                // Ctrl is secondary on Windows/Linux; Command is secondary on macOS.
+                let modifiers = gpui::Modifiers { platform: true, control: true, ..Default::default() };
+                let position = gpui::point(px(12.0), px(2.0));
+                terminal.mouse_down(&gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left, position, modifiers, click_count: 1, ..Default::default()
+                }, cx);
+                assert!(terminal.mouse_down_hyperlink.is_some());
+                terminal.last_content.mode = super::Modes::ALT_SCREEN | super::Modes::SGR_MOUSE | super::Modes::MOUSE_DRAG;
+                terminal.mouse_move(&gpui::MouseMoveEvent {
+                    position, modifiers, pressed_button: Some(gpui::MouseButton::Left),
+                }, cx);
+                terminal.mouse_up_with_settings(&gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left, position, modifiers, click_count: 1,
+                }, &super::TerminalSettings::default(), cx);
+                assert!(terminal.take_pty_write_log().is_empty());
+                assert!(matches!(terminal.events.back(), Some(InternalEvent::ProcessHyperlink(link, true)) if link.text == "https://example.com"));
+            });
+        });
+    }
+
+    #[test]
     fn capped_history_full_damage_requires_conservative_invalidate_evidence() {
         let config = pty_term_config(8, SettingsCursorShape::default());
         let (events_tx, _events_rx) = unbounded();
@@ -3318,18 +3633,16 @@ mod tests {
             term_config: config,
             events: VecDeque::new(),
             last_mouse: None,
-            mouse_down_position: None,
+            mouse_selection: None,
             matches: Vec::new(),
             active_match: None,
             last_content: Content::default(),
             selection_head: None,
-            frozen_selection: None,
             title_override: None,
             scroll_px: px(0.0),
             viewport: ViewportPosition::new(0),
             row_geometry: RowGeometry::new(16.0),
             next_link_id: 0,
-            selection_phase: SelectionPhase::Ended,
             hyperlink_regex_searches: RegexSearches::default(),
             vi_mode_enabled: false,
             last_mouse_move_time: Instant::now(),

@@ -1,12 +1,15 @@
-//! UI adapter for manifest-based external command plugins.
+//! UI adapter for built-in and manifest-based external command plugins.
 
+use futures::{FutureExt as _, future::Shared};
 use gpui::{App, BorrowAppContext as _, Global, Task};
 use plugin_grants::{GrantRecord, GrantsFile, Tier};
 use plugin_host::resident::{
     BroadcastReport, ConnectionSnapshot, ConnectionState, LaunchSpec, ProcessLauncher, Supervisor,
     SupervisorConfig, SystemClock,
 };
-use plugin_host::{LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginLifecycle};
+use plugin_host::{
+    LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginLifecycle, PluginSource,
+};
 use plugin_protocol::v2::{Capability, HostEvent, InvokeContext, Output};
 use sleipnir_settings::TerminalSettings;
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +37,8 @@ pub struct PluginRuntime {
     /// resident process. This set closes that window synchronously.
     connecting: BTreeSet<String>,
     revision: CatalogRevision,
+    /// A replacement must wait until the old process releases its socket.
+    retirement: Shared<Task<()>>,
     calls: crate::plugin_host_calls::HostCallLimiter,
     _pump: Task<()>,
     _housekeeping: Task<()>,
@@ -48,6 +53,7 @@ impl PluginRuntime {
                 catalog: PluginCatalog::default(),
                 connecting: BTreeSet::new(),
                 revision: Vec::new(),
+                retirement: Task::ready(()).shared(),
                 calls: crate::plugin_host_calls::HostCallLimiter::new(),
                 _pump: Task::ready(()),
                 _housekeeping: Task::ready(()),
@@ -85,16 +91,25 @@ impl PluginRuntime {
 
     pub fn reload(cx: &mut App) {
         let settings = TerminalSettings::get_global(cx);
-        let catalog = if settings.plugins.enabled {
-            plugin_host::load_catalog(&settings.plugins.directories)
-        } else {
-            PluginCatalog::default()
+        let catalog = match std::env::current_exe() {
+            Ok(executable) => plugin_host::builtin::load_catalog(
+                &executable,
+                settings.plugins.builtin_agents,
+                settings
+                    .plugins
+                    .enabled
+                    .then_some(settings.plugins.directories.as_slice()),
+            ),
+            Err(err) => {
+                log::error!("cannot resolve terminal executable for built-in plugins: {err}");
+                PluginCatalog::default()
+            }
         };
         for diagnostic in &catalog.diagnostics {
             log::warn!("plugin: {diagnostic}");
         }
         log::info!(
-            "plugin: enabled={} loaded {} plugin(s), {} command(s): {:?}",
+            "plugin: external_enabled={} loaded {} plugin(s), {} command(s): {:?}",
             settings.plugins.enabled,
             catalog.plugins.len(),
             catalog.commands.len(),
@@ -111,8 +126,12 @@ impl PluginRuntime {
             .map(|plugin| {
                 (
                     plugin.clone(),
-                    loaded_plugin_hash(plugin),
-                    grants.grants.get(plugin.id()).cloned(),
+                    (plugin.source == PluginSource::External)
+                        .then(|| loaded_plugin_hash(plugin))
+                        .flatten(),
+                    (plugin.source == PluginSource::External)
+                        .then(|| grants.grants.get(plugin.id()).cloned())
+                        .flatten(),
                 )
             })
             .collect();
@@ -120,9 +139,15 @@ impl PluginRuntime {
             .global_mut::<PluginRuntime>()
             .replace_catalog(catalog, revision);
         if let Some(retired) = retired {
-            cx.background_executor()
-                .spawn(async move { retired.shutdown_all() })
-                .detach();
+            let previous = retirement(cx);
+            let task = cx
+                .background_executor()
+                .spawn(async move {
+                    previous.await;
+                    retired.shutdown_all();
+                })
+                .shared();
+            cx.global_mut::<PluginRuntime>().retirement = task;
         }
     }
 
@@ -252,17 +277,30 @@ pub fn requested_capabilities_for_plugin(plugin: &LoadedPlugin) -> Vec<Capabilit
 }
 
 pub fn launch_spec(plugin: &LoadedPlugin, granted: Vec<Capability>) -> LaunchSpec {
-    LaunchSpec::from_plugin(
+    let mut spec = LaunchSpec::from_plugin(
         &plugin.manifest,
         &plugin.resolved_binary,
         &plugin.directory,
         granted,
-    )
+    );
+    spec.keep_alive = builtin_grants(plugin).is_some();
+    spec
+}
+
+/// Only host-created provenance grants the compiled-in audit set. Neither a
+/// matching plugin id nor a `built_in` entry in plugin-grants.json is enough.
+pub fn builtin_grants(plugin: &LoadedPlugin) -> Option<Vec<Capability>> {
+    (plugin.source == PluginSource::BuiltInAgents)
+        .then(|| requested_capabilities_for_plugin(plugin))
 }
 
 pub fn supervisor(cx: &App) -> Option<Arc<Supervisor>> {
     cx.try_global::<PluginRuntime>()
         .map(|rt| Arc::clone(&rt.supervisor))
+}
+
+pub fn retirement(cx: &App) -> Shared<Task<()>> {
+    cx.global::<PluginRuntime>().retirement.clone()
 }
 
 pub fn is_current(supervisor: &Arc<Supervisor>, cx: &App) -> bool {
@@ -298,12 +336,18 @@ pub fn grants() -> GrantsFile {
     plugin_grants::load(&plugin_grants::default_grants_path())
 }
 
-pub fn grant_tiers() -> BTreeMap<String, Tier> {
-    grants()
+pub fn grant_tiers(cx: &App) -> BTreeMap<String, Tier> {
+    let mut tiers: BTreeMap<_, _> = grants()
         .grants
         .into_iter()
         .map(|(id, rec)| (id, rec.tier))
-        .collect()
+        .collect();
+    for plugin in PluginRuntime::plugins(cx) {
+        if builtin_grants(&plugin).is_some() {
+            tiers.insert(plugin.manifest.id, Tier::BuiltIn);
+        }
+    }
+    tiers
 }
 
 pub fn catalog_names(cx: &App) -> BTreeMap<String, String> {
@@ -434,6 +478,7 @@ mod tests {
     fn runtime_with_plugin() -> PluginRuntime {
         let resolved_binary = PathBuf::from("/resolved/demo");
         let plugin = LoadedPlugin {
+            source: PluginSource::External,
             manifest: serde_json::from_str(r#"{"id":"demo","name":"Demo","version":"1","api_version":2,"lifecycle":"resident","binary":"./demo"}"#).unwrap(),
             directory: PathBuf::from("demo"),
             resolved_binary,
@@ -456,10 +501,32 @@ mod tests {
                 )),
                 None,
             )],
+            retirement: Task::ready(()).shared(),
             calls: crate::plugin_host_calls::HostCallLimiter::new(),
             _pump: Task::ready(()),
             _housekeeping: Task::ready(()),
         }
+    }
+
+    #[test]
+    fn only_host_provenance_gets_builtin_grants_and_idle_exemption() {
+        let runtime = runtime_with_plugin();
+        let mut external = runtime.catalog.plugins[0].clone();
+        external.manifest.id = "agents".into();
+        assert!(builtin_grants(&external).is_none());
+        assert!(!launch_spec(&external, vec![]).keep_alive);
+
+        let catalog =
+            plugin_host::builtin::load_catalog(&std::env::current_exe().unwrap(), true, None);
+        let builtin = &catalog.plugins[0];
+        let granted = builtin_grants(builtin).unwrap();
+        assert!(granted.contains(&Capability::HostCallSendText));
+        assert!(granted.contains(&Capability::HostCallRequestClosePane));
+        assert!(!granted.contains(&Capability::Network));
+        let launch = launch_spec(builtin, granted.clone());
+        assert!(launch.keep_alive);
+        assert_eq!(launch.granted, granted);
+        assert_eq!(launch.args, [plugin_host::builtin::AGENTS_ARGUMENT]);
     }
 
     #[test]

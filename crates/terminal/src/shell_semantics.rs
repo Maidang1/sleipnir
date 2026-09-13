@@ -1,5 +1,5 @@
-//! Pure shell-integration helpers: OSC 133 inject scripts, click-to-move,
-//! and command-output ranges. Wired from spawn / `mouse_down`.
+//! Pure shell-integration helpers: OSC 133 inject scripts and click-to-move.
+//! Wired from spawn / `mouse_down`.
 
 /// Interactive shells we can auto-inject OSC 133 A/B/C/D into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,8 +159,8 @@ pub fn wrap_shell_for_inject_in(
     }
     // The app can be launched from another terminal and inherit its integration
     // markers. They describe the parent process, not this new PTY; leaving them
-    // set makes our injected script return before emitting OSC 133 B, so command
-    // input selection falls back to the entire terminal buffer.
+    // set makes our injected script return before emitting OSC 133 markers,
+    // breaking command tracking and click-to-move prompt boundaries.
     for key in [
         "ITERM_SESSION_ID",
         "GHOSTTY_RESOURCES_DIR",
@@ -357,157 +357,6 @@ pub fn click_to_move_sequence(req: ClickToMove) -> Option<Vec<u8>> {
         ((-delta) as usize, b"\x1b[D".as_slice())
     };
     Some(seq.repeat(n))
-}
-
-/// Inclusive range for an editor-style Select All inside the active command line.
-///
-/// OSC 133's command-start column is preferred. When shell integration is not
-/// available, select only the occupied cells before the cursor on its row;
-/// never fall back to the terminal's entire scrollback buffer.
-pub fn command_input_selection_range(
-    command_start: Option<crate::Point>,
-    cursor: crate::Point,
-    occupied_columns: usize,
-) -> Option<crate::Range> {
-    let start = command_start
-        .filter(|start| start.line == cursor.line && start.column < cursor.column)
-        .unwrap_or_else(|| crate::Point::new(cursor.line, 0));
-    let end_column = cursor.column.max(occupied_columns).checked_sub(1)?;
-    if end_column < start.column {
-        return None;
-    }
-    Some(crate::Range::new(
-        start,
-        crate::Point::new(cursor.line, end_column),
-    ))
-}
-
-/// Bytes that clear the whole current input line for an editor-style "delete
-/// selection" gesture: ctrl-e (jump to line end) then ctrl-u (kill to line
-/// start). Works in readline/zsh emacs mode regardless of cursor position.
-pub fn clear_input_line_sequence() -> Vec<u8> {
-    vec![0x05, 0x15]
-}
-
-/// How a triple-click should select.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TripleClickKind {
-    /// Cmd/Ctrl-triple-click: the recorded command output.
-    CommandOutput(crate::SelectionRange),
-    /// Plain triple-click (or no usable markers): whole lines, as today.
-    Lines,
-}
-
-/// Cmd/Ctrl-triple-click uses OSC 133 C/D (or A/B) to bound output.
-/// Without the modifier, or without a containing command, this is [`TripleClickKind::Lines`].
-///
-/// `markers` store absolute scrollback lines (`cursor.line + history_size`),
-/// while `click_line` is an alacritty grid line (viewport-relative). `history_size`
-/// bridges the two so a click matches markers regardless of scrollback depth.
-pub fn triple_click_kind(
-    primary_mod: bool,
-    markers: &[crate::Osc133Marker],
-    click_line: i32,
-    last_column: usize,
-    history_size: i32,
-) -> TripleClickKind {
-    if primary_mod {
-        if let Some(range) = command_output_range(markers, click_line, last_column, history_size) {
-            return TripleClickKind::CommandOutput(range);
-        }
-    }
-    TripleClickKind::Lines
-}
-
-/// Inclusive cell range of the command output that contains `click_line`.
-///
-/// `markers` carry absolute scrollback lines; `click_line` is a grid line.
-/// The returned [`crate::SelectionRange`] is in grid coordinates, ready to hand
-/// to the alacritty selection.
-pub fn command_output_range(
-    markers: &[crate::Osc133Marker],
-    click_line: i32,
-    last_column: usize,
-    history_size: i32,
-) -> Option<crate::SelectionRange> {
-    // Compare in the markers' absolute coordinate space.
-    let click_abs = click_line + history_size;
-    let marked: Vec<(crate::Osc133Kind, i32)> = markers
-        .iter()
-        .filter_map(|m| m.line.map(|line| (m.kind, line)))
-        .collect();
-    if marked.is_empty() {
-        return None;
-    }
-
-    let abs_range = range_from_c_d(&marked, click_abs, last_column)
-        .or_else(|| range_from_prompt_pair(&marked, click_abs, last_column))?;
-    // Convert the range back to grid coordinates for selection.
-    Some(crate::SelectionRange {
-        start: crate::Point::new(abs_range.start.line - history_size, abs_range.start.column),
-        end: crate::Point::new(abs_range.end.line - history_size, abs_range.end.column),
-        is_block: abs_range.is_block,
-    })
-}
-
-fn range_from_c_d(
-    marked: &[(crate::Osc133Kind, i32)],
-    click_line: i32,
-    last_column: usize,
-) -> Option<crate::SelectionRange> {
-    let start_idx = marked.iter().rposition(|(kind, line)| {
-        *line <= click_line
-            && matches!(
-                kind,
-                crate::Osc133Kind::CommandExecuted | crate::Osc133Kind::CommandStart
-            )
-    })?;
-    let start_line = marked[start_idx].1;
-    let end_line = marked[start_idx + 1..]
-        .iter()
-        .find(|(kind, line)| {
-            *line >= start_line
-                && matches!(
-                    kind,
-                    crate::Osc133Kind::CommandFinished { .. } | crate::Osc133Kind::PromptStart
-                )
-        })
-        .map(|(_, line)| *line)?;
-    if click_line < start_line || click_line > end_line {
-        return None;
-    }
-    Some(crate::SelectionRange {
-        start: crate::Point::new(start_line, 0),
-        end: crate::Point::new(end_line, last_column),
-        is_block: false,
-    })
-}
-
-fn range_from_prompt_pair(
-    marked: &[(crate::Osc133Kind, i32)],
-    click_line: i32,
-    last_column: usize,
-) -> Option<crate::SelectionRange> {
-    let starts: Vec<i32> = marked
-        .iter()
-        .filter_map(|(kind, line)| matches!(kind, crate::Osc133Kind::PromptStart).then_some(*line))
-        .collect();
-    let prev = starts
-        .iter()
-        .rev()
-        .find(|&&line| line < click_line)
-        .copied()?;
-    let next = starts.iter().find(|&&line| line > click_line).copied()?;
-    let start_line = prev + 1;
-    let end_line = next - 1;
-    if end_line < start_line {
-        return None;
-    }
-    Some(crate::SelectionRange {
-        start: crate::Point::new(start_line, 0),
-        end: crate::Point::new(end_line, last_column),
-        is_block: false,
-    })
 }
 
 #[cfg(test)]
@@ -842,42 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn select_all_without_shell_marker_stays_on_the_cursor_row() {
-        let range =
-            command_input_selection_range(None, crate::Point::new(4, 8), 8).expect("typed command");
-
-        assert_eq!(range.start(), crate::Point::new(4, 0));
-        assert_eq!(range.end(), crate::Point::new(4, 7));
-    }
-
-    #[test]
-    fn select_all_prefers_the_osc133_command_start_column() {
-        let range = command_input_selection_range(
-            Some(crate::Point::new(4, 3)),
-            crate::Point::new(4, 8),
-            8,
-        )
-        .expect("typed command");
-
-        assert_eq!(range.start(), crate::Point::new(4, 3));
-        assert_eq!(range.end(), crate::Point::new(4, 7));
-    }
-
-    #[test]
-    fn select_all_without_input_has_no_range() {
-        assert_eq!(
-            command_input_selection_range(None, crate::Point::new(4, 0), 0),
-            None
-        );
-    }
-
-    #[test]
-    fn clear_input_line_is_ctrl_e_then_ctrl_u() {
-        // ctrl-e (0x05) jumps to end, ctrl-u (0x15) kills to start → whole line.
-        assert_eq!(clear_input_line_sequence(), vec![0x05, 0x15]);
-    }
-
-    #[test]
     fn click_to_move_without_markers_ignores_prefix_guard() {
         // No prompt marker → no prefix guard; clicking a low column just moves left.
         let mut req = move_req(3, 10);
@@ -900,14 +713,6 @@ mod tests {
     fn click_to_move_noop_on_prompt_prefix() {
         let req = move_req(3, 10);
         assert_eq!(click_to_move_sequence(req), None);
-    }
-
-    fn marker(kind: crate::Osc133Kind, line: i32) -> crate::Osc133Marker {
-        crate::Osc133Marker {
-            kind,
-            line: Some(line),
-            column: Some(0),
-        }
     }
 
     #[test]
@@ -934,74 +739,5 @@ mod tests {
         req.prompt_line = Some(absolute_to_grid_line(prompt_abs, history_size));
         let bytes = click_to_move_sequence(req).expect("grid prompt line must match");
         assert_eq!(bytes, b"\x1b[C".repeat(10));
-    }
-
-    #[test]
-    fn command_output_range_from_c_and_d() {
-        use crate::Osc133Kind::{CommandExecuted, CommandFinished};
-        let markers = [
-            marker(CommandExecuted, 10),
-            marker(CommandFinished { status: Some(0) }, 20),
-        ];
-        // No scrollback: absolute marker lines equal grid lines.
-        let range = command_output_range(&markers, 15, 80, 0).expect("inside output");
-        assert_eq!(range.start, crate::Point::new(10, 0));
-        assert_eq!(range.end, crate::Point::new(20, 80));
-        assert!(!range.is_block);
-        assert!(command_output_range(&markers, 25, 80, 0).is_none());
-    }
-
-    #[test]
-    fn command_output_range_falls_back_to_prompt_pair() {
-        use crate::Osc133Kind::PromptStart;
-        let markers = [marker(PromptStart, 0), marker(PromptStart, 15)];
-        let range = command_output_range(&markers, 8, 40, 0).expect("between prompts");
-        assert_eq!(range.start, crate::Point::new(1, 0));
-        assert_eq!(range.end, crate::Point::new(14, 40));
-    }
-
-    #[test]
-    fn command_output_range_matches_grid_click_against_absolute_markers() {
-        use crate::Osc133Kind::{CommandExecuted, CommandFinished};
-        // Markers are stored absolute (cursor.line + history_size). With 100
-        // lines of scrollback the command output lives at absolute rows
-        // 110..120, which map to grid rows 10..20.
-        let history_size = 100;
-        let markers = [
-            marker(CommandExecuted, 110),
-            marker(CommandFinished { status: Some(0) }, 120),
-        ];
-        // A grid-coordinate click at row 15 (inside the output) must match, and
-        // the returned range must be back in grid coordinates for selection.
-        let range =
-            command_output_range(&markers, 15, 80, history_size).expect("grid click inside output");
-        assert_eq!(range.start, crate::Point::new(10, 0));
-        assert_eq!(range.end, crate::Point::new(20, 80));
-        // A grid click outside the output must not match.
-        assert!(command_output_range(&markers, 25, 80, history_size).is_none());
-    }
-
-    #[test]
-    fn modifier_triple_click_selects_output_plain_selects_lines() {
-        use crate::Osc133Kind::{CommandExecuted, CommandFinished};
-        let markers = [
-            marker(CommandExecuted, 10),
-            marker(CommandFinished { status: Some(0) }, 20),
-        ];
-        match triple_click_kind(true, &markers, 15, 80, 0) {
-            TripleClickKind::CommandOutput(range) => {
-                assert_eq!(range.start.line, 10);
-                assert_eq!(range.end.line, 20);
-            }
-            TripleClickKind::Lines => panic!("modifier triple-click should use output range"),
-        }
-        assert_eq!(
-            triple_click_kind(false, &markers, 15, 80, 0),
-            TripleClickKind::Lines
-        );
-        assert_eq!(
-            triple_click_kind(true, &[], 15, 80, 0),
-            TripleClickKind::Lines
-        );
     }
 }

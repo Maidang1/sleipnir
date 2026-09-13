@@ -166,6 +166,8 @@ pub struct TerminalSettings {
     pub custom_theme: Option<CustomPalette>,
     /// Enable OpenType ligatures (`calt`) when the font supports them (M10).
     pub font_ligatures: bool,
+    /// Draw a subtle, breathing starfield behind terminal text. Default false.
+    pub starfield: bool,
     /// Optional key binding overrides loaded from settings (M9).
     pub key_bindings: Vec<KeyBindingSpec>,
     /// When to confirm before closing a pane/tab (M12). Default: dirty.
@@ -200,17 +202,29 @@ pub struct TerminalSettings {
     pub keybinding_preset: KeybindingPreset,
     /// Legacy compatibility field; session restore and its banner were removed.
     pub show_tombstone: bool,
-    /// External command plugin discovery and permission policy.
+    /// Built-in service policy and external command plugin discovery.
     pub plugins: PluginSettings,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default)]
 pub struct PluginSettings {
-    /// Master switch. Disabled means no manifests are read and no plugin runs.
+    /// External plugins only. Disabled means no user manifests are read.
     pub enabled: bool,
+    /// First-party Agents runs by default, independently of external plugins.
+    pub builtin_agents: bool,
     /// Extra plugin roots layered after the platform config directory.
     pub directories: Vec<PathBuf>,
+}
+
+impl Default for PluginSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            builtin_agents: true,
+            directories: Vec::new(),
+        }
+    }
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -299,6 +313,7 @@ impl Default for TerminalSettings {
             theme: ThemeSetting::Builtin(ThemeName::Mocha),
             custom_theme: None,
             font_ligatures: false,
+            starfield: false,
             key_bindings: Vec::new(),
             confirm_close: ConfirmClose::Dirty,
             path_links: true,
@@ -406,6 +421,19 @@ impl TerminalSettings {
         } else {
             apply_loaded(settings, cx);
             log::info!("copy_on_select -> {enabled} (persisted)");
+        }
+    }
+
+    /// Toggle the starfield and persist under `terminal.starfield`.
+    pub fn set_starfield(enabled: bool, cx: &mut App) {
+        let mut settings = Self::get_global(cx).clone();
+        settings.starfield = enabled;
+        if let Err(err) = persist_terminal_bool("starfield", enabled) {
+            log::warn!("failed to persist starfield={enabled}: {err}");
+        } else {
+            apply_loaded(settings, cx);
+            cx.refresh_windows();
+            log::info!("starfield -> {enabled} (persisted)");
         }
     }
 
@@ -546,6 +574,8 @@ struct TerminalSettingsFile {
     font_weight: Option<f32>,
     /// Enable font ligatures (`calt`). Default false.
     font_ligatures: Option<bool>,
+    /// Subtle breathing stars behind terminal text. Default false.
+    starfield: Option<bool>,
     line_height: Option<TerminalLineHeight>,
     option_as_meta: Option<bool>,
     copy_on_select: Option<bool>,
@@ -699,6 +729,9 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
             FontFeatures::disable_ligatures()
         });
     }
+    if let Some(v) = t.starfield {
+        settings.starfield = v;
+    }
     if let Some(lh) = t.line_height {
         settings.line_height = lh;
     }
@@ -790,6 +823,7 @@ fn default_settings_file() -> SettingsFile {
             line_height: Some(TerminalLineHeight::Custom(1.3)),
             option_as_meta: Some(option_as_meta_default()),
             copy_on_select: Some(false),
+            starfield: Some(false),
             max_scroll_history_lines: Some(10_000),
             scroll_multiplier: Some(3.0),
             minimum_contrast: Some(45.0),
@@ -919,13 +953,17 @@ fn persist_theme(theme: &ThemeSetting) -> anyhow::Result<()> {
 fn persist_terminal_bool(key: &str, value: bool) -> anyhow::Result<()> {
     let path = config_path();
     patch_settings_file_at_path(&path, |doc| {
-        if !doc.get("terminal").map(|t| t.is_object()).unwrap_or(false) {
-            doc["terminal"] = serde_json::json!({});
-        }
-        if let Some(terminal) = doc.get_mut("terminal").and_then(|t| t.as_object_mut()) {
-            terminal.insert(key.to_string(), serde_json::Value::Bool(value));
-        }
+        patch_terminal_bool_document(doc, key, value);
     })
+}
+
+fn patch_terminal_bool_document(doc: &mut serde_json::Value, key: &str, value: bool) {
+    if !doc.get("terminal").map(|t| t.is_object()).unwrap_or(false) {
+        doc["terminal"] = serde_json::json!({});
+    }
+    if let Some(terminal) = doc.get_mut("terminal").and_then(|t| t.as_object_mut()) {
+        terminal.insert(key.to_string(), serde_json::Value::Bool(value));
+    }
 }
 
 pub fn init(cx: &mut App) {
@@ -1109,6 +1147,51 @@ mod tests {
         assert_eq!(v["inject_osc133"], false);
         assert_eq!(v["terminal"]["font_size"], 14);
         assert_eq!(v["terminal"]["font_ligatures"], true);
+    }
+
+    #[test]
+    fn starfield_defaults_off_in_runtime_and_generated_config() {
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, serde_json::from_str("{}").unwrap());
+        assert!(!settings.starfield);
+        let config = serde_json::to_value(default_settings_file()).unwrap();
+        assert_eq!(config["terminal"]["starfield"], false);
+    }
+
+    #[test]
+    fn starfield_loads_and_can_be_disabled_again() {
+        let mut settings = TerminalSettings::default();
+        for enabled in [true, false] {
+            let raw = serde_json::json!({"terminal": {"starfield": enabled}});
+            merge_file(&mut settings, serde_json::from_value(raw).unwrap());
+            assert_eq!(settings.starfield, enabled);
+        }
+    }
+
+    #[test]
+    fn starfield_persistence_preserves_other_settings_and_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"theme":"nord","terminal":{"font_size":16,"copy_on_select":true},"unknown":{"keep":42}}"#,
+        )
+        .unwrap();
+        for enabled in [true, false] {
+            patch_settings_file_at_path(&path, |doc| {
+                patch_terminal_bool_document(doc, "starfield", enabled);
+            })
+            .unwrap();
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(doc["theme"], "nord");
+            assert_eq!(doc["terminal"]["font_size"], 16);
+            assert_eq!(doc["terminal"]["copy_on_select"], true);
+            assert_eq!(doc["unknown"]["keep"], 42);
+            let mut settings = TerminalSettings::default();
+            merge_file(&mut settings, serde_json::from_str(&raw).unwrap());
+            assert_eq!(settings.starfield, enabled);
+        }
     }
 
     #[test]
@@ -1385,11 +1468,28 @@ mod tests {
         let file: SettingsFile = serde_json::from_str(raw).expect("parse plugins");
         let mut settings = TerminalSettings::default();
         assert!(!settings.plugins.enabled);
+        assert!(settings.plugins.builtin_agents);
         merge_file(&mut settings, file);
         assert!(settings.plugins.enabled);
+        assert!(settings.plugins.builtin_agents);
         assert_eq!(
             settings.plugins.directories,
             vec![PathBuf::from("/opt/sleipnir-plugins")]
+        );
+    }
+
+    #[test]
+    fn builtin_agents_can_be_disabled_without_enabling_external_plugins() {
+        let file: SettingsFile =
+            serde_json::from_str(r#"{"plugins":{"builtin_agents":false}}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert!(!settings.plugins.enabled);
+        assert!(!settings.plugins.builtin_agents);
+        let old: PluginSettings = serde_json::from_str(r#"{"enabled":false}"#).unwrap();
+        assert!(
+            old.builtin_agents,
+            "old configs also get the built-in default"
         );
     }
 

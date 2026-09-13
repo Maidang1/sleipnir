@@ -6,7 +6,12 @@ JSON-lines client for the local agent-coordination socket
 
 Launch, prompt, interrupt, focus, and close are **accepted and queued**.
 This binary does not spawn an agent, drive a PTY, or consume adapter
-effects. Execution awaits an adapter wired into the Agents plugin/host.
+effects. Execution is delivered by the built-in Agents plugin, which starts with Sleipnir.
+
+The client is also built into the terminal as `sleipnir agentctl`; no separate
+installation is required. Inside a Sleipnir pane, `"$SLEIPNIR_BIN" agentctl list`
+works even if the application is not on PATH. All arguments below work with
+either entry point. The CLI does not start the GUI or the coordination server.
 
 There is **no** approve command.
 

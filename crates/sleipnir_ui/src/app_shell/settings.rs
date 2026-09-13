@@ -401,7 +401,7 @@ impl AppShell {
         )
     }
 
-    /// General section: ligatures, copy-on-select, and pointers for advanced config.
+    /// General section: terminal toggles and pointers for advanced config.
     fn render_settings_general_section(
         &self,
         tokens: &ChromeTokens,
@@ -475,6 +475,25 @@ impl AppShell {
                                 |_this, cx| {
                                     let next = !TerminalSettings::get_global(cx).copy_on_select;
                                     TerminalSettings::set_copy_on_select(next, cx);
+                                    cx.notify();
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pl(px(14.0))
+                                    .child(div().w_full().h(px(1.0)).bg(tokens.border)),
+                            )
+                            .child(self.settings_toggle_row(
+                                "starfield",
+                                "Starfield",
+                                "Stars gently brighten, dim, and drift behind terminal text. Pauses in inactive windows.",
+                                TerminalSettings::get_global(cx).starfield,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = !TerminalSettings::get_global(cx).starfield;
+                                    TerminalSettings::set_starfield(next, cx);
                                     cx.notify();
                                 },
                             )),

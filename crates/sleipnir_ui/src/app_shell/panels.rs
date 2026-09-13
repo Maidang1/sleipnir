@@ -158,7 +158,7 @@ impl AppShell {
         let border_w = pixel::PIXEL_BORDER;
         let snapshots = crate::plugin_runtime::snapshots(cx);
         let names = crate::plugin_runtime::catalog_names(cx);
-        let tiers = crate::plugin_runtime::grant_tiers();
+        let tiers = crate::plugin_runtime::grant_tiers(cx);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

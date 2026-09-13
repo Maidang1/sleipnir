@@ -3,7 +3,9 @@
 //! Chrome is trusted UI: tab chips, the command palette, a compact status
 //! slot. Plugins contribute through one `Render` to
 //! [`plugin_protocol::v2::RenderTarget::Status`], laid out by
-//! [`sleipnir_widget`] — never by a third layout implementation.
+//! [`sleipnir_widget`]. Chrome projects only the first content row; it does not
+//! mount the panel's attribution footer inside the titlebar. The host adds
+//! per-item provenance and native single-line controls at paint time.
 //!
 //! **Capability.** All three contributions require
 //! [`Capability::RenderStatus`]. They occupy the same trusted mount (the
@@ -21,7 +23,7 @@
 //! Pure state. No gpui, no window.
 
 use plugin_protocol::v2::{Tone, Widget};
-use sleipnir_widget::{Layout, layout};
+use sleipnir_widget::{LaidOutKind, layout};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -95,8 +97,25 @@ struct PluginChrome {
 #[derive(Clone, Debug)]
 pub struct StatusLayoutCache {
     pub cols: u16,
-    pub layout: Layout,
+    pub layout: StatusLayout,
     pub computes: u32,
+}
+
+/// Compact titlebar projection, deliberately not a Panel/Block `Layout`.
+/// Provenance travels with each item rather than in a clipped second row.
+#[derive(Clone, Debug)]
+pub struct StatusLayout {
+    pub items: Vec<StatusItem>,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct StatusItem {
+    pub plugin_id: String,
+    pub owner_instance_id: Uuid,
+    pub surface_id: Uuid,
+    pub kind: LaidOutKind,
 }
 
 /// Accounted truncations so a flooding plugin is visible in the Monitor.
@@ -240,13 +259,13 @@ impl ChromeRegistry {
         &self.cached_palette
     }
 
-    /// Status layout for `cols`, cached. Concatenates live plugins in id
-    /// order into one Row so a single [`layout`] call covers the strip.
+    /// First-row content from the shared layout, cached in plugin-id order.
+    /// Never paint panel attribution, wrapped text, or lower rows in chrome.
     ///
     /// Does **not** call [`layout`] on unchanged (`cols`, trees) frames —
     /// chrome paints every frame and a plugin must not be able to make that
     /// janky.
-    pub fn status_layout(&mut self, cols: u16) -> Option<&Layout> {
+    pub fn status_layout(&mut self, cols: u16) -> Option<&StatusLayout> {
         let cols = cols.clamp(1, MAX_STATUS_COLS);
         let cache_hit = self.status_cache.as_ref().is_some_and(|c| c.cols == cols);
         if cache_hit {
@@ -256,18 +275,41 @@ impl ChromeRegistry {
             self.status_cache = None;
             return None;
         }
-        let children: Vec<Widget> = self.plugins.values().map(|p| p.tree.clone()).collect();
-        let tree = Widget::Row { gap: 1, children };
-        let attr = if self.plugins.len() == 1 {
-            self.plugins
-                .keys()
-                .next()
-                .map(|key| key.plugin_id.as_str())
-                .unwrap_or("chrome")
-        } else {
-            "chrome"
+        let mut items = Vec::new();
+        let mut width = 0u32;
+        'plugins: for (key, plugin) in &self.plugins {
+            let shared = layout(&plugin.tree, cols, &key.plugin_id);
+            for node in shared.walk() {
+                if node.rect.row != 0 || matches!(node.kind, LaidOutKind::Col | LaidOutKind::Row) {
+                    continue;
+                }
+                let mut kind = node.kind.clone();
+                // First-row text only: explicit line breaks and wrapping must
+                // not increase chrome height. Panel layout stays unchanged.
+                match &mut kind {
+                    LaidOutKind::Text { lines, .. } => lines.truncate(1),
+                    LaidOutKind::Code { lines } => lines.truncate(1),
+                    _ => {}
+                }
+                let item_width = compact_width(&kind);
+                let next_width = width + u32::from(!items.is_empty()) + item_width;
+                if next_width > u32::from(cols) {
+                    break 'plugins;
+                }
+                width = next_width;
+                items.push(StatusItem {
+                    plugin_id: key.plugin_id.clone(),
+                    owner_instance_id: plugin.owner_instance_id,
+                    surface_id: plugin.surface_id,
+                    kind,
+                });
+            }
+        }
+        let layout = StatusLayout {
+            height: u32::from(!items.is_empty()),
+            width,
+            items,
         };
-        let layout = layout(&tree, cols, attr);
         let computes = self
             .status_cache
             .as_ref()
@@ -285,6 +327,21 @@ impl ChromeRegistry {
     pub fn status_computes(&self) -> u32 {
         self.status_cache.as_ref().map(|c| c.computes).unwrap_or(0)
     }
+}
+
+fn compact_width(kind: &LaidOutKind) -> u32 {
+    use sleipnir_widget::{CHIP_PAD, cell_cols};
+    match kind {
+        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => {
+            cell_cols(text) + 2 * CHIP_PAD
+        }
+        LaidOutKind::Text { lines, .. } => lines.first().map_or(0, |line| cell_cols(line)),
+        LaidOutKind::Code { lines } => lines.first().map_or(0, |line| cell_cols(&line.text)),
+        LaidOutKind::Spark { levels } => levels.len() as u32,
+        LaidOutKind::Bar { width, .. } => *width,
+        _ => 1,
+    }
+    .max(1)
 }
 
 /// Display title that cannot be mistaken for a built-in. The plugin id is
@@ -557,6 +614,83 @@ mod tests {
         let entries = reg.palette_entries();
         assert_eq!(entries.len(), MAX_PALETTE_TOTAL);
         assert!(reg.drops.palette_dropped > 0);
+    }
+
+    #[test]
+    fn agents_titlebar_status_is_one_compact_row() {
+        let mut reg = ChromeRegistry::new();
+        reg.apply_status(
+            "agents",
+            owner(1),
+            Widget::Row {
+                gap: 1,
+                children: vec![badge("●1", Tone::Accent), btn("Agents", "open_panel")],
+            },
+            true,
+            None,
+        );
+        let status = reg.status_layout(MAX_STATUS_COLS).unwrap();
+        assert_eq!(
+            status.height, 1,
+            "titlebar status must not contain a second attribution row"
+        );
+        assert!(
+            status.width <= 13,
+            "one short Agents chip must not reserve a 24-column panel"
+        );
+    }
+
+    #[test]
+    fn multiline_status_keeps_only_first_row_and_preserves_provenance() {
+        let mut reg = ChromeRegistry::new();
+        reg.apply_status(
+            "external",
+            owner(1),
+            Widget::Col {
+                gap: 0,
+                children: vec![text("first\nsecond"), btn("hidden", "hidden")],
+            },
+            true,
+            None,
+        );
+        let status = reg.status_layout(MAX_STATUS_COLS).unwrap();
+        assert_eq!(status.height, 1);
+        assert_eq!(status.width, 5);
+        assert_eq!(status.items.len(), 1);
+        assert_eq!(status.items[0].plugin_id, "external");
+        assert!(
+            matches!(&status.items[0].kind, LaidOutKind::Text { lines, .. } if lines == &["first"])
+        );
+        // Hidden lower-row actions are still reachable from the palette.
+        assert_eq!(reg.palette_entries()[0].action, "hidden");
+    }
+
+    #[test]
+    fn compact_status_buttons_keep_their_exact_owner_surface_and_argument() {
+        let mut reg = ChromeRegistry::new();
+        for n in 1..=2 {
+            reg.apply_status(
+                "demo",
+                owner(n),
+                Widget::Btn {
+                    s: format!("{n}"),
+                    action: "open".into(),
+                    arg: Some(format!("arg-{n}")),
+                },
+                true,
+                None,
+            );
+        }
+        let entries = reg.palette_entries().to_vec();
+        let status = reg.status_layout(MAX_STATUS_COLS).unwrap();
+        assert_eq!(status.height, 1);
+        assert_eq!(status.items.len(), 2);
+        for (item, entry) in status.items.iter().zip(entries) {
+            assert_eq!(item.owner_instance_id, entry.owner_instance_id);
+            assert_eq!(item.surface_id, entry.surface_id);
+            assert!(matches!(&item.kind, LaidOutKind::Btn { action, arg, .. }
+                if action == &entry.action && arg == &entry.arg));
+        }
     }
 
     #[test]

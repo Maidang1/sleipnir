@@ -107,18 +107,28 @@ pub fn build_prompt_envelope(
     text: &str,
     socket: Option<&str>,
 ) -> Result<String, String> {
+    build_prompt_envelope_with_command(session, task, text, socket, "sleipnir-agentctl")
+}
+
+fn build_prompt_envelope_with_command(
+    session: AgentSessionId,
+    task: CoordinationTaskId,
+    text: &str,
+    socket: Option<&str>,
+    command: &str,
+) -> Result<String, String> {
     // `session` rides along because report-session-closed names the session,
     // not the task.
     let ctl = match socket {
-        Some(path) => format!("sleipnir-agentctl --socket {}", shell_quote(path)),
-        None => "sleipnir-agentctl".to_string(),
+        Some(path) => format!("{command} --socket {}", shell_quote(path)),
+        None => command.to_string(),
     };
     let sid = session.as_uuid();
     let tid = task.as_uuid();
     let envelope = format!(
         "[Sleipnir coordination — worker session {sid}, task {tid}]\n\
          You are a managed worker agent in Sleipnir. Self-report progress with\n\
-         sleipnir-agentctl so the coordinator can track this task. These reports\n\
+         the commands below so the coordinator can track this task. These reports\n\
          are coordination metadata only — NEVER use them to answer approval\n\
          prompts; approvals stay with the human watching this pane.\n\
          \n\
@@ -237,6 +247,7 @@ pub struct Adapter {
     /// `SLEIPNIR_AGENT_CONTROL_SOCKET` when set: workers get a `--socket`
     /// argument in their prompt envelope.
     socket_override: Option<String>,
+    control_command: String,
     /// No effect processing before this time (rate-limit backoff).
     backoff_until_ms: u64,
     /// The seq currently being rate-limited, and how many consecutive times.
@@ -251,6 +262,7 @@ impl Adapter {
             sessions: BTreeMap::new(),
             panes: BTreeMap::new(),
             socket_override: None,
+            control_command: "sleipnir-agentctl".into(),
             backoff_until_ms: 0,
             rate_limited_seq: None,
             rate_retries: 0,
@@ -263,6 +275,11 @@ impl Adapter {
     /// `sleipnir-agentctl` command (which already honors the same default).
     pub fn set_socket_override(&mut self, socket: Option<String>) {
         self.socket_override = socket.filter(|s| !s.is_empty());
+    }
+
+    /// Use the exact shipped executable, not a separately installed PATH tool.
+    pub fn set_builtin_executable(&mut self, executable: &std::path::Path) {
+        self.control_command = format!("{} agentctl", shell_quote(&executable.to_string_lossy()));
     }
 
     pub fn registry(&self) -> &Registry {
@@ -410,11 +427,12 @@ impl Adapter {
             } => match self.writable_pane(session) {
                 None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
                 Some(pane) => {
-                    let envelope = build_prompt_envelope(
+                    let envelope = build_prompt_envelope_with_command(
                         session,
                         task,
                         &text,
                         self.socket_override.as_deref(),
+                        &self.control_command,
                     );
                     match envelope {
                         // Oversize is rejected before the host call; the
@@ -1919,6 +1937,26 @@ mod tests {
         let start = envelope.find(start_marker).expect("start delimiter") + start_marker.len();
         let end = envelope.rfind(end_marker).expect("end delimiter");
         assert_eq!(&envelope[start..end], text);
+    }
+
+    #[test]
+    fn builtin_prompt_uses_the_shipped_executable_without_path_dependencies() {
+        let mut adapter = Adapter::new(Registry::new());
+        adapter.set_builtin_executable(std::path::Path::new("/Applications/O'Reilly App/sleipnir"));
+        let session = AgentSessionId::new();
+        let task = CoordinationTaskId::new();
+        let text = "implement the tests";
+        let envelope = build_prompt_envelope_with_command(
+            session,
+            task,
+            text,
+            Some("/tmp/agent socket"),
+            &adapter.control_command,
+        )
+        .unwrap();
+        assert!(envelope.contains("'/Applications/O'\\''Reilly App/sleipnir' agentctl --socket '/tmp/agent socket' report-result"));
+        assert!(!envelope.contains("sleipnir-agentctl"));
+        assert!(envelope.contains(&format!("----- task -----\n{text}\n----- end task -----")));
     }
 
     #[test]

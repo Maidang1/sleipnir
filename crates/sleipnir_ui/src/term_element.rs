@@ -12,10 +12,10 @@ use itertools::Itertools;
 use row_geometry::{HitTarget, RowGeometry};
 use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use terminal::{
     Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
-    Rgb, Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
+    Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
     viewport_top_abs, y_for_display,
 };
 
@@ -30,6 +30,7 @@ pub struct TermElement {
     last_input_at: Instant,
     /// App-reported blink preference (M11).
     terminal_wants_blink: bool,
+    starfield_time: Duration,
     interactivity: gpui::Interactivity,
 }
 
@@ -51,9 +52,15 @@ impl TermElement {
             font_size_override,
             last_input_at,
             terminal_wants_blink,
+            starfield_time: Duration::ZERO,
             interactivity: Default::default(),
         }
         .track_focus(&focus)
+    }
+
+    pub(crate) fn with_starfield_time(mut self, elapsed: Duration) -> Self {
+        self.starfield_time = elapsed;
+        self
     }
 }
 
@@ -126,26 +133,44 @@ impl BatchedTextRun {
             origin.x + self.start.column as f32 * dimensions.cell_width,
             map.y(origin, self.start.line),
         );
-        if let Err(err) = window
-            .text_system()
-            .shape_line(
-                self.text.clone().into(),
-                self.font_size,
-                std::slice::from_ref(&self.style),
-                self.force_width(dimensions.cell_width),
-            )
-            .paint(
-                pos,
-                dimensions.line_height,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
-        {
+        let line = window.text_system().shape_line(
+            self.text.clone().into(),
+            self.font_size,
+            std::slice::from_ref(&self.style),
+            self.force_width(dimensions.cell_width),
+        );
+        let line = ensure_grid_text_width(
+            line,
+            dimensions.cell_width * (self.cell_count * self.column_span) as f32,
+        );
+        if let Err(err) = line.paint(
+            pos,
+            dimensions.line_height,
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        ) {
             log::error!("terminal text paint failed: {err:?}");
         }
     }
+}
+
+fn ensure_grid_text_width(mut line: gpui::ShapedLine, grid_width: Pixels) -> gpui::ShapedLine {
+    // GPUI's force_width moves glyphs but keeps the font's natural line width.
+    // CJK fallback glyphs can extend past that width after fitting two cells.
+    // paint_layer uses the width to order draws, so an understated bound lets
+    // overlapping background quads paint over the tail of the text batch.
+    if line.width() < grid_width {
+        // Detach the shared cached layout before changing its paint bounds.
+        // with_len preserves text, glyph positions and decorations.
+        let len = line.len();
+        line = line.with_len(len);
+        std::sync::Arc::get_mut(&mut *line)
+            .expect("with_len creates an unshared layout")
+            .width = grid_width;
+    }
+    line
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -264,6 +289,7 @@ pub struct LayoutState {
     dimensions: TerminalBounds,
     batches: Vec<BatchedTextRun>,
     backgrounds: Vec<BgRect>,
+    selection_backgrounds: Vec<BgRect>,
     search_rects: Vec<BgRect>,
     /// Underlines for the hovered hyperlink (M11).
     hover_underlines: Vec<BgRect>,
@@ -441,7 +467,7 @@ impl Element for TermElement {
                 };
 
                 let selection_range = content.selection.map(|sel| sel.point_range());
-                let (batches, backgrounds) = layout_grid(
+                let (batches, backgrounds, selection_backgrounds) = layout_grid(
                     &content.cells,
                     &text_style,
                     font_size,
@@ -460,9 +486,8 @@ impl Element for TermElement {
                     content.cursor.point.column,
                 );
 
-                // Selection is now rendered as reverse-video inside layout_grid
-                // (glyph recolored over a selection-colored cell), so there is
-                // no separate selection overlay layer.
+                // Selection uses reverse-video text from layout_grid. Its
+                // opaque backgrounds paint after the decorative starfield.
 
                 // Search highlights (M10): paint under selection, above cell bg.
                 // The match the find bar points at gets the cursor color so the
@@ -588,6 +613,7 @@ impl Element for TermElement {
                     dimensions,
                     batches,
                     backgrounds,
+                    selection_backgrounds,
                     search_rects,
                     hover_underlines,
                     background_color: {
@@ -648,6 +674,19 @@ impl Element for TermElement {
                     window.set_cursor_style(cursor_style, &layout.hitbox);
 
                     for bg in &layout.backgrounds {
+                        paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
+                    }
+                    if TerminalSettings::get_global(cx).starfield {
+                        let palette = TerminalPalette::get_global(cx);
+                        crate::starfield::paint(
+                            bounds,
+                            self.terminal.entity_id().as_u64(),
+                            palette.foreground,
+                            self.starfield_time,
+                            window,
+                        );
+                    }
+                    for bg in &layout.selection_backgrounds {
                         paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
                     }
                     for bg in &layout.search_rects {
@@ -764,14 +803,6 @@ impl TermElement {
                     return;
                 }
                 let is_focused = focus.is_focused(window);
-                if e.pressed_button.is_some() && is_focused {
-                    // bounds filled by terminal from last content during drag
-                    let bounds = terminal.read(cx).last_content().terminal_bounds.bounds;
-                    terminal.update(cx, |terminal, cx| {
-                        terminal.mouse_drag(e, bounds, cx);
-                        cx.notify();
-                    });
-                }
                 if e.pressed_button.is_none() && !is_focused {
                     return;
                 }
@@ -901,7 +932,7 @@ fn try_block_click(
     let line_h = f32::from(content.terminal_bounds.line_height);
     let pos = crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
     // Only consume the click when it actually lands on a button. The rest of
-    // a block's area must stay available for text selection and click-to-move.
+    // a block's area must stay available for text selection and Alt+click-to-move.
     let Some(surface) = view.read(cx).blocks().get(id).cloned() else {
         return false;
     };
@@ -1019,14 +1050,17 @@ fn point_in_range(point: terminal::Point, range: &TerminalRange) -> bool {
 }
 
 /// Append a single-cell background rect, coalescing with the previous rect when
-/// it is the same color on the same display line and directly adjacent.
+/// it is the same color on the same display line and adjacent or overlapping.
+/// Wide heads emit both columns; visiting their spacers must not duplicate a
+/// background or selection overlay and create overlapping paint layers.
 fn push_bg(backgrounds: &mut Vec<BgRect>, line: i32, col: i32, color: gpui::Hsla) {
     if let Some(last) = backgrounds.last_mut()
         && last.color == color
         && last.line == line
-        && last.end_col + 1 == col
+        && col >= last.start_col
+        && col <= last.end_col + 1
     {
-        last.end_col = col;
+        last.end_col = last.end_col.max(col);
     } else {
         backgrounds.push(BgRect {
             line,
@@ -1044,9 +1078,10 @@ fn layout_grid(
     palette: &TerminalPalette,
     selection: Option<TerminalRange>,
     skip_lines: &std::collections::HashSet<i32>,
-) -> (Vec<BatchedTextRun>, Vec<BgRect>) {
+) -> (Vec<BatchedTextRun>, Vec<BgRect>, Vec<BgRect>) {
     let mut batches: Vec<BatchedTextRun> = Vec::new();
     let mut backgrounds: Vec<BgRect> = Vec::new();
+    let mut selection_backgrounds: Vec<BgRect> = Vec::new();
     let mut current: Option<BatchedTextRun> = None;
 
     let linegroups = cells.iter().chunk_by(|c| c.point.line);
@@ -1071,19 +1106,25 @@ fn layout_grid(
                 std::mem::swap(&mut fg, &mut bg);
             }
 
-            // Selected cells get a solid highlight and a contrasting foreground,
-            // matching native terminals instead of tinting the original glyph.
+            // Selection is a translucent overlay; preserve the cell's original
+            // background and text colors underneath it.
             let selected = selection
                 .as_ref()
                 .is_some_and(|sel| point_in_range(indexed.point, sel));
 
             if selected {
                 let base_col = indexed.point.column as i32;
-                let color = selection_background(palette);
+                let color = selection_background();
                 for offset in 0..columns as i32 {
-                    push_bg(&mut backgrounds, display_line, base_col + offset, color);
+                    push_bg(
+                        &mut selection_backgrounds,
+                        display_line,
+                        base_col + offset,
+                        color,
+                    );
                 }
-            } else if !is_default_background_color(bg) {
+            }
+            if !is_default_background_color(bg) {
                 let color = convert_color(&bg, palette);
                 let base_col = indexed.point.column as i32;
                 for offset in 0..columns as i32 {
@@ -1095,15 +1136,8 @@ fn layout_grid(
                 continue;
             }
 
-            let mut color = convert_color(
-                &if selected {
-                    selection_foreground(palette)
-                } else {
-                    fg
-                },
-                palette,
-            );
-            if cell.is_dim() && !selected {
+            let mut color = convert_color(&fg, palette);
+            if cell.is_dim() {
                 color = color.opacity(0.55);
             }
             let text = compose_cell_text(cell.character(), cell.zerowidth());
@@ -1137,7 +1171,7 @@ fn layout_grid(
     if let Some(batch) = current {
         batches.push(batch);
     }
-    (batches, backgrounds)
+    (batches, backgrounds, selection_backgrounds)
 }
 
 /// Paint the terminal cell cursor. Caller must already filter out `Hidden`.
@@ -1421,54 +1455,9 @@ fn paint_laid_node(
     }
 }
 
-/// Use the active theme's ANSI red for an unmistakable selected-input fill.
-fn selection_background(palette: &TerminalPalette) -> gpui::Hsla {
-    palette.ansi[1]
-}
-
-/// Pick a foreground that stays legible over the configured selection fill.
-fn selection_foreground(palette: &TerminalPalette) -> Color {
-    let background = selection_rgb(selection_background(palette));
-    let foreground = selection_rgb(palette.foreground);
-    let terminal_background = selection_rgb(palette.background);
-    let foreground_contrast = rgb_contrast(foreground, background);
-    let terminal_background_contrast = rgb_contrast(terminal_background, background);
-    let selected = if terminal_background_contrast > foreground_contrast {
-        terminal_background
-    } else {
-        foreground
-    };
-    Color::Spec(Rgb {
-        r: selected.0,
-        g: selected.1,
-        b: selected.2,
-    })
-}
-
-fn selection_rgb(color: gpui::Hsla) -> (u8, u8, u8) {
-    let rgba: gpui::Rgba = color.into();
-    (
-        (rgba.r.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (rgba.g.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (rgba.b.clamp(0.0, 1.0) * 255.0).round() as u8,
-    )
-}
-
-fn rgb_contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
-    let luminance = |rgb: (u8, u8, u8)| {
-        let channel = |value: u8| {
-            let value = value as f32 / 255.0;
-            if value <= 0.04045 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(rgb.0) + 0.7152 * channel(rgb.1) + 0.0722 * channel(rgb.2)
-    };
-    let a = luminance(a);
-    let b = luminance(b);
-    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+/// A subtle white overlay, independent of the terminal's ANSI accent colors.
+fn selection_background() -> gpui::Hsla {
+    gpui::Hsla::white().opacity(0.10)
 }
 
 fn convert_color(color: &Color, palette: &TerminalPalette) -> gpui::Hsla {
@@ -1537,6 +1526,119 @@ struct TerminalInputHandler {
 mod tests {
     use super::*;
     use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
+
+    #[test]
+    fn wide_cell_backgrounds_do_not_overlap() {
+        let color = gpui::Hsla::white();
+        let mut backgrounds = Vec::new();
+        // A wide head emits both occupied columns; the grid iterator then
+        // visits the spacer again. Include the next head to reproduce the
+        // overlapping rectangles that used to cover the end of a CJK batch.
+        for column in [0, 1, 1, 2, 3, 3, 4, 5, 5] {
+            push_bg(&mut backgrounds, 0, column, color);
+        }
+        assert_eq!(backgrounds.len(), 1, "wide spacers must not split the fill");
+        assert_eq!(backgrounds[0].start_col, 0);
+        assert_eq!(backgrounds[0].end_col, 5);
+    }
+
+    #[test]
+    fn background_coalescing_preserves_gaps_colors_and_rows() {
+        let white = gpui::Hsla::white();
+        let black = gpui::Hsla::black();
+        let mut backgrounds = Vec::new();
+        for (line, col, color) in [(0, 0, white), (0, 2, white), (0, 3, black), (1, 4, black)] {
+            push_bg(&mut backgrounds, line, col, color);
+        }
+        assert_eq!(backgrounds.len(), 4);
+    }
+
+    #[test]
+    fn forced_cjk_text_layer_covers_glyphs_without_mutating_cached_layout() {
+        let mut line = gpui::ShapedLine::default();
+        *line = std::sync::Arc::new(gpui::LineLayout {
+            font_size: px(14.),
+            width: px(168.),
+            ascent: px(12.),
+            descent: px(3.),
+            len: 36,
+            runs: vec![gpui::ShapedRun {
+                font_id: gpui::FontId(0),
+                glyphs: vec![gpui::ShapedGlyph {
+                    id: gpui::GlyphId(1),
+                    position: point(px(185.43164), px(0.)),
+                    index: 33,
+                    is_emoji: false,
+                }],
+            }],
+        });
+        let cached = line.clone();
+        let fitted = ensure_grid_text_width(line, px(202.28906));
+        assert_eq!(fitted.width(), px(202.28906));
+        assert_eq!(
+            cached.width(),
+            px(168.),
+            "shared layout cache must stay intact"
+        );
+        assert_eq!(
+            fitted.runs[0].glyphs[0].position,
+            cached.runs[0].glyphs[0].position
+        );
+        assert_eq!(fitted.len(), cached.len());
+        assert_eq!(fitted.ascent, cached.ascent);
+        assert_eq!(fitted.descent, cached.descent);
+    }
+
+    #[test]
+    fn grid_text_width_keeps_larger_natural_bounds() {
+        let mut line = gpui::ShapedLine::default();
+        *line = std::sync::Arc::new(gpui::LineLayout {
+            width: px(30.),
+            ..Default::default()
+        });
+        let cached = line.clone();
+        let fitted = ensure_grid_text_width(line, px(20.));
+        assert_eq!(fitted.width(), px(30.));
+        assert!(std::sync::Arc::ptr_eq(&fitted, &cached));
+    }
+
+    #[test]
+    fn selection_backgrounds_are_separate_from_starfield_underlay() {
+        let palette = palette_for_theme(ThemeName::Dracula, Appearance::Dark);
+        let cells: Vec<_> = (0..3)
+            .map(|column| IndexedCell {
+                point: terminal::Point { line: 0, column },
+                cell: Cell::default(),
+            })
+            .collect();
+        let selection = TerminalRange::new(cells[0].point, cells[1].point);
+        let (_, backgrounds, selected) = layout_grid(
+            &cells,
+            &TextStyle::default(),
+            px(14.0),
+            &palette,
+            Some(selection),
+            &Default::default(),
+        );
+        assert!(
+            backgrounds.is_empty(),
+            "selection must not paint below stars"
+        );
+        assert_eq!(selected.len(), 1, "adjacent selected cells still coalesce");
+        assert_eq!(selected[0].start_col, 0);
+        assert_eq!(selected[0].end_col, 1);
+        assert_eq!(selected[0].color, selection_background());
+
+        let (_, _, selected) = layout_grid(
+            &cells,
+            &TextStyle::default(),
+            px(14.0),
+            &palette,
+            None,
+            &Default::default(),
+        );
+        assert!(selected.is_empty());
+    }
 
     /// Both mount points render one schema (ADR-0017), so a variant the Panel
     /// painter draws and the Block painter drops is an invisible failure:
@@ -1792,21 +1894,24 @@ mod tests {
     }
 
     #[test]
-    fn selection_background_uses_theme_ansi_red() {
-        let palette = palette_for_theme(ThemeName::Dracula, Appearance::Dark);
-
-        assert_eq!(selection_background(&palette), palette.ansi[1]);
-        assert_ne!(selection_background(&palette), palette.selection);
+    fn selection_background_is_translucent_white() {
+        let color: gpui::Rgba = selection_background().into();
+        assert_eq!((color.r, color.g, color.b), (1.0, 1.0, 1.0));
+        assert!((color.a - 0.10).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn selection_foreground_changes_when_the_original_glyph_is_low_contrast() {
-        let mut palette = palette_for_theme(ThemeName::Dracula, Appearance::Dark);
-        palette.foreground = palette.selection;
-        let selected = selection_foreground(&palette);
-
-        assert_eq!(convert_color(&selected, &palette), palette.background);
-        assert_ne!(convert_color(&selected, &palette), palette.selection);
+    fn selection_overlay_keeps_the_underlying_background_visible() {
+        let background = gpui::Hsla::from(gpui::rgb(0x282a36));
+        let base: gpui::Rgba = background.into();
+        let blended: gpui::Rgba = background.blend(selection_background()).into();
+        for (base, blended) in [
+            (base.r, blended.r),
+            (base.g, blended.g),
+            (base.b, blended.b),
+        ] {
+            assert!((blended - (base * 0.9 + 0.1)).abs() < 0.001);
+        }
     }
 }
 

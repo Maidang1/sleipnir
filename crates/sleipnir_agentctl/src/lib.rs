@@ -16,6 +16,9 @@ use agent_coordination::{
 use serde::Serialize;
 use uuid::Uuid;
 
+mod cli;
+pub use cli::run_cli;
+
 pub const AWAIT_ADAPTER_NOTE: &str = "note: accepted and queued; execution awaits an adapter (this CLI does not launch or prompt an agent)";
 
 /// I/O, protocol, or correlation-id mismatch.
@@ -247,6 +250,7 @@ impl std::error::Error for ParseError {}
 
 pub fn usage() -> &'static str {
     "usage: sleipnir-agentctl [--socket PATH] <command> [args]\n\
+     built-in: sleipnir agentctl [--socket PATH] <command> [args]\n\
      commands:\n\
        list\n\
        launch <kind> <cwd> [--name NAME] [-- ARG...]\n\

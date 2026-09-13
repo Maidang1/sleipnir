@@ -6,8 +6,8 @@
 //! `panel_scene_paint.rs`; this module is the gpui element/painter side.
 
 use gpui::{
-    App, Bounds, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, SharedString,
+    App, AppContext as _, Bounds, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 
@@ -212,32 +212,146 @@ impl AppShell {
     pub(super) fn render_plugin_chrome_status(
         &mut self,
         tokens: &ChromeTokens,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         use crate::plugin_chrome::MAX_STATUS_COLS;
+        use sleipnir_widget::LaidOutKind;
         if self.plugin_chrome.is_empty() {
             return div().into_any_element();
         }
-        let (cell_w, line_h, font_family, font_size) =
-            panel_cell_metrics(window, cx, self.font_size_override);
-        let Some(laid) = self.plugin_chrome.status_layout(MAX_STATUS_COLS) else {
+        let builtins: std::collections::BTreeSet<_> =
+            crate::plugin_runtime::PluginRuntime::plugins(cx)
+                .into_iter()
+                .filter(|plugin| plugin.source == plugin_host::PluginSource::BuiltInAgents)
+                .map(|plugin| plugin.manifest.id)
+                .collect();
+        let Some(status) = self.plugin_chrome.status_layout(MAX_STATUS_COLS) else {
             return div().into_any_element();
         };
-        let width = px((laid.width as f32 * cell_w).max(1.0));
-        // Chrome is one band high. Clip rather than grow the titlebar.
-        let height = px((laid.height as f32 * line_h).clamp(1.0, 28.0));
+        if status.height == 0 || status.width == 0 {
+            return div().into_any_element();
+        }
+        // Native chrome metrics, independent of terminal font/zoom. Content
+        // hugs its width; never paint the panel's two-row attribution layout.
         let mut body = div()
             .id("plugin-chrome-status")
-            .flex_shrink_0()
-            .w(width)
-            .h(height)
-            .relative()
+            .h(px(24.0))
+            .max_w(px(MAX_STATUS_COLS as f32 * 8.0))
+            .min_w_0()
+            .flex_shrink(1.0)
+            .mr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
             .overflow_hidden()
-            .font_family(font_family)
-            .text_size(font_size);
-        body = paint_laid_out(body, laid, tokens, cell_w, line_h);
+            .text_size(px(12.0))
+            .line_height(px(16.0));
+        for (index, item) in status.items.iter().enumerate() {
+            // The built-in Agents plugin's status chip is replaced by the
+            // bottom-right agent HUD, so the titlebar shows a single, minimal
+            // entry point rather than two. External contributions still render.
+            if builtins.contains(&item.plugin_id) && item.plugin_id == "agents" {
+                continue;
+            }
+            let (label, tone, action) = match &item.kind {
+                LaidOutKind::Btn { text, action, arg } => {
+                    (text.clone(), Tone::Fg, Some((action.clone(), arg.clone())))
+                }
+                LaidOutKind::Badge { text, tone } => (text.clone(), *tone, None),
+                LaidOutKind::Text { lines, tone, .. } => {
+                    (lines.first().cloned().unwrap_or_default(), *tone, None)
+                }
+                LaidOutKind::Code { lines } => (
+                    lines
+                        .first()
+                        .map(|line| line.text.clone())
+                        .unwrap_or_default(),
+                    Tone::Dim,
+                    None,
+                ),
+                LaidOutKind::Spark { levels } => {
+                    (sleipnir_widget::spark_glyphs(levels), Tone::Accent, None)
+                }
+                LaidOutKind::Bar { filled, width } => (
+                    format!("{}%", filled * 100 / width.max(&1)),
+                    Tone::Dim,
+                    None,
+                ),
+                LaidOutKind::Sep => ("|".into(), Tone::Dim, None),
+                LaidOutKind::Truncated => ("…".into(), Tone::Dim, None),
+                LaidOutKind::Unknown => ("[?]".into(), Tone::Dim, None),
+                _ => continue,
+            };
+            let builtin = builtins.contains(&item.plugin_id);
+            // External contributions remain visibly attributed. Built-in
+            // identity comes from host provenance, never a plugin-supplied id.
+            let label = if builtin {
+                label
+            } else {
+                format!("{}: {label}", item.plugin_id)
+            };
+            let tooltip: SharedString = format!(
+                "{} · {}",
+                item.plugin_id,
+                if builtin { "built-in" } else { "plugin" }
+            )
+            .into();
+            let mut chip = div()
+                .id(("plugin-status-item", index))
+                .h(px(24.0))
+                .flex_shrink_0()
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .text_color(slot_color(tokens, tone))
+                .whitespace_nowrap()
+                .child(label)
+                .tooltip(move |_window, cx| {
+                    let text = tooltip.clone();
+                    cx.new(move |_| StatusProvenance { text }).into()
+                });
+            if let Some((action, arg)) = action {
+                let owner = item.owner_instance_id;
+                let surface = item.surface_id;
+                chip = chip
+                    .cursor_pointer()
+                    .occlude()
+                    .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
+                        crate::plugin_runtime::push_action(
+                            owner,
+                            surface,
+                            action.clone(),
+                            arg.clone(),
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }));
+            }
+            body = body.child(chip);
+        }
         body.into_any_element()
+    }
+}
+
+/// Host-owned provenance stays available without a second titlebar row.
+struct StatusProvenance {
+    text: SharedString,
+}
+
+impl Render for StatusProvenance {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = sleipnir_settings::TerminalPalette::get_global(cx);
+        let tokens = ChromeTokens::from_palette(&palette, window.is_window_active());
+        div()
+            .px_2()
+            .py_1()
+            .bg(tokens.surface)
+            .text_color(tokens.fg_muted)
+            .text_size(px(12.0))
+            .child(self.text.clone())
     }
 }
 
