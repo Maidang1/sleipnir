@@ -3096,7 +3096,7 @@ mod tests {
             }
         }
         let range = super::Range::new(super::Point::new(0, 0), super::Point::new(0, 4));
-        terminal.matches.push(range.clone());
+        terminal.matches.push(range);
         terminal.activate_match(0);
 
         visual.update(|window, cx| {

@@ -274,7 +274,7 @@ impl AppShell {
 /// unique within a window, so packing them keeps rows distinct across
 /// re-renders.
 fn agent_panel_row_id(tab_index: usize, pane_id: PaneId) -> u64 {
-    ((tab_index as u64) << 32) | (pane_id as u64 & 0xffff_ffff)
+    ((tab_index as u64) << 32) | (pane_id & 0xffff_ffff)
 }
 
 #[cfg(test)]

@@ -570,7 +570,7 @@ impl AppShell {
 
         for (i, target) in targets.iter().enumerate() {
             let status = agent_hooks::check_hook_status(target);
-            let (status_label, can_install) = match status {
+            let (_status_label, can_install) = match status {
                 agent_hooks::HookStatus::Installed => ("[ok]", false),
                 agent_hooks::HookStatus::Outdated => ("[update]", true),
                 agent_hooks::HookStatus::NotInstalled => ("[--]", true),
