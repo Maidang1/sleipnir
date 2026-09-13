@@ -2346,8 +2346,7 @@ impl Render for AppShell {
                             sleipnir_settings::TerminalSettings::get_global(cx)
                                 .plugins
                                 .agent_panel;
-                        let has_agents = agent_panel_enabled
-                            && !self.agent_hud_rows(cx).is_empty();
+                        let has_agents = agent_panel_enabled && !self.agent_hud_rows(cx).is_empty();
                         let content = self.render_content(&tokens, window, cx);
                         if has_agents {
                             div()
@@ -2355,9 +2354,7 @@ impl Render for AppShell {
                                 .min_h_0()
                                 .flex()
                                 .flex_row()
-                                .child(
-                                    div().flex_1().min_w_0().size_full().child(content),
-                                )
+                                .child(div().flex_1().min_w_0().size_full().child(content))
                                 .child(self.render_agent_panel(&tokens, cx))
                                 .into_any_element()
                         } else {

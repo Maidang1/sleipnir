@@ -209,9 +209,7 @@ fn register_claude_settings_hook(target: &AgentHookTarget) -> Result<(), String>
         .ok_or("settings root is not an object")?
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}));
-    let hooks_obj = hooks
-        .as_object_mut()
-        .ok_or("hooks is not an object")?;
+    let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
 
     for event in &[
         "SessionStart",
@@ -232,9 +230,11 @@ fn register_claude_settings_hook(target: &AgentHookTarget) -> Result<(), String>
                 .get("hooks")
                 .and_then(|h| h.as_array())
                 .map(|hooks| {
-                    hooks
-                        .iter()
-                        .any(|h| h.get("command").and_then(|c| c.as_str()).map_or(false, |c| c.contains("sleipnir-agent-state")))
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .map_or(false, |c| c.contains("sleipnir-agent-state"))
+                    })
                 })
                 .unwrap_or(false)
         });

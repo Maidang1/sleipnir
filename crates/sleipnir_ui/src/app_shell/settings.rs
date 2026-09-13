@@ -612,14 +612,9 @@ impl AppShell {
                             .text_color(tokens.fg)
                             .child(SharedString::from(label)),
                     )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(tokens.fg_muted)
-                            .child(SharedString::from(format!(
-                                "Hook for {label} agent lifecycle events"
-                            ))),
-                    ),
+                    .child(div().text_size(px(11.0)).text_color(tokens.fg_muted).child(
+                        SharedString::from(format!("Hook for {label} agent lifecycle events")),
+                    )),
             );
 
             if can_install {
@@ -631,7 +626,9 @@ impl AppShell {
                         if let Some(t) = targets.iter().find(|t| t.id == target_id) {
                             match agent_hooks::install_hooks(t) {
                                 Ok(()) => log::info!("installed hook for {}", t.label),
-                                Err(err) => log::warn!("failed to install hook for {}: {err}", t.label),
+                                Err(err) => {
+                                    log::warn!("failed to install hook for {}: {err}", t.label)
+                                }
                             }
                         }
                         cx.notify();
@@ -670,7 +667,10 @@ impl AppShell {
                             if let Some(t) = targets.iter().find(|t| t.id == target_id) {
                                 match agent_hooks::uninstall_hook(t) {
                                     Ok(()) => log::info!("uninstalled hook for {}", t.label),
-                                    Err(err) => log::warn!("failed to uninstall hook for {}: {err}", t.label),
+                                    Err(err) => log::warn!(
+                                        "failed to uninstall hook for {}: {err}",
+                                        t.label
+                                    ),
                                 }
                             }
                             cx.notify();

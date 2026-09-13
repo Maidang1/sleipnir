@@ -71,11 +71,11 @@ impl AppShell {
                 let status = match (ledger, pane_key) {
                     (Some(lg), Some(pk)) => {
                         let runs: Vec<_> = lg.snapshot();
-                        let pane_runs: Vec<_> = runs
+                        let pane_runs: Vec<_> = runs.iter().filter(|r| r.pane == pk).collect();
+                        if pane_runs
                             .iter()
-                            .filter(|r| r.pane == pk)
-                            .collect();
-                        if pane_runs.iter().any(|r| r.state == run_ledger::RunState::Running) {
+                            .any(|r| r.state == run_ledger::RunState::Running)
+                        {
                             AgentRunStatus::Running
                         } else if pane_runs.iter().any(|r| r.state.is_finished()) {
                             AgentRunStatus::Exited
