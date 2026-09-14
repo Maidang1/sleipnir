@@ -29,6 +29,32 @@ pub(crate) enum AgentRunStatus {
     Unknown,
 }
 
+/// The single presence rule the host owns: given every run the ledger knows for
+/// one pane, the most a conservative observer may claim about the agent in it.
+///
+/// A pane with any live run is `Running`; otherwise a pane the ledger has seen
+/// finish at least one run has `Exited`; a pane the ledger has never recorded is
+/// `Unknown`. Keeping this in one pure function means the HUD — and any future
+/// presence surface — read one rule instead of each re-interpreting the ledger,
+/// which is where the ownership drift started.
+pub(crate) fn derive_pane_status(
+    runs: &[run_ledger::Run],
+    pane: run_ledger::PaneKey,
+) -> AgentRunStatus {
+    let mut saw_finished = false;
+    for run in runs.iter().filter(|r| r.pane == pane) {
+        if run.state == run_ledger::RunState::Running {
+            return AgentRunStatus::Running;
+        }
+        saw_finished = true;
+    }
+    if saw_finished {
+        AgentRunStatus::Exited
+    } else {
+        AgentRunStatus::Unknown
+    }
+}
+
 /// One running agent, resolved to the tab/pane that hosts it. Pure data so the
 /// row computation is unit-testable without a window.
 #[derive(Clone, Debug)]
@@ -69,20 +95,7 @@ impl AppShell {
                 };
                 let pane_key = tab.tree.pane_key_for_id(pane_id);
                 let status = match (ledger, pane_key) {
-                    (Some(lg), Some(pk)) => {
-                        let runs: Vec<_> = lg.snapshot();
-                        let pane_runs: Vec<_> = runs.iter().filter(|r| r.pane == pk).collect();
-                        if pane_runs
-                            .iter()
-                            .any(|r| r.state == run_ledger::RunState::Running)
-                        {
-                            AgentRunStatus::Running
-                        } else if pane_runs.iter().any(|r| r.state.is_finished()) {
-                            AgentRunStatus::Exited
-                        } else {
-                            AgentRunStatus::Unknown
-                        }
-                    }
+                    (Some(lg), Some(pk)) => derive_pane_status(&lg.snapshot(), pk),
                     _ => AgentRunStatus::Unknown,
                 };
                 rows.push(AgentHudRow {
@@ -281,10 +294,66 @@ fn agent_panel_row_id(tab_index: usize, pane_id: PaneId) -> u64 {
 mod tests {
     use super::*;
 
+    fn pane(n: u128) -> run_ledger::PaneKey {
+        run_ledger::PaneKey::from_u128(n)
+    }
+
     #[test]
     fn row_ids_are_unique_per_tab_and_pane() {
         assert_ne!(agent_panel_row_id(0, 1), agent_panel_row_id(1, 1));
         assert_ne!(agent_panel_row_id(0, 1), agent_panel_row_id(0, 2));
         assert_eq!(agent_panel_row_id(2, 5), agent_panel_row_id(2, 5));
+    }
+
+    #[test]
+    fn unknown_when_ledger_has_no_run_for_the_pane() {
+        let ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        assert_eq!(
+            derive_pane_status(&ledger.snapshot(), pane(1)),
+            AgentRunStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn running_while_a_run_is_live() {
+        let mut ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        ledger.apply(run_ledger::RunEvent::started(pane(1), "claude", None, 10));
+        assert_eq!(
+            derive_pane_status(&ledger.snapshot(), pane(1)),
+            AgentRunStatus::Running
+        );
+    }
+
+    #[test]
+    fn exited_once_every_run_for_the_pane_finished() {
+        let mut ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        ledger.apply(run_ledger::RunEvent::started(pane(1), "claude", None, 10));
+        ledger.apply(run_ledger::RunEvent::finished(pane(1), Some(0), 20));
+        assert_eq!(
+            derive_pane_status(&ledger.snapshot(), pane(1)),
+            AgentRunStatus::Exited
+        );
+    }
+
+    #[test]
+    fn a_live_run_wins_over_a_finished_one_in_the_same_pane() {
+        let mut ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        ledger.apply(run_ledger::RunEvent::started(pane(1), "claude", None, 10));
+        ledger.apply(run_ledger::RunEvent::finished(pane(1), Some(0), 20));
+        ledger.apply(run_ledger::RunEvent::started(pane(1), "claude", None, 30));
+        assert_eq!(
+            derive_pane_status(&ledger.snapshot(), pane(1)),
+            AgentRunStatus::Running
+        );
+    }
+
+    #[test]
+    fn another_panes_runs_do_not_leak() {
+        let mut ledger = run_ledger::Ledger::new(run_ledger::LaunchId::nil());
+        ledger.apply(run_ledger::RunEvent::started(pane(1), "claude", None, 10));
+        assert_eq!(
+            derive_pane_status(&ledger.snapshot(), pane(2)),
+            AgentRunStatus::Unknown
+        );
     }
 }

@@ -42,12 +42,70 @@ pub trait ProcReader {
     fn listeners(&self) -> Vec<(u32, String)>;
 }
 
-/// Build the snapshot. `root_pid` is the pane's shell (not the foreground job).
+/// One machine-level capture of the process table and listen table, read once
+/// and then reused to derive facts for every pane.
+///
+/// Collecting these tables is the expensive part (`sysinfo` refreshes every
+/// process, `lsof` scans every socket). A terminal with N panes needs the *same*
+/// two tables N times, so capturing once per poll and deriving each pane's tree
+/// and ports from the shared snapshot replaces N full system scans with one.
+#[derive(Clone, Debug)]
+pub struct MachineSnapshot {
+    procs: Vec<RawProc>,
+    listeners: Vec<(u32, String)>,
+}
+
+impl MachineSnapshot {
+    /// Read the live process and listen tables once (macOS/Linux/Windows as in
+    /// [`LiveProcReader`]).
+    pub fn capture() -> Self {
+        Self::from_reader(&LiveProcReader)
+    }
+
+    /// Capture both tables from an injected reader (tests, and the seam
+    /// [`build_pane_facts`] uses so existing callers keep their behavior).
+    pub fn from_reader(reader: &impl ProcReader) -> Self {
+        MachineSnapshot {
+            procs: reader.processes(),
+            listeners: reader.listeners(),
+        }
+    }
+
+    /// Derive read-only facts for one pane rooted at its shell pid, reusing the
+    /// shared tables without rescanning the system. `root_pid` is the pane's
+    /// shell (not the foreground job).
+    pub fn derive(
+        &self,
+        cwd: Option<PathBuf>,
+        foreground: Option<String>,
+        root_pid: Option<u32>,
+    ) -> PaneFacts {
+        derive_pane_facts(cwd, foreground, root_pid, &self.procs, &self.listeners)
+    }
+}
+
+/// Build the snapshot for a single pane. `root_pid` is the pane's shell (not the
+/// foreground job). For more than one pane, capture a [`MachineSnapshot`] once
+/// and call [`MachineSnapshot::derive`] per pane instead of paying for a fresh
+/// system scan each time.
 pub fn build_pane_facts(
     cwd: Option<PathBuf>,
     foreground: Option<String>,
     root_pid: Option<u32>,
     reader: &impl ProcReader,
+) -> PaneFacts {
+    MachineSnapshot::from_reader(reader).derive(cwd, foreground, root_pid)
+}
+
+/// Pure derivation of one pane's facts from already-captured tables. This is the
+/// per-pane work that runs on the shared [`MachineSnapshot`]; it never touches
+/// the system, so it is cheap to run for every pane.
+fn derive_pane_facts(
+    cwd: Option<PathBuf>,
+    foreground: Option<String>,
+    root_pid: Option<u32>,
+    procs: &[RawProc],
+    listeners: &[(u32, String)],
 ) -> PaneFacts {
     let cwd = cwd.filter(|p| !p.as_os_str().is_empty());
     let foreground = foreground.and_then(|s| {
@@ -68,10 +126,9 @@ pub fn build_pane_facts(
         };
     };
 
-    let procs = reader.processes();
     let by_pid: HashMap<u32, &RawProc> = procs.iter().map(|p| (p.pid, p)).collect();
     let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
-    for p in &procs {
+    for p in procs {
         if let Some(parent) = p.parent {
             kids.entry(parent).or_default().push(p.pid);
         }
@@ -86,11 +143,13 @@ pub fn build_pane_facts(
     walk(root, 0, &by_pid, &kids, &mut seen, &mut tree);
 
     let in_tree: HashSet<u32> = tree.iter().map(|r| r.pid).collect();
-    let mut ports: Vec<ListenPort> = reader
-        .listeners()
-        .into_iter()
+    let mut ports: Vec<ListenPort> = listeners
+        .iter()
         .filter(|(pid, _)| in_tree.contains(pid))
-        .map(|(pid, addr)| ListenPort { pid, addr })
+        .map(|(pid, addr)| ListenPort {
+            pid: *pid,
+            addr: addr.clone(),
+        })
         .collect();
     ports.sort_by(|a, b| a.addr.cmp(&b.addr).then(a.pid.cmp(&b.pid)));
     ports.dedup();
@@ -479,6 +538,40 @@ mod tests {
         assert_eq!(facts.foreground.as_deref(), Some("zsh"));
         assert!(facts.tree.is_empty());
         assert!(facts.ports.is_empty());
+    }
+
+    #[test]
+    fn one_snapshot_derives_independent_facts_per_pane() {
+        // Two shells under init, each with its own listening child. A single
+        // capture must derive each pane's tree and ports without leaking the
+        // other pane's descendants — the property that lets one scan replace N.
+        let reader = Fake {
+            procs: vec![
+                proc(1, None, "init"),
+                proc(10, Some(1), "zsh"),
+                proc(11, Some(10), "node"),
+                proc(20, Some(1), "zsh"),
+                proc(21, Some(20), "python"),
+            ],
+            listens: vec![(11, "127.0.0.1:3000".into()), (21, "127.0.0.1:8000".into())],
+        };
+        let snapshot = MachineSnapshot::from_reader(&reader);
+
+        let first = snapshot.derive(None, None, Some(10));
+        assert_eq!(
+            first.tree.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(first.ports.len(), 1);
+        assert_eq!(first.ports[0].addr, "127.0.0.1:3000");
+
+        let second = snapshot.derive(None, None, Some(20));
+        assert_eq!(
+            second.tree.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            vec![20, 21]
+        );
+        assert_eq!(second.ports.len(), 1);
+        assert_eq!(second.ports[0].addr, "127.0.0.1:8000");
     }
 
     #[test]

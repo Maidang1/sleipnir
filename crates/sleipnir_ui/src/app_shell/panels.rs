@@ -537,8 +537,8 @@ impl AppShell {
         use crate::chrome::history_search::{filter_history, load_history_hits};
         let border_w = pixel::PIXEL_BORDER;
         let hits = load_history_hits();
-        let shown = filter_history(&hits, &self.history_query, 20);
-        let selected = self.history_selected.min(shown.len().saturating_sub(1));
+        let shown = filter_history(&hits, &self.history.query, 20);
+        let selected = self.history.selected.min(shown.len().saturating_sub(1));
         let mut list = div().flex().flex_col().gap_1().px_3().pb_3();
         for (i, hit) in shown.iter().enumerate() {
             let is_sel = i == selected;
@@ -555,7 +555,7 @@ impl AppShell {
                     .hover(|el| el.bg(tokens.hover))
                     .child(hit.command.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.history_selected = i;
+                        this.history.selected = i;
                         this.run_history_selection(window, cx);
                     })),
             );
@@ -581,7 +581,7 @@ impl AppShell {
                         .py_2()
                         .text_xs()
                         .text_color(tokens.fg_muted)
-                        .child(format!("History · {}|", self.history_query))
+                        .child(format!("History · {}|", self.history.query))
                         .child(self.query_input_canvas(
                             crate::app_shell::query::QuerySurface::History,
                             cx,

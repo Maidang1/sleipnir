@@ -313,6 +313,58 @@ struct PanelDrag {
 }
 
 /// Window root: unified chrome band + active terminal.
+struct SettingsState {
+    section: SettingsSection,
+    theme_query: String,
+    theme_selected: usize,
+    theme_scroll: ScrollHandle,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self {
+            section: SettingsSection::Theme,
+            theme_query: String::new(),
+            theme_selected: 0,
+            theme_scroll: ScrollHandle::new(),
+        }
+    }
+}
+
+struct PaletteState {
+    query: String,
+    selected: usize,
+    marked: Option<std::ops::Range<usize>>,
+    scroll: ScrollHandle,
+    recents: Vec<CommandId>,
+    items: Vec<CommandItem>,
+    plugin_commands: Vec<plugin_host::LoadedPluginCommand>,
+}
+
+impl PaletteState {
+    fn new(
+        items: Vec<CommandItem>,
+        plugin_commands: Vec<plugin_host::LoadedPluginCommand>,
+    ) -> Self {
+        Self {
+            query: String::new(),
+            selected: 0,
+            marked: None,
+            scroll: ScrollHandle::new(),
+            recents: Vec::new(),
+            items,
+            plugin_commands,
+        }
+    }
+}
+
+#[derive(Default)]
+struct HistoryState {
+    query: String,
+    selected: usize,
+    marked: Option<std::ops::Range<usize>>,
+}
+
 pub struct AppShell {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
@@ -351,38 +403,10 @@ pub struct AppShell {
     /// modes. Replaces the old one-bool-per-overlay matrix, so illegal
     /// combinations are unrepresentable.
     pub(crate) mode: UiMode,
-    /// Active section tab inside the settings panel.
-    settings_section: SettingsSection,
-    /// Type-to-filter query for the theme picker (empty = all).
-    theme_query: String,
-    /// Keyboard-selected row in the settings theme picker.
-    settings_theme_selected: usize,
-    /// Scroll handle for the theme picker list (arrow keys scroll-follow).
-    settings_theme_scroll: ScrollHandle,
-    palette_query: String,
-    palette_selected: usize,
-    /// IME composition range (UTF-16) inside `palette_query`, if composing.
-    palette_marked: Option<std::ops::Range<usize>>,
-    palette_scroll: ScrollHandle,
-    palette_recents: Vec<CommandId>,
-    palette_items: Vec<CommandItem>,
-    plugin_commands: Vec<plugin_host::LoadedPluginCommand>,
-    find_query: String,
-    /// IME composition range (UTF-16) inside `find_query`, if composing.
-    find_marked: Option<std::ops::Range<usize>>,
-    /// Monotonic generation used to discard stale debounce timers.
-    find_debounce_gen: u64,
-    /// Monotonic request id used to discard stale asynchronous search results.
-    find_gen: u64,
-    find_match_count: usize,
-    find_active_index: usize,
-    /// Terminal pane the running/last find targeted, so a workspace commit
-    /// can re-run the search when the active pane changes.
-    find_searched_term: Option<gpui::EntityId>,
-    /// Regex mode: treat the query as a raw regex instead of a literal (⌥⌘R).
-    find_regex: bool,
-    /// Match case (⌥⌘C). Off = case-insensitive; on = case-sensitive.
-    find_match_case: bool,
+    settings: SettingsState,
+    palette: PaletteState,
+    /// Find-in-scrollback state domain (query, IME marks, match cursor, modes).
+    find: find::FindState,
     /// Window-scoped font size override (M12 zoom); not written to settings.
     pub(crate) font_size_override: Option<Pixels>,
     /// Close-confirm dialog pending (M12).
@@ -397,10 +421,7 @@ pub struct AppShell {
     /// Focused-pane facts: async collection state machine. Carries its own
     /// snapshot timestamp and in-flight flag.
     facts: PaneFactsState,
-    history_query: String,
-    history_selected: usize,
-    /// IME composition range (UTF-16) inside `history_query`, if composing.
-    history_marked: Option<std::ops::Range<usize>>,
+    history: HistoryState,
     /// Git diff inspector (ADR-0012). Not a Pane.
     pub(crate) diff_view: Option<crate::diff::DiffView>,
     diff_gen: u64,
@@ -578,34 +599,15 @@ impl AppShell {
                 },
                 ..UiMode::default()
             },
-            settings_section: SettingsSection::Theme,
-            theme_query: String::new(),
-            settings_theme_selected: 0,
-            settings_theme_scroll: ScrollHandle::new(),
-            palette_query: String::new(),
-            palette_selected: 0,
-            palette_marked: None,
-            palette_scroll: ScrollHandle::new(),
-            palette_recents: Vec::new(),
-            palette_items,
-            plugin_commands,
-            find_query: String::new(),
-            find_marked: None,
-            find_debounce_gen: 0,
-            find_gen: 0,
-            find_match_count: 0,
-            find_active_index: 0,
-            find_searched_term: None,
-            find_regex: false,
-            find_match_case: false,
+            settings: SettingsState::default(),
+            palette: PaletteState::new(palette_items, plugin_commands),
+            find: find::FindState::default(),
             font_size_override: None,
             close_confirm: None,
             plugin_consent: None,
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
-            history_query: String::new(),
-            history_selected: 0,
-            history_marked: None,
+            history: HistoryState::default(),
             diff_view: None,
             diff_gen: 0,
             facts: PaneFactsState::default(),
@@ -972,10 +974,14 @@ impl AppShell {
     }
 
     fn rebuild_palette_items(&mut self) {
-        self.palette_items = palette_commands();
-        self.palette_items
-            .extend(crate::command_palette::plugin_items(&self.plugin_commands));
-        self.palette_items
+        self.palette.items = palette_commands();
+        self.palette
+            .items
+            .extend(crate::command_palette::plugin_items(
+                &self.palette.plugin_commands,
+            ));
+        self.palette
+            .items
             .extend(crate::command_palette::contribution_items(
                 self.plugin_chrome.palette_entries(),
             ));
@@ -1541,9 +1547,9 @@ impl AppShell {
     /// Toggle the history overlay, resetting the query when it closes.
     fn toggle_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.mode.toggle(OverlayKind::History) {
-            self.history_query.clear();
-            self.history_marked = None;
-            self.history_selected = 0;
+            self.history.query.clear();
+            self.history.marked = None;
+            self.history.selected = 0;
             self.focus_active(window, cx);
         } else {
             // Focus the shell so the history query box's IME input handler
@@ -1556,8 +1562,8 @@ impl AppShell {
     /// Send the selected history hit to the active pane and close the overlay.
     pub(crate) fn run_history_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let hits = crate::chrome::history_search::load_history_hits();
-        let shown = crate::chrome::history_search::filter_history(&hits, &self.history_query, 20);
-        let Some(hit) = shown.get(self.history_selected.min(shown.len().saturating_sub(1))) else {
+        let shown = crate::chrome::history_search::filter_history(&hits, &self.history.query, 20);
+        let Some(hit) = shown.get(self.history.selected.min(shown.len().saturating_sub(1))) else {
             return;
         };
         let cmd = hit.command.clone();
@@ -1586,24 +1592,24 @@ impl AppShell {
             "up" | "down" => {
                 let hits = crate::chrome::history_search::load_history_hits();
                 let shown =
-                    crate::chrome::history_search::filter_history(&hits, &self.history_query, 20)
+                    crate::chrome::history_search::filter_history(&hits, &self.history.query, 20)
                         .len();
                 if shown > 0 {
                     if key == "up" {
-                        self.history_selected = if self.history_selected == 0 {
+                        self.history.selected = if self.history.selected == 0 {
                             shown - 1
                         } else {
-                            self.history_selected - 1
+                            self.history.selected - 1
                         };
                     } else {
-                        self.history_selected = (self.history_selected + 1) % shown;
+                        self.history.selected = (self.history.selected + 1) % shown;
                     }
                     cx.notify();
                 }
             }
             "backspace" => {
-                self.history_query.pop();
-                self.history_selected = 0;
+                self.history.query.pop();
+                self.history.selected = 0;
                 cx.notify();
             }
             _ => {
@@ -1612,8 +1618,8 @@ impl AppShell {
                     && !ch.is_empty()
                     && !ch.chars().any(|c| c.is_control())
                 {
-                    self.history_query.push_str(ch);
-                    self.history_selected = 0;
+                    self.history.query.push_str(ch);
+                    self.history.selected = 0;
                     cx.notify();
                 }
             }
@@ -2188,7 +2194,7 @@ impl Render for AppShell {
                 if this.mode.is(OverlayKind::Settings) {
                     // Type-to-filter the theme picker when that section is
                     // active; escape clears the filter before closing.
-                    if this.settings_section == SettingsSection::Theme {
+                    if this.settings.section == SettingsSection::Theme {
                         match event.keystroke.key.as_str() {
                             "up" | "arrowup" | "down" | "arrowdown" | "enter" => {
                                 this.settings_theme_key_down(event.keystroke.key.as_str(), cx);
@@ -2196,8 +2202,8 @@ impl Render for AppShell {
                                 return;
                             }
                             "escape" => {
-                                if !this.theme_query.is_empty() {
-                                    this.theme_query.clear();
+                                if !this.settings.theme_query.is_empty() {
+                                    this.settings.theme_query.clear();
                                     cx.notify();
                                 } else {
                                     this.close_settings(window, cx);
@@ -2206,9 +2212,9 @@ impl Render for AppShell {
                                 return;
                             }
                             "backspace" => {
-                                this.theme_query.pop();
-                                this.settings_theme_selected = 0;
-                                this.settings_theme_scroll.scroll_to_item(0);
+                                this.settings.theme_query.pop();
+                                this.settings.theme_selected = 0;
+                                this.settings.theme_scroll.scroll_to_item(0);
                                 cx.notify();
                                 cx.stop_propagation();
                                 return;
@@ -2219,9 +2225,9 @@ impl Render for AppShell {
                                     && !ch.is_empty()
                                     && !ch.chars().any(|c| c.is_control())
                                 {
-                                    this.theme_query.push_str(ch);
-                                    this.settings_theme_selected = 0;
-                                    this.settings_theme_scroll.scroll_to_item(0);
+                                    this.settings.theme_query.push_str(ch);
+                                    this.settings.theme_selected = 0;
+                                    this.settings.theme_scroll.scroll_to_item(0);
                                     cx.notify();
                                 }
                             }

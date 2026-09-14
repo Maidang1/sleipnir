@@ -9,8 +9,8 @@ events support about each?
 
 This is not an agent runner. There is no approval answering, no model or
 provider code, no network access, and no persistence. The human keeps
-ultimate control of every agent in its own visible pane (ADR-0008): the
-plugin watches and displays, posts a single OS notification per proven
+ultimate control of every agent in its own visible pane: the plugin watches
+and displays, posts a single OS notification per proven
 unseen session exit, and — for sessions a coordinator explicitly launches —
 drives that pane through the host's granted calls.
 
@@ -316,6 +316,5 @@ SDK testing and tooling; normal terminal installation needs neither.
 | `src/adapter.rs` | The generic coordination adapter: effect-log delivery, session↔pane map, ownership gates. Host contact only via the `HostCalls` trait. |
 | `src/main.rs` | The resident session: events, actions, panel identity, socket lifecycle, tick. Thin. |
 
-Follow-ups (adapter control transports, richer state from agent-native
-hooks) are tracked in
-`docs/superpowers/plans/2026-09-09-agent-collaboration-slice-1.md`.
+Future adapter control transports and richer state from agent-native hooks
+remain out of scope for this plugin.

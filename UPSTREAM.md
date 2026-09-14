@@ -11,7 +11,7 @@ What stays **local** (forked or original):
 | `terminal` | Heavily forked: settings/theme rewired to `sleipnir_settings` |
 | `gpui_platform` | Slim macOS, Windows, and Linux application entry |
 | `sleipnir`, `sleipnir_ui`, `sleipnir_settings`, `release_channel` | Product code |
-| `alacritty_terminal` | **Git pin** to [Maidang1/alacritty](https://github.com/Maidang1/alacritty) (`sleipnir-osc-custom`): zed alacritty fork + OSC 133/9/777 (see [ADR-0005](docs/adr/0005-vendored-alacritty-term.md)) |
+| `alacritty_terminal` | **Git pin** to [Maidang1/alacritty](https://github.com/Maidang1/alacritty) (`sleipnir-osc-custom`): zed alacritty fork + OSC 133/9/777 |
 | `vte` | **Git pin** to [Maidang1/vte](https://github.com/Maidang1/vte) (`sleipnir-osc-custom`): vte 0.15.0 + `Handler::osc_custom`; `[patch.crates-io]` forces every crate onto that rev |
 
 ---
@@ -48,15 +48,14 @@ Cargo clones the monorepo once per rev and resolves workspace/path deps inside Z
 
 Required `[patch.crates-io]` entries live in root `Cargo.toml`:
 - `async-process` / `async-task` — aligned with Zed
-- `vte = { git = "https://github.com/Maidang1/vte", rev = "…" }` — vte 0.15.0 + `Handler::osc_custom` so OSC 133/9/777 reach `alacritty_terminal` (ADR-0005)
+- `vte = { git = "https://github.com/Maidang1/vte", rev = "…" }` — vte 0.15.0 + `Handler::osc_custom` so OSC 133/9/777 reach `alacritty_terminal`
 
 ---
 
 ## Divergence & upstream watch (frozen fork)
 
-Policy: the VT fork is **frozen** — there is no routine upstream sync. See
-[ADR-0007](docs/adr/0007-frozen-vt-fork.md). This section is the price of that
-policy: a rebase must never depend on anyone's memory.
+Policy: the VT fork is **frozen** — there is no routine upstream sync. This
+section records the divergence so a rebase never depends on anyone's memory.
 
 **What our forks add on top of their baselines:**
 

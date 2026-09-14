@@ -13,8 +13,8 @@ enable switch. See [Agents](../sleipnir_plugin_agents/README.md).
 
 Windows builds compile; `Server::bind` returns a clear unsupported error.
 
-Sleipnir remains the ground an agent runs on ([ADR-0008](../../docs/adr/0008-no-builtin-ai.md)):
-no built-in model calls, no approval automation.
+Sleipnir remains the ground an agent runs on: no built-in model calls and no
+approval automation.
 
 ## Two queues
 

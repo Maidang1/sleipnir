@@ -239,6 +239,13 @@ enum ExecOutcome {
     RateLimited,
 }
 
+/// Result after the delivery lease has either committed every acknowledgement
+/// or deliberately left the effect queued for a rate-limit retry.
+enum DeliveryOutcome {
+    Committed,
+    RateLimited,
+}
+
 /// The adapter: owns the shared registry handle and the session↔pane map.
 pub struct Adapter {
     registry: Registry,
@@ -298,36 +305,17 @@ impl Adapter {
             return false;
         };
         let seq = effect.seq;
-        match self.execute(effect, host, now_ms) {
-            ExecOutcome::RateLimited => {
+        match self.deliver(effect, host, now_ms) {
+            DeliveryOutcome::RateLimited => {
                 if self.note_rate_limited(seq, now_ms) {
                     // Same seq rate-limited too many times: give up for real.
                     self.fail_delivery(seq, now_ms);
                 }
                 true
             }
-            ExecOutcome::Ack(updates, prompt_task) => {
+            DeliveryOutcome::Committed => {
                 self.rate_limited_seq = None;
                 self.rate_retries = 0;
-                for update in updates {
-                    if let Err(err) = self.registry.apply(update, now_ms) {
-                        // The registry rejected our ack. Retire the effect so
-                        // the next tick cannot re-execute a host side effect
-                        // that already ran (a duplicate pane/prompt is worse
-                        // than a FailedDelivery mark).
-                        eprintln!("agents: coordination ack rejected: {err}");
-                        let _ = self
-                            .registry
-                            .apply(AdapterUpdate::DeliveryFailed { seq }, now_ms);
-                        return true;
-                    }
-                }
-                if let Some(task) = prompt_task {
-                    // Prompt delivered; the task stays in flight as Running
-                    // until a native adapter result, an interrupt, or a
-                    // session close moves it.
-                    self.mark_prompt_running(task, now_ms);
-                }
                 true
             }
         }
@@ -355,31 +343,54 @@ impl Adapter {
         }
     }
 
-    /// Execute one effect against the host and produce its acknowledgement.
-    fn execute(&mut self, effect: Effect, host: &mut dyn HostCalls, now_ms: u64) -> ExecOutcome {
+    /// Execute and acknowledge one effect while its session delivery lease is
+    /// held. This is the only commit path for an attempted host side effect.
+    fn deliver(
+        &mut self,
+        effect: Effect,
+        host: &mut dyn HostCalls,
+        now_ms: u64,
+    ) -> DeliveryOutcome {
         let registry = self.registry.clone();
         let seq = effect.seq;
-        registry
-            .deliver(&effect, |delivery| {
-                match self.execute_claimed(effect.clone(), host, now_ms) {
-                    ExecOutcome::Ack(updates, prompt_task) => {
-                        for update in updates {
-                            if let Err(err) = delivery.apply(update, now_ms) {
-                                eprintln!("agents: coordination ack rejected: {err}");
-                                let _ =
-                                    delivery.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms);
-                                return ExecOutcome::Ack(vec![], None);
-                            }
+        match registry.deliver(&effect, |delivery| {
+            match self.execute_claimed(effect.clone(), host, now_ms) {
+                ExecOutcome::Ack(updates, prompt_task) => {
+                    for update in updates {
+                        if let Err(err) = delivery.apply(update, now_ms) {
+                            // The host side effect already ran. Retire the
+                            // effect under the same lease rather than allowing
+                            // another consumer to replay it.
+                            eprintln!("agents: coordination ack rejected: {err}");
+                            let _ = delivery.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms);
+                            return DeliveryOutcome::Committed;
                         }
-                        if let Some(task) = prompt_task {
-                            let _ = delivery.apply(AdapterUpdate::TaskRunning { task }, now_ms);
-                        }
-                        ExecOutcome::Ack(vec![], None)
                     }
-                    ExecOutcome::RateLimited => ExecOutcome::RateLimited,
+                    if let Some(task) = prompt_task
+                        && let Err(err) =
+                            delivery.apply(AdapterUpdate::TaskRunning { task }, now_ms)
+                    {
+                        eprintln!("agents: could not mark prompt running: {err}");
+                    }
+                    DeliveryOutcome::Committed
                 }
-            })
-            .unwrap_or_else(|_| ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None))
+                ExecOutcome::RateLimited => DeliveryOutcome::RateLimited,
+            }
+        }) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // The effect became obsolete or ownership changed before the
+                // lease was acquired. No host side effect ran, so retire the
+                // stale intent through the rejection path. Successful effects
+                // are still acknowledged only inside the delivery lease.
+                eprintln!("agents: could not claim delivery {seq}: {err}");
+                if let Err(fail_err) = registry.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms)
+                {
+                    eprintln!("agents: could not retire rejected delivery {seq}: {fail_err}");
+                }
+                DeliveryOutcome::Committed
+            }
+        }
     }
 
     fn execute_claimed(
@@ -534,17 +545,6 @@ impl Adapter {
         match resp.body {
             Response::Inspect { session } => Some(session),
             _ => None,
-        }
-    }
-
-    /// After a successful `PromptDelivered` ack, move the task to Running.
-    /// Split from the ack so the effect log is cleared first.
-    pub fn mark_prompt_running(&self, task: CoordinationTaskId, now_ms: u64) {
-        if let Err(err) = self
-            .registry
-            .apply(AdapterUpdate::TaskRunning { task }, now_ms)
-        {
-            eprintln!("agents: could not mark prompt running: {err}");
         }
     }
 
@@ -998,7 +998,7 @@ mod tests {
                 text: "already done".into(),
             },
         );
-        adapter.execute(stale, &mut host, ms());
+        adapter.deliver(stale, &mut host, ms());
         assert!(
             host.texts.is_empty(),
             "stale effect must never type into the pane"

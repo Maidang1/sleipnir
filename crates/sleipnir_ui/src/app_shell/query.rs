@@ -66,33 +66,33 @@ pub(crate) fn splice_utf16(s: &mut String, range_utf16: Range<usize>, text: &str
 impl AppShell {
     pub(crate) fn query_text(&self, surface: QuerySurface) -> &str {
         match surface {
-            QuerySurface::Palette => &self.palette_query,
-            QuerySurface::Find => &self.find_query,
-            QuerySurface::History => &self.history_query,
+            QuerySurface::Palette => &self.palette.query,
+            QuerySurface::Find => &self.find.query,
+            QuerySurface::History => &self.history.query,
         }
     }
 
     fn query_text_mut(&mut self, surface: QuerySurface) -> &mut String {
         match surface {
-            QuerySurface::Palette => &mut self.palette_query,
-            QuerySurface::Find => &mut self.find_query,
-            QuerySurface::History => &mut self.history_query,
+            QuerySurface::Palette => &mut self.palette.query,
+            QuerySurface::Find => &mut self.find.query,
+            QuerySurface::History => &mut self.history.query,
         }
     }
 
     pub(crate) fn query_marked(&self, surface: QuerySurface) -> Option<Range<usize>> {
         match surface {
-            QuerySurface::Palette => self.palette_marked.clone(),
-            QuerySurface::Find => self.find_marked.clone(),
-            QuerySurface::History => self.history_marked.clone(),
+            QuerySurface::Palette => self.palette.marked.clone(),
+            QuerySurface::Find => self.find.marked.clone(),
+            QuerySurface::History => self.history.marked.clone(),
         }
     }
 
     fn set_query_marked(&mut self, surface: QuerySurface, marked: Option<Range<usize>>) {
         match surface {
-            QuerySurface::Palette => self.palette_marked = marked,
-            QuerySurface::Find => self.find_marked = marked,
-            QuerySurface::History => self.history_marked = marked,
+            QuerySurface::Palette => self.palette.marked = marked,
+            QuerySurface::Find => self.find.marked = marked,
+            QuerySurface::History => self.history.marked = marked,
         }
     }
 
@@ -100,12 +100,12 @@ impl AppShell {
     fn query_changed(&mut self, surface: QuerySurface, cx: &mut gpui::Context<Self>) {
         match surface {
             QuerySurface::Palette => {
-                self.palette_selected = 0;
+                self.palette.selected = 0;
                 cx.notify();
             }
             QuerySurface::Find => self.debounce_find(cx),
             QuerySurface::History => {
-                self.history_selected = 0;
+                self.history.selected = 0;
                 cx.notify();
             }
         }

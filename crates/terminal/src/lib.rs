@@ -12,6 +12,7 @@ mod mappings;
 mod row_map;
 
 mod alacritty;
+mod cwd_timeline;
 mod osc133;
 mod osc_notify;
 mod pty_info;
@@ -44,6 +45,7 @@ use futures::{
 };
 
 use alacritty_terminal::grid::Dimensions as _;
+use cwd_timeline::CwdTimeline;
 use itertools::Itertools as _;
 use mappings::mouse::{alt_scroll, mouse_button_report, mouse_moved_report, scroll_report};
 use row_geometry::{RowGeometry, ViewportPosition};
@@ -908,46 +910,18 @@ impl TerminalBuilder {
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10),
                 last_content: Default::default(),
-                last_mouse: None,
-                mouse_selection: None,
                 matches: Vec::new(),
                 active_match: None,
-                selection_head: None,
-                scroll_px: px(0.),
-                viewport: ViewportPosition::new(0),
-                row_geometry: RowGeometry::new(16.0),
-                next_link_id: 0,
-                hyperlink_regex_searches: RegexSearches::new(
+                viewport: ViewportState::new(),
+                interaction: InteractionState::new(RegexSearches::new(
                     &path_hyperlink_regexes,
                     path_hyperlink_timeout_ms,
-                ),
-                vi_mode_enabled: false,
-                last_mouse_move_time: Instant::now(),
-                last_hyperlink_search_position: None,
-                mouse_down_hyperlink: None,
+                )),
+                semantics: SemanticsState::new(working_directory),
                 child_exited: None,
-                keyboard_input_sent: false,
-                last_history_size: 0,
-                pending_block_anchor_changes: Vec::new(),
-                pending_backend_wakeup: false,
-                prompt_markers: Vec::new(),
-                last_busy: false,
-                busy_since: None,
-                run_tracker: RunTracker::default(),
-                started_at: Instant::now(),
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
-                cwd_history: working_directory
-                    .as_ref()
-                    .map(|working_directory| {
-                        vec![CwdHistoryEntry {
-                            scrollback_position: i32::MIN,
-                            working_directory: working_directory.clone(),
-                        }]
-                    })
-                    .unwrap_or_default(),
-                pending_cwd_boundary: None,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
                 #[cfg(any(test, feature = "test-support"))]
@@ -1062,41 +1036,63 @@ enum TerminalType {
     Closed,
 }
 
-pub struct Terminal {
-    terminal_type: TerminalType,
-    term: Arc<AlacrittyTermLock>,
-    term_config: AlacrittyTermConfig,
-    events: VecDeque<InternalEvent>,
-    /// This is only used for mouse mode cell change detection
-    last_mouse: Option<(Point, SelectionSide)>,
-    mouse_selection: Option<MouseSelection>,
-    pub matches: Vec<Range>,
-    /// The match the find UI currently points at, so paint can distinguish it
-    /// from the other highlights. Cleared together with `matches`.
-    pub active_match: Option<Range>,
-    pub last_content: Content,
-    pub selection_head: Option<Point>,
-    title_override: Option<String>,
+struct ViewportState {
     scroll_px: Pixels,
     /// Host-side sub-row remainder (ADR-0018 decision 2). Never sent to the grid.
-    viewport: ViewportPosition,
+    position: ViewportPosition,
     /// Block heights and the mapping both paint and hit-testing use.
-    row_geometry: RowGeometry,
+    geometry: RowGeometry,
+    /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) rebases
+    /// gutter markers and block anchors.
+    last_history_size: usize,
+}
+
+impl ViewportState {
+    fn new() -> Self {
+        Self {
+            scroll_px: px(0.0),
+            position: ViewportPosition::new(0),
+            geometry: RowGeometry::new(16.0),
+            last_history_size: 0,
+        }
+    }
+}
+
+struct InteractionState {
+    /// Used for mouse-mode cell change detection.
+    last_mouse: Option<(Point, SelectionSide)>,
+    mouse_selection: Option<MouseSelection>,
+    selection_head: Option<Point>,
     next_link_id: usize,
     hyperlink_regex_searches: RegexSearches,
     vi_mode_enabled: bool,
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
-    child_exited: Option<ExitStatus>,
     keyboard_input_sent: bool,
-    /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) means
-    /// gutter marker lines must be rebased.
-    last_history_size: usize,
+}
+
+impl InteractionState {
+    fn new(hyperlink_regex_searches: RegexSearches) -> Self {
+        Self {
+            last_mouse: None,
+            mouse_selection: None,
+            selection_head: None,
+            next_link_id: 0,
+            hyperlink_regex_searches,
+            vi_mode_enabled: false,
+            last_mouse_move_time: Instant::now(),
+            last_hyperlink_search_position: None,
+            mouse_down_hyperlink: None,
+            keyboard_input_sent: false,
+        }
+    }
+}
+
+struct SemanticsState {
     /// Ordered block-anchor lifecycle updates published to the host mount.
     pending_block_anchor_changes: Vec<BlockAnchorChange>,
-    /// Set when the current sync followed a backend wakeup, which distinguishes
-    /// PTY-driven churn from user-only viewport moves.
+    /// Distinguishes PTY-driven churn from user-only viewport moves.
     pending_backend_wakeup: bool,
     /// Prompt/command markers with scrollback lines for jump navigation.
     prompt_markers: Vec<Osc133Marker>,
@@ -1104,26 +1100,50 @@ pub struct Terminal {
     last_busy: bool,
     /// When the current foreground job became busy, if any.
     busy_since: Option<Instant>,
-    /// OSC 133 / busy-probe → Run start/finish. Pure; emit happens at cx sites.
+    /// OSC 133 / busy-probe to Run start/finish. Pure; emit happens at cx sites.
     run_tracker: RunTracker,
     /// Monotonic origin for Run duration math.
     started_at: Instant,
+    cwd_timeline: CwdTimeline,
+}
+
+impl SemanticsState {
+    fn new(initial_cwd: Option<PathBuf>) -> Self {
+        Self {
+            pending_block_anchor_changes: Vec::new(),
+            pending_backend_wakeup: false,
+            prompt_markers: Vec::new(),
+            last_busy: false,
+            busy_since: None,
+            run_tracker: RunTracker::default(),
+            started_at: Instant::now(),
+            cwd_timeline: CwdTimeline::new(initial_cwd),
+        }
+    }
+}
+
+pub struct Terminal {
+    terminal_type: TerminalType,
+    term: Arc<AlacrittyTermLock>,
+    term_config: AlacrittyTermConfig,
+    events: VecDeque<InternalEvent>,
+    pub matches: Vec<Range>,
+    /// The match the find UI currently points at, so paint can distinguish it
+    /// from the other highlights. Cleared together with `matches`.
+    pub active_match: Option<Range>,
+    pub last_content: Content,
+    title_override: Option<String>,
+    viewport: ViewportState,
+    interaction: InteractionState,
+    semantics: SemanticsState,
+    child_exited: Option<ExitStatus>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
-    cwd_history: Vec<CwdHistoryEntry>,
-    pending_cwd_boundary: Option<i32>,
     #[cfg(any(test, feature = "test-support"))]
     input_log: Vec<Vec<u8>>,
     #[cfg(any(test, feature = "test-support"))]
     pty_write_log: std::cell::RefCell<Vec<Vec<u8>>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CwdHistoryEntry {
-    /// Line offset in the retained scrollback buffer.
-    scrollback_position: i32,
-    working_directory: PathBuf,
 }
 
 const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
@@ -1176,7 +1196,7 @@ impl Terminal {
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
                     info.emit_title_changed_if_changed(cx);
                 }
-                self.pending_backend_wakeup = true;
+                self.semantics.pending_backend_wakeup = true;
             }
             TerminalBackendEvent::ColorRequest(index, format) => {
                 // It's important that the color request is processed here to retain relative order
@@ -1198,6 +1218,7 @@ impl Terminal {
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
                 if let Some(out) = self
+                    .semantics
                     .run_tracker
                     .on_marker(Osc133Kind::CommandFinished { status: None }, self.mono_ms())
                 {
@@ -1208,7 +1229,7 @@ impl Terminal {
             TerminalBackendEvent::Osc133(payload) => {
                 if let Some(kind) = Osc133Kind::from_payload(&payload) {
                     self.record_osc133_marker(kind);
-                    if let Some(out) = self.run_tracker.take_output() {
+                    if let Some(out) = self.semantics.run_tracker.take_output() {
                         self.emit_tracker_out(out, cx);
                     }
                 }
@@ -1260,10 +1281,10 @@ impl Terminal {
                 scroll_display(term, *scroll);
                 self.refresh_hovered_word(window);
 
-                if self.vi_mode_enabled {
+                if self.interaction.vi_mode_enabled {
                     update_vi_cursor_for_scroll(term, *scroll);
                     if let Some(selection_head) = update_selection_to_vi_cursor(term) {
-                        self.selection_head = Some(selection_head);
+                        self.interaction.selection_head = Some(selection_head);
                         cx.emit(Event::SelectionsChanged)
                     }
                 }
@@ -1273,7 +1294,7 @@ impl Terminal {
                 set_term_selection(term, selection.as_ref());
 
                 if let Some(selection) = selection {
-                    self.selection_head = Some(selection.head);
+                    self.interaction.selection_head = Some(selection.head);
                 }
                 cx.emit(Event::SelectionsChanged)
             }
@@ -1282,7 +1303,7 @@ impl Terminal {
                 let (point, side) = self.pointer_map_locked(term).grid_point_and_side(*position);
 
                 if update_term_selection(term, point, side) {
-                    self.selection_head = Some(point);
+                    self.interaction.selection_head = Some(point);
                     cx.emit(Event::SelectionsChanged)
                 }
             }
@@ -1314,7 +1335,7 @@ impl Terminal {
             }
             InternalEvent::ToggleViMode => {
                 trace!("Toggling vi mode");
-                self.vi_mode_enabled = !self.vi_mode_enabled;
+                self.interaction.vi_mode_enabled = !self.interaction.vi_mode_enabled;
                 toggle_term_vi_mode(term);
             }
             InternalEvent::ViMotion(motion) => {
@@ -1329,7 +1350,7 @@ impl Terminal {
                 match find_from_terminal_point(
                     term,
                     point,
-                    &mut self.hyperlink_regex_searches,
+                    &mut self.interaction.hyperlink_regex_searches,
                     self.path_style,
                 ) {
                     Some(hyperlink) => {
@@ -1422,7 +1443,7 @@ impl Terminal {
         find_from_terminal_point(
             &term_lock,
             point,
-            &mut self.hyperlink_regex_searches,
+            &mut self.interaction.hyperlink_regex_searches,
             self.path_style,
         )
     }
@@ -1457,8 +1478,8 @@ impl Terminal {
     }
 
     fn next_link_id(&mut self) -> usize {
-        let res = self.next_link_id;
-        self.next_link_id = self.next_link_id.wrapping_add(1);
+        let res = self.interaction.next_link_id;
+        self.interaction.next_link_id = self.interaction.next_link_id.wrapping_add(1);
         res
     }
 
@@ -1490,9 +1511,9 @@ impl Terminal {
         PointerMap {
             size: self.last_content.terminal_bounds,
             display_offset,
-            geometry: &self.row_geometry,
+            geometry: &self.viewport.geometry,
             history_size,
-            sub: self.viewport.sub,
+            sub: self.viewport.position.sub,
         }
     }
 
@@ -1502,20 +1523,20 @@ impl Terminal {
     }
 
     pub fn row_geometry(&self) -> &RowGeometry {
-        &self.row_geometry
+        &self.viewport.geometry
     }
 
     pub fn row_geometry_mut(&mut self) -> &mut RowGeometry {
-        &mut self.row_geometry
+        &mut self.viewport.geometry
     }
 
     pub fn viewport_sub(&self) -> f32 {
-        self.viewport.sub
+        self.viewport.position.sub
     }
 
     /// Flush the remainder so a jump lands a Block against the viewport edge.
     pub fn set_viewport_sub(&mut self, sub: f32) {
-        self.viewport.sub = if sub.is_finite() && sub >= 0.0 {
+        self.viewport.position.sub = if sub.is_finite() && sub >= 0.0 {
             sub
         } else {
             0.0
@@ -1523,7 +1544,7 @@ impl Terminal {
     }
 
     pub fn set_blocks_frozen(&mut self, frozen: bool) {
-        self.row_geometry.set_frozen(frozen);
+        self.viewport.geometry.set_frozen(frozen);
     }
 
     /// Ordered anchor-lifecycle changes for the host block registry.
@@ -1533,17 +1554,17 @@ impl Terminal {
     /// delta, and any invalidation subsumes all older and future rebases until
     /// the next take.
     pub fn take_block_anchor_changes(&mut self) -> Vec<BlockAnchorChange> {
-        std::mem::take(&mut self.pending_block_anchor_changes)
+        std::mem::take(&mut self.semantics.pending_block_anchor_changes)
     }
 
     /// Replace the Block set from the mount point. Heights are integer rows
     /// from `sleipnir_widget::layout`. While frozen, upsert keeps pinned heights.
     pub fn upsert_block(&mut self, block: row_geometry::Block) {
-        self.row_geometry.upsert(block);
+        self.viewport.geometry.upsert(block);
     }
 
     pub fn remove_block(&mut self, id: row_geometry::BlockId) {
-        self.row_geometry.remove(id);
+        self.viewport.geometry.remove(id);
     }
 
     /// Record a parsed OSC 133 marker against the current cursor line.
@@ -1558,32 +1579,34 @@ impl Terminal {
             )
         };
         // Keep A/B/C/D so jump-prompt, click-to-move, and output select share one log.
-        self.prompt_markers
+        self.semantics
+            .prompt_markers
             .push(Osc133Marker { kind, line, column });
-        if self.prompt_markers.len() > 500 {
-            let drain = self.prompt_markers.len() - 500;
-            self.prompt_markers.drain(0..drain);
+        if self.semantics.prompt_markers.len() > 500 {
+            let drain = self.semantics.prompt_markers.len() - 500;
+            self.semantics.prompt_markers.drain(0..drain);
         }
         let at_ms = self.mono_ms();
         match kind {
             Osc133Kind::CommandExecuted => {
                 let command = self.read_command_between_start_and_cursor();
-                self.run_tracker
+                self.semantics
+                    .run_tracker
                     .on_marker_with_command(kind, at_ms, command);
             }
             other => {
-                self.run_tracker.on_marker(other, at_ms);
+                self.semantics.run_tracker.on_marker(other, at_ms);
             }
         }
         if matches!(kind, Osc133Kind::CommandFinished { .. }) {
             // Command ended via shell integration; clear busy timer.
-            self.last_busy = false;
-            self.busy_since = None;
+            self.semantics.last_busy = false;
+            self.semantics.busy_since = None;
         }
     }
 
     fn mono_ms(&self) -> u64 {
-        self.started_at.elapsed().as_millis() as u64
+        self.semantics.started_at.elapsed().as_millis() as u64
     }
 
     fn emit_tracker_out(&mut self, out: TrackerOut, cx: &mut Context<Self>) {
@@ -1594,7 +1617,8 @@ impl Terminal {
                 let (line, column) = if inferred {
                     (None, None)
                 } else {
-                    self.prompt_markers
+                    self.semantics
+                        .prompt_markers
                         .iter()
                         .rev()
                         .find(|m| matches!(m.kind, Osc133Kind::CommandExecuted))
@@ -1620,7 +1644,7 @@ impl Terminal {
     pub fn scroll_to_absolute(&mut self, absolute: i32, column: usize) {
         let history = self.term.lock_unfair().history_size() as i32;
         let grid_line = absolute_to_grid_line(absolute, history);
-        self.viewport.jump_to_anchor(absolute);
+        self.viewport.position.jump_to_anchor(absolute);
         self.events
             .push_back(InternalEvent::ScrollToPoint(Point::new(grid_line, column)));
     }
@@ -1648,6 +1672,7 @@ impl Terminal {
     /// Grid text from the most recent OSC 133 B (command start) to the cursor.
     fn read_command_between_start_and_cursor(&self) -> Option<String> {
         let start = self
+            .semantics
             .prompt_markers
             .iter()
             .rev()
@@ -1669,7 +1694,8 @@ impl Terminal {
 
     /// Scrollback lines that mark prompt starts (for jump navigation).
     pub fn prompt_marker_lines(&self) -> Vec<i32> {
-        self.prompt_markers
+        self.semantics
+            .prompt_markers
             .iter()
             .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
             .filter_map(|m| m.line)
@@ -1680,12 +1706,14 @@ impl Terminal {
     /// the current prompt. `None` if the click should fall through.
     fn click_to_move_bytes(&self, point: Point) -> Option<Vec<u8>> {
         let prompt_line_abs = self
+            .semantics
             .prompt_markers
             .iter()
             .rev()
             .find(|m| matches!(m.kind, Osc133Kind::PromptStart))
             .and_then(|m| m.line);
         let prompt_prefix_cols = self
+            .semantics
             .prompt_markers
             .iter()
             .rev()
@@ -1743,7 +1771,7 @@ impl Terminal {
             scroll_display(&mut term, Scroll::Delta(delta_lines));
         }
         // Flush so a Block at the prompt lands against the viewport edge.
-        self.viewport.jump_to_anchor(target_line);
+        self.viewport.position.jump_to_anchor(target_line);
         true
     }
 
@@ -1760,11 +1788,11 @@ impl Terminal {
         let busy = self.looks_busy();
         let now = Instant::now();
         let at_ms = self.mono_ms();
-        match (self.last_busy, busy) {
+        match (self.semantics.last_busy, busy) {
             (false, true) => {
-                self.last_busy = true;
-                self.busy_since = Some(now);
-                if let Some(out) = self.run_tracker.on_busy_change(
+                self.semantics.last_busy = true;
+                self.semantics.busy_since = Some(now);
+                if let Some(out) = self.semantics.run_tracker.on_busy_change(
                     true,
                     self.foreground_process_command_name(),
                     at_ms,
@@ -1774,11 +1802,15 @@ impl Terminal {
                 None
             }
             (true, false) => {
-                self.last_busy = false;
-                if let Some(out) = self.run_tracker.on_busy_change(false, None, at_ms) {
+                self.semantics.last_busy = false;
+                if let Some(out) = self
+                    .semantics
+                    .run_tracker
+                    .on_busy_change(false, None, at_ms)
+                {
                     self.emit_tracker_out(out, cx);
                 }
-                let started = self.busy_since.take()?;
+                let started = self.semantics.busy_since.take()?;
                 let dur = now.saturating_duration_since(started);
                 if dur.as_secs() >= min_secs {
                     Some(dur)
@@ -1824,7 +1856,7 @@ impl Terminal {
         if let Some(search_match) = self.matches.get(index).cloned() {
             self.active_match = Some(search_match);
             self.set_selection(Some(Selection::simple_range(search_match)));
-            if self.vi_mode_enabled {
+            if self.interaction.vi_mode_enabled {
                 self.events
                     .push_back(InternalEvent::MoveViCursorToPoint(search_match.end()));
             } else {
@@ -1935,7 +1967,7 @@ impl Terminal {
     }
 
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
-        self.keyboard_input_sent = true;
+        self.interaction.keyboard_input_sent = true;
         self.write_input(input);
     }
 
@@ -1943,10 +1975,9 @@ impl Terminal {
         let input = input.into();
         if input.contains(&b'\r') {
             let term = self.term.lock_unfair();
-            self.pending_cwd_boundary = Some(Self::scrollback_position(
-                term.grid().cursor.point.line.0,
-                term.history_size(),
-            ));
+            self.semantics
+                .cwd_timeline
+                .mark_boundary(term.grid().cursor.point.line.0, term.history_size());
         }
 
         self.events.push_back(InternalEvent::Scroll(Scroll::Bottom));
@@ -1969,7 +2000,7 @@ impl Terminal {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn keyboard_input_sent(&self) -> bool {
-        self.keyboard_input_sent
+        self.interaction.keyboard_input_sent
     }
 
     pub fn toggle_vi_mode(&mut self) {
@@ -1977,7 +2008,7 @@ impl Terminal {
     }
 
     pub fn vi_motion(&mut self, keystroke: &Keystroke) {
-        if !self.vi_mode_enabled {
+        if !self.interaction.vi_mode_enabled {
             return;
         }
 
@@ -2066,7 +2097,7 @@ impl Terminal {
     }
 
     pub fn try_keystroke(&mut self, keystroke: &Keystroke, option_as_meta: bool) -> bool {
-        if self.vi_mode_enabled {
+        if self.interaction.vi_mode_enabled {
             self.vi_motion(keystroke);
             return true;
         }
@@ -2130,24 +2161,25 @@ impl Terminal {
         let history_size = terminal.history_size();
         let damage = take_damage_kind(&mut terminal);
         let capped_history = history_size >= self.term_config.scrolling_history;
-        let removed = crate::row_map::history_shrink(self.last_history_size, history_size);
+        let removed = crate::row_map::history_shrink(self.viewport.last_history_size, history_size);
         if removed > 0 {
-            rebase_markers_after_history_shrink(&mut self.prompt_markers, removed);
-            self.row_geometry.rebase_after_history_shrink(removed);
+            rebase_markers_after_history_shrink(&mut self.semantics.prompt_markers, removed);
+            self.viewport.geometry.rebase_after_history_shrink(removed);
             self.publish_rebase(removed);
         }
-        self.last_history_size = history_size;
+        self.viewport.last_history_size = history_size;
         let screen_lines = terminal.screen_lines();
         self.last_content = make_content(&terminal, &self.last_content);
-        self.row_geometry
+        self.viewport
+            .geometry
             .set_line_height(f32::from(self.last_content.terminal_bounds.line_height));
-        self.row_geometry.set_line_count(
+        self.viewport.geometry.set_line_count(
             i32::try_from(history_size.saturating_add(screen_lines)).unwrap_or(i32::MAX),
         );
         let alt = self.last_content.mode.contains(Modes::ALT_SCREEN);
-        self.row_geometry.set_alt_screen(alt);
+        self.viewport.geometry.set_alt_screen(alt);
         if alt {
-            self.viewport.sub = 0.0;
+            self.viewport.position.sub = 0.0;
         }
 
         let alt_transitioned = (!prev_alt && alt) || (prev_alt && !alt);
@@ -2156,12 +2188,12 @@ impl Terminal {
         }
         let capped_churn_without_delta = removed == 0
             && capped_history
-            && self.pending_backend_wakeup
+            && self.semantics.pending_backend_wakeup
             && matches!(damage, DamageKind::Full);
         if capped_churn_without_delta {
             self.invalidate_terminal_anchors();
         }
-        self.pending_backend_wakeup = false;
+        self.semantics.pending_backend_wakeup = false;
     }
 
     pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
@@ -2183,17 +2215,17 @@ impl Terminal {
     }
 
     fn mouse_changed(&mut self, point: Point, side: SelectionSide) -> bool {
-        match self.last_mouse {
+        match self.interaction.last_mouse {
             Some((old_point, old_side)) => {
                 if old_point == point && old_side == side {
                     false
                 } else {
-                    self.last_mouse = Some((point, side));
+                    self.interaction.last_mouse = Some((point, side));
                     true
                 }
             }
             None => {
-                self.last_mouse = Some((point, side));
+                self.interaction.last_mouse = Some((point, side));
                 true
             }
         }
@@ -2212,7 +2244,7 @@ impl Terminal {
             // reports, which would be a press-less (malformed) sequence.
             // `mouse_up` resolves it: release on the same link opens it,
             // otherwise the gesture is dropped.
-            if self.mouse_down_hyperlink.is_none() {
+            if self.interaction.mouse_down_hyperlink.is_none() {
                 let (point, side) = self.pointer_map().grid_point_and_side(position);
 
                 if self.mouse_changed(point, side) {
@@ -2243,6 +2275,7 @@ impl Terminal {
         // kept in the signature because callers pass event state through.
         let _ = modifiers;
         if self
+            .interaction
             .mouse_selection
             .as_ref()
             .is_some_and(|selection| selection.dragging)
@@ -2255,18 +2288,22 @@ impl Terminal {
         // Throttle hyperlink searches to avoid excessive processing
         let now = Instant::now();
         if self
+            .interaction
             .last_hyperlink_search_position
             .map_or(true, |last_pos| {
                 // Only search if mouse moved significantly or enough time passed
                 let distance_moved = ((position.x - last_pos.x).abs()
                     + (position.y - last_pos.y).abs())
                     > FIND_HYPERLINK_THROTTLE_PX;
-                let time_elapsed = now.duration_since(self.last_mouse_move_time).as_millis() > 100;
+                let time_elapsed = now
+                    .duration_since(self.interaction.last_mouse_move_time)
+                    .as_millis()
+                    > 100;
                 distance_moved || time_elapsed
             })
         {
-            self.last_mouse_move_time = now;
-            self.last_hyperlink_search_position = Some(position);
+            self.interaction.last_mouse_move_time = now;
+            self.interaction.last_hyperlink_search_position = Some(position);
             self.events.push_back(InternalEvent::FindHyperlink(
                 position - self.last_content.terminal_bounds.bounds.origin,
                 false,
@@ -2275,7 +2312,7 @@ impl Terminal {
     }
 
     fn update_mouse_selection(&mut self, e: &MouseMoveEvent) {
-        let Some(selection) = self.mouse_selection.as_mut() else {
+        let Some(selection) = self.interaction.mouse_selection.as_mut() else {
             return;
         };
         if !selection.dragging
@@ -2312,8 +2349,8 @@ impl Terminal {
         let point = self.pointer_map().grid_point(position);
 
         if e.button == MouseButton::Left {
-            self.mouse_selection = None;
-            self.mouse_down_hyperlink = None;
+            self.interaction.mouse_selection = None;
+            self.interaction.mouse_down_hyperlink = None;
         }
 
         // Only Alt+click moves the shell cursor. A plain click anchors a
@@ -2336,9 +2373,9 @@ impl Terminal {
             && (TerminalSettings::get_global(cx).open_links_in_mouse_mode
                 || !self.mouse_mode(e.modifiers.shift))
         {
-            self.mouse_down_hyperlink = self.find_hyperlink_at_point(point);
+            self.interaction.mouse_down_hyperlink = self.find_hyperlink_at_point(point);
 
-            if self.mouse_down_hyperlink.is_some() {
+            if self.interaction.mouse_down_hyperlink.is_some() {
                 return;
             }
         }
@@ -2352,7 +2389,7 @@ impl Terminal {
             }
         } else if e.button == MouseButton::Left && e.click_count > 0 {
             let (point, side) = self.pointer_map().grid_point_and_side(position);
-            self.mouse_selection = Some(MouseSelection {
+            self.interaction.mouse_selection = Some(MouseSelection {
                 origin: e.position,
                 dragging: false,
             });
@@ -2389,14 +2426,15 @@ impl Terminal {
         cx: &Context<Self>,
     ) {
         let dragged = if e.button == MouseButton::Left {
-            self.mouse_selection
+            self.interaction
+                .mouse_selection
                 .take()
                 .is_some_and(|selection| selection.dragging)
         } else {
             false
         };
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        if let Some(mouse_down_hyperlink) = self.mouse_down_hyperlink.take() {
+        if let Some(mouse_down_hyperlink) = self.interaction.mouse_down_hyperlink.take() {
             let point = self.pointer_map().grid_point(position);
 
             if self
@@ -2405,12 +2443,12 @@ impl Terminal {
             {
                 self.events
                     .push_back(InternalEvent::ProcessHyperlink(mouse_down_hyperlink, true));
-                self.last_mouse = None;
+                self.interaction.last_mouse = None;
                 return;
             }
 
             if self.mouse_mode(e.modifiers.shift) {
-                self.last_mouse = None;
+                self.interaction.last_mouse = None;
                 return;
             }
         }
@@ -2446,7 +2484,7 @@ impl Terminal {
             }
         }
 
-        self.last_mouse = None;
+        self.interaction.last_mouse = None;
     }
 
     ///Scroll the terminal
@@ -2494,8 +2532,8 @@ impl Terminal {
         let line_height = self.last_content.terminal_bounds.line_height;
         match e.touch_phase {
             TouchPhase::Started => {
-                self.scroll_px = px(0.);
-                self.viewport.sub = 0.0;
+                self.viewport.scroll_px = px(0.);
+                self.viewport.position.sub = 0.0;
                 None
             }
             TouchPhase::Moved => {
@@ -2507,10 +2545,10 @@ impl Terminal {
                 // grid clamps Scroll::Delta while that remainder survives, so
                 // trackpad momentum repeatedly paints the screen at different
                 // sub-pixel positions and the text flickers.
-                if self.row_geometry.blocks().next().is_none() {
-                    self.viewport.sub = 0.0;
+                if self.viewport.geometry.blocks().next().is_none() {
+                    self.viewport.position.sub = 0.0;
                     return Some(accumulate_uniform_wheel(
-                        &mut self.scroll_px,
+                        &mut self.viewport.scroll_px,
                         delta,
                         line_height,
                         self.last_content.terminal_bounds.height(),
@@ -2519,8 +2557,8 @@ impl Terminal {
 
                 // Blocks have variable pixel heights, so retain their sub-row
                 // remainder (ADR-0018 decision 2).
-                self.viewport.row = usize::try_from(viewport_top_abs(
-                    self.last_history_size as i32,
+                self.viewport.position.row = usize::try_from(viewport_top_abs(
+                    self.viewport.last_history_size as i32,
                     self.last_content.display_offset,
                 ))
                 .unwrap_or(0);
@@ -2529,7 +2567,8 @@ impl Terminal {
                 // (toward history). Negate on the way in and back out.
                 let absolute_line_delta = self
                     .viewport
-                    .apply_pixel_delta(-f32::from(delta), &self.row_geometry);
+                    .position
+                    .apply_pixel_delta(-f32::from(delta), &self.viewport.geometry);
                 Some(-absolute_line_delta)
             }
             TouchPhase::Ended | TouchPhase::Cancelled => None,
@@ -2578,27 +2617,16 @@ impl Terminal {
     }
 
     pub(crate) fn record_cwd_change(&mut self, new_working_directory: PathBuf) {
-        let scrollback_position = self.pending_cwd_boundary.take().unwrap_or_else(|| {
-            let term = self.term.lock_unfair();
-            Self::scrollback_position(term.grid().cursor.point.line.0, term.history_size())
-        });
-        self.cwd_history.push(CwdHistoryEntry {
-            scrollback_position,
-            working_directory: new_working_directory,
-        });
+        let term = self.term.lock_unfair();
+        self.semantics.cwd_timeline.record(
+            new_working_directory,
+            term.grid().cursor.point.line.0,
+            term.history_size(),
+        );
     }
 
     fn reset_cwd_history(&mut self) {
-        self.pending_cwd_boundary = None;
-        self.cwd_history = self
-            .working_directory()
-            .map(|working_directory| {
-                vec![CwdHistoryEntry {
-                    scrollback_position: i32::MIN,
-                    working_directory,
-                }]
-            })
-            .unwrap_or_default();
+        self.semantics.cwd_timeline.reset(self.working_directory());
     }
 
     fn publish_rebase(&mut self, removed: i32) {
@@ -2606,12 +2634,13 @@ impl Terminal {
             return;
         }
 
-        match self.pending_block_anchor_changes.as_mut_slice() {
+        match self.semantics.pending_block_anchor_changes.as_mut_slice() {
             [BlockAnchorChange::Invalidate] => {}
             [BlockAnchorChange::Rebase(total)] => {
                 *total = total.saturating_add(removed);
             }
             [] => self
+                .semantics
                 .pending_block_anchor_changes
                 .push(BlockAnchorChange::Rebase(removed)),
             _ => unreachable!("block anchor change queue is producer-canonicalized"),
@@ -2619,36 +2648,26 @@ impl Terminal {
     }
 
     fn publish_invalidate(&mut self) {
-        self.pending_block_anchor_changes.clear();
-        self.pending_block_anchor_changes
+        self.semantics.pending_block_anchor_changes.clear();
+        self.semantics
+            .pending_block_anchor_changes
             .push(BlockAnchorChange::Invalidate);
     }
 
     fn invalidate_terminal_anchors(&mut self) {
         self.reset_cwd_history();
-        self.prompt_markers.clear();
-        self.row_geometry.invalidate_anchors();
+        self.semantics.prompt_markers.clear();
+        self.viewport.geometry.invalidate_anchors();
         self.publish_invalidate();
     }
 
     fn cwd_at_line(&self, line: i32, history_size: usize) -> Option<PathBuf> {
-        // Once the scrollback cap is reached, evictions move retained lines without changing
-        // `history_size`, so stored row offsets no longer identify their original lines.
-        if self.cwd_history.is_empty() || history_size >= self.term_config.scrolling_history {
-            return self.working_directory();
-        }
-        let scrollback_position = Self::scrollback_position(line, history_size);
-        self.cwd_history
-            .iter()
-            .rev()
-            .find(|entry| entry.scrollback_position <= scrollback_position)
-            .map(|entry| entry.working_directory.clone())
-            .or_else(|| self.working_directory())
-    }
-
-    fn scrollback_position(line: i32, history_size: usize) -> i32 {
-        let history_size = i32::try_from(history_size).unwrap_or(i32::MAX);
-        history_size.saturating_add(line)
+        self.semantics.cwd_timeline.cwd_at_line(
+            line,
+            history_size,
+            self.term_config.scrolling_history,
+            self.working_directory(),
+        )
     }
 
     pub fn title(&self, truncate: bool) -> String {
@@ -2731,7 +2750,7 @@ impl Terminal {
         //    even if the shell exits with a non-zero code (e.g. after `false`).
         // 2. Shell spawn failures (bad $SHELL) - don't close, so the user sees
         //    the error. Spawn failures never receive keyboard input.
-        let should_close = if self.keyboard_input_sent {
+        let should_close = if self.interaction.keyboard_input_sent {
             true
         } else {
             self.child_exited.is_none_or(|e| e.code() == Some(0))
@@ -2742,7 +2761,7 @@ impl Terminal {
     }
 
     pub fn vi_mode_enabled(&self) -> bool {
-        self.vi_mode_enabled
+        self.interaction.vi_mode_enabled
     }
 }
 
@@ -2879,9 +2898,9 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockAnchorChange, Content, CwdHistoryEntry, InternalEvent, PtyEvent, Terminal,
-        TerminalBounds, TerminalType, accumulate_uniform_wheel, normalize_terminal_bounds,
-        terminal_looks_busy,
+        BlockAnchorChange, Content, InteractionState, InternalEvent, PtyEvent, SemanticsState,
+        Terminal, TerminalBounds, TerminalType, ViewportState, accumulate_uniform_wheel,
+        normalize_terminal_bounds, terminal_looks_busy,
     };
     use crate::{
         Osc133Kind,
@@ -2892,8 +2911,8 @@ mod tests {
     use collections::VecDeque;
     use futures::channel::mpsc::unbounded;
     use gpui::{AppContext as _, Bounds, Context, Empty, Render, Size, TestAppContext, Window, px};
-    use row_geometry::{Anchor, Block, RowGeometry, ViewportPosition};
-    use std::{path::PathBuf, time::Instant};
+    use row_geometry::{Anchor, Block};
+    use std::path::PathBuf;
     use util::paths::PathStyle;
     use vte::ansi::Handler;
 
@@ -2961,7 +2980,7 @@ mod tests {
             columns_changed,
             "must compare against live term columns, not pending bounds"
         );
-        assert_eq!(terminal.prompt_markers, Vec::new());
+        assert_eq!(terminal.semantics.prompt_markers, Vec::new());
         assert_eq!(
             terminal.take_block_anchor_changes(),
             vec![BlockAnchorChange::Invalidate]
@@ -2971,13 +2990,13 @@ mod tests {
     #[test]
     fn invalidate_terminal_anchors_clears_markers_geometry_and_cwd_state() {
         let mut terminal = test_terminal();
-        terminal.prompt_markers.push(crate::Osc133Marker {
+        terminal.semantics.prompt_markers.push(crate::Osc133Marker {
             kind: Osc133Kind::PromptStart,
             line: Some(7),
             column: Some(2),
         });
         terminal.record_cwd_change(PathBuf::from("/tmp/child"));
-        terminal.row_geometry.upsert(Block {
+        terminal.viewport.geometry.upsert(Block {
             id: Default::default(),
             run_id: Default::default(),
             anchor: Anchor { line: 7, column: 0 },
@@ -2986,10 +3005,9 @@ mod tests {
 
         terminal.invalidate_terminal_anchors();
 
-        assert!(terminal.prompt_markers.is_empty());
-        assert!(terminal.row_geometry.blocks().next().is_none());
-        assert_eq!(terminal.pending_cwd_boundary, None);
-        assert!(terminal.cwd_history.is_empty());
+        assert!(terminal.semantics.prompt_markers.is_empty());
+        assert!(terminal.viewport.geometry.blocks().next().is_none());
+        assert_eq!(terminal.cwd_at_line(0, 0), None);
         assert_eq!(
             terminal.take_block_anchor_changes(),
             vec![BlockAnchorChange::Invalidate]
@@ -3007,7 +3025,7 @@ mod tests {
             terminal.take_block_anchor_changes(),
             vec![BlockAnchorChange::Rebase(i32::MAX)]
         );
-        assert!(terminal.pending_block_anchor_changes.is_empty());
+        assert!(terminal.semantics.pending_block_anchor_changes.is_empty());
     }
 
     #[test]
@@ -3021,14 +3039,14 @@ mod tests {
         terminal.publish_rebase(4);
 
         assert_eq!(
-            terminal.pending_block_anchor_changes,
+            terminal.semantics.pending_block_anchor_changes,
             vec![BlockAnchorChange::Invalidate]
         );
         assert_eq!(
             terminal.take_block_anchor_changes(),
             vec![BlockAnchorChange::Invalidate]
         );
-        assert!(terminal.pending_block_anchor_changes.is_empty());
+        assert!(terminal.semantics.pending_block_anchor_changes.is_empty());
     }
 
     #[test]
@@ -3385,7 +3403,7 @@ mod tests {
                     cx,
                 );
                 assert_eq!(terminal.take_pty_write_log(), vec![b"\x1b[D".repeat(3)]);
-                assert!(terminal.mouse_selection.is_none());
+                assert!(terminal.interaction.mouse_selection.is_none());
                 assert!(terminal.events.is_empty());
             });
         });
@@ -3535,7 +3553,7 @@ mod tests {
                 terminal.mouse_down(&gpui::MouseDownEvent {
                     button: gpui::MouseButton::Left, position, modifiers, click_count: 1, ..Default::default()
                 }, cx);
-                assert!(terminal.mouse_down_hyperlink.is_some());
+                assert!(terminal.interaction.mouse_down_hyperlink.is_some());
                 terminal.last_content.mode = super::Modes::ALT_SCREEN | super::Modes::SGR_MOUSE | super::Modes::MOUSE_DRAG;
                 terminal.mouse_move(&gpui::MouseMoveEvent {
                     position, modifiers, pressed_button: Some(gpui::MouseButton::Left),
@@ -3580,12 +3598,12 @@ mod tests {
     async fn sync_alt_transition_invalidates_anchor_state(cx: &mut TestAppContext) {
         let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
         let mut terminal = test_terminal();
-        terminal.prompt_markers.push(crate::Osc133Marker {
+        terminal.semantics.prompt_markers.push(crate::Osc133Marker {
             kind: Osc133Kind::PromptStart,
             line: Some(3),
             column: Some(0),
         });
-        terminal.row_geometry.upsert(Block {
+        terminal.viewport.geometry.upsert(Block {
             id: Default::default(),
             run_id: Default::default(),
             anchor: Anchor { line: 3, column: 0 },
@@ -3606,8 +3624,8 @@ mod tests {
                 terminal.sync(window, cx);
             });
             entity.update(cx, |terminal, _| {
-                assert!(terminal.prompt_markers.is_empty());
-                assert!(terminal.row_geometry.blocks().next().is_none());
+                assert!(terminal.semantics.prompt_markers.is_empty());
+                assert!(terminal.viewport.geometry.blocks().next().is_none());
                 assert_eq!(
                     terminal.take_block_anchor_changes(),
                     vec![BlockAnchorChange::Invalidate]
@@ -3632,40 +3650,17 @@ mod tests {
             term,
             term_config: config,
             events: VecDeque::new(),
-            last_mouse: None,
-            mouse_selection: None,
             matches: Vec::new(),
             active_match: None,
             last_content: Content::default(),
-            selection_head: None,
             title_override: None,
-            scroll_px: px(0.0),
-            viewport: ViewportPosition::new(0),
-            row_geometry: RowGeometry::new(16.0),
-            next_link_id: 0,
-            hyperlink_regex_searches: RegexSearches::default(),
-            vi_mode_enabled: false,
-            last_mouse_move_time: Instant::now(),
-            last_hyperlink_search_position: None,
-            mouse_down_hyperlink: None,
+            viewport: ViewportState::new(),
+            interaction: InteractionState::new(RegexSearches::default()),
+            semantics: SemanticsState::new(Some(working_directory)),
             child_exited: None,
-            keyboard_input_sent: false,
-            last_history_size: 0,
-            pending_block_anchor_changes: Vec::new(),
-            pending_backend_wakeup: false,
-            prompt_markers: Vec::new(),
-            last_busy: false,
-            busy_since: None,
-            run_tracker: Default::default(),
-            started_at: Instant::now(),
             event_loop_task: gpui::Task::ready(Ok(())),
             background_executor: TestAppContext::single().executor(),
             path_style: PathStyle::local(),
-            cwd_history: vec![CwdHistoryEntry {
-                scrollback_position: i32::MIN,
-                working_directory,
-            }],
-            pending_cwd_boundary: None,
             input_log: Vec::new(),
             pty_write_log: Default::default(),
         };

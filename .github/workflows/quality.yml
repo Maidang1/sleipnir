@@ -14,6 +14,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs:
+    name: Documentation links
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r scripts/requirements-docs.txt
+      - run: python scripts/tests/test-doc-links.py
+      - run: python scripts/check-doc-links.py
+
   rust:
     name: Rust (${{ matrix.os }})
     strategy:

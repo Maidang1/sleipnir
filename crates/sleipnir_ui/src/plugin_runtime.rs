@@ -393,17 +393,26 @@ pub fn has_grant_for_instance(instance_id: uuid::Uuid, cap: Capability, cx: &App
         .is_some_and(|rt| rt.supervisor.has_grant_for_instance(instance_id, cap))
 }
 
-pub fn plan_host_call(
+/// Authorize, rate-limit, validate, and plan one call for a concrete plugin
+/// instance. Callers do not assemble capability lists; the call itself names
+/// its required capability and the supervisor is the grant authority.
+pub fn authorize_and_plan_host_call(
     plugin_id: &str,
+    instance_id: uuid::Uuid,
     call: &plugin_protocol::v2::HostCall,
-    granted: &[Capability],
     now_ms: u64,
     cx: &mut App,
 ) -> crate::plugin_host_calls::CallPlan {
+    let required = call.required_capability();
+    let granted = cx
+        .global::<PluginRuntime>()
+        .supervisor
+        .has_grant_for_instance(instance_id, required)
+        .then_some(required);
     crate::plugin_host_calls::plan_call(
         plugin_id,
         call,
-        granted,
+        granted.as_slice(),
         &mut cx.global_mut::<PluginRuntime>().calls,
         now_ms,
     )

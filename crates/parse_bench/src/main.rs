@@ -4,7 +4,7 @@
 //! Sleipnir uses — ingests a byte stream into its grid, with rendering
 //! suppressed. This is the analogue of kitty's `kitten __benchmark__`
 //! (parser-only) methodology, and is **not** the end-to-end `cat` throughput
-//! measured inside the GUI (see `scripts/bench/README.md`).
+//! measured inside the GUI.
 //!
 //! Usage:
 //!   cargo run --release -p parse_bench -- <file> [chunk_bytes] [cols] [rows]

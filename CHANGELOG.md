@@ -55,9 +55,6 @@
 - Update checks that hit GitHub API anonymous rate limiting (HTTP 403) now say so with a retry hint instead of a generic failure.
 - `scripts/test-macos-update.sh` packaging verification also covers the CI layout (`./Sleipnir.app` at repo root), where it was previously skipped silently.
 
-### Documentation
-- `docs/kitty-graphics.md` now states clearly that Kitty Graphics is on the roadmap (planned, not yet implemented) and links the implementation/removal history in ADR-0019.
-
 ## 0.6.0
 
 ### Features
@@ -152,7 +149,7 @@
 - Run Ledger overlay (`⌘⇧L`): grouped runs, jump to the pane and scroll to the OSC 133 Anchor
 - Pane gutter triangles on command start/end lines (overlay; hidden on alt screen)
 - Menu-bar Attention item (`show_tray_icon`) and Dock badge of failed Attention count
-- Default-off control surface (ADR-0011): listens when `control_surface: true` or `SLEIPNIR_CONTROL=1`; `sleipnir-ctl ls/send/wait/capture` drive live panes
+- Default-off control surface: listens when `control_surface: true` or `SLEIPNIR_CONTROL=1`; `sleipnir-ctl ls/send/wait/capture` drive live panes
 - Restore tombstone banner from prior-launch Run metadata (no scrollback); dismisses on type; skips in-flight / unrecognized last commands; `show_tombstone: false` hides it
 - Send Selection / Send Git Diff to the focused pane; optional `pipe_selection_command`
 - Shell history search overlay (`⌘⇧;`) over `HISTFILE` / `~/.zsh_history`

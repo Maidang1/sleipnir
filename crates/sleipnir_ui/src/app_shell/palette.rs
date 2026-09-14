@@ -18,9 +18,9 @@ use crate::ui_mode::OverlayKind;
 impl AppShell {
     pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mode.open(OverlayKind::Palette);
-        self.palette_query.clear();
-        self.palette_marked = None;
-        self.palette_selected = 0;
+        self.palette.query.clear();
+        self.palette.marked = None;
+        self.palette.selected = 0;
         // The query box owns text input while open: focus the shell so the IME
         // input handler registered by `query_input_canvas` becomes active.
         window.focus(&self.focus_handle, cx);
@@ -29,18 +29,18 @@ impl AppShell {
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode.close(OverlayKind::Palette) {
-            self.palette_query.clear();
-            self.palette_marked = None;
-            self.palette_selected = 0;
+            self.palette.query.clear();
+            self.palette.marked = None;
+            self.palette.selected = 0;
             self.focus_active(window, cx);
             cx.notify();
         }
     }
 
     fn filtered_palette_indices(&self) -> Vec<usize> {
-        let mut indices = filter_commands(&self.palette_items, &self.palette_query);
-        if self.palette_query.trim().is_empty() {
-            prioritize_recents(&self.palette_items, &mut indices, &self.palette_recents);
+        let mut indices = filter_commands(&self.palette.items, &self.palette.query);
+        if self.palette.query.trim().is_empty() {
+            prioritize_recents(&self.palette.items, &mut indices, &self.palette.recents);
         }
         indices
     }
@@ -51,7 +51,7 @@ impl AppShell {
         self.close_palette(window, cx);
         self.dispatch_command(id, window, cx);
         if !matches!(id, CommandId::Plugin(_) | CommandId::PluginContribution(_)) {
-            record_recent(&mut self.palette_recents, id);
+            record_recent(&mut self.palette.recents, id);
         }
     }
 
@@ -72,8 +72,8 @@ impl AppShell {
             }
             "enter" => {
                 let hits = self.filtered_palette_indices();
-                if let Some(&idx) = hits.get(self.palette_selected) {
-                    let id = self.palette_items[idx].id;
+                if let Some(&idx) = hits.get(self.palette.selected) {
+                    let id = self.palette.items[idx].id;
                     self.run_command(id, window, cx);
                 }
                 true
@@ -81,12 +81,12 @@ impl AppShell {
             "up" | "arrowup" => {
                 let hits = self.filtered_palette_indices();
                 if !hits.is_empty() {
-                    self.palette_selected = if self.palette_selected == 0 {
+                    self.palette.selected = if self.palette.selected == 0 {
                         hits.len() - 1
                     } else {
-                        self.palette_selected - 1
+                        self.palette.selected - 1
                     };
-                    self.palette_scroll.scroll_to_item(self.palette_selected);
+                    self.palette.scroll.scroll_to_item(self.palette.selected);
                     cx.notify();
                 }
                 true
@@ -94,22 +94,22 @@ impl AppShell {
             "down" | "arrowdown" => {
                 let hits = self.filtered_palette_indices();
                 if !hits.is_empty() {
-                    self.palette_selected = (self.palette_selected + 1) % hits.len();
-                    self.palette_scroll.scroll_to_item(self.palette_selected);
+                    self.palette.selected = (self.palette.selected + 1) % hits.len();
+                    self.palette.scroll.scroll_to_item(self.palette.selected);
                     cx.notify();
                 }
                 true
             }
             "backspace" => {
-                self.palette_query.pop();
-                self.palette_selected = 0;
+                self.palette.query.pop();
+                self.palette.selected = 0;
                 cx.notify();
                 true
             }
             "v" if event.keystroke.modifiers.platform && !event.keystroke.modifiers.alt => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.palette_query.push_str(&text.replace(['\n', '\r'], ""));
-                    self.palette_selected = 0;
+                    self.palette.query.push_str(&text.replace(['\n', '\r'], ""));
+                    self.palette.selected = 0;
                     cx.notify();
                 }
                 true
@@ -117,8 +117,8 @@ impl AppShell {
             _ => {
                 if let Some(ch) = event.keystroke.key_char.as_ref() {
                     if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                        self.palette_query.push_str(ch);
-                        self.palette_selected = 0;
+                        self.palette.query.push_str(ch);
+                        self.palette.selected = 0;
                         cx.notify();
                     }
                 }
@@ -133,13 +133,13 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let hits = self.filtered_palette_indices();
-        let selected = self.palette_selected.min(hits.len().saturating_sub(1));
-        let query: SharedString = if self.palette_query.is_empty() {
+        let selected = self.palette.selected.min(hits.len().saturating_sub(1));
+        let query: SharedString = if self.palette.query.is_empty() {
             "Type a command…".into()
         } else {
-            format!("{}|", self.palette_query).into()
+            format!("{}|", self.palette.query).into()
         };
-        let query_color = if self.palette_query.is_empty() {
+        let query_color = if self.palette.query.is_empty() {
             tokens.fg_muted
         } else {
             tokens.fg
@@ -152,7 +152,7 @@ impl AppShell {
             .w_full()
             .max_h(px(320.0))
             .overflow_y_scroll()
-            .track_scroll(&self.palette_scroll)
+            .track_scroll(&self.palette.scroll)
             .py_1();
 
         if hits.is_empty() {
@@ -166,7 +166,7 @@ impl AppShell {
             );
         } else {
             for (row_i, &item_i) in hits.iter().enumerate() {
-                let item = &self.palette_items[item_i];
+                let item = &self.palette.items[item_i];
                 let id = item.id;
                 let title = item.title.clone();
                 let shortcut = item.shortcut.clone();
@@ -185,7 +185,7 @@ impl AppShell {
                         .hover(|el| el.bg(tokens.hover))
                         .on_hover(cx.listener(move |this, hovered, _, cx| {
                             if *hovered {
-                                this.palette_selected = row_i;
+                                this.palette.selected = row_i;
                                 cx.notify();
                             }
                         }))

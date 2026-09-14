@@ -103,15 +103,19 @@ impl AppShell {
         }
         self.plugin_watch.ports_inflight = true;
         cx.spawn(async move |this, cx| {
-            let mut found = Vec::new();
-            for (pane, pid) in port_jobs {
-                let facts = cx
-                    .background_spawn(async move {
-                        crate::chrome::pane_facts::collect_live_facts(None, None, pid)
-                    })
-                    .await;
-                found.push((pane, facts.ports));
-            }
+            // One machine-level scan per poll: the process and listen tables are
+            // the same for every pane, so capture them once off-thread and derive
+            // each pane's ports from the shared snapshot instead of rescanning the
+            // whole system once per pane.
+            let found = cx
+                .background_spawn(async move {
+                    let snapshot = crate::chrome::pane_facts::MachineSnapshot::capture();
+                    port_jobs
+                        .into_iter()
+                        .map(|(pane, pid)| (pane, snapshot.derive(None, None, pid).ports))
+                        .collect::<Vec<_>>()
+                })
+                .await;
             this.update(cx, |this, cx| {
                 this.plugin_watch.ports_inflight = false;
                 for (pane, ports) in found {
@@ -374,27 +378,18 @@ impl AppShell {
             CallPlan, cap_screen, error_result, filter_listed_panes, read_screen_access,
             send_key_ready, send_text_result,
         };
-        use plugin_protocol::v2::{Capability, PaneInfo};
-        let granted: Vec<Capability> = [
-            Capability::HostCallNotify,
-            Capability::HostCallReadScreen,
-            Capability::HostCallListPanes,
-            Capability::HostCallOpenPane,
-            Capability::HostCallDrawScene,
-            Capability::HostCallScrollToRun,
-            Capability::HostCallFocusPane,
-            Capability::HostCallSendText,
-            Capability::HostCallSendKey,
-            Capability::HostCallRequestClosePane,
-        ]
-        .into_iter()
-        .filter(|cap| crate::plugin_runtime::has_grant_for_instance(instance_id, *cap, cx))
-        .collect();
+        use plugin_protocol::v2::PaneInfo;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let plan = crate::plugin_runtime::plan_host_call(plugin_id, &call, &granted, now_ms, cx);
+        let plan = crate::plugin_runtime::authorize_and_plan_host_call(
+            plugin_id,
+            instance_id,
+            &call,
+            now_ms,
+            cx,
+        );
         let result = match plan {
             CallPlan::Reply(result) => result,
             CallPlan::Notify { title, body } => {
@@ -738,9 +733,9 @@ impl AppShell {
     }
     pub(super) fn refresh_plugin_commands(&mut self, cx: &mut Context<Self>) {
         crate::plugin_runtime::PluginRuntime::reload(cx);
-        self.plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
+        self.palette.plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
         self.rebuild_palette_items();
-        self.palette_selected = 0;
+        self.palette.selected = 0;
         self.start_resident_plugins(cx);
     }
     pub(super) fn run_plugin_contribution(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -811,7 +806,7 @@ impl AppShell {
         cx.notify();
     }
     pub(super) fn run_plugin_command(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(plugin) = self.plugin_commands.get(index).cloned() else {
+        let Some(plugin) = self.palette.plugin_commands.get(index).cloned() else {
             return;
         };
         self.start_plugin_command(plugin, cx);
