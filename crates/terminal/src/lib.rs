@@ -2148,6 +2148,7 @@ impl Terminal {
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         let prev_alt = self.last_content.mode.contains(Modes::ALT_SCREEN);
+        let prev_mouse = self.last_content.mode.intersects(Modes::MOUSE_MODE);
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
@@ -2185,6 +2186,13 @@ impl Terminal {
         let alt_transitioned = (!prev_alt && alt) || (prev_alt && !alt);
         if alt_transitioned {
             self.invalidate_terminal_anchors();
+        }
+        let mouse = self.last_content.mode.intersects(Modes::MOUSE_MODE);
+        if alt_transitioned || (!prev_mouse && mouse) {
+            // Grid coordinates and OSC 8 spans from the previous screen are
+            // meaningless after an alt-screen swap; mouse-mode apps also stop
+            // receiving FindHyperlink updates, so drop the host hover overlay.
+            self.last_content.last_hovered_word = None;
         }
         let capped_churn_without_delta = removed == 0
             && capped_history
@@ -2238,6 +2246,10 @@ impl Terminal {
     pub fn mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if self.mouse_mode(e.modifiers.shift) {
+            // The TUI owns the pointer. A leftover host hover (URL underline +
+            // LinkPreview tooltip) from the primary screen would float over
+            // apps like Grok/vim because this branch never re-runs FindHyperlink.
+            self.last_content.last_hovered_word = None;
             // A ctrl/cmd press on a link suppressed its button-press report in
             // `mouse_down`. Since the app never saw the press, we must swallow
             // the whole gesture rather than forward later motion/release
@@ -2521,6 +2533,10 @@ impl Terminal {
     }
 
     fn refresh_hovered_word(&mut self, window: &Window) {
+        if self.mouse_mode(window.modifiers().shift) {
+            self.last_content.last_hovered_word = None;
+            return;
+        }
         self.schedule_find_hyperlink(window.modifiers(), window.mouse_position());
     }
 
@@ -2898,9 +2914,9 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockAnchorChange, Content, InteractionState, InternalEvent, PtyEvent, SemanticsState,
-        Terminal, TerminalBounds, TerminalType, ViewportState, accumulate_uniform_wheel,
-        normalize_terminal_bounds, terminal_looks_busy,
+        BlockAnchorChange, Content, HoveredWord, InteractionState, InternalEvent, Point, PtyEvent,
+        Range, SemanticsState, Terminal, TerminalBounds, TerminalType, ViewportState,
+        accumulate_uniform_wheel, normalize_terminal_bounds, terminal_looks_busy,
     };
     use crate::{
         Osc133Kind,
@@ -3629,6 +3645,75 @@ mod tests {
                 assert_eq!(
                     terminal.take_block_anchor_changes(),
                     vec![BlockAnchorChange::Invalidate]
+                );
+            });
+        });
+    }
+
+    fn stale_hovered_word(url: &str) -> HoveredWord {
+        HoveredWord {
+            word: url.to_string(),
+            word_match: Range::new(Point::new(0, 0), Point::new(0, url.len())),
+            id: 1,
+        }
+    }
+
+    #[gpui::test]
+    async fn mouse_mode_motion_clears_stale_hyperlink_hover(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+                terminal.last_content.last_hovered_word = Some(stale_hovered_word(
+                    "https://code.byted.org/obric/coze-loop/merge_requests/new",
+                ));
+                terminal.last_content.mode =
+                    super::Modes::ALT_SCREEN | super::Modes::SGR_MOUSE | super::Modes::MOUSE_DRAG;
+                terminal.mouse_move(
+                    &gpui::MouseMoveEvent {
+                        position: gpui::point(px(40.0), px(12.0)),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert!(
+                    terminal.last_content.last_hovered_word.is_none(),
+                    "mouse-mode TUIs must not keep a host link tooltip from the previous screen"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn entering_alt_screen_clears_stale_hyperlink_hover(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        let mut terminal = test_terminal();
+        terminal.last_content.last_hovered_word = Some(stale_hovered_word(
+            "https://code.byted.org/obric/coze-loop/merge_requests/new",
+        ));
+        terminal.last_content.mode = super::Modes::empty();
+        {
+            let term = terminal.term.clone();
+            let mut term = term.lock_unfair();
+            term.set_private_mode(alacritty_terminal::vte::ansi::PrivateMode::Named(
+                alacritty_terminal::vte::ansi::NamedPrivateMode::SwapScreenAndSetRestoreCursor,
+            ));
+        }
+
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| terminal);
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+            });
+            entity.update(cx, |terminal, _| {
+                assert!(
+                    terminal.last_content.mode.contains(super::Modes::ALT_SCREEN),
+                    "fixture must actually enter the alternate screen"
+                );
+                assert!(
+                    terminal.last_content.last_hovered_word.is_none(),
+                    "alt-screen entry must drop hover from the primary screen"
                 );
             });
         });

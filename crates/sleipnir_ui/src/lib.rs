@@ -1071,12 +1071,17 @@ impl Render for TermView {
                     .child(err.clone())
                     .into_any_element(),
                 TerminalSlot::Ready(terminal) => {
-                    let hovered = terminal
-                        .read(cx)
-                        .last_content()
-                        .last_hovered_word
-                        .as_ref()
-                        .map(|w| w.word.clone());
+                    let hovered = {
+                        let term = terminal.read(cx);
+                        if term.mouse_mode(false) {
+                            None
+                        } else {
+                            term.last_content()
+                                .last_hovered_word
+                                .as_ref()
+                                .map(|w| w.word.clone())
+                        }
+                    };
 
                     let a11y_text: SharedString = terminal.read(cx).visible_screen_text().into();
                     let body = div()
@@ -1875,6 +1880,23 @@ mod tests {
         assert_eq!(
             linux_notification_args("Sleipnir", "build; rm -rf /"),
             ["--app-name", "Sleipnir", "Sleipnir", "build; rm -rf /"]
+        );
+    }
+
+    #[test]
+    fn link_preview_tooltip_is_suppressed_in_mouse_mode() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find("TerminalSlot::Ready(terminal) => {")
+            .expect("ready terminal render");
+        let block = &src[start..start + 1600];
+        assert!(
+            block.contains("if term.mouse_mode(false)"),
+            "full-screen mouse-mode apps must not inherit a host URL tooltip"
+        );
+        assert!(
+            block.contains("LinkPreview"),
+            "the hover tooltip must still exist for normal-mode links"
         );
     }
 

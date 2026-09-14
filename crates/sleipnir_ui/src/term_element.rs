@@ -507,11 +507,13 @@ impl Element for TermElement {
                     search_rects.extend(range_rects(m, content.display_offset, color));
                 }
 
-                // URL / path hover underline (M11).
+                // URL / path hover underline (M11). Mouse-mode TUIs own the
+                // pointer; a stale host underline would paint over their grid.
                 let link_color = palette.ansi[4].opacity(0.85);
                 let mut hover_underlines = Vec::new();
-                let hover_link = content.last_hovered_word.is_some();
-                if let Some(hovered) = content.last_hovered_word.as_ref() {
+                let hover_link = content.last_hovered_word.is_some()
+                    && !content.mode.intersects(Modes::MOUSE_MODE);
+                if hover_link && let Some(hovered) = content.last_hovered_word.as_ref() {
                     hover_underlines.extend(range_rects(
                         hovered.word_match,
                         content.display_offset,
