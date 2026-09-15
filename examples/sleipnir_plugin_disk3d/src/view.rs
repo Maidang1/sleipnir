@@ -3,9 +3,8 @@
 //! Kept free of I/O and of the wire protocol so the whole view is unit
 //! testable: given a scan and a camera, the tree is a pure function.
 
-use plugin_protocol::v2::{
-    MAX_WIDGET_NODES, SceneBar, SceneCamera, SceneData, Tone, Widget, measure,
-};
+use plugin_protocol::v2::{MAX_WIDGET_NODES, Tone, Widget, measure};
+use serde::Deserialize;
 use sleipnir_plugin::{badge, btn, col, row, sep, text};
 
 use crate::raster::{Camera, Scene, default_light};
@@ -98,14 +97,19 @@ impl View {
         self.scan = scan;
     }
 
-    /// Apply a host-driven camera. The host owns the interactive camera (drag to
-    /// rotate, wheel to zoom) and reports the new state as a `camera` action
-    /// whose arg is a JSON [`SceneCamera`] — the same typed payload the scene
-    /// itself carries. Missing or malformed payloads keep the current values,
-    /// and pitch/zoom are clamped to the same readable range the button
-    /// controls use, so a stray value cannot flatten or explode the view.
+    /// Apply a camera payload `{yaw,pitch,zoom}`. Malformed values keep the
+    /// current camera; pitch/zoom are clamped to the button-control range.
     pub fn apply_camera_arg(&mut self, arg: &str) {
-        let Ok(cam) = serde_json::from_str::<SceneCamera>(arg) else {
+        #[derive(Deserialize)]
+        struct CameraArg {
+            #[serde(default)]
+            yaw: f32,
+            #[serde(default)]
+            pitch: f32,
+            #[serde(default)]
+            zoom: f32,
+        }
+        let Ok(cam) = serde_json::from_str::<CameraArg>(arg) else {
             return;
         };
         if cam.yaw.is_finite() {
@@ -168,38 +172,22 @@ pub fn grid_cols(n: usize) -> usize {
     (n as f64).sqrt().ceil().max(1.0) as usize
 }
 
-/// Bar colours, cycled by entry index. RGB so the host paints them directly
-/// (the widget schema's semantic tones do not reach the projected scene).
-const PALETTE: &[[u8; 3]] = &[
-    [102, 178, 242],
-    [242, 140, 89],
-    [115, 217, 128],
-    [230, 115, 166],
-    [178, 140, 230],
-    [242, 204, 89],
-    [128, 204, 204],
-    [217, 153, 115],
-];
+#[derive(Debug)]
+struct ChartBar {
+    gx: u32,
+    gz: u32,
+    height: f32,
+    selected: bool,
+}
 
-/// Selected bar colour: bright so it reads next to the legend.
-const SELECTED_COLOR: [u8; 3] = [255, 255, 153];
+struct ChartData {
+    cols: u32,
+    rows: u32,
+    bars: Vec<ChartBar>,
+}
 
-/// Floor plane colour.
-const FLOOR_COLOR: [u8; 3] = [46, 46, 56];
-
-/// Build the compact scene description the host projects and paints.
-///
-/// The grid is the reason this is 3D rather than a bar chart drawn in
-/// perspective: entries occupy both floor axes, so rotating the camera reveals
-/// bars that were behind others, and a dozen directories stay readable in a
-/// width that a single row of bars could not fit.
-///
-/// Heights are linear in share of the largest entry, normalised to `0.0..=1.0`
-/// with a visible floor at [`MIN_BAR_SHARE`], so a directory dominated by one
-/// entry still shows its small children; a log scale would flatter small dirs.
-/// The host owns projection, so this carries geometry and colour only — no
-/// pixels. The text fallback reuses this via [`build_scene`].
-pub fn build_scene_data(view: &View) -> SceneData {
+/// Grid layout and normalised bar heights shared by the raster.
+pub fn build_scene_data(view: &View) -> ChartData {
     let entries = &view.scan.entries;
     let cols = if entries.is_empty() {
         0
@@ -217,32 +205,15 @@ pub fn build_scene_data(view: &View) -> SceneData {
         .enumerate()
         .map(|(i, entry)| {
             let share = entry.bytes as f32 / largest as f32;
-            let height = share.max(MIN_BAR_SHARE).clamp(0.0, 1.0);
-            let selected = i == view.selected;
-            SceneBar {
+            ChartBar {
                 gx: (i as u32) % cols.max(1),
                 gz: (i as u32) / cols.max(1),
-                height,
-                color: if selected {
-                    SELECTED_COLOR
-                } else {
-                    PALETTE[i % PALETTE.len()]
-                },
-                selected,
+                height: share.max(MIN_BAR_SHARE).clamp(0.0, 1.0),
+                selected: i == view.selected,
             }
         })
         .collect();
-    SceneData {
-        cols,
-        rows,
-        floor: FLOOR_COLOR,
-        camera: SceneCamera {
-            yaw: view.camera.yaw,
-            pitch: view.camera.pitch,
-            zoom: view.zoom,
-        },
-        bars,
-    }
+    ChartData { cols, rows, bars }
 }
 
 /// Rows available to the raster on a surface of `rows` total.
@@ -710,14 +681,8 @@ mod tests {
             assert!(bar.gx < scene.cols, "gx out of grid: {bar:?}");
             assert!(bar.gz < scene.rows, "gz out of grid: {bar:?}");
         }
-        // Exactly the selected entry carries the selected flag/colour.
         assert!(scene.bars[0].selected);
-        assert_eq!(scene.bars[0].color, SELECTED_COLOR);
         assert!(scene.bars.iter().skip(1).all(|b| !b.selected));
-        // The camera mirrors the view.
-        assert_eq!(scene.camera.yaw, view.camera.yaw);
-        assert_eq!(scene.camera.pitch, view.camera.pitch);
-        assert_eq!(scene.camera.zoom, view.zoom);
     }
 
     #[test]

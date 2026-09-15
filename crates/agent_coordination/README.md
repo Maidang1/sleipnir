@@ -26,8 +26,12 @@ Requests acknowledge **acceptance**, never execution (`launch_accepted`,
 | **Effects** | adapter (single consumer) | `LaunchRequested` (kind/cwd/name/args), `PromptRequested` (text), `InterruptRequested`, `FocusRequested`, `CloseRequested` | durable until adapter ack / `DeliveryFailed` |
 | **Facts** | coordinator clients / UI (per-cursor) | session/task/ownership observations | capped ring; overflow increments `facts_dropped` |
 
-`Registry::peek_effects` does not consume. `Registry::facts_since(cursor)`
-does not touch the effect log. `Registry::apply` never drains either queue.
+Each session has its own effect mailbox. `Registry::peek_effects` flattens
+them oldest-seq-first and does not consume. `Registry::try_claim(seq)`
+holds a per-session claim until `ClaimedEffect::commit` or drop.
+`Registry::facts_since(cursor)` does not touch the effect log.
+`Registry::apply` never drains either queue. JSON line packing lives in
+the server (`frame`), not the registry.
 
 Each effect has a monotonic `seq`. Peek is oldest-first. The adapter
 acknowledges by **exact `seq`** (`BindPane { seq, session, pane }`,
@@ -43,7 +47,7 @@ payloads already queued are not dropped.
 ## Protocol
 
 One JSON object per line. Tagged unions, `snake_case`, additive fields via
-`#[serde(default)]`. `PROTOCOL_VERSION` is `1`.
+`#[serde(default)]`. `PROTOCOL_VERSION` is `2`.
 
 Requests carry a correlation `id`. The matching response echoes it.
 
@@ -55,7 +59,7 @@ Requests carry a correlation `id`. The matching response echoes it.
 | `launch` | `kind`, `cwd`, `name?`, `args?` | `launch_accepted` | queue `LaunchRequested`; `kind` is `codex` / `claude` / `gemini` / `opencode`; `cwd` must be absolute and NUL-free; `args` is argv |
 | `prompt` | `session`, `text` | `prompt_accepted` | queue `PromptRequested` with the text |
 | `wait` | `task` | `wait` | **immediate snapshot**: `status`, `terminal`, optional `result` / `detail`. Stop polling when `terminal` is true. The client owns any timeout. |
-| `interrupt` | `session` | `interrupt_accepted` | queue `InterruptRequested`; in-flight tasks become `interrupting` — **not** settled until `InterruptDelivered` |
+| `interrupt` | `session` | `interrupt_accepted` | queue `InterruptRequested` naming the in-flight task (rejected if idle); that task becomes `interrupting` — **not** settled until `InterruptDelivered` |
 | `focus` | `session` | `focus_accepted` | queue `FocusRequested`; requires a bound pane |
 | `inspect` | `session` | `inspect` | full snapshot including tasks (`result` / `detail` on each task) |
 | `human_takeover` | `session` | `taken_over` | writer → human |
@@ -83,7 +87,7 @@ Example:
 
 ### Task status
 
-`accepted` → `dispatching` → `running` ⇄ `awaiting_human` → `settled` | `unknown` | `failed_delivery`
+`dispatching` → `running` ⇄ `awaiting_human` → `settled` | `unknown` | `failed_delivery`
 
 `interrupting` is in-flight: an interrupt was accepted and is not yet
 confirmed. The interrupt **request** never settles a task. When the adapter

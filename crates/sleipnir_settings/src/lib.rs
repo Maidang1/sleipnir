@@ -636,31 +636,7 @@ where
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
-/// Directory that holds `settings.json` and local plugin configuration.
-pub fn config_dir() -> PathBuf {
-    config_dir_for(cfg!(windows))
-}
-
-/// Settings/session directory for a given OS family.
-pub fn config_dir_for(windows: bool) -> PathBuf {
-    if windows {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir")
-    }
-}
-
-pub fn config_path() -> PathBuf {
-    config_path_for(cfg!(windows))
-}
-
-pub fn config_path_for(windows: bool) -> PathBuf {
-    config_dir_for(windows).join("settings.json")
-}
+pub use sleipnir_paths::{config_dir, config_dir_for, config_path, config_path_for};
 
 fn load_or_default() -> TerminalSettings {
     let mut settings = TerminalSettings::default();

@@ -80,11 +80,7 @@ pub fn is_rate_limited(message: &str) -> bool {
     message == "rate limited"
 }
 
-/// The host's SendText payload cap, in characters (mirrors
-/// `plugin_host_calls::MAX_SEND_TEXT_CHARS`, which the plugin cannot import).
-/// An envelope that would exceed it is rejected *before* the host call —
-/// never truncated.
-pub const SEND_TEXT_CAP_CHARS: usize = 8 * 1024;
+pub const SEND_TEXT_CAP_CHARS: usize = sleipnir_plugin::MAX_SEND_TEXT_CHARS;
 
 /// Single-quote a path for display inside shell instructions. The envelope
 /// is pasted into an agent's UI, not executed by a shell we control — but
@@ -231,9 +227,9 @@ pub struct ManagedRow {
 
 /// The result of executing one effect against the host.
 enum ExecOutcome {
-    /// Ack the effect's exact seq with these updates, in order. The task is
-    /// marked `Running` only after a successful `PromptDelivered` ack.
-    Ack(Vec<AdapterUpdate>, Option<CoordinationTaskId>),
+    /// Ack the effect's exact seq. `PromptDelivered` itself marks the task
+    /// `Running`.
+    Ack(AdapterUpdate),
     /// The host rate-limited the call. The effect stays queued under the
     /// same seq for a bounded retry; no state changes.
     RateLimited,
@@ -343,8 +339,8 @@ impl Adapter {
         }
     }
 
-    /// Execute and acknowledge one effect while its session delivery lease is
-    /// held. This is the only commit path for an attempted host side effect.
+    /// Execute and acknowledge one effect while its session claim is held.
+    /// This is the only commit path for an attempted host side effect.
     fn deliver(
         &mut self,
         effect: Effect,
@@ -353,43 +349,29 @@ impl Adapter {
     ) -> DeliveryOutcome {
         let registry = self.registry.clone();
         let seq = effect.seq;
-        match registry.deliver(&effect, |delivery| {
-            match self.execute_claimed(effect.clone(), host, now_ms) {
-                ExecOutcome::Ack(updates, prompt_task) => {
-                    for update in updates {
-                        if let Err(err) = delivery.apply(update, now_ms) {
-                            // The host side effect already ran. Retire the
-                            // effect under the same lease rather than allowing
-                            // another consumer to replay it.
-                            eprintln!("agents: coordination ack rejected: {err}");
-                            let _ = delivery.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms);
-                            return DeliveryOutcome::Committed;
-                        }
-                    }
-                    if let Some(task) = prompt_task
-                        && let Err(err) =
-                            delivery.apply(AdapterUpdate::TaskRunning { task }, now_ms)
-                    {
-                        eprintln!("agents: could not mark prompt running: {err}");
-                    }
-                    DeliveryOutcome::Committed
-                }
-                ExecOutcome::RateLimited => DeliveryOutcome::RateLimited,
-            }
-        }) {
-            Ok(outcome) => outcome,
+        let claimed = match registry.try_claim(seq) {
+            Ok(claimed) => claimed,
             Err(err) => {
                 // The effect became obsolete or ownership changed before the
-                // lease was acquired. No host side effect ran, so retire the
-                // stale intent through the rejection path. Successful effects
-                // are still acknowledged only inside the delivery lease.
+                // claim was acquired. No host side effect ran, so retire the
+                // stale intent through the rejection path.
                 eprintln!("agents: could not claim delivery {seq}: {err}");
                 if let Err(fail_err) = registry.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms)
                 {
                     eprintln!("agents: could not retire rejected delivery {seq}: {fail_err}");
                 }
+                return DeliveryOutcome::Committed;
+            }
+        };
+        match self.execute_claimed(claimed.effect().clone(), host, now_ms) {
+            ExecOutcome::Ack(update) => {
+                if let Err(err) = claimed.commit(update, now_ms) {
+                    eprintln!("agents: coordination ack rejected: {err}");
+                    let _ = registry.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms);
+                }
                 DeliveryOutcome::Committed
             }
+            ExecOutcome::RateLimited => DeliveryOutcome::RateLimited,
         }
     }
 
@@ -421,13 +403,13 @@ impl Adapter {
                         },
                     );
                     self.panes.insert(pane, session);
-                    ExecOutcome::Ack(vec![AdapterUpdate::BindPane { seq, session, pane }], None)
+                    ExecOutcome::Ack(AdapterUpdate::BindPane { seq, session, pane })
                 }
                 Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                 Err(message) => {
                     eprintln!("agents: launch delivery failed: {message}");
                     // Canonical registry failure also closes an unbound launch session.
-                    ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                    ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq })
                 }
             },
             EffectBody::PromptRequested {
@@ -436,7 +418,7 @@ impl Adapter {
                 text,
                 ..
             } => match self.writable_pane(session) {
-                None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
+                None => ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq }),
                 Some(pane) => {
                     let envelope = build_prompt_envelope_with_command(
                         session,
@@ -450,62 +432,55 @@ impl Adapter {
                         // coordinator's text is never truncated.
                         Err(message) => {
                             eprintln!("agents: prompt delivery failed: {message}");
-                            ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                            ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq })
                         }
                         Ok(envelope) => match host.send_text_enter(pane, &envelope) {
-                            Ok(()) => ExecOutcome::Ack(
-                                vec![AdapterUpdate::PromptDelivered { seq }],
-                                Some(task),
-                            ),
+                            Ok(()) => ExecOutcome::Ack(AdapterUpdate::PromptDelivered { seq }),
                             Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                             Err(message) => {
                                 eprintln!("agents: prompt delivery failed: {message}");
-                                ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                                ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq })
                             }
                         },
                     }
                 }
             },
             EffectBody::InterruptRequested { session, .. } => match self.writable_pane(session) {
-                None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
+                None => ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq }),
                 Some(pane) => match host.send_key(pane, "ctrl-c") {
-                    Ok(()) => {
-                        ExecOutcome::Ack(vec![AdapterUpdate::InterruptDelivered { seq }], None)
-                    }
+                    Ok(()) => ExecOutcome::Ack(AdapterUpdate::InterruptDelivered { seq }),
                     Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                     Err(message) => {
                         eprintln!("agents: interrupt delivery failed: {message}");
-                        ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                        ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq })
                     }
                 },
             },
             // Focus is visibility-only: no ownership gate, but the pane must
             // still be one we bound.
             EffectBody::FocusRequested { session } => match self.pane_for(session) {
-                None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
+                None => ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq }),
                 Some(pane) => match host.focus_pane(pane) {
-                    Ok(()) => ExecOutcome::Ack(vec![AdapterUpdate::FocusDelivered { seq }], None),
+                    Ok(()) => ExecOutcome::Ack(AdapterUpdate::FocusDelivered { seq }),
                     Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                     Err(message) => {
                         eprintln!("agents: focus delivery failed: {message}");
-                        ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                        ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq })
                     }
                 },
             },
             EffectBody::CloseRequested { session } => {
                 match self.writable_pane(session) {
-                    None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
+                    None => ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq }),
                     Some(pane) => match host.request_close_pane(pane) {
                         // Ok means the close *request* was accepted (a busy
                         // pane may show a confirm the user can cancel). The
                         // session closes when the real PaneClosed arrives.
-                        Ok(()) => {
-                            ExecOutcome::Ack(vec![AdapterUpdate::CloseDelivered { seq }], None)
-                        }
+                        Ok(()) => ExecOutcome::Ack(AdapterUpdate::CloseDelivered { seq }),
                         Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                         Err(message) => {
                             eprintln!("agents: close delivery failed: {message}");
-                            ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                            ExecOutcome::Ack(AdapterUpdate::DeliveryFailed { seq })
                         }
                     },
                 }
@@ -1104,12 +1079,12 @@ mod tests {
                 ms(),
             )
             .unwrap_err();
-        assert!(err.contains("already bound"), "{err}");
+        assert!(err.to_string().contains("already bound"), "{err}");
         let err = adapter
             .registry()
             .apply(AdapterUpdate::PromptDelivered { seq: seq + 100 }, ms())
             .unwrap_err();
-        assert!(err.contains("unknown effect"), "{err}");
+        assert!(err.to_string().contains("unknown effect"), "{err}");
     }
 
     #[test]
@@ -1125,8 +1100,8 @@ mod tests {
             Response::FocusAccepted { .. }
         ));
         assert!(matches!(
-            call(adapter.registry(), Request::Interrupt { session }),
-            Response::InterruptAccepted { .. }
+            call(adapter.registry(), Request::Close { session }),
+            Response::CloseAccepted { .. }
         ));
         let pending = adapter.registry().peek_effects();
         assert_eq!(pending.len(), 2);
@@ -1134,7 +1109,7 @@ mod tests {
         assert!(matches!(pending[0].body, EffectBody::FocusRequested { .. }));
         assert!(adapter.process_one(&mut host, ms()));
         assert_eq!(host.focuses.len(), 1);
-        assert_eq!(host.keys.len(), 0, "interrupt not processed yet");
+        assert_eq!(host.closes.len(), 0, "close not processed yet");
         let remaining = adapter.registry().peek_effects();
         assert_eq!(remaining.len(), 1);
         assert_ne!(

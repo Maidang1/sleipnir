@@ -4,23 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// `$SLEIPNIR_CONTROL_SOCKET` if set and non-empty, else `~/.config/sleipnir/control.sock`.
+/// `$SLEIPNIR_CONTROL_SOCKET` if set and non-empty, else the canonical
+/// `control.sock` under [`sleipnir_paths::config_dir`].
 pub fn socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("SLEIPNIR_CONTROL_SOCKET") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
     }
-    if cfg!(windows) {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-            .join("control.sock")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir/control.sock")
-    }
+    sleipnir_paths::control_socket_path()
 }
 
 /// `SLEIPNIR_CONTROL=1` (or `true`) turns the surface on regardless of settings.

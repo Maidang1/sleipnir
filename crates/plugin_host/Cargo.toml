@@ -9,11 +9,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-dirs.workspace = true
 libc.workspace = true
 log.workspace = true
 plugin_protocol.workspace = true
-schemars.workspace = true
+sleipnir_paths.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

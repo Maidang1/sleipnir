@@ -42,20 +42,6 @@ fn resolve_cwd(raw: &str) -> Option<PathBuf> {
     }
 }
 
-fn apply_draw_scene_call(
-    plugin_panels: &mut crate::plugin_panel::PanelRegistry,
-    plugin_id: &str,
-    instance_id: uuid::Uuid,
-    pane: PaneKey,
-    scene: plugin_protocol::v2::SceneData,
-) -> HostCallResult {
-    if plugin_panels.set_scene(pane, plugin_id, instance_id, scene) {
-        HostCallResult::SceneOk
-    } else {
-        crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
-    }
-}
-
 impl AppShell {
     pub(super) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
@@ -432,24 +418,6 @@ impl AppShell {
                 }
             }
             CallPlan::OpenPane { cwd, command } => self.execute_open_pane(cwd, command, window, cx),
-            CallPlan::DrawScene { pane, scene } => {
-                // A fresh scene from the plugin is authoritative, including its
-                // camera: the host adopts it so the plugin's own controls (spin,
-                // rescan, cd) keep the view in sync. Host-driven camera moves go
-                // the other way and never resend the scene (see the camera
-                // action path), so this cannot fight an in-progress drag.
-                let result = apply_draw_scene_call(
-                    &mut self.plugin_panels,
-                    plugin_id,
-                    instance_id,
-                    pane,
-                    scene,
-                );
-                if matches!(result, HostCallResult::SceneOk) {
-                    window.refresh();
-                }
-                result
-            }
             CallPlan::ScrollToRun { run_id } => {
                 let pane = if cx.has_global::<RunLedgerGlobal>() {
                     cx.global::<RunLedgerGlobal>()
@@ -1066,8 +1034,9 @@ pub(super) fn run_event_to_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
     use crate::plugin_panel::PanelSurface;
-    use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData, Tone, Widget};
+    use plugin_protocol::v2::{Tone, Widget};
     use uuid::Uuid;
 
     fn text(s: &str) -> Widget {
@@ -1165,11 +1134,8 @@ mod tests {
             scene: Some(scene(0.1)),
         });
 
-        let result = apply_draw_scene_call(&mut panels, "demo", new_owner, pane, scene(0.9));
-        assert_eq!(
-            result,
-            crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
-        );
+        let result = panels.set_scene(pane, "demo", new_owner, scene(0.9));
+        assert!(!result);
         let surface = panels.get(pane).expect("surface remains");
         assert_eq!(surface.owner_instance_id, old_owner);
         assert_eq!(surface.surface_id, old_surface_id);
@@ -1193,11 +1159,8 @@ mod tests {
             scene: Some(scene(0.2)),
         });
 
-        let result = apply_draw_scene_call(&mut panels, "demo", new_owner, pane, scene(0.8));
-        assert_eq!(
-            result,
-            crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
-        );
+        let result = panels.set_scene(pane, "demo", new_owner, scene(0.8));
+        assert!(!result);
         let surface = panels.get(pane).expect("surface remains");
         assert_eq!(surface.owner_instance_id, old_owner);
         assert_eq!(surface.surface_id, old_surface_id);

@@ -526,7 +526,7 @@ pub(super) fn paint_node(
 /// round-trip. The selected bar's faces get a thin accent outline so the eye
 /// lands on the row the legend names.
 pub(super) fn paint_panel_scene(
-    scene: &plugin_protocol::v2::SceneData,
+    scene: &crate::panel_scene_paint::SceneData,
     bounds: Bounds<Pixels>,
     border: Hsla,
     window: &mut Window,

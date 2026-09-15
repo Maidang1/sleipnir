@@ -5,9 +5,9 @@
 //! find bar and quick-select remain independent transient modes because they
 //! intentionally coexist with normal terminal content.
 //!
-//! Note that the confirm dialog (`AppShell::close_confirm`) is a third modal
-//! surface that lives outside this enum and can coexist with any overlay; the
-//! key-down chain gives it priority.
+//! Confirm, menus, and rename are still stored as separate fields on the
+//! shell. [`InputMode`] is the single keyboard owner derived from those
+//! fields plus [`UiMode`], so capture-key handling is a match, not a ladder.
 
 use crate::chrome::pane_facts::PaneFacts;
 use run_ledger::PaneKey;
@@ -94,6 +94,18 @@ impl UiMode {
         self.quick_select_open = !self.quick_select_open;
         self.quick_select_open
     }
+}
+
+/// Who currently owns capture-phase keyboard input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputMode {
+    Terminal,
+    Confirm,
+    Consent,
+    Menu,
+    Overlay(OverlayKind),
+    Find,
+    Rename,
 }
 
 /// How long a facts snapshot stays current before the panel collects again.

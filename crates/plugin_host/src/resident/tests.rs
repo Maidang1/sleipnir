@@ -1946,7 +1946,7 @@ fn declared_capabilities_include_resident_from_lifecycle() {
             title: "Run".into(),
             description: String::new(),
             keywords: vec![],
-            permissions: BTreeSet::from([crate::Permission::ReadCwd]),
+            permissions: BTreeSet::from([plugin_protocol::v2::Capability::ReadCwd]),
             timeout_secs: None,
         }],
     };
@@ -1971,9 +1971,9 @@ fn declared_capabilities_include_plugin_level_v2_permissions() {
         binary: "x".into(),
         args: vec![],
         permissions: BTreeSet::from([
-            crate::Permission::SubscribeEvents,
-            crate::Permission::RenderBlock,
-            crate::Permission::ReadCwd,
+            plugin_protocol::v2::Capability::SubscribeEvents,
+            plugin_protocol::v2::Capability::RenderBlock,
+            plugin_protocol::v2::Capability::ReadCwd,
         ]),
         commands: vec![],
     };

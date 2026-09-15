@@ -10,51 +10,10 @@ states the exact size and percentage of the highlighted bar.
 
 ## How it renders
 
-The plugin sends the host a compact **scene**: the grid size, one bar per entry
-(grid cell, normalised height `0..1`, RGB colour, selected flag) and a camera
-(yaw, pitch, zoom). The host projects that geometry against the panel's real
-pixel bounds and paints it as filled vector polygons (`paint_path`), sorted
-back-to-front. Two things fall out of that split:
-
-- **Crisp at any size.** There is no bitmap to scale; the polygons are
-  re-projected every frame against the current bounds, so resizing the split
-  re-fits the picture instead of stretching pixels.
-- **Smooth, local camera.** The host owns the interactive camera: a drag mutates
-  the stored scene camera and repaints immediately, with no plugin round-trip per
-  frame. The final camera is reported back to the plugin as a throttled `camera`
-  action so the plugin-owned legend stays in sync.
-
-The projection is genuine, not faked:
-
-- **Orthographic projection.** Deliberately not perspective: a chart must stay
-  measurable, and equal shares must read as equal from any angle.
-- **Painter's algorithm.** Faces are sorted by depth and painted far-to-near, so
-  bars correctly hide each other at every rotation.
-- **Lambert shading** with the light fixed in world space. This is what sells the
-  depth — faces brighten and darken as the model turns.
-- **Auto-fit framing.** The projected bounding box is measured every frame and
-  mapped into the panel, so the scene cannot drift off-surface at any rotation,
-  zoom or bar count.
-
-### Camera sync (no loopback)
-
-The host drives the camera; the plugin is the authority on data and the legend.
-The rule that keeps them from fighting:
-
-- **Host → plugin:** a drag/zoom sends a `camera` action. The plugin updates its
-  own camera and resends **chrome only** (the legend), never the scene.
-- **Plugin → host:** the plugin's own controls (spin, rescan, `cd`, the button
-  arrows) resend the **scene**, camera included, which the host adopts on arrival.
-
-So "a scene arriving adopts its camera; a `camera` action never triggers a
-scene."
-
-### Text fallback
-
-When the host has not granted `host_call_draw_scene`, the plugin falls back to a
-software rasteriser whose framebuffer is character cells (orthographic
-projection, per-cell z-buffer, Lambert shading quantised onto `░▒▓`). It looks
-like this:
+The plugin projects the chart into a widget tree and `render`s it into a panel.
+There is no separate host-side scene call. The rasteriser's framebuffer is
+character cells (orthographic projection, per-cell z-buffer, Lambert shading
+quantised onto `░▒▓`). It looks like this:
 
 ```
 [disk 3d]  crates  1.74M
@@ -75,8 +34,7 @@ bar 1 of 12  ·  yaw 40°  pitch 24°  zoom 1.0x
 <◀> <▶> <▲> <▼> <+> <-> <Next bar> <Spin ½ turn> <Rescan>
 ```
 
-`CELL_ASPECT = 0.5` compensates for cells being about twice as tall as wide in
-that fallback; the host vector path uses square pixels and needs no such factor.
+`CELL_ASPECT = 0.5` compensates for cells being about twice as tall as wide.
 
 ## Design constraints worth knowing
 
@@ -132,7 +90,7 @@ Plugins are off by default; enable them in `~/.config/sleipnir/settings.json`:
 ```
 
 Start Sleipnir, approve the consent prompt (`resident`, `render_panel`,
-`subscribe_events`, `read_cwd`, `host_call_draw_scene`), then run
+`subscribe_events`, `read_cwd`), then run
 **"Disk 3D: Chart This Directory"** from the command palette. `cd` elsewhere and
 the chart follows.
 

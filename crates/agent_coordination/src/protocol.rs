@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 /// Protocol version this crate speaks. The future socket server will
 /// advertise this on connect; a mismatch is a refuse, not a silent coerce.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Opaque id of one visible agent session (one pane's integrated agent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -107,9 +107,6 @@ pub enum Writer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
-    /// Registry accepted the request; the adapter effect is not yet queued
-    /// (unused at rest: handle() moves to [`Dispatching`] in the same step).
-    Accepted,
     /// An adapter effect is pending or in delivery.
     Dispatching,
     /// Work is in flight in the visible pane.
@@ -137,11 +134,7 @@ impl TaskStatus {
     pub fn is_in_flight(self) -> bool {
         matches!(
             self,
-            Self::Accepted
-                | Self::Dispatching
-                | Self::Running
-                | Self::AwaitingHuman
-                | Self::Interrupting
+            Self::Dispatching | Self::Running | Self::AwaitingHuman | Self::Interrupting
         )
     }
 }
@@ -151,18 +144,6 @@ impl TaskStatus {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     List,
-    /// Continue a session summary page. Offsets are snapshots, not stable cursors.
-    ListPage {
-        offset: usize,
-    },
-    InspectPage {
-        session: AgentSessionId,
-        offset: usize,
-    },
-    /// Continue the diagnostic effect stream after the last sequence number.
-    EffectsPage {
-        cursor: u64,
-    },
     Launch {
         kind: AgentKind,
         cwd: String,
@@ -179,11 +160,6 @@ pub enum Request {
     /// Immediate status snapshot. The client owns any real waiting.
     Wait {
         task: CoordinationTaskId,
-    },
-    /// Continue a bounded wait result page after `offset` characters.
-    WaitPage {
-        task: CoordinationTaskId,
-        offset: usize,
     },
     Interrupt {
         session: AgentSessionId,
@@ -312,6 +288,10 @@ pub enum Response {
         facts: Vec<Fact>,
         next_cursor: u64,
         missed: u64,
+        /// More frames follow on this connection. Registry always sets this
+        /// false; the server sets it when splitting a fact batch to fit a line.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        more: bool,
     },
 }
 
@@ -408,8 +388,7 @@ pub enum EffectBody {
     InterruptRequested {
         session: AgentSessionId,
         /// The assignment targeted when the interrupt was accepted, never a later task.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        task: Option<CoordinationTaskId>,
+        task: CoordinationTaskId,
     },
     FocusRequested {
         session: AgentSessionId,
@@ -590,9 +569,6 @@ mod tests {
         let task = tid(2);
         let cases = [
             Request::List,
-            Request::ListPage { offset: 3 },
-            Request::InspectPage { session, offset: 4 },
-            Request::EffectsPage { cursor: 5 },
             Request::Launch {
                 kind: AgentKind::Codex,
                 cwd: "/work".into(),
@@ -604,7 +580,6 @@ mod tests {
                 text: "do the thing".into(),
             },
             Request::Wait { task },
-            Request::WaitPage { task, offset: 6 },
             Request::Interrupt { session },
             Request::Focus { session },
             Request::Inspect { session },
@@ -629,6 +604,17 @@ mod tests {
             assert_eq!(serde_json::from_str::<WireRequest>(&line).unwrap(), req);
             assert!(line.contains(r#""id":7"#));
             assert!(line.contains(r#""op":"#));
+        }
+    }
+
+    #[test]
+    fn page_ops_are_not_on_the_wire() {
+        for op in ["list_page", "inspect_page", "effects_page", "wait_page"] {
+            let raw = format!(r#"{{"id":1,"op":"{op}","offset":0}}"#);
+            assert!(
+                serde_json::from_str::<WireRequest>(&raw).is_err(),
+                "{op} must not decode"
+            );
         }
     }
 

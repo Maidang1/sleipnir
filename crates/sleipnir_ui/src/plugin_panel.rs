@@ -9,7 +9,7 @@
 //! Pure decision logic. No gpui, no window. The shell calls these helpers,
 //! then paints the [`sleipnir_widget::Layout`] they did not recompute.
 
-use plugin_protocol::v2::{SceneData, Widget};
+use plugin_protocol::v2::Widget;
 use sleipnir_widget::{Hit, Layout, hit_test, layout};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -17,10 +17,8 @@ use uuid::Uuid;
 use crate::pane_tree::PaneKey;
 use crate::plugin_surface::{StaleRegistry, Surface};
 
-/// A 3D scene sent by a plugin, projected and painted host-side in the panel.
-/// Mirrors [`plugin_protocol::v2::SceneData`]; the host stores it verbatim and
-/// owns projection so the picture stays crisp at any panel size.
-pub type PanelScene = SceneData;
+/// A 3D scene stored on a panel. Host-local; not a protocol type.
+pub type PanelScene = crate::panel_scene_paint::SceneData;
 
 /// One plugin-drawn panel. The tree is data; the host stores it.
 #[derive(Clone, Debug, PartialEq)]
@@ -187,7 +185,7 @@ impl PanelRegistry {
     pub fn set_scene_camera(
         &mut self,
         pane: PaneKey,
-        camera: plugin_protocol::v2::SceneCamera,
+        camera: crate::panel_scene_paint::SceneCamera,
     ) -> bool {
         match self.surfaces.get_mut(&pane) {
             Some(surface) => match surface.scene.as_mut() {
@@ -486,7 +484,7 @@ mod tests {
 
     #[test]
     fn set_scene_requires_owner_and_camera_update_is_in_place() {
-        use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
+        use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
         let mut reg = PanelRegistry::new();
         let terminals = BTreeSet::new();
         let owner = Uuid::from_u128(1);
@@ -535,7 +533,7 @@ mod tests {
 
     #[test]
     fn stale_reclaim_clears_old_scene() {
-        use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
+        use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
 
         let mut reg = PanelRegistry::new();
         let terminals = BTreeSet::new();
@@ -579,7 +577,7 @@ mod tests {
 
     #[test]
     fn clone_and_insert_surfaces_preserve_surface_identity_and_scene() {
-        use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
+        use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
 
         let mut source = PanelRegistry::new();
         let mut target = PanelRegistry::new();

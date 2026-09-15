@@ -17,7 +17,7 @@
 //! Pure decision logic. No gpui, no window, no process spawn. The shell
 //! executes the plan and always calls `reply`.
 
-use plugin_protocol::v2::{Capability, HostCall, HostCallResult, PaneInfo, RunId, SceneData};
+use plugin_protocol::v2::{Capability, HostCall, HostCallResult, PaneInfo, RunId};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::pane_tree::PaneKey;
@@ -41,15 +41,7 @@ pub const MAX_OPEN_ARG_CHARS: usize = 256;
 pub const RATE_WINDOW_MS: u64 = 5_000;
 /// Max accepted calls per plugin in [`RATE_WINDOW_MS`].
 pub const RATE_MAX_CALLS: u32 = 10;
-/// Max bars in one DrawScene call. Matches the scanner's `MAX_BARS` with
-/// generous headroom; an external plugin sending more is malformed, not drawn.
-pub const MAX_SCENE_BARS: usize = 256;
-/// Max grid extent (cols or rows) in one DrawScene call. A bar grid larger than
-/// this cannot be laid out legibly and is almost certainly a bad payload.
-pub const MAX_SCENE_GRID: u32 = 64;
-/// SendText payload cap. Oversize is an error, not truncation: silently
-/// cutting a prompt could execute a different command than the plugin sent.
-pub const MAX_SEND_TEXT_CHARS: usize = 8 * 1024;
+pub use plugin_protocol::v2::MAX_SEND_TEXT_CHARS;
 
 /// Allowlisted logical keys for [`HostCall::SendKey`]. Names, not bytes;
 /// sufficient for interruption and prompt navigation. Unknown names are
@@ -119,9 +111,7 @@ pub struct OpenCommand {
 }
 
 /// What the UI should do for one `Call`. Always ends in a reply.
-///
-/// Not `Eq`: `DrawScene` carries floating-point geometry.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallPlan {
     /// No side effect: send this result as the Reply.
     Reply(HostCallResult),
@@ -136,10 +126,6 @@ pub enum CallPlan {
     OpenPane {
         cwd: Option<String>,
         command: Option<OpenCommand>,
-    },
-    DrawScene {
-        pane: PaneKey,
-        scene: SceneData,
     },
     ScrollToRun {
         run_id: RunId,
@@ -213,10 +199,7 @@ pub fn plan_call(
             message: format!("capability {need:?} not granted"),
         });
     }
-    // DrawScene is exempt from the anti-spam limiter: it only repaints the
-    // host's own surface (no external side effect like Notify / OpenPane),
-    // and legitimate animations (e.g. a spinning scene) exceed the budget.
-    if !matches!(call, HostCall::DrawScene { .. }) && !limiter.allow(plugin_id, now_ms) {
+    if !limiter.allow(plugin_id, now_ms) {
         return CallPlan::Reply(HostCallResult::Error {
             message: "rate limited".into(),
         });
@@ -242,13 +225,6 @@ pub fn plan_call(
                 Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
             }
         }
-        HostCall::DrawScene { pane, scene } => match validate_scene(scene) {
-            Ok(()) => CallPlan::DrawScene {
-                pane: *pane,
-                scene: scene.clone(),
-            },
-            Err(message) => CallPlan::Reply(HostCallResult::Error { message }),
-        },
         HostCall::ScrollToRun { run_id } => CallPlan::ScrollToRun { run_id: *run_id },
         HostCall::FocusPane { pane } => CallPlan::FocusPane { pane: *pane },
         HostCall::SendText { pane, text, enter } => match validate_send_text(text) {
@@ -366,40 +342,6 @@ pub fn parse_open_command(command: &str) -> Result<OpenCommand, String> {
 /// Truncate visible screen text at a char boundary.
 pub fn cap_screen(text: String) -> String {
     cap_chars(&text, MAX_SCREEN_CHARS)
-}
-
-/// Validate a `DrawScene` payload before the host stores it.
-///
-/// Cheap structural checks only: bar count and grid extent are bounded so a
-/// malformed or hostile plugin cannot force the host to lay out an absurd grid,
-/// and every bar must sit inside the declared grid. Geometry values (height,
-/// colour) are clamped at paint time, not rejected here.
-fn validate_scene(scene: &SceneData) -> Result<(), String> {
-    if scene.bars.len() > MAX_SCENE_BARS {
-        return Err(format!(
-            "scene has {} bars, exceeds {MAX_SCENE_BARS}",
-            scene.bars.len()
-        ));
-    }
-    // An empty scene is legal (nothing to chart); a non-empty one needs a grid.
-    if !scene.bars.is_empty() && (scene.cols == 0 || scene.rows == 0) {
-        return Err("scene has bars but a zero-sized grid".into());
-    }
-    if scene.cols > MAX_SCENE_GRID || scene.rows > MAX_SCENE_GRID {
-        return Err(format!(
-            "scene grid {}x{} exceeds {MAX_SCENE_GRID}",
-            scene.cols, scene.rows
-        ));
-    }
-    for bar in &scene.bars {
-        if bar.gx >= scene.cols || bar.gz >= scene.rows {
-            return Err(format!(
-                "bar at ({},{}) is outside the {}x{} grid",
-                bar.gx, bar.gz, scene.cols, scene.rows
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// ListPanes reports only terminal panes. A plugin Panel is not a PTY and
@@ -689,25 +631,6 @@ mod tests {
     }
 
     #[test]
-    fn draw_scene_is_exempt_from_the_rate_limiter() {
-        // DrawScene only repaints the host's own surface; it has no external
-        // side effect like Notify / OpenPane. The anti-spam limiter must not
-        // freeze a granted animation (a spinning scene sends 22 frames in 1.8s).
-        let mut limiter = HostCallLimiter::new();
-        let granted = [Capability::HostCallDrawScene];
-        let call = scene(1, 1, vec![bar(0, 0)]);
-        for i in 0..RATE_MAX_CALLS + 12 {
-            let plan = plan_call("gfx", &call, &granted, &mut limiter, 1_000);
-            assert!(
-                matches!(plan, CallPlan::DrawScene { .. }),
-                "frame {i} must not be rate limited, got {plan:?}"
-            );
-        }
-        // Exemption must not count towards (or inflate) the dropped counter.
-        assert_eq!(limiter.dropped_counts().get("gfx").copied().unwrap_or(0), 0);
-    }
-
-    #[test]
     fn open_command_is_argv_not_a_shell_line() {
         let cmd = parse_open_command("cargo test --all").unwrap();
         assert_eq!(cmd.program, "cargo");
@@ -938,117 +861,8 @@ mod tests {
         assert!(matches!(plan, CallPlan::ListPanes));
     }
 
-    fn scene(cols: u32, rows: u32, bars: Vec<plugin_protocol::v2::SceneBar>) -> HostCall {
-        HostCall::DrawScene {
-            pane: key(1),
-            scene: SceneData {
-                cols,
-                rows,
-                floor: [18, 18, 22],
-                camera: plugin_protocol::v2::SceneCamera::default(),
-                bars,
-            },
-        }
-    }
-
-    fn bar(gx: u32, gz: u32) -> plugin_protocol::v2::SceneBar {
-        plugin_protocol::v2::SceneBar {
-            gx,
-            gz,
-            height: 0.5,
-            color: [40, 70, 95],
-            selected: false,
-        }
-    }
-
-    #[test]
-    fn draw_scene_accepts_a_well_formed_scene() {
-        let mut limiter = HostCallLimiter::new();
-        let call = scene(2, 2, vec![bar(0, 0), bar(1, 1)]);
-        let plan = plan_call(
-            "gfx",
-            &call,
-            &[Capability::HostCallDrawScene],
-            &mut limiter,
-            0,
-        );
-        match plan {
-            CallPlan::DrawScene { pane, scene } => {
-                assert_eq!(pane, key(1));
-                assert_eq!(scene.bars.len(), 2);
-            }
-            other => panic!("expected DrawScene, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn draw_scene_rejects_too_many_bars() {
-        let mut limiter = HostCallLimiter::new();
-        let bars: Vec<_> = (0..MAX_SCENE_BARS + 1).map(|_| bar(0, 0)).collect();
-        let call = scene(MAX_SCENE_GRID, MAX_SCENE_GRID, bars);
-        let plan = plan_call(
-            "gfx",
-            &call,
-            &[Capability::HostCallDrawScene],
-            &mut limiter,
-            0,
-        );
-        match plan {
-            CallPlan::Reply(HostCallResult::Error { message }) => {
-                assert!(message.contains("exceeds"), "{message}");
-            }
-            other => panic!("expected Error reply, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn draw_scene_rejects_out_of_grid_bar_and_bad_dimensions() {
-        let mut limiter = HostCallLimiter::new();
-        // A bar outside the declared grid.
-        let call = scene(1, 1, vec![bar(2, 0)]);
-        let plan = plan_call(
-            "gfx",
-            &call,
-            &[Capability::HostCallDrawScene],
-            &mut limiter,
-            0,
-        );
-        assert!(matches!(
-            plan,
-            CallPlan::Reply(HostCallResult::Error { .. })
-        ));
-        // Bars present but a zero-sized grid.
-        let call = scene(0, 0, vec![bar(0, 0)]);
-        let plan = plan_call(
-            "gfx",
-            &call,
-            &[Capability::HostCallDrawScene],
-            &mut limiter,
-            0,
-        );
-        assert!(matches!(
-            plan,
-            CallPlan::Reply(HostCallResult::Error { .. })
-        ));
-        // An oversized grid.
-        let call = scene(MAX_SCENE_GRID + 1, 1, vec![]);
-        let plan = plan_call(
-            "gfx",
-            &call,
-            &[Capability::HostCallDrawScene],
-            &mut limiter,
-            0,
-        );
-        assert!(matches!(
-            plan,
-            CallPlan::Reply(HostCallResult::Error { .. })
-        ));
-    }
-
     #[test]
     fn scroll_to_run_plans_when_granted_and_uses_the_default_rate_limiter() {
-        // Unlike DrawScene, ScrollToRun is not exempt from the anti-spam
-        // limiter: it steals the user's scroll position, an external effect.
         let mut limiter = HostCallLimiter::new();
         let granted = [Capability::HostCallScrollToRun];
         let call = HostCall::ScrollToRun { run_id: key(9) };
@@ -1066,17 +880,6 @@ mod tests {
             limiter.dropped_counts().get("demo").copied().unwrap_or(0),
             1
         );
-    }
-
-    #[test]
-    fn draw_scene_needs_its_capability() {
-        let mut limiter = HostCallLimiter::new();
-        let call = scene(1, 1, vec![bar(0, 0)]);
-        let plan = plan_call("gfx", &call, &[], &mut limiter, 0);
-        assert!(matches!(
-            plan,
-            CallPlan::Reply(HostCallResult::Error { .. })
-        ));
     }
 
     fn send_text(text: &str, enter: bool) -> HostCall {

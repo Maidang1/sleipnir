@@ -290,14 +290,12 @@ is no patch protocol.
 ## Host calls
 
 A resident plugin can also ask the host to act (`Context::call`, or the typed
-wrappers such as `Context::draw_scene`, `Context::focus_pane`,
+wrappers such as `Context::focus_pane`,
 `Context::send_text`, `Context::send_key`, `Context::request_close_pane`,
 `Context::open_pane_argv`).
 Each call is gated by its own capability, and every `Call` id gets exactly
 one `Reply` — denial is
-`HostCallResult::Error`, never silence. Calls are rate-limited per plugin
-(`draw_scene` is exempt: repainting the host's own surface has no external
-side effect).
+`HostCallResult::Error`, never silence. Calls are rate-limited per plugin.
 
 | Call | Capability | Effect |
 | --- | --- | --- |
@@ -306,7 +304,6 @@ side effect).
 | `list_panes` | `host_call_list_panes` | open terminal panes |
 | `open_pane` | `host_call_open_pane` | spawn a pane from a whitespace-split command string |
 | `open_pane_argv` | `host_call_open_pane` | spawn a pane from structured `{ cwd, program, args }` (never a shell line) |
-| `draw_scene` | `host_call_draw_scene` | replace a panel's 3D scene |
 | `scroll_to_run` | `host_call_scroll_to_run` | jump a pane's scrollback to a run |
 | `focus_pane` | `host_call_focus_pane` | focus a specific terminal pane |
 | `send_text` | `host_call_send_text` | type into a specific terminal pane (paste-aware) |
@@ -431,7 +428,6 @@ by the snapshot set.
 | `host_call_read_screen` | elevated | read any pane's screen |
 | `host_call_list_panes` | elevated | list open panes |
 | `host_call_open_pane` | elevated | open a new pane |
-| `host_call_draw_scene` | elevated | draw a 3D scene in a panel |
 | `host_call_scroll_to_run` | elevated | jump a pane back to a run's output |
 | `host_call_focus_pane` | elevated | focus a specific terminal pane |
 | `host_call_send_text` | elevated | type into a specific terminal pane |

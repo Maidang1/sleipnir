@@ -18,8 +18,8 @@ path = "src/main.rs"
 [dependencies]
 sleipnir-plugin.workspace = true
 run_ledger.workspace = true
+sleipnir_paths.workspace = true
 uuid.workspace = true
-dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

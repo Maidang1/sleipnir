@@ -26,8 +26,8 @@ pub use crate::widgets::{
 use plugin_protocol::v2::Output as WireOutput;
 pub use plugin_protocol::v2::{
     BlockId, Capability, CommandSpec, EventFilter, EventKind, HostCall, HostCallResult, HostEvent,
-    InvokeContext, Lifecycle, Manifest, MessageId, PROTOCOL_VERSION, PaneInfo, PaneKey,
-    RenderTarget, RunId, SceneBar, SceneCamera, SceneData, Tone, Widget,
+    InvokeContext, Lifecycle, MAX_SEND_TEXT_CHARS, Manifest, MessageId, PROTOCOL_VERSION, PaneInfo,
+    PaneKey, RenderTarget, RunId, Tone, Widget,
 };
 
 /// One command invocation delivered to the plugin.
@@ -159,20 +159,6 @@ impl Context<'_> {
 
     pub fn call_with_timeout(&mut self, call: HostCall, timeout: Duration) -> HostCallResult {
         self.io.call(call, timeout)
-    }
-
-    /// Send a 3D scene to the host for display in a panel.
-    ///
-    /// The host owns projection and painting: it draws the geometry as vector
-    /// polygons against the panel's real pixel bounds, so the chart stays crisp
-    /// at any size and the camera can move host-side without a round-trip per
-    /// frame. Returns `Ok(())` when the host accepts the scene.
-    pub fn draw_scene(&mut self, pane: PaneKey, scene: SceneData) -> Result<(), String> {
-        match self.call(HostCall::DrawScene { pane, scene }) {
-            HostCallResult::SceneOk => Ok(()),
-            HostCallResult::Error { message } => Err(message),
-            other => Err(format!("unexpected result: {other:?}")),
-        }
     }
 
     /// Scroll a pane back to the output anchor of `run_id` and focus it.

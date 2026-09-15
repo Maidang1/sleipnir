@@ -34,7 +34,7 @@ use crate::command_palette::{CommandId, CommandItem, commands as palette_command
 use crate::pane_tree::{CloseOutcome, Direction, PaneId, PaneRect, SplitAxis, SplitPath, neighbor};
 use crate::run_ledger_global::RunLedgerGlobal;
 pub(crate) use crate::tab_convert::Tab;
-use crate::ui_mode::{OverlayKind, PaneFactsState, UiMode};
+use crate::ui_mode::{InputMode, OverlayKind, PaneFactsState, UiMode};
 use crate::{TermView, UpdateModel, UpdateUiState};
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
@@ -471,6 +471,220 @@ impl Focusable for AppShell {
 
 impl EventEmitter<()> for AppShell {}
 
+impl AppShell {
+    fn input_mode(&self) -> InputMode {
+        if self.close_confirm.is_some() {
+            InputMode::Confirm
+        } else if self.mode.is(OverlayKind::PluginConsent) {
+            InputMode::Consent
+        } else if self.tab_menu.is_some() || self.terminal_menu.is_some() {
+            InputMode::Menu
+        } else if self.mode.overlay != OverlayKind::None {
+            InputMode::Overlay(self.mode.overlay)
+        } else if self.mode.find_open {
+            InputMode::Find
+        } else if self.rename.is_some() {
+            InputMode::Rename
+        } else {
+            InputMode::Terminal
+        }
+    }
+
+    fn handle_capture_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.input_mode() {
+            InputMode::Confirm => match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.confirm_close_cancel(window, cx);
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    self.confirm_close_proceed(window, cx);
+                    cx.stop_propagation();
+                }
+                _ => {
+                    if !event.keystroke.modifiers.platform {
+                        cx.stop_propagation();
+                    }
+                }
+            },
+            InputMode::Consent => match event.keystroke.key.as_str() {
+                "escape" | "enter" => {
+                    self.deny_plugin_consent(cx);
+                    cx.stop_propagation();
+                }
+                _ => {
+                    if !event.keystroke.modifiers.platform {
+                        cx.stop_propagation();
+                    }
+                }
+            },
+            InputMode::Menu => {
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "escape" => {
+                        self.tab_menu = None;
+                        self.terminal_menu = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "down" | "up" if !event.keystroke.modifiers.platform => {
+                        let count = if self.tab_menu.is_some() {
+                            AppShell::TAB_MENU_ITEM_COUNT
+                        } else {
+                            self.terminal_menu_items().len()
+                        };
+                        let selected = self
+                            .tab_menu
+                            .as_ref()
+                            .map(|m| m.selected)
+                            .or_else(|| self.terminal_menu.as_ref().map(|m| m.selected))
+                            .unwrap_or(0);
+                        let next = if key == "down" {
+                            (selected + 1) % count.max(1)
+                        } else {
+                            (selected + count.max(1) - 1) % count.max(1)
+                        };
+                        if let Some(menu) = self.tab_menu.as_mut() {
+                            menu.selected = next;
+                        } else if let Some(menu) = self.terminal_menu.as_mut() {
+                            menu.selected = next;
+                        }
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "enter" => {
+                        let selected = self
+                            .tab_menu
+                            .as_ref()
+                            .map(|m| m.selected)
+                            .or_else(|| self.terminal_menu.as_ref().map(|m| m.selected))
+                            .unwrap_or(0);
+                        if self.tab_menu.is_some() {
+                            self.run_tab_menu_item(selected, window, cx);
+                        } else if let Some(item) = self.terminal_menu_items().get(selected).copied()
+                        {
+                            self.run_terminal_menu_item(item, window, cx);
+                        }
+                        cx.stop_propagation();
+                    }
+                    _ => {
+                        if !event.keystroke.modifiers.platform {
+                            cx.stop_propagation();
+                        }
+                    }
+                }
+            }
+            InputMode::Overlay(OverlayKind::Update) => {
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_update(cx);
+                    cx.stop_propagation();
+                }
+                if !event.keystroke.modifiers.platform {
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Overlay(OverlayKind::PaneFacts) => {
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_pane_facts(cx);
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Overlay(OverlayKind::PluginMonitor) => {
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_plugin_monitor(cx);
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Overlay(OverlayKind::Palette) => {
+                if self.palette_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Overlay(OverlayKind::History) => {
+                self.history_key_down(event, window, cx);
+                if !event.keystroke.modifiers.platform {
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Find => {
+                if self.find_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Overlay(OverlayKind::Settings) => {
+                if self.settings.section == SettingsSection::Theme {
+                    match event.keystroke.key.as_str() {
+                        "up" | "arrowup" | "down" | "arrowdown" | "enter" => {
+                            self.settings_theme_key_down(event.keystroke.key.as_str(), cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "escape" => {
+                            if !self.settings.theme_query.is_empty() {
+                                self.settings.theme_query.clear();
+                                cx.notify();
+                            } else {
+                                self.close_settings(window, cx);
+                            }
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "backspace" => {
+                            self.settings.theme_query.pop();
+                            self.settings.theme_selected = 0;
+                            self.settings.theme_scroll.scroll_to_item(0);
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                        _ => {
+                            if !event.keystroke.modifiers.platform
+                                && let Some(ch) = event.keystroke.key_char.as_ref()
+                                && !ch.is_empty()
+                                && !ch.chars().any(|c| c.is_control())
+                            {
+                                self.settings.theme_query.push_str(ch);
+                                self.settings.theme_selected = 0;
+                                self.settings.theme_scroll.scroll_to_item(0);
+                                cx.notify();
+                            }
+                        }
+                    }
+                }
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_settings(window, cx);
+                    cx.stop_propagation();
+                }
+                if !event.keystroke.modifiers.platform {
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Overlay(OverlayKind::Diff) => {
+                if self.handle_diff_key(event, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                if !event.keystroke.modifiers.platform {
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Rename => {
+                if self.rename_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+            InputMode::Terminal
+            | InputMode::Overlay(OverlayKind::None)
+            | InputMode::Overlay(OverlayKind::PluginConsent) => {}
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn linux_window_open_diagnostic(source: &str) -> String {
     format!(
@@ -733,33 +947,6 @@ impl AppShell {
                         this.sync_window_title(window, cx);
                         cx.notify();
                     }
-                    crate::TermViewEvent::RequestNewTab => {
-                        this.add_tab(window, cx);
-                    }
-                    crate::TermViewEvent::RequestNextTab => {
-                        this.next_tab(window, cx);
-                    }
-                    crate::TermViewEvent::RequestPrevTab => {
-                        this.prev_tab(window, cx);
-                    }
-                    crate::TermViewEvent::RequestReloadSettings => {
-                        // Reload clears window font zoom override (plan risk mitigation).
-                        this.font_size_override = None;
-                        this.apply_font_override_to_all_panes(cx);
-                        TerminalSettings::reload(cx);
-                        RunLedgerGlobal::reload_settings_in(cx);
-                        crate::control_surface::reload(cx);
-                        crate::attention_chrome::refresh(cx);
-                        cx.notify();
-                    }
-                    crate::TermViewEvent::RequestCycleTheme => {
-                        let next = TerminalSettings::get_global(cx).theme.next();
-                        TerminalSettings::set_theme(next, cx);
-                        cx.notify();
-                    }
-                    crate::TermViewEvent::RequestOpenSettings => {
-                        this.toggle_settings(window, cx);
-                    }
                     crate::TermViewEvent::Bell => {
                         this.on_term_bell(view, cx);
                     }
@@ -795,11 +982,6 @@ impl AppShell {
                             this.apply_run_event(RunEvent::finished(pane, *exit_code, 0), cx);
                         }
                         cx.notify();
-                    }
-                    crate::TermViewEvent::GutterClicked { line } => {
-                        if let Some(pane) = this.pane_key_for_view(view) {
-                            this.jump_to_gutter(pane, *line, window, cx);
-                        }
                     }
                     crate::TermViewEvent::ContextMenu { position, link } => {
                         this.terminal_menu = Some(TerminalMenuState {
@@ -1703,35 +1885,6 @@ impl AppShell {
         crate::attention_chrome::refresh(cx);
     }
 
-    fn jump_to_gutter(
-        &mut self,
-        pane: run_ledger::PaneKey,
-        line: i32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let run_id = if cx.has_global::<RunLedgerGlobal>() {
-            let snapshot = cx.global::<RunLedgerGlobal>().snapshot();
-            run_id_for_gutter(&snapshot, pane, line)
-        } else {
-            None
-        };
-        if let Some(id) = run_id {
-            if cx.has_global::<RunLedgerGlobal>() {
-                cx.update_global(|g: &mut RunLedgerGlobal, _| {
-                    g.mark_run_seen(id);
-                });
-            }
-        }
-        self.jump_to_ledger_row(pane, run_id, window, cx);
-        if run_id.is_none() {
-            if let Some(view) = self.view_for_pane(pane) {
-                view.update(cx, |v, cx| v.scroll_to_anchor(line, 0, cx));
-            }
-        }
-        cx.notify();
-    }
-
     fn view_for_pane(&self, pane: run_ledger::PaneKey) -> Option<Entity<TermView>> {
         for tab in &self.tabs {
             let mut out = Vec::new();
@@ -1845,21 +1998,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Settings reload clears window-scoped font zoom.
-        self.font_size_override = None;
-        self.apply_font_override_to_all_panes(cx);
-        TerminalSettings::reload(cx);
-        self.refresh_plugin_commands(cx);
-        RunLedgerGlobal::reload_settings_in(cx);
-        crate::control_surface::reload(cx);
-        crate::attention_chrome::refresh(cx);
-        cx.notify();
+        self.reload_settings(cx);
     }
 
     fn on_cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
-        let next = TerminalSettings::get_global(cx).theme.next();
-        TerminalSettings::set_theme(next, cx);
-        cx.notify();
+        self.cycle_theme(cx);
     }
 
     // ── command palette (M9) ────────────────────────────────────────────────
@@ -2058,206 +2201,7 @@ impl Render for AppShell {
             // Intercept keys during overlays / rename before the focused terminal
             // sees them (capture phase runs top-down).
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if this.close_confirm.is_some() {
-                    match event.keystroke.key.as_str() {
-                        "escape" => {
-                            this.confirm_close_cancel(window, cx);
-                            cx.stop_propagation();
-                        }
-                        "enter" => {
-                            this.confirm_close_proceed(window, cx);
-                            cx.stop_propagation();
-                        }
-                        _ => {
-                            if !event.keystroke.modifiers.platform {
-                                cx.stop_propagation();
-                            }
-                        }
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::PluginConsent) {
-                    // Enter must not grant — Approve is an explicit click only.
-                    match event.keystroke.key.as_str() {
-                        "escape" | "enter" => {
-                            this.deny_plugin_consent(cx);
-                            cx.stop_propagation();
-                        }
-                        _ => {
-                            if !event.keystroke.modifiers.platform {
-                                cx.stop_propagation();
-                            }
-                        }
-                    }
-                    return;
-                }
-                if this.tab_menu.is_some() || this.terminal_menu.is_some() {
-                    let key = event.keystroke.key.as_str();
-                    match key {
-                        "escape" => {
-                            this.tab_menu = None;
-                            this.terminal_menu = None;
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                        "down" | "up" if !event.keystroke.modifiers.platform => {
-                            let count = if this.tab_menu.is_some() {
-                                AppShell::TAB_MENU_ITEM_COUNT
-                            } else {
-                                this.terminal_menu_items().len()
-                            };
-                            let selected = this
-                                .tab_menu
-                                .as_ref()
-                                .map(|m| m.selected)
-                                .or_else(|| this.terminal_menu.as_ref().map(|m| m.selected))
-                                .unwrap_or(0);
-                            let next = if key == "down" {
-                                (selected + 1) % count.max(1)
-                            } else {
-                                (selected + count.max(1) - 1) % count.max(1)
-                            };
-                            if let Some(menu) = this.tab_menu.as_mut() {
-                                menu.selected = next;
-                            } else if let Some(menu) = this.terminal_menu.as_mut() {
-                                menu.selected = next;
-                            }
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                        "enter" => {
-                            let selected = this
-                                .tab_menu
-                                .as_ref()
-                                .map(|m| m.selected)
-                                .or_else(|| this.terminal_menu.as_ref().map(|m| m.selected))
-                                .unwrap_or(0);
-                            if this.tab_menu.is_some() {
-                                this.run_tab_menu_item(selected, window, cx);
-                            } else if let Some(item) =
-                                this.terminal_menu_items().get(selected).copied()
-                            {
-                                this.run_terminal_menu_item(item, window, cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        _ => {
-                            if !event.keystroke.modifiers.platform {
-                                cx.stop_propagation();
-                            }
-                        }
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::Update) {
-                    if event.keystroke.key.as_str() == "escape" {
-                        this.close_update(cx);
-                        cx.stop_propagation();
-                    }
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::PaneFacts) && event.keystroke.key.as_str() == "escape"
-                {
-                    this.close_pane_facts(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.mode.is(OverlayKind::PluginMonitor)
-                    && event.keystroke.key.as_str() == "escape"
-                {
-                    this.close_plugin_monitor(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.mode.is(OverlayKind::Palette) {
-                    if this.palette_key_down(event, window, cx) {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::History) {
-                    this.history_key_down(event, window, cx);
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.find_open {
-                    if this.find_key_down(event, window, cx) {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::Settings) {
-                    // Type-to-filter the theme picker when that section is
-                    // active; escape clears the filter before closing.
-                    if this.settings.section == SettingsSection::Theme {
-                        match event.keystroke.key.as_str() {
-                            "up" | "arrowup" | "down" | "arrowdown" | "enter" => {
-                                this.settings_theme_key_down(event.keystroke.key.as_str(), cx);
-                                cx.stop_propagation();
-                                return;
-                            }
-                            "escape" => {
-                                if !this.settings.theme_query.is_empty() {
-                                    this.settings.theme_query.clear();
-                                    cx.notify();
-                                } else {
-                                    this.close_settings(window, cx);
-                                }
-                                cx.stop_propagation();
-                                return;
-                            }
-                            "backspace" => {
-                                this.settings.theme_query.pop();
-                                this.settings.theme_selected = 0;
-                                this.settings.theme_scroll.scroll_to_item(0);
-                                cx.notify();
-                                cx.stop_propagation();
-                                return;
-                            }
-                            _ => {
-                                if !event.keystroke.modifiers.platform
-                                    && let Some(ch) = event.keystroke.key_char.as_ref()
-                                    && !ch.is_empty()
-                                    && !ch.chars().any(|c| c.is_control())
-                                {
-                                    this.settings.theme_query.push_str(ch);
-                                    this.settings.theme_selected = 0;
-                                    this.settings.theme_scroll.scroll_to_item(0);
-                                    cx.notify();
-                                }
-                            }
-                        }
-                    }
-                    if event.keystroke.key.as_str() == "escape" {
-                        this.close_settings(window, cx);
-                        cx.stop_propagation();
-                    }
-                    // Swallow other keys while the settings panel is open
-                    // so they don't reach the terminal underneath.
-                    // ⌘, (OpenSettings) still fires via on_action.
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::Diff) {
-                    if this.handle_diff_key(event, window, cx) {
-                        cx.stop_propagation();
-                        return;
-                    }
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.rename_key_down(event, window, cx) {
-                    cx.stop_propagation();
-                }
+                this.handle_capture_key(event, window, cx);
             }))
             // Clicking anywhere else (terminal, another tab) commits the
             // in-progress rename.
@@ -2453,28 +2397,6 @@ impl Render for AppShell {
     }
 }
 
-fn run_id_for_gutter(
-    snapshot: &[run_ledger::Run],
-    pane: PaneKey,
-    line: i32,
-) -> Option<run_ledger::RunId> {
-    if let Some(run) = snapshot
-        .iter()
-        .rev()
-        .find(|run| run.pane == pane && run.anchor.is_some_and(|anchor| anchor.line == line))
-    {
-        return Some(run.id);
-    }
-    snapshot
-        .iter()
-        .rev()
-        .filter(|run| run.pane == pane)
-        .filter_map(|run| run.anchor.map(|anchor| (run.id, anchor.line)))
-        .filter(|(_, start)| *start <= line)
-        .max_by_key(|(_, start)| *start)
-        .map(|(id, _)| id)
-}
-
 #[cfg(test)]
 mod workspace_regression_tests {
     use super::{ConfirmKind, PaneKey, Tab};
@@ -2559,48 +2481,5 @@ mod workspace_regression_tests {
         assert_eq!(pending.pane_target(&tabs), None);
         assert_eq!(ConfirmKind::CloseTab(1).pane_target(&tabs), None);
         assert_eq!(tabs[0].active_pane, 10);
-    }
-}
-
-#[cfg(test)]
-mod gutter_jump_tests {
-    use super::run_id_for_gutter;
-    use run_ledger::{Anchor, LaunchId, Ledger, PaneKey, RunEvent};
-
-    #[test]
-    fn prefers_exact_start_line_then_nearest_preceding() {
-        let pane = PaneKey::new_v4();
-        let mut ledger = Ledger::new(LaunchId::new_v4());
-        ledger.set_redact(false);
-        ledger.apply(RunEvent::started_at(
-            pane,
-            "first",
-            None,
-            0,
-            false,
-            Some(Anchor {
-                line: 10,
-                column: 0,
-            }),
-        ));
-        ledger.apply(RunEvent::finished(pane, Some(0), 5));
-        ledger.apply(RunEvent::started_at(
-            pane,
-            "second",
-            None,
-            10,
-            false,
-            Some(Anchor {
-                line: 20,
-                column: 0,
-            }),
-        ));
-        let snap = ledger.snapshot();
-        let first = snap.iter().find(|r| r.command == "first").unwrap().id;
-        let second = snap.iter().find(|r| r.command == "second").unwrap().id;
-        assert_eq!(run_id_for_gutter(&snap, pane, 10), Some(first));
-        assert_eq!(run_id_for_gutter(&snap, pane, 20), Some(second));
-        assert_eq!(run_id_for_gutter(&snap, pane, 24), Some(second));
-        assert_eq!(run_id_for_gutter(&snap, pane, 15), Some(first));
     }
 }

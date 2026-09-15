@@ -1,21 +1,45 @@
-//! Host-side projection and vector painting for plugin 3D scenes (ADR-0017).
+//! Host-side projection and vector painting for panel 3D scenes.
 //!
-//! A plugin sends a [`SceneData`] — a grid of bars with normalised heights and
-//! RGB colours, plus a camera — and the host owns everything downstream: it
-//! projects the geometry against the panel's real pixel bounds and paints it as
-//! filled polygons. Two things fall out of that split:
-//!
-//! - **Crisp at any size.** There is no bitmap to scale; the polygons are
-//!   re-projected every frame against the current bounds, so a resize just
-//!   re-fits the picture instead of stretching pixels.
-//! - **Local camera.** The host can rotate/zoom by mutating the stored camera
-//!   and repainting, with no round-trip to the plugin per frame.
-//!
-//! This module is the pure part: projection, auto-fit, face ordering and
-//! shading. It names no gpui type so it stays unit testable. `layout.rs` calls
-//! [`project_scene`] inside a `canvas` and paints the returned faces.
+//! Geometry lives here, not on the plugin protocol. The host projects against
+//! the panel's real pixel bounds and paints filled polygons.
 
-use plugin_protocol::v2::{SceneCamera, SceneData};
+/// A 3D bar-chart scene in normalised, host-agnostic form.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SceneData {
+    pub cols: u32,
+    pub rows: u32,
+    pub floor: [u8; 3],
+    pub camera: SceneCamera,
+    pub bars: Vec<SceneBar>,
+}
+
+/// One bar: a grid cell, a normalised height, and a colour.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SceneBar {
+    pub gx: u32,
+    pub gz: u32,
+    pub height: f32,
+    pub color: [u8; 3],
+    pub selected: bool,
+}
+
+/// Orthographic camera: yaw about Y, pitch about X, plus a zoom multiplier.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SceneCamera {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub zoom: f32,
+}
+
+impl Default for SceneCamera {
+    fn default() -> Self {
+        Self {
+            yaw: 0.0,
+            pitch: 0.0,
+            zoom: 1.0,
+        }
+    }
+}
 
 /// Half-width of a bar's square footprint, in world units.
 const BAR_HALF: f32 = 0.34;
@@ -299,7 +323,7 @@ pub fn project_scene(scene: &SceneData, width: f32, height: f32) -> ProjectedSce
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData};
+    use super::{SceneBar, SceneCamera, SceneData};
 
     fn scene(cols: u32, rows: u32, bars: Vec<SceneBar>) -> SceneData {
         SceneData {

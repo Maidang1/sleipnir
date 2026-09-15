@@ -14,9 +14,9 @@ use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_co
 use std::ops::Range as StdRange;
 use std::time::{Duration, Instant};
 use terminal::{
-    Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
-    Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
-    viewport_top_abs, y_for_display,
+    Cell, Color, CursorShape, IndexedCell, Modes, NamedColor, Range as TerminalRange, Terminal,
+    TerminalBounds, absolute_to_display_line, is_default_background_color, viewport_top_abs,
+    y_for_display,
 };
 
 pub struct TermElement {
@@ -303,7 +303,6 @@ pub struct LayoutState {
     blink_alpha: f32,
     /// Whether to request another animation frame (M11).
     blink_animating: bool,
-    gutter: Vec<GutterPaint>,
     map: PaintMap,
     block_paints: Vec<BlockPaint>,
 }
@@ -313,12 +312,6 @@ struct BlockPaint {
     layout: sleipnir_widget::Layout,
     stale: bool,
     frozen: bool,
-}
-
-struct GutterPaint {
-    display_line: i32,
-    kind: GutterKind,
-    color: gpui::Hsla,
 }
 
 impl Element for TermElement {
@@ -507,13 +500,13 @@ impl Element for TermElement {
                     search_rects.extend(range_rects(m, content.display_offset, color));
                 }
 
-                // URL / path hover underline (M11). Mouse-mode TUIs own the
-                // pointer; a stale host underline would paint over their grid.
+                // URL / path hover underline (M11). `hovered_word()` is None
+                // while a mouse-mode TUI owns the pointer.
                 let link_color = palette.ansi[4].opacity(0.85);
                 let mut hover_underlines = Vec::new();
-                let hover_link = content.last_hovered_word.is_some()
-                    && !content.mode.intersects(Modes::MOUSE_MODE);
-                if hover_link && let Some(hovered) = content.last_hovered_word.as_ref() {
+                let hovered = terminal.read(cx).hovered_word().cloned();
+                let hover_link = hovered.is_some();
+                if let Some(hovered) = hovered.as_ref() {
                     hover_underlines.extend(range_rects(
                         hovered.word_match,
                         content.display_offset,
@@ -542,37 +535,6 @@ impl Element for TermElement {
                         content.cursor_char,
                         content.cursor.shape,
                     )),
-                };
-
-                let gutter = {
-                    use sleipnir_settings::RunLedgerMode;
-                    if content.mode.contains(Modes::ALT_SCREEN)
-                        || TerminalSettings::get_global(cx).run_ledger == RunLedgerMode::Off
-                    {
-                        Vec::new()
-                    } else {
-                        let rows = dimensions.num_lines() as i32;
-                        terminal
-                            .read(cx)
-                            .gutter_overlay()
-                            .into_iter()
-                            .filter_map(|mark| {
-                                let display_line = absolute_to_display_line(
-                                    mark.line,
-                                    history,
-                                    content.display_offset,
-                                );
-                                if display_line < 0 || display_line >= rows {
-                                    return None;
-                                }
-                                Some(GutterPaint {
-                                    display_line,
-                                    kind: mark.kind,
-                                    color: gutter_color(mark.status, palette.as_ref()),
-                                })
-                            })
-                            .collect()
-                    }
                 };
 
                 let blink_alpha =
@@ -629,7 +591,6 @@ impl Element for TermElement {
                     hover_link,
                     blink_alpha,
                     blink_animating,
-                    gutter,
                     map,
                     block_paints,
                 }
@@ -701,15 +662,6 @@ impl Element for TermElement {
                     for batch in &layout.batches {
                         batch.paint(origin, &layout.dimensions, &layout.map, window, cx);
                     }
-                    for mark in &layout.gutter {
-                        paint_gutter_triangle(
-                            origin,
-                            mark,
-                            &layout.dimensions,
-                            &layout.map,
-                            window,
-                        );
-                    }
                     for block in &layout.block_paints {
                         paint_block(origin, block, &layout.dimensions, &layout.map, window, cx);
                     }
@@ -762,9 +714,6 @@ impl TermElement {
                 move |e: &MouseDownEvent, window, cx| {
                     window.focus(&focus, cx);
                     if button == MouseButton::Left && try_block_click(&terminal, &view, e, cx) {
-                        return;
-                    }
-                    if button == MouseButton::Left && try_gutter_click(&terminal, e, cx) {
                         return;
                     }
                     if button == MouseButton::Right {
@@ -877,43 +826,6 @@ fn paint_underline(
     window.paint_quad(fill(rect, bg.color));
 }
 
-fn gutter_color(status: Option<i32>, palette: &TerminalPalette) -> gpui::Hsla {
-    match status {
-        Some(0) => palette.ansi[2],
-        Some(_) => palette.ansi[1],
-        None => palette.ansi[3],
-    }
-}
-
-fn paint_gutter_triangle(
-    origin: GpuiPoint<Pixels>,
-    mark: &GutterPaint,
-    _dimensions: &TerminalBounds,
-    map: &PaintMap,
-    window: &mut Window,
-) {
-    let row_h = map.h(mark.display_line);
-    let mid_y = map.y(origin, mark.display_line) + row_h * 0.5;
-    let h = row_h.min(px(8.0));
-    let step = px(2.0);
-    let x0 = origin.x + px(1.0);
-    for i in 0..3 {
-        let inset = px(i as f32);
-        let hh = h - inset * 2.0;
-        if hh <= px(0.5) {
-            break;
-        }
-        let x = match mark.kind {
-            GutterKind::Start => x0 + step * i as f32,
-            GutterKind::End => x0 + step * (2 - i) as f32,
-        };
-        window.paint_quad(fill(
-            Bounds::new(point(x, mid_y - hh * 0.5), size(step, hh)),
-            mark.color,
-        ));
-    }
-}
-
 fn try_block_click(
     terminal: &Entity<Terminal>,
     view: &Entity<crate::TermView>,
@@ -949,45 +861,6 @@ fn try_block_click(
         return true;
     }
     crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
-    true
-}
-
-fn try_gutter_click(terminal: &Entity<Terminal>, e: &MouseDownEvent, cx: &mut App) -> bool {
-    let content = terminal.read(cx).last_content().clone();
-    if content.mode.contains(Modes::ALT_SCREEN) {
-        return false;
-    }
-    let origin = content.terminal_bounds.bounds.origin;
-    let x = e.position.x - origin.x;
-    if x < px(0.) || x > px(8.) {
-        return false;
-    }
-    let y = e.position.y - origin.y;
-    if y < px(0.) {
-        return false;
-    }
-    let history = terminal.read(cx).history_size() as i32;
-    let hit = terminal.read(cx).hit_local(gpui::point(x, y));
-    let abs = match hit {
-        HitTarget::Cell { line } => line,
-        HitTarget::Block { id, .. } => terminal
-            .read(cx)
-            .row_geometry()
-            .get(id)
-            .map(|b| b.anchor.line)
-            .unwrap_or(0),
-    };
-    let display_line = absolute_to_display_line(abs, history, content.display_offset);
-    let marks = terminal.read(cx).gutter_overlay();
-    let Some(mark) = marks.into_iter().find(|m| {
-        absolute_to_display_line(m.line, history, content.display_offset) == display_line
-    }) else {
-        return false;
-    };
-    terminal.update(cx, |term, cx| {
-        term.emit_gutter_click(mark.line, cx);
-        cx.notify();
-    });
     true
 }
 

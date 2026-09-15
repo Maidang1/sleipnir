@@ -18,8 +18,8 @@
 //! stderr is drained, I/O is threaded, and the transport is a trait (so the
 //! supervisor is testable without spawning binaries).
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use plugin_protocol::v2::Capability;
+use serde::Deserialize;
 use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs;
@@ -32,77 +32,6 @@ pub mod resident;
 /// The only manifest / protocol version this host speaks (ADR-0016).
 pub const PLUGIN_API_VERSION: u32 = plugin_protocol::v2::PROTOCOL_VERSION;
 const MANIFEST_FILE: &str = "plugin.json";
-
-/// Permission is the user-facing capability name; it maps 1:1 to the v2 wire
-/// `Capability`. Kept as its own type so settings/schema stay in this crate.
-///
-/// The snapshot reads are taken when the user asked. The observation,
-/// rendering, and host-call additions are categorically stronger (ADR-0016
-/// §4) and exist so `plugin.json` can declare them for pre-launch audit —
-/// the whole point of keeping the file (ADR-0015). They are never implied
-/// by the snapshot set.
-#[derive(
-    Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum Permission {
-    ReadSelection,
-    ReadVisibleScreen,
-    ReadCwd,
-    ReadTitle,
-    WriteTerminal,
-    Clipboard,
-    Network,
-    /// Process stays up between invocations.
-    Resident,
-    /// Continuous observation; narrowable with `EventFilter`.
-    SubscribeEvents,
-    RenderBlock,
-    RenderPanel,
-    RenderStatus,
-    HostCallNotify,
-    HostCallReadScreen,
-    HostCallListPanes,
-    HostCallOpenPane,
-    HostCallDrawScene,
-    HostCallScrollToRun,
-    HostCallFocusPane,
-    HostCallSendText,
-    HostCallSendKey,
-    HostCallRequestClosePane,
-}
-
-impl Permission {
-    /// Map onto the v2 wire capability.
-    pub fn to_v2(self) -> plugin_protocol::v2::Capability {
-        match self {
-            Self::ReadSelection => plugin_protocol::v2::Capability::ReadSelection,
-            Self::ReadVisibleScreen => plugin_protocol::v2::Capability::ReadVisibleScreen,
-            Self::ReadCwd => plugin_protocol::v2::Capability::ReadCwd,
-            Self::ReadTitle => plugin_protocol::v2::Capability::ReadTitle,
-            Self::WriteTerminal => plugin_protocol::v2::Capability::WriteTerminal,
-            Self::Clipboard => plugin_protocol::v2::Capability::Clipboard,
-            Self::Network => plugin_protocol::v2::Capability::Network,
-            Self::Resident => plugin_protocol::v2::Capability::Resident,
-            Self::SubscribeEvents => plugin_protocol::v2::Capability::SubscribeEvents,
-            Self::RenderBlock => plugin_protocol::v2::Capability::RenderBlock,
-            Self::RenderPanel => plugin_protocol::v2::Capability::RenderPanel,
-            Self::RenderStatus => plugin_protocol::v2::Capability::RenderStatus,
-            Self::HostCallNotify => plugin_protocol::v2::Capability::HostCallNotify,
-            Self::HostCallReadScreen => plugin_protocol::v2::Capability::HostCallReadScreen,
-            Self::HostCallListPanes => plugin_protocol::v2::Capability::HostCallListPanes,
-            Self::HostCallOpenPane => plugin_protocol::v2::Capability::HostCallOpenPane,
-            Self::HostCallDrawScene => plugin_protocol::v2::Capability::HostCallDrawScene,
-            Self::HostCallScrollToRun => plugin_protocol::v2::Capability::HostCallScrollToRun,
-            Self::HostCallFocusPane => plugin_protocol::v2::Capability::HostCallFocusPane,
-            Self::HostCallSendText => plugin_protocol::v2::Capability::HostCallSendText,
-            Self::HostCallSendKey => plugin_protocol::v2::Capability::HostCallSendKey,
-            Self::HostCallRequestClosePane => {
-                plugin_protocol::v2::Capability::HostCallRequestClosePane
-            }
-        }
-    }
-}
 
 /// The declared lifecycle in `plugin.json`. Distinct type from the wire enum so
 /// the manifest schema lives here.
@@ -142,7 +71,7 @@ pub struct PluginManifest {
     /// a palette command still has to declare `subscribe_events` / `render_*`
     /// here so a user can audit them without running the binary.
     #[serde(default)]
-    pub permissions: BTreeSet<Permission>,
+    pub permissions: BTreeSet<Capability>,
     #[serde(default)]
     pub commands: Vec<PluginCommand>,
 }
@@ -159,7 +88,7 @@ pub struct PluginCommand {
     /// Capabilities this command needs. Each must be covered by a stored
     /// per-plugin grant (ADR-0016); first run prompts for consent.
     #[serde(default)]
-    pub permissions: BTreeSet<Permission>,
+    pub permissions: BTreeSet<Capability>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
@@ -244,27 +173,9 @@ fn default_true() -> bool {
     true
 }
 
-pub fn default_plugin_dir() -> PathBuf {
-    default_plugin_dir_for(cfg!(windows))
-}
-
-/// The built-in plugin discovery root for a given OS family. This must mirror
-/// `sleipnir_settings::config_dir_for`: on macOS/Unix the config lives under
-/// `~/.config/sleipnir` (NOT `dirs::config_dir()`, which is
-/// `~/Library/Application Support` on macOS) so plugins are found next to
-/// `settings.json`.
-pub fn default_plugin_dir_for(windows: bool) -> PathBuf {
-    let base = if windows {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir")
-    };
-    base.join("plugins")
-}
+pub use sleipnir_paths::{
+    plugin_dir as default_plugin_dir, plugin_dir_for as default_plugin_dir_for,
+};
 
 pub fn load_catalog(extra_dirs: &[PathBuf]) -> PluginCatalog {
     let mut roots = vec![default_plugin_dir()];
@@ -786,15 +697,15 @@ mod tests {
             plugin
                 .manifest
                 .permissions
-                .contains(&Permission::SubscribeEvents)
+                .contains(&Capability::SubscribeEvents)
         );
         assert!(
             plugin
                 .manifest
                 .permissions
-                .contains(&Permission::RenderBlock)
+                .contains(&Capability::RenderBlock)
         );
-        assert!(plugin.manifest.permissions.contains(&Permission::ReadCwd));
+        assert!(plugin.manifest.permissions.contains(&Capability::ReadCwd));
         let caps = crate::resident::declared_capabilities(&plugin.manifest);
         assert!(caps.contains(&plugin_protocol::v2::Capability::SubscribeEvents));
         assert!(caps.contains(&plugin_protocol::v2::Capability::RenderBlock));
@@ -834,14 +745,14 @@ mod tests {
         let catalog = load_catalog_from_roots(&[temp.path().to_path_buf()]);
         assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
         let perms = &catalog.plugins[0].manifest.permissions;
-        assert!(perms.contains(&Permission::HostCallNotify));
-        assert!(perms.contains(&Permission::HostCallOpenPane));
-        assert!(perms.contains(&Permission::HostCallFocusPane));
-        assert!(perms.contains(&Permission::HostCallSendText));
-        assert!(perms.contains(&Permission::HostCallSendKey));
-        assert!(perms.contains(&Permission::HostCallRequestClosePane));
-        assert!(perms.contains(&Permission::RenderPanel));
-        assert!(perms.contains(&Permission::RenderStatus));
+        assert!(perms.contains(&Capability::HostCallNotify));
+        assert!(perms.contains(&Capability::HostCallOpenPane));
+        assert!(perms.contains(&Capability::HostCallFocusPane));
+        assert!(perms.contains(&Capability::HostCallSendText));
+        assert!(perms.contains(&Capability::HostCallSendKey));
+        assert!(perms.contains(&Capability::HostCallRequestClosePane));
+        assert!(perms.contains(&Capability::RenderPanel));
+        assert!(perms.contains(&Capability::RenderStatus));
     }
 
     #[test]

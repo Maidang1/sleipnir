@@ -32,7 +32,7 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
-use crate::{Permission, PluginLifecycle, PluginManifest};
+use crate::{PluginLifecycle, PluginManifest};
 use plugin_protocol::v2::{self, Capability};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -90,16 +90,9 @@ impl LaunchSpec {
 /// be a subset. Plugin-level permissions exist so a command-less resident can
 /// still be audited before launch (ADR-0015 / ADR-0016).
 pub fn declared_capabilities(manifest: &PluginManifest) -> BTreeSet<Capability> {
-    let mut set: BTreeSet<Capability> = manifest
-        .permissions
-        .iter()
-        .copied()
-        .map(Permission::to_v2)
-        .collect();
+    let mut set: BTreeSet<Capability> = manifest.permissions.iter().copied().collect();
     for command in &manifest.commands {
-        for permission in &command.permissions {
-            set.insert(permission.to_v2());
-        }
+        set.extend(command.permissions.iter().copied());
     }
     if manifest.lifecycle == PluginLifecycle::Resident {
         set.insert(Capability::Resident);

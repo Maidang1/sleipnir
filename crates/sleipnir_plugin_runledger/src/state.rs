@@ -177,25 +177,9 @@ impl LedgerState {
     }
 }
 
-/// Where `runs.json` lives for this user. Mirrors
-/// `plugin_host::default_plugin_dir_for` minus the trailing `plugins`:
-/// `~/.config/sleipnir` everywhere but Windows, so the plugin keeps reading
-/// the same file the core used to write.
-pub fn default_config_dir() -> PathBuf {
-    default_config_dir_for(cfg!(windows))
-}
-
-pub fn default_config_dir_for(windows: bool) -> PathBuf {
-    if windows {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir")
-    }
-}
+pub use sleipnir_paths::{
+    config_dir as default_config_dir, config_dir_for as default_config_dir_for,
+};
 
 /// The default ledger file for this user.
 pub fn default_runs_file() -> PathBuf {

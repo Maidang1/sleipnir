@@ -75,19 +75,9 @@ fn current_hook_version() -> String {
 }
 
 fn default_socket_path() -> String {
-    if cfg!(windows) {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir/agent-control.sock")
-            .display()
-            .to_string()
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir/agent-control.sock")
-            .display()
-            .to_string()
-    }
+    sleipnir_paths::agent_control_socket_path()
+        .display()
+        .to_string()
 }
 
 fn generate_hook_script(agent_id: &str) -> String {

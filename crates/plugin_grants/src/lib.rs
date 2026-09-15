@@ -23,13 +23,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// On-disk schema version. Unknown versions are treated as corrupt.
 pub const GRANTS_VERSION: u32 = 1;
-
-const GRANTS_FILE: &str = "plugin-grants.json";
 
 /// Trust tier (ADR-0016 §6). Staged rather than blocking the whole programme
 /// on a cross-platform sandbox.
@@ -227,27 +225,9 @@ fn is_leap(year: i32) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-/// Config directory convention matching `plugin_host::default_plugin_dir_for`
-/// and `sleipnir_settings::config_dir_for`: on macOS/Unix this is
-/// `~/.config/sleipnir`, **not** `dirs::config_dir()` (`~/Library/Application
-/// Support` on macOS). Grants must sit next to `settings.json`.
-pub fn default_grants_path() -> PathBuf {
-    default_grants_path_for(cfg!(windows))
-}
-
-/// Grants path for a given OS family. See [`default_grants_path`].
-pub fn default_grants_path_for(windows: bool) -> PathBuf {
-    let base = if windows {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir")
-    };
-    base.join(GRANTS_FILE)
-}
+pub use sleipnir_paths::{
+    grants_path as default_grants_path, grants_path_for as default_grants_path_for,
+};
 
 /// Load grants. Missing file → empty; unreadable, corrupt, or unrecognized
 /// version → quarantined as `.bak`, then empty.
@@ -299,6 +279,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     const HASH_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -430,7 +411,6 @@ mod tests {
             Capability::HostCallReadScreen,
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
-            Capability::HostCallDrawScene,
             Capability::HostCallScrollToRun,
             Capability::HostCallFocusPane,
             Capability::HostCallSendText,

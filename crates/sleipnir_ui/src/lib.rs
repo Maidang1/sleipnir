@@ -84,18 +84,6 @@ use util::shell::Shell;
 #[derive(Clone, Debug)]
 pub enum TermViewEvent {
     TitleChanged,
-    /// Request the shell open a new tab (avoids TermView holding a WeakEntity<AppShell>).
-    RequestNewTab,
-    /// Request switching to the next tab.
-    RequestNextTab,
-    /// Request switching to the previous tab.
-    RequestPrevTab,
-    /// Request reload of settings.
-    RequestReloadSettings,
-    /// Request cycling the theme.
-    RequestCycleTheme,
-    /// Request opening the settings panel.
-    RequestOpenSettings,
     /// Terminal BEL — shell may flash tab chrome (visual bell).
     Bell,
     /// Right-click on the terminal in normal mode. The shell shows the
@@ -115,10 +103,6 @@ pub enum TermViewEvent {
     /// The current command in this pane finished.
     RunFinished {
         exit_code: Option<i32>,
-    },
-    /// Overlay triangle on a command start/end line was clicked.
-    GutterClicked {
-        line: i32,
     },
     /// The user sent input to this pane (keystroke, paste, IME).
     UserTyped,
@@ -574,7 +558,6 @@ impl TermView {
                     cx.emit(TermViewEvent::TitleChanged);
                     cx.notify();
                 }
-                Event::NewNavigationTarget(_) => {}
                 Event::Open(target) => {
                     open_navigation_target(target, cx);
                 }
@@ -606,9 +589,6 @@ impl TermView {
                     cx.emit(TermViewEvent::RunFinished {
                         exit_code: *exit_code,
                     });
-                }
-                Event::GutterClicked { line } => {
-                    cx.emit(TermViewEvent::GutterClicked { line: *line });
                 }
             },
         )
@@ -933,35 +913,6 @@ impl TermView {
             .map(|t| t.read(cx).last_content().mode.contains(Modes::ALT_SCREEN))
             .unwrap_or(false)
     }
-
-    fn new_tab(&mut self, _: &NewTab, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestNewTab);
-    }
-
-    fn next_tab(&mut self, _: &NextTab, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestNextTab);
-    }
-
-    fn prev_tab(&mut self, _: &PrevTab, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestPrevTab);
-    }
-
-    fn reload_settings(
-        &mut self,
-        _: &ReloadSettings,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.emit(TermViewEvent::RequestReloadSettings);
-    }
-
-    fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestCycleTheme);
-    }
-
-    fn open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestOpenSettings);
-    }
 }
 
 /// Hover tooltip previewing the hyperlink/path under the pointer (M16).
@@ -1041,17 +992,9 @@ impl Render for TermView {
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::send_text))
             .on_action(cx.listener(Self::send_keystroke))
-            .on_action(cx.listener(Self::new_tab))
-            // CloseTab (⌘W) is intentionally NOT handled here. TermView would
-            // nest-update AppShell and drop *this* entity while it is still
-            // leased for the action — that panics and tears down the window.
-            // AppShell owns the close path (close active pane, or tab if last)
-            // and receives the action via bubble phase, same as SplitRight.
-            .on_action(cx.listener(Self::next_tab))
-            .on_action(cx.listener(Self::prev_tab))
-            .on_action(cx.listener(Self::reload_settings))
-            .on_action(cx.listener(Self::cycle_theme))
-            .on_action(cx.listener(Self::open_settings))
+            // Shell actions (NewTab, CloseTab, settings, …) bubble to AppShell.
+            // Handling them here nest-updates AppShell and can drop this entity
+            // while it is still leased for the action.
             .on_key_down(cx.listener(Self::on_key_down))
             .child(match &self.terminal {
                 TerminalSlot::Loading => div()
@@ -1071,17 +1014,7 @@ impl Render for TermView {
                     .child(err.clone())
                     .into_any_element(),
                 TerminalSlot::Ready(terminal) => {
-                    let hovered = {
-                        let term = terminal.read(cx);
-                        if term.mouse_mode(false) {
-                            None
-                        } else {
-                            term.last_content()
-                                .last_hovered_word
-                                .as_ref()
-                                .map(|w| w.word.clone())
-                        }
-                    };
+                    let hovered = terminal.read(cx).hovered_word().map(|w| w.word.clone());
 
                     let a11y_text: SharedString = terminal.read(cx).visible_screen_text().into();
                     let body = div()
@@ -1891,8 +1824,8 @@ mod tests {
             .expect("ready terminal render");
         let block = &src[start..start + 1600];
         assert!(
-            block.contains("if term.mouse_mode(false)"),
-            "full-screen mouse-mode apps must not inherit a host URL tooltip"
+            block.contains("hovered_word()"),
+            "tooltip must use Terminal::hovered_word, which is None in mouse-mode"
         );
         assert!(
             block.contains("LinkPreview"),

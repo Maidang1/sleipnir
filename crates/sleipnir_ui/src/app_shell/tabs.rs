@@ -459,8 +459,9 @@ impl AppShell {
 mod tests {
     use super::*;
     use crate::pane_tree::{LeafContent, SplitAxis};
+    use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
     use crate::plugin_panel::PanelSurface;
-    use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData, Tone, Widget};
+    use plugin_protocol::v2::{Tone, Widget};
     use uuid::Uuid;
 
     fn closed_tab(index: usize) -> ClosedTab {
