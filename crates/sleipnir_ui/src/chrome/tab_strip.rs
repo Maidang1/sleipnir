@@ -202,11 +202,14 @@ pub(crate) fn render_tab_chip(
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                this.input = crate::ui_mode::InputMode::TabMenu(TabMenuState {
-                    tab_id,
-                    position: event.position,
-                    selected: 0,
-                });
+                this.set_input(
+                    crate::ui_mode::InputMode::TabMenu(TabMenuState {
+                        tab_id,
+                        position: event.position,
+                        selected: 0,
+                    }),
+                    cx,
+                );
                 cx.notify();
             }),
         )
@@ -423,7 +426,9 @@ impl AppShell {
             .min((viewport.height - menu_h).max(px(0.0)));
 
         let close_menu = |this: &mut AppShell, cx: &mut Context<AppShell>| {
-            this.input.dismiss_tab_menu();
+            // Route click-away through the AppShell method so it runs teardown,
+            // not `InputMode::dismiss_tab_menu` directly.
+            this.dismiss_tab_menu(cx);
             cx.notify();
         };
 

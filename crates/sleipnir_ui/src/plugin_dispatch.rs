@@ -58,6 +58,28 @@ impl WindowRoutes {
     }
 }
 
+/// One tick's plan. Routing (inbound drain / live-set sync) and the per-window
+/// event watch are independent: an empty inbound with an unchanged live set may
+/// skip routing, but the watch must still be walked so quiet residents keep
+/// receiving polled cwd / agent / focus / port `HostEvent`s. `PluginEventWatch`
+/// self-throttles once called; the bug this guards against is *not calling* it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PumpPlan {
+    route: bool,
+    poll: bool,
+}
+
+impl PumpPlan {
+    fn for_tick(has_inbound: bool, live_changed: bool) -> Self {
+        Self {
+            // Nothing new to deliver and no live-set delta: routing is a no-op.
+            route: has_inbound || live_changed,
+            // The watch is polled every tick regardless of inbound traffic.
+            poll: true,
+        }
+    }
+}
+
 impl PluginDispatcher {
     pub(crate) fn pump(&mut self, cx: &mut App) {
         let Some(supervisor) = plugin_runtime::supervisor(cx) else {
@@ -67,14 +89,35 @@ impl PluginDispatcher {
         let live = supervisor.live_instances();
         let changed = self.live != live;
         self.live = live;
-        if inbound.is_empty() && !changed {
-            return;
-        }
+        let plan = PumpPlan::for_tick(!inbound.is_empty(), changed);
         let windows: Vec<_> = cx
             .windows()
             .into_iter()
             .filter_map(|handle| handle.downcast::<AppShell>())
             .collect();
+
+        if plan.route {
+            self.route(inbound, changed, &windows, cx);
+        }
+
+        if plan.poll {
+            for handle in &windows {
+                let _ = handle.update(cx, |shell, _, cx| {
+                    shell.poll_plugin_events(cx);
+                });
+            }
+        }
+    }
+
+    /// Drain inbound into per-window destinations and sync surfaces on a live-set
+    /// change. Kept separate from the event watch so a quiet tick still polls.
+    fn route(
+        &mut self,
+        inbound: Vec<plugin_host::resident::InboundEnvelope>,
+        changed: bool,
+        windows: &[gpui::WindowHandle<AppShell>],
+        cx: &mut App,
+    ) {
         let active = cx
             .active_window()
             .and_then(|handle| handle.downcast::<AppShell>());
@@ -181,17 +224,12 @@ impl PluginDispatcher {
             }
         }
         if changed {
-            for handle in &windows {
+            for handle in windows {
                 let _ = handle.update(cx, |shell, _, cx| {
                     shell.sync_plugin_surfaces(cx);
                     cx.notify();
                 });
             }
-        }
-        for handle in &windows {
-            let _ = handle.update(cx, |shell, _, cx| {
-                shell.poll_plugin_events(cx);
-            });
         }
     }
 }
@@ -333,5 +371,27 @@ mod tests {
                 })
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn quiet_tick_skips_routing_but_still_polls_the_watch() {
+        // Empty inbound + unchanged live set: routing is a no-op, yet the event
+        // watch must still be walked so quiet residents keep seeing polled
+        // cwd / agent / focus / port HostEvents.
+        let plan = PumpPlan::for_tick(false, false);
+        assert!(!plan.route, "no inbound and no live delta must skip routing");
+        assert!(plan.poll, "the event watch must run on every tick");
+    }
+
+    #[test]
+    fn inbound_or_live_change_also_routes() {
+        for (has_inbound, live_changed) in [(true, false), (false, true), (true, true)] {
+            let plan = PumpPlan::for_tick(has_inbound, live_changed);
+            assert!(
+                plan.route,
+                "inbound={has_inbound} live_changed={live_changed} must route"
+            );
+            assert!(plan.poll, "the watch always runs");
+        }
     }
 }

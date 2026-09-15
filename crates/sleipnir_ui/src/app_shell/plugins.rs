@@ -6,7 +6,6 @@
 //! `panels.rs`.
 
 use super::*;
-use crate::plugin_surface::StaleRegistry;
 use plugin_protocol::v2::HostCallResult;
 
 /// Enough to finish a launch after the user approves. The dialog itself
@@ -45,8 +44,8 @@ impl AppShell {
     pub(crate) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
         if !self
-            .plugin_watch
-            .due(std::time::Instant::now(), std::time::Duration::from_secs(1))
+            .plugin
+            .watch_due(std::time::Instant::now(), std::time::Duration::from_secs(1))
         {
             return;
         }
@@ -76,17 +75,17 @@ impl AppShell {
                 facts.push(PaneUiFacts { pane, cwd, agent });
             }
         }
-        for ev in self.plugin_watch.ingest_ui(focus, &facts) {
+        for ev in self.plugin.watch_ingest_ui(focus, &facts) {
             crate::plugin_runtime::broadcast_event(ev, cx);
         }
         // The built-in Agents observer does not subscribe to port events.
         if !TerminalSettings::get_global(cx).plugins.enabled {
             return;
         }
-        if self.plugin_watch.ports_inflight {
+        if self.plugin.watch_ports_inflight() {
             return;
         }
-        self.plugin_watch.ports_inflight = true;
+        self.plugin.set_watch_ports_inflight(true);
         cx.spawn(async move |this, cx| {
             // One machine-level scan per poll: the process and listen tables are
             // the same for every pane, so capture them once off-thread and derive
@@ -102,9 +101,9 @@ impl AppShell {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.plugin_watch.ports_inflight = false;
+                this.plugin.set_watch_ports_inflight(false);
                 for (pane, ports) in found {
-                    for ev in this.plugin_watch.ingest_ports(pane, &ports) {
+                    for ev in this.plugin.watch_ingest_ports(pane, &ports) {
                         crate::plugin_runtime::broadcast_event(ev, cx);
                     }
                 }
@@ -153,12 +152,12 @@ impl AppShell {
             .filter(|snap| snap.state == ConnectionState::Live)
             .map(|snap| snap.instance_id)
             .collect();
-        self.plugin_panels.mark_missing_stale(&live);
+        self.plugin.mark_panels_stale(&live);
         self.mark_missing_blocks_stale(&live, cx);
         // Chrome is the exception: transient decoration is dropped, not
         // dimmed, so a dead plugin cannot leave a badge misreporting live
         // state (see `plugin_surface`).
-        if self.plugin_chrome.sync_live(&live) {
+        if self.plugin.sync_chrome_live(&live) {
             self.rebuild_palette_items();
         }
     }
@@ -184,7 +183,7 @@ impl AppShell {
                 terminals.insert(key);
             }
         }
-        match self.plugin_panels.apply_render(
+        match self.plugin.apply_panel_render(
             plugin_id,
             instance_id,
             pane,
@@ -194,7 +193,7 @@ impl AppShell {
         ) {
             ApplyPanel::Create { pane_key } => {
                 if !self.insert_panel_leaf(pane_key, plugin_id, window, cx) {
-                    self.plugin_panels.remove(pane_key);
+                    self.plugin.remove_panel(pane_key);
                 }
             }
             ApplyPanel::Replace { .. } => cx.notify(),
@@ -308,8 +307,8 @@ impl AppShell {
         );
         let hint = self.active_pane_key();
         match self
-            .plugin_chrome
-            .apply_status(plugin_id, instance_id, tree, granted, hint)
+            .plugin
+            .apply_chrome_status(plugin_id, instance_id, tree, granted, hint)
         {
             ApplyChrome::Applied => {
                 self.rebuild_palette_items();
@@ -359,11 +358,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::plugin_host_calls::{
-            CallPlan, cap_screen, error_result, filter_listed_panes, read_screen_access,
-            send_key_ready, send_text_result,
-        };
-        use plugin_protocol::v2::PaneInfo;
+        use crate::plugin_host_calls::CallPlan;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -375,141 +370,26 @@ impl AppShell {
             now_ms,
             cx,
         );
+        // Notify is a host side effect, not a workspace verb, so it never goes
+        // through `WorkspaceIo`. Everything else is one plan → execute → reply.
         let result = match plan {
-            CallPlan::Reply(result) => result,
             CallPlan::Notify { title, body } => {
                 crate::notify_message(&title, &body);
                 HostCallResult::Ok
             }
-            CallPlan::ListPanes => {
-                let mut terminals = std::collections::BTreeSet::new();
-                let mut infos = Vec::new();
-                for (pane, view) in live_panes {
-                    terminals.insert(*pane);
-                    infos.push(PaneInfo {
-                        pane: *pane,
-                        cwd: view
-                            .read(cx)
-                            .working_directory(cx)
-                            .map(|p| p.to_string_lossy().into_owned()),
-                        title: Some(view.read(cx).title().to_string()),
-                        busy: view.read(cx).looks_busy(cx),
-                    });
-                }
-                HostCallResult::Panes {
-                    panes: filter_listed_panes(infos, &terminals),
-                }
-            }
-            CallPlan::ReadScreen { pane } => {
-                let mut terminals = std::collections::BTreeSet::new();
-                for (key, _) in live_panes {
-                    terminals.insert(*key);
-                }
-                let (_, panels) = self.terminal_and_panel_keys();
-                match read_screen_access(pane, &terminals, &panels) {
-                    Err(message) => error_result(message),
-                    Ok(()) => match live_panes.iter().find(|(key, _)| *key == pane) {
-                        Some((_, view)) => HostCallResult::Screen {
-                            text: cap_screen(view.read(cx).visible_screen_text(cx)),
-                        },
-                        None => error_result(format!("pane {pane} not found")),
-                    },
-                }
-            }
-            CallPlan::OpenPane { cwd, command } => self.execute_open_pane(cwd, command, window, cx),
-            CallPlan::ScrollToRun { run_id } => {
-                let pane = if cx.has_global::<RunLedgerGlobal>() {
-                    cx.global::<RunLedgerGlobal>()
-                        .snapshot()
-                        .into_iter()
-                        .find(|run| run.id == run_id)
-                        .map(|run| run.pane)
-                } else {
-                    None
+            plan => {
+                let mut io = ShellWorkspaceIo {
+                    shell: self,
+                    live_panes,
+                    window,
+                    cx,
                 };
-                match pane {
-                    // Same semantics as the ledger-panel row jump: an inferred
-                    // run has no anchor, so the pane is only focused.
-                    Some(pane) => {
-                        self.jump_to_ledger_row(pane, Some(run_id), window, cx);
-                        HostCallResult::Ok
-                    }
-                    None => error_result(format!("run {run_id} not found")),
-                }
-            }
-            CallPlan::FocusPane { pane } => {
-                let (terminals, panels) = self.terminal_and_panel_keys();
-                match read_screen_access(pane, &terminals, &panels) {
-                    Err(message) => error_result(message),
-                    Ok(()) => {
-                        self.jump_to_ledger_row(pane, None, window, cx);
-                        HostCallResult::Ok
-                    }
-                }
-            }
-            CallPlan::SendText { pane, text, enter } => {
-                match self.terminal_view_for_call(pane, live_panes) {
-                    Err(message) => error_result(message),
-                    Ok(view) => {
-                        let delivered =
-                            view.update(cx, |view, cx| view.insert_text(&text, enter, cx));
-                        send_text_result(delivered)
-                    }
-                }
-            }
-            CallPlan::SendKey { pane, key } => {
-                match self.terminal_view_for_call(pane, live_panes) {
-                    Err(message) => error_result(message),
-                    Ok(view) => {
-                        let has_terminal = view.read(cx).terminal_entity().is_some();
-                        let vi_mode = view.read(cx).vi_mode_enabled(cx);
-                        match send_key_ready(has_terminal, vi_mode) {
-                            Err(message) => error_result(message),
-                            Ok(()) => {
-                                let delivered = view.update(cx, |view, cx| {
-                                    view.send_named_keystroke(key.keystroke_str(), cx)
-                                });
-                                if delivered {
-                                    HostCallResult::Ok
-                                } else {
-                                    error_result(format!(
-                                        "key {} was not delivered",
-                                        key.keystroke_str()
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            CallPlan::RequestClosePane { pane } => {
-                let (terminals, panels) = self.terminal_and_panel_keys();
-                match read_screen_access(pane, &terminals, &panels) {
-                    Err(message) => error_result(message),
-                    Ok(()) => match self.request_close_terminal_pane(pane, window, cx) {
-                        Ok(()) => HostCallResult::Ok,
-                        Err(message) => error_result(message),
-                    },
-                }
+                plan.execute(&mut io)
             }
         };
         if !crate::plugin_runtime::reply_host_call_to_instance(instance_id, id, result, cx) {
             log::debug!("plugin {plugin_id} Call {id} reply dropped (session gone)");
         }
-    }
-    fn terminal_view_for_call(
-        &self,
-        pane: PaneKey,
-        live_panes: &[(PaneKey, Entity<TermView>)],
-    ) -> Result<Entity<TermView>, String> {
-        let (terminals, panels) = self.terminal_and_panel_keys();
-        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
-        live_panes
-            .iter()
-            .find(|(key, _)| *key == pane)
-            .map(|(_, view)| view.clone())
-            .or_else(|| self.view_for_pane(pane))
-            .ok_or_else(|| format!("pane {pane} not found"))
     }
     pub(crate) fn terminal_and_panel_keys(
         &self,
@@ -581,7 +461,7 @@ impl AppShell {
         self.start_resident_plugins(cx);
     }
     pub(super) fn run_plugin_contribution(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.plugin_chrome.palette_entries().get(index).cloned() else {
+        let Some(entry) = self.plugin.chrome_palette_entries().get(index).cloned() else {
             return;
         };
         crate::plugin_runtime::push_action(
@@ -863,6 +743,131 @@ impl AppShell {
             });
         })
         .detach();
+    }
+}
+
+/// [`WorkspaceIo`] backed by the live shell. Borrows the shell plus the frame's
+/// `window`/`cx` so `CallPlan::execute` runs the same verbs the control surface
+/// does. `live_panes` is the shared terminal walk (`live_terminal_panes`) so a
+/// host call and `sleipnir-ctl ls` cannot drift into two enumerations.
+struct ShellWorkspaceIo<'a, 'b> {
+    shell: &'a mut AppShell,
+    live_panes: &'a [(PaneKey, Entity<TermView>)],
+    window: &'a mut Window,
+    cx: &'a mut Context<'b, AppShell>,
+}
+
+impl ShellWorkspaceIo<'_, '_> {
+    /// Resolve a terminal pane, denying panels and missing panes with the same
+    /// rules as the control surface. Prefers the shared `live_panes` walk.
+    fn terminal_view(&self, pane: PaneKey) -> Result<Entity<TermView>, String> {
+        let (terminals, panels) = self.shell.terminal_and_panel_keys();
+        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
+        self.live_panes
+            .iter()
+            .find(|(key, _)| *key == pane)
+            .map(|(_, view)| view.clone())
+            .or_else(|| self.shell.view_for_pane(pane))
+            .ok_or_else(|| format!("pane {pane} not found"))
+    }
+}
+
+impl crate::plugin_host_calls::WorkspaceIo for ShellWorkspaceIo<'_, '_> {
+    fn list_terminal_panes(&mut self) -> Vec<plugin_protocol::v2::PaneInfo> {
+        use plugin_protocol::v2::PaneInfo;
+        // `live_panes` already excludes plugin Panel leaves, so no second
+        // identity filter is needed.
+        self.live_panes
+            .iter()
+            .map(|(pane, view)| PaneInfo {
+                pane: *pane,
+                cwd: view
+                    .read(self.cx)
+                    .working_directory(self.cx)
+                    .map(|p| p.to_string_lossy().into_owned()),
+                title: Some(view.read(self.cx).title().to_string()),
+                busy: view.read(self.cx).looks_busy(self.cx),
+            })
+            .collect()
+    }
+
+    fn read_screen(&mut self, pane: PaneKey) -> Result<String, String> {
+        let view = self.terminal_view(pane)?;
+        Ok(view.read(self.cx).visible_screen_text(self.cx))
+    }
+
+    fn open_pane(
+        &mut self,
+        cwd: Option<String>,
+        command: Option<crate::plugin_host_calls::OpenCommand>,
+    ) -> HostCallResult {
+        self.shell
+            .execute_open_pane(cwd, command, self.window, self.cx)
+    }
+
+    fn scroll_to_run(&mut self, run_id: plugin_protocol::v2::RunId) -> Result<(), String> {
+        let pane = if self.cx.has_global::<RunLedgerGlobal>() {
+            self.cx
+                .global::<RunLedgerGlobal>()
+                .snapshot()
+                .into_iter()
+                .find(|run| run.id == run_id)
+                .map(|run| run.pane)
+        } else {
+            None
+        };
+        match pane {
+            // Same semantics as the ledger-panel row jump: an inferred run has
+            // no anchor, so the pane is only focused.
+            Some(pane) => {
+                self.shell
+                    .jump_to_ledger_row(pane, Some(run_id), self.window, self.cx);
+                Ok(())
+            }
+            None => Err(format!("run {run_id} not found")),
+        }
+    }
+
+    fn focus_pane(&mut self, pane: PaneKey) -> Result<(), String> {
+        let (terminals, panels) = self.shell.terminal_and_panel_keys();
+        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
+        self.shell.jump_to_ledger_row(pane, None, self.window, self.cx);
+        Ok(())
+    }
+
+    fn send_text(&mut self, pane: PaneKey, text: String, enter: bool) -> Result<(), String> {
+        let view = self.terminal_view(pane)?;
+        let delivered = view.update(self.cx, |view, cx| view.insert_text(&text, enter, cx));
+        if delivered {
+            Ok(())
+        } else {
+            Err(crate::plugin_host_calls::SEND_TEXT_NO_TERMINAL.into())
+        }
+    }
+
+    fn send_key(
+        &mut self,
+        pane: PaneKey,
+        key: crate::plugin_host_calls::LogicalKey,
+    ) -> Result<(), String> {
+        let view = self.terminal_view(pane)?;
+        let has_terminal = view.read(self.cx).terminal_entity().is_some();
+        let vi_mode = view.read(self.cx).vi_mode_enabled(self.cx);
+        crate::plugin_host_calls::send_key_ready(has_terminal, vi_mode)?;
+        let delivered =
+            view.update(self.cx, |view, cx| view.send_named_keystroke(key.keystroke_str(), cx));
+        if delivered {
+            Ok(())
+        } else {
+            Err(format!("key {} was not delivered", key.keystroke_str()))
+        }
+    }
+
+    fn request_close_pane(&mut self, pane: PaneKey) -> Result<(), String> {
+        let (terminals, panels) = self.shell.terminal_and_panel_keys();
+        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
+        self.shell
+            .request_close_terminal_pane(pane, self.window, self.cx)
     }
 }
 

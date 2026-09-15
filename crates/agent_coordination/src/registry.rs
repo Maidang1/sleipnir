@@ -197,11 +197,15 @@ impl Registry {
                 registry: self.clone(),
                 effect,
                 session,
-                committed: false,
             });
         }
     }
 
+    /// Ack the claimed effect. Never touches `claimed_seq`: the lease ends only
+    /// when [`ClaimedEffect`] drops, so a failed ack (e.g. an
+    /// [`CoordError::EffectKindMismatch`]) still releases the claim and wakes
+    /// any waiter. Callers must not early-return before the ack while holding
+    /// the claim; every path here falls through to a `result`.
     fn commit_claimed_direct(
         &self,
         session: AgentSessionId,
@@ -214,18 +218,16 @@ impl Registry {
         if inner.claimed_seq_of(session) != Some(seq) {
             return Err(CoordError::EffectNotClaimed);
         }
-        let result = match outcome {
+        match outcome {
             CommitOp::Failed => inner.delivery_failed(seq, now_ms),
-            CommitOp::LaunchBound { pane } => {
-                let EffectBody::LaunchRequested { session: s, .. } = &effect.body else {
-                    return Err(CoordError::EffectKindMismatch {
-                        seq,
-                        actual: effect.body.kind_name(),
-                        expected: "launch_requested",
-                    });
-                };
-                inner.bind_pane(seq, *s, pane)
-            }
+            CommitOp::LaunchBound { pane } => match &effect.body {
+                EffectBody::LaunchRequested { session: s, .. } => inner.bind_pane(seq, *s, pane),
+                _ => Err(CoordError::EffectKindMismatch {
+                    seq,
+                    actual: effect.body.kind_name(),
+                    expected: "launch_requested",
+                }),
+            },
             CommitOp::Delivered => match &effect.body {
                 EffectBody::PromptRequested { .. } => inner.prompt_delivered(seq),
                 EffectBody::InterruptRequested { .. } => inner.interrupt_delivered(seq),
@@ -251,12 +253,7 @@ impl Registry {
                     expected: "non-launch effect",
                 }),
             },
-        };
-        if let Some(s) = inner.sessions.get_mut(&session) {
-            s.claimed_seq = None;
         }
-        self.cv.notify_all();
-        result
     }
 
     fn release_claim(&self, session: AgentSessionId) {
@@ -320,8 +317,10 @@ pub enum DeliverOutcome {
     Failed,
 }
 
-/// A seq-typed delivery lease. [`Self::commit`] acks and removes the effect.
-/// Drop without commit releases the per-session claim; the effect stays queued.
+/// A seq-typed delivery lease. [`Self::commit_launch`] / [`Self::commit_ok`]
+/// ack the effect; **drop is the only releaser** of the per-session claim, so a
+/// failed ack still ends the lease and wakes any waiter. On a successful ack the
+/// effect is removed from the mailbox; on failure it stays queued.
 ///
 /// Must not call [`Registry::handle`] for a mutating request or
 /// [`Registry::try_claim`] on this session from the same thread: those wait
@@ -332,7 +331,6 @@ pub struct ClaimedEffect {
     registry: Registry,
     effect: Effect,
     session: AgentSessionId,
-    committed: bool,
 }
 
 impl ClaimedEffect {
@@ -344,30 +342,24 @@ impl ClaimedEffect {
         self.effect.seq
     }
 
-    /// Ack a `LaunchRequested` effect with its bound pane.
-    pub fn commit_launch(mut self, outcome: LaunchOutcome, now_ms: u64) -> Result<(), CoordError> {
-        let result = self
-            .registry
-            .commit_claimed_direct(self.session, &self.effect, outcome.into(), now_ms);
-        self.committed = true;
-        result
+    /// Ack a `LaunchRequested` effect with its bound pane. The claim is released
+    /// on drop regardless of whether the ack succeeded.
+    pub fn commit_launch(self, outcome: LaunchOutcome, now_ms: u64) -> Result<(), CoordError> {
+        self.registry
+            .commit_claimed_direct(self.session, &self.effect, outcome.into(), now_ms)
     }
 
-    /// Ack a non-launch effect (prompt/interrupt/focus/close).
-    pub fn commit_ok(mut self, outcome: DeliverOutcome, now_ms: u64) -> Result<(), CoordError> {
-        let result = self
-            .registry
-            .commit_claimed_direct(self.session, &self.effect, outcome.into(), now_ms);
-        self.committed = true;
-        result
+    /// Ack a non-launch effect (prompt/interrupt/focus/close). The claim is
+    /// released on drop regardless of whether the ack succeeded.
+    pub fn commit_ok(self, outcome: DeliverOutcome, now_ms: u64) -> Result<(), CoordError> {
+        self.registry
+            .commit_claimed_direct(self.session, &self.effect, outcome.into(), now_ms)
     }
 }
 
 impl Drop for ClaimedEffect {
     fn drop(&mut self) {
-        if !self.committed {
-            self.registry.release_claim(self.session);
-        }
+        self.registry.release_claim(self.session);
     }
 }
 
@@ -3276,6 +3268,48 @@ mod tests {
                 .iter()
                 .any(|e| e.seq == seq && matches!(e.body, EffectBody::LaunchRequested { .. }))
         );
+    }
+
+    #[test]
+    fn commit_kind_mismatch_still_releases_the_lease() {
+        // A wrong-kind commit (here `commit_launch` on a non-launch effect)
+        // fails with EffectKindMismatch, but the lease must still end so the
+        // session does not wedge. Regression: a `committed = true` set before
+        // the ack, or an early-return while holding `claimed_seq`, left every
+        // subsequent claim / mutating request waiting on the condvar forever.
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        assert!(matches!(
+            reg.handle(req(2, Request::Focus { session }), 2).body,
+            Response::FocusAccepted { .. }
+        ));
+        let focus_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::FocusRequested { session: s } if *s == session),
+        );
+        match reg.try_claim(focus_seq).expect("claim focus").commit_launch(
+            LaunchOutcome::Bound {
+                pane: Uuid::from_u128(9),
+            },
+            3,
+        ) {
+            Err(CoordError::EffectKindMismatch { .. }) => {}
+            other => panic!("commit_launch on a focus effect must mismatch: {other:?}"),
+        }
+        // The failed commit left the effect queued.
+        assert!(
+            reg.peek_effects()
+                .iter()
+                .any(|e| e.seq == focus_seq && matches!(e.body, EffectBody::FocusRequested { .. }))
+        );
+        // The lease is released: a second claim returns promptly (not
+        // EffectAlreadyClaimed) and a mutating request does not hang.
+        reg.try_claim(focus_seq)
+            .expect("second claim must succeed after the lease is released");
+        assert!(matches!(
+            reg.handle(req(4, Request::Focus { session }), 4).body,
+            Response::FocusAccepted { .. }
+        ));
     }
 
     #[test]

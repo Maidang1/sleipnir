@@ -37,10 +37,10 @@ fn next_detached_pane_id(tree: &PaneNode) -> PaneId {
 }
 
 fn transferred_panel_surfaces(
-    panels: &crate::plugin_panel::PanelRegistry,
+    plugin: &crate::plugin_window::PluginHost,
     pane_keys: impl IntoIterator<Item = PaneKey>,
 ) -> Vec<crate::plugin_panel::PanelSurface> {
-    panels.clone_surfaces(pane_keys)
+    plugin.clone_panel_surfaces(pane_keys)
 }
 
 fn can_extract_terminal_pane(tab: &Tab, pane_id: PaneId) -> bool {
@@ -220,7 +220,7 @@ impl AppShell {
             let _ = self.take_rename_input(cx);
         }
         let closed_keys = self.tabs[index].tree.all_pane_keys();
-        self.plugin_panels.remove_all(closed_keys.iter().copied());
+        self.plugin.remove_panels(closed_keys.iter().copied());
         for pane in closed_keys {
             self.apply_pane_closed(pane, cx);
         }
@@ -318,7 +318,7 @@ impl AppShell {
         };
         let tab = self.tabs[idx].clone();
         let panel_surfaces =
-            transferred_panel_surfaces(&self.plugin_panels, tab.tree.all_pane_keys());
+            transferred_panel_surfaces(&self.plugin, tab.tree.all_pane_keys());
         let options = terminal_window_options(cx);
         match cx.open_window(options, move |window, cx| {
             let tab = tab.clone();
@@ -330,7 +330,7 @@ impl AppShell {
         }) {
             Ok(_) => {
                 let removed = self.tabs.remove(idx);
-                self.plugin_panels.remove_all(removed.tree.all_pane_keys());
+                self.plugin.remove_panels(removed.tree.all_pane_keys());
                 self.active = new_active;
                 self.commit_workspace(window, cx);
             }
@@ -417,7 +417,7 @@ impl AppShell {
         self.next_id = adopted.next_id;
         self.next_pane_id = adopted.next_pane_id;
         let views: Vec<Entity<TermView>> = leaves.into_iter().map(|(_, v)| v.clone()).collect();
-        self.plugin_panels.insert_surfaces(panel_surfaces);
+        self.plugin.insert_panel_surfaces(panel_surfaces);
         self.tabs.push(tab);
         self.active = 0;
         for view in &views {
@@ -527,8 +527,8 @@ mod tests {
     fn transferred_panel_surfaces_keep_surface_tree() {
         let first = Uuid::from_u128(1);
         let second = Uuid::from_u128(2);
-        let mut panels = crate::plugin_panel::PanelRegistry::new();
-        panels.insert_surfaces([
+        let mut plugin = crate::plugin_window::PluginHost::new();
+        plugin.insert_panel_surfaces([
             PanelSurface {
                 plugin_id: "demo".into(),
                 owner_instance_id: Uuid::from_u128(101),
@@ -555,7 +555,7 @@ mod tests {
             },
         ]);
 
-        let moved = transferred_panel_surfaces(&panels, [second, first]);
+        let moved = transferred_panel_surfaces(&plugin, [second, first]);
         assert_eq!(moved.len(), 2);
         assert_eq!(moved[0].pane_key, second);
         assert_eq!(moved[0].surface_id, Uuid::from_u128(12));

@@ -65,42 +65,52 @@ Do these **in this order**.
 
 ### 1. PluginHost owns surfaces; AppShell paints
 
-Previous extraction sliced `impl AppShell` across ~20 files. Ownership did
-not move. `PluginRuntime` is a process `Global`; execution is per-window
-(`PanelRegistry`, `ChromeRegistry`, `PluginEventWatch`, consent,
-`handle_host_call`). `PluginDispatcher` walks every `AppShell` every
-16 ms.
+**Slice 1 landed (WorkspaceIo + per-window PluginHost field):**
 
-Also still true:
+- **One `WorkspaceIo` for ctl and plugins.** `plugin_host_calls::WorkspaceIo`
+  is the single executor for the workspace verbs (`list_terminal_panes`,
+  `read_screen`, `open_pane`, `focus_pane`, `send_text`, `send_key`,
+  `request_close_pane`, `scroll_to_run`). `CallPlan::execute(&mut impl
+  WorkspaceIo) -> HostCallResult` is the only place those side effects run,
+  and it is unit-tested against an in-memory fake (`FakeWorkspace`).
+  `AppShell::handle_host_call` is now `authorize_and_plan → execute → reply`:
+  the ~150-line match of side effects on `AppShell` is gone, replaced by a
+  `ShellWorkspaceIo` adapter. `control_surface::dispatch` backs the same trait
+  with `AppWorkspaceIo` (over the live windows), so ctl `ls` / `capture` /
+  `send` share the pane walk and `insert_text` write with the plugin verbs
+  instead of a parallel `list_panes` / `view_for_pane` copy. `Wait` stays
+  ctl-only (no plugin twin). `Notify` is a host side effect next to `execute`,
+  never a `WorkspaceIo` method. Dead `filter_listed_panes` / `send_text_result`
+  helpers are deleted (`live_terminal_panes` already excludes panels).
+- **Per-window `PluginHost` field.** `AppShell` holds one `plugin: PluginHost`
+  (`crates/sleipnir_ui/src/plugin_window.rs`) instead of three sibling
+  `plugin_panels` / `plugin_chrome` / `plugin_watch` fields. The three
+  registries are private; every call site goes through a `PluginHost` method
+  (`apply_panel_render`, `apply_chrome_status`, `sync_chrome_live`,
+  `mark_panels_stale`, `watch_*`, the panel accessors), not `self.plugin_panels`
+  from twenty files. AppShell still paints from it and keeps `InputMode` / tabs
+  / focus. `PluginRuntime` stays a process `Global` (supervisor / catalog /
+  16 ms pump); surfaces are per-window (tab detach transfers panel surfaces
+  through `clone_panel_surfaces` / `insert_panel_surfaces`).
 
-- `AppShell::handle_host_call` and `control_surface::dispatch` are still two
-  hosts for the same verbs. **Send is aligned:** both use `insert_text`
-  (paste-aware, no CSI smuggling). List/read/open/focus/close are not yet
-  one `WorkspaceIo`.
-- `term_element.rs` paints plugin blocks and calls
-  `plugin_runtime::push_action`. Dual `LaidOutKind` painters (panel GPUI
-  divs vs terminal quads) with "must not drift" comments.
-- Panel leaf is `LeafContent::Panel { plugin_id: String }` plus a parallel
-  `PanelRegistry` keyed by `PaneKey`.
-- Agents `adapter.rs` keeps a second session/pane map on top of the
-  registry. Launch is not atomic: PTY exists before `BindPane`.
-- `plugin_host` supervisor has two maps (`live` by plugin id, `active` by
-  instance id) and a two-phase OnDemand connect.
+**Still AppShell-owned / not done (slice 2+ of this item):**
 
-**Do:** `Workspace` (tabs / focus / close) + `PluginHost` (session / surfaces
-/ consent / host calls) + keep `InputMode` as the overlay stack. AppShell
-becomes a compositor. One `WorkspaceIo` for ctl and plugins.
-`handle_host_call` becomes `reply(plan.execute(io))`. One `LaidOutPainter`,
-or a `BlockOverlay` element so the grid painter never imports
-`plugin_runtime`.
+- `term_element.rs` still paints plugin blocks and calls
+  `plugin_runtime::push_action`. Dual `LaidOutKind` painters (panel GPUI divs
+  vs terminal quads) with "must not drift" comments remain. No `BlockOverlay`.
+- Panel leaf is still `LeafContent::Panel { plugin_id: String }` plus the
+  `PanelRegistry` keyed by `PaneKey`; it has **not** become
+  `LeafContent::Panel(Entity<…>)`.
+- `AppShell::render` still drives the pane-facts refresh side-effect pump
+  (item 4). The 16 ms plugin pump already runs off `Render` in
+  `plugin_dispatch` (poll vs route split); the event watch is walked there.
+- Agents `adapter.rs` second session/pane map and launch atomicity are
+  untouched. `plugin_host` supervisor still has two maps.
 
-Template for Agents: `sleipnir_plugin_runledger` (`rows` / `state` / `view`).
-Leave `plugin_grants` alone.
-
-Optional leftover of the registry pass: split `registry.rs` now that mailbox
-+ framing landed (session / task / effects / facts / validate). Tests move
-with the domain they pin. Host-local 3D is already gone; dual LaidOutKind
-painters remain in this item.
+**Do (remaining):** finish the compositor split — one `LaidOutPainter` or a
+`BlockOverlay` element so the grid painter never imports `plugin_runtime`, then
+`LeafContent::Panel(Entity<…>)` to retire the parallel `PanelRegistry`. Keep
+`InputMode` as the overlay stack and `plugin_grants` alone.
 
 ### 2. Grow `atomic_write` into the real write discipline
 

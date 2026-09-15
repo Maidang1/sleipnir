@@ -69,7 +69,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let link = self.input.terminal_menu().and_then(|s| s.link.clone());
-        let _ = self.input.take_terminal_menu();
+        let _ = self.take_terminal_menu_input(cx);
         match item {
             TerminalMenuItem::Copy => {
                 if let Some(term) = self.active_terminal_entity(cx) {
@@ -173,21 +173,21 @@ impl AppShell {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
-                        this.input.dismiss_terminal_menu();
+                        this.dismiss_terminal_menu(cx);
                         cx.notify();
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, _, _, cx| {
-                        this.input.dismiss_terminal_menu();
+                        this.dismiss_terminal_menu(cx);
                         cx.notify();
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Middle,
                     cx.listener(move |this, _, _, cx| {
-                        this.input.dismiss_terminal_menu();
+                        this.dismiss_terminal_menu(cx);
                         cx.notify();
                     }),
                 )

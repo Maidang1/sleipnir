@@ -21,6 +21,7 @@ mod plugin_monitor_panel;
 mod plugin_panel;
 mod plugin_runtime;
 mod plugin_surface;
+mod plugin_window;
 mod run_ledger_global;
 mod starfield;
 mod tab_convert;

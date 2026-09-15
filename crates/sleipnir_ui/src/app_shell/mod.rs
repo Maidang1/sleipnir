@@ -402,12 +402,10 @@ pub struct AppShell {
     diff_gen: u64,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
-    /// Last-seen pane facts for plugin events. Polled, never per-frame.
-    plugin_watch: crate::plugin_event_watch::PluginEventWatch,
-    /// Host-owned plugin Panel surfaces (ADR-0017). Keyed by pane_key.
-    plugin_panels: crate::plugin_panel::PanelRegistry,
-    /// Chrome contributions (ADR-0017 status mount).
-    plugin_chrome: crate::plugin_chrome::ChromeRegistry,
+    /// Per-window plugin surfaces: panel registry, chrome contributions, and
+    /// the polled pane-fact watch. `PluginRuntime` (supervisor / catalog /
+    /// pump) stays a process `Global`; this is the window-scoped half.
+    plugin: crate::plugin_window::PluginHost,
 }
 
 /// What the shared confirm dialog is asking about.
@@ -448,9 +446,11 @@ impl EventEmitter<()> for AppShell {}
 
 impl AppShell {
     /// Replace the keyboard owner, running teardown for the outgoing mode.
-    /// Every path that changes `self.input` must go through here so that
+    /// This and the `take_*` / `dismiss_*` methods below are the only writers of
+    /// `self.input`: each runs `teardown_input` for the mode it replaces, so
     /// Find highlights, IME state, menu selection, and theme query are cleaned
-    /// up regardless of which mode is being replaced.
+    /// up no matter which owner is being dropped. Nothing (paint click-away
+    /// included) may assign `self.input` or call `InputMode::dismiss_*` directly.
     pub(crate) fn set_input(&mut self, next: InputMode, cx: &mut Context<Self>) {
         let old = self.input.owner();
         self.input.replace(next);
@@ -515,6 +515,15 @@ impl AppShell {
     pub(crate) fn take_tab_menu_input(&mut self, cx: &mut Context<Self>) -> Option<TabMenuState> {
         let r = self.input.take_tab_menu()?;
         self.teardown_input(InputOwner::TabMenu, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_terminal_menu_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<TerminalMenuState> {
+        let r = self.input.take_terminal_menu()?;
+        self.teardown_input(InputOwner::TerminalMenu, cx);
         Some(r)
     }
 
@@ -851,9 +860,7 @@ impl AppShell {
             diff_gen: 0,
             facts: PaneFactsState::default(),
             _quit_subscription: None,
-            plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
-            plugin_panels: crate::plugin_panel::PanelRegistry::new(),
-            plugin_chrome: crate::plugin_chrome::ChromeRegistry::new(),
+            plugin: crate::plugin_window::PluginHost::new(),
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -1009,11 +1016,14 @@ impl AppShell {
                         cx.notify();
                     }
                     crate::TermViewEvent::ContextMenu { position, link } => {
-                        this.input = InputMode::TerminalMenu(TerminalMenuState {
-                            position: *position,
-                            link: link.clone(),
-                            selected: 0,
-                        });
+                        this.set_input(
+                            InputMode::TerminalMenu(TerminalMenuState {
+                                position: *position,
+                                link: link.clone(),
+                                selected: 0,
+                            }),
+                            cx,
+                        );
                         cx.notify();
                     }
                     crate::TermViewEvent::UserTyped => {}
@@ -1177,7 +1187,7 @@ impl AppShell {
         tab_panes: &[crate::pane_tree::PaneKey],
         tab_is_active: bool,
     ) -> Vec<crate::plugin_chrome::PluginTabBadge> {
-        self.plugin_chrome.badges_for_tab(tab_panes, tab_is_active)
+        self.plugin.chrome_badges_for_tab(tab_panes, tab_is_active)
     }
 
     fn rebuild_palette_items(&mut self) {
@@ -1190,7 +1200,7 @@ impl AppShell {
         self.palette
             .items
             .extend(crate::command_palette::contribution_items(
-                self.plugin_chrome.palette_entries(),
+                self.plugin.chrome_palette_entries(),
             ));
     }
 
@@ -1491,8 +1501,8 @@ impl AppShell {
                 .filter(|(_, _, c)| c.is_panel())
                 .map(|(_, k, _)| k)
                 .collect();
-            self.plugin_panels.remove_all(panel_keys);
-            self.plugin_panels.remove(closed_key);
+            self.plugin.remove_panels(panel_keys);
+            self.plugin.remove_panel(closed_key);
             self.close_tab_at(index, window, cx);
             return;
         }
@@ -1510,7 +1520,7 @@ impl AppShell {
             }
             CloseOutcome::NotFound => {}
             CloseOutcome::Closed => {
-                self.plugin_panels.remove(closed_key);
+                self.plugin.remove_panel(closed_key);
                 self.apply_pane_closed(closed_key, cx);
                 if was_active {
                     if let Some(tab) = self.tabs.get_mut(index) {
@@ -1542,7 +1552,7 @@ impl AppShell {
         };
         match tab.tree.close(pane_id) {
             CloseOutcome::Closed => {
-                self.plugin_panels.remove(pane_key);
+                self.plugin.remove_panel(pane_key);
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.active_pane = tab.tree.first_leaf_id();
                 }
@@ -1551,7 +1561,7 @@ impl AppShell {
             // TreeEmpty would mean the panel was the tab's only leaf, which the
             // insert path forbids; fall back to the tab-close path just in case.
             CloseOutcome::TreeEmpty => {
-                self.plugin_panels.remove(pane_key);
+                self.plugin.remove_panel(pane_key);
                 self.close_active_tab(window, cx);
             }
             CloseOutcome::NotFound => {}

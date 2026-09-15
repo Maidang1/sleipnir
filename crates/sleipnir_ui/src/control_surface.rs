@@ -480,38 +480,119 @@ async fn wait_until(
 
 #[cfg(unix)]
 fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
+    use crate::plugin_host_calls::WorkspaceIo;
+    let mut io = AppWorkspaceIo { cx };
     match req {
         ControlRequest::Ls => ControlResponse::Ls {
-            panes: list_panes(cx),
+            panes: io
+                .list_terminal_panes()
+                .into_iter()
+                .map(|info| PaneSnap {
+                    pane: info.pane,
+                    cwd: info.cwd,
+                    busy: info.busy,
+                    title: info.title,
+                })
+                .collect(),
         },
-        ControlRequest::Capture { pane } => match view_for_pane(cx, pane) {
-            Some(view) => ControlResponse::Capture {
-                text: view.read(cx).visible_screen_text(cx),
-            },
-            None => ControlResponse::Error {
-                message: format!("pane {pane} not found"),
-            },
+        ControlRequest::Capture { pane } => match io.read_screen(pane) {
+            Ok(text) => ControlResponse::Capture { text },
+            Err(message) => ControlResponse::Error { message },
         },
-        ControlRequest::Send { pane, text, enter } => match view_for_pane(cx, pane) {
-            Some(view) => {
-                let delivered = view.update(cx, |v, cx| v.insert_text(&text, enter, cx));
-                if delivered {
-                    ControlResponse::Send
-                } else {
-                    ControlResponse::Error {
-                        message: format!("pane {pane} is not ready"),
-                    }
-                }
-            }
-            None => ControlResponse::Error {
-                message: format!("pane {pane} not found"),
-            },
+        ControlRequest::Send { pane, text, enter } => match io.send_text(pane, text, enter) {
+            Ok(()) => ControlResponse::Send,
+            Err(message) => ControlResponse::Error { message },
         },
         ControlRequest::Wait { .. } => ControlResponse::Error {
             message: "wait handled asynchronously".into(),
         },
     }
 }
+
+/// [`WorkspaceIo`] over every live window, for `sleipnir-ctl`. The same trait
+/// the plugin host calls execute against, so `ls` / `capture` / `send` share
+/// the pane walk and `insert_text` write with the plugin verbs instead of a
+/// parallel copy. `ls` and `capture` keep the full (uncapped) text ctl expects;
+/// the plugin `ReadScreen` cap lives in [`crate::plugin_host_calls::CallPlan`].
+///
+/// The window-owning verbs (open / focus / send-key / close / scroll-to-run)
+/// are never planned by the control surface — its protocol has no such request
+/// — so they report they are unavailable here rather than reaching for a
+/// `Window` the socket thread does not have.
+#[cfg(unix)]
+struct AppWorkspaceIo<'a> {
+    cx: &'a mut App,
+}
+
+#[cfg(unix)]
+impl crate::plugin_host_calls::WorkspaceIo for AppWorkspaceIo<'_> {
+    fn list_terminal_panes(&mut self) -> Vec<plugin_protocol::v2::PaneInfo> {
+        live_terminal_panes(self.cx)
+            .into_iter()
+            .map(|(pane, view)| plugin_protocol::v2::PaneInfo {
+                pane,
+                cwd: view
+                    .read(self.cx)
+                    .working_directory(self.cx)
+                    .map(|p| p.to_string_lossy().into_owned()),
+                title: Some(view.read(self.cx).title().to_string()),
+                busy: view.read(self.cx).looks_busy(self.cx),
+            })
+            .collect()
+    }
+
+    fn read_screen(&mut self, pane: PaneKey) -> Result<String, String> {
+        match view_for_pane(self.cx, pane) {
+            Some(view) => Ok(view.read(self.cx).visible_screen_text(self.cx)),
+            None => Err(format!("pane {pane} not found")),
+        }
+    }
+
+    fn open_pane(
+        &mut self,
+        _cwd: Option<String>,
+        _command: Option<crate::plugin_host_calls::OpenCommand>,
+    ) -> plugin_protocol::v2::HostCallResult {
+        plugin_protocol::v2::HostCallResult::Error {
+            message: "open_pane is not a control-surface request".into(),
+        }
+    }
+
+    fn scroll_to_run(&mut self, _run_id: plugin_protocol::v2::RunId) -> Result<(), String> {
+        Err("scroll_to_run is not a control-surface request".into())
+    }
+
+    fn focus_pane(&mut self, _pane: PaneKey) -> Result<(), String> {
+        Err("focus_pane is not a control-surface request".into())
+    }
+
+    fn send_text(&mut self, pane: PaneKey, text: String, enter: bool) -> Result<(), String> {
+        match view_for_pane(self.cx, pane) {
+            Some(view) => {
+                let delivered = view.update(self.cx, |v, cx| v.insert_text(&text, enter, cx));
+                if delivered {
+                    Ok(())
+                } else {
+                    Err(format!("pane {pane} is not ready"))
+                }
+            }
+            None => Err(format!("pane {pane} not found")),
+        }
+    }
+
+    fn send_key(
+        &mut self,
+        _pane: PaneKey,
+        _key: crate::plugin_host_calls::LogicalKey,
+    ) -> Result<(), String> {
+        Err("send_key is not a control-surface request".into())
+    }
+
+    fn request_close_pane(&mut self, _pane: PaneKey) -> Result<(), String> {
+        Err("request_close_pane is not a control-surface request".into())
+    }
+}
+
 
 #[cfg(unix)]
 fn wait_status(pane: PaneKey, until: WaitUntil, cx: &mut App) -> Result<bool, String> {
@@ -529,22 +610,6 @@ fn wait_status(pane: PaneKey, until: WaitUntil, cx: &mut App) -> Result<bool, St
         (false, false)
     };
     Ok(wait_matches(until, busy, failed, attention))
-}
-
-#[cfg(unix)]
-fn list_panes(cx: &mut App) -> Vec<PaneSnap> {
-    collect_live_panes(cx)
-        .into_iter()
-        .map(|(pane, view)| PaneSnap {
-            pane,
-            cwd: view
-                .read(cx)
-                .working_directory(cx)
-                .map(|p| p.to_string_lossy().into_owned()),
-            busy: view.read(cx).looks_busy(cx),
-            title: Some(view.read(cx).title().to_string()),
-        })
-        .collect()
 }
 
 #[cfg(unix)]
@@ -570,11 +635,6 @@ pub(crate) fn live_terminal_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<Te
         out.extend(panes);
     }
     out
-}
-
-#[cfg(unix)]
-fn collect_live_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
-    live_terminal_panes(cx)
 }
 
 #[cfg(all(test, unix))]

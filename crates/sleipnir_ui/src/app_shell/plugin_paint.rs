@@ -35,7 +35,7 @@ impl AppShell {
             .or_else(|| self.content_bounds.map(|b| f32::from(b.size.width)))
             .unwrap_or(80.0);
         let cols = cols_from_pixels(pixel_width, cell_w);
-        let Some(surface) = self.plugin_panels.get(pane_key) else {
+        let Some(surface) = self.plugin.panel(pane_key) else {
             return div()
                 .size_full()
                 .bg(tokens.surface)
@@ -131,7 +131,7 @@ impl AppShell {
                 let local_x = f32::from(ev.position.x) - f32::from(origin.x);
                 let local_y = f32::from(ev.position.y) - f32::from(origin.y);
                 let pos = cell_from_pixels(local_x, local_y, cell_w_click, line_h_click);
-                if let Some(surface) = this.plugin_panels.get(pane_key) {
+                if let Some(surface) = this.plugin.panel(pane_key) {
                     if surface.stale {
                         cx.notify();
                         return;
@@ -159,7 +159,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         use crate::plugin_chrome::MAX_STATUS_COLS;
-        if self.plugin_chrome.is_empty() {
+        if self.plugin.chrome_is_empty() {
             return div().into_any_element();
         }
         let builtins: std::collections::BTreeSet<_> =
@@ -168,7 +168,7 @@ impl AppShell {
                 .filter(|plugin| plugin.source == plugin_host::PluginSource::BuiltInAgents)
                 .map(|plugin| plugin.manifest.id)
                 .collect();
-        let Some(status) = self.plugin_chrome.status_layout(MAX_STATUS_COLS) else {
+        let Some(status) = self.plugin.chrome_status_layout(MAX_STATUS_COLS) else {
             return div().into_any_element();
         };
         if status.height == 0 || status.width == 0 {

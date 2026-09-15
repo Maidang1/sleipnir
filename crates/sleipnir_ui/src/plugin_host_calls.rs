@@ -110,6 +110,45 @@ pub struct OpenCommand {
     pub args: Vec<String>,
 }
 
+/// The workspace side effects a planned [`CallPlan`] executes against. One
+/// executor for both plugin host calls and `sleipnir-ctl`: the shell provides
+/// an implementation backed by its live panes, and the control surface backs
+/// the same verbs with the live window(s). Keeping this trait gpui-free means
+/// `CallPlan::execute` stays unit-testable against a fake.
+///
+/// [`CallPlan::Notify`] is deliberately absent: notification is a host side
+/// effect the caller performs next to `execute`, not a workspace verb, so it is
+/// never a second copy of List/Send here.
+pub trait WorkspaceIo {
+    /// Terminal (PTY) panes across every window. Panel leaves are excluded, so
+    /// the result never needs a second identity filter.
+    fn list_terminal_panes(&mut self) -> Vec<PaneInfo>;
+    /// Visible screen text of a terminal pane. Uncapped; `execute` caps the
+    /// plugin `ReadScreen` reply while ctl `Capture` keeps the full text.
+    fn read_screen(&mut self, pane: PaneKey) -> Result<String, String>;
+    /// Open a new terminal pane. Returns the protocol reply directly because
+    /// the success payload carries the new [`PaneKey`].
+    fn open_pane(&mut self, cwd: Option<String>, command: Option<OpenCommand>) -> HostCallResult;
+    /// Scroll a pane to (and focus) the output of a run.
+    fn scroll_to_run(&mut self, run_id: RunId) -> Result<(), String>;
+    /// Focus a terminal pane.
+    fn focus_pane(&mut self, pane: PaneKey) -> Result<(), String>;
+    /// Type text into a terminal pane (paste-aware `insert_text`, never CSI).
+    fn send_text(&mut self, pane: PaneKey, text: String, enter: bool) -> Result<(), String>;
+    /// Send one allowlisted logical key to a terminal pane.
+    fn send_key(&mut self, pane: PaneKey, key: LogicalKey) -> Result<(), String>;
+    /// Request that a terminal pane close (busy panes still confirm).
+    fn request_close_pane(&mut self, pane: PaneKey) -> Result<(), String>;
+}
+
+fn ok_or_error(result: Result<(), String>) -> HostCallResult {
+    match result {
+        Ok(()) => HostCallResult::Ok,
+        Err(message) => error_result(message),
+    }
+}
+
+
 /// What the UI should do for one `Call`. Always ends in a reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallPlan {
@@ -146,6 +185,42 @@ pub enum CallPlan {
         pane: PaneKey,
     },
 }
+
+impl CallPlan {
+    /// Run a planned call's workspace side effects and produce its `Reply`.
+    ///
+    /// [`CallPlan::Reply`] short-circuits (no side effect). [`CallPlan::Notify`]
+    /// is not workspace IO: the caller handles it and never routes it here, so
+    /// hitting it is a host bug rather than a silent drop — it still returns a
+    /// reply so the one-call-one-reply contract holds.
+    pub fn execute(self, io: &mut impl WorkspaceIo) -> HostCallResult {
+        match self {
+            CallPlan::Reply(result) => result,
+            // Notify is a host side effect performed next to execute, not a
+            // workspace verb. Planners route it separately; reaching it here
+            // means the caller forgot to.
+            CallPlan::Notify { .. } => error_result("notify is not a workspace call"),
+            CallPlan::ListPanes => HostCallResult::Panes {
+                panes: io.list_terminal_panes(),
+            },
+            CallPlan::ReadScreen { pane } => match io.read_screen(pane) {
+                Ok(text) => HostCallResult::Screen {
+                    text: cap_screen(text),
+                },
+                Err(message) => error_result(message),
+            },
+            CallPlan::OpenPane { cwd, command } => io.open_pane(cwd, command),
+            CallPlan::ScrollToRun { run_id } => ok_or_error(io.scroll_to_run(run_id)),
+            CallPlan::FocusPane { pane } => ok_or_error(io.focus_pane(pane)),
+            CallPlan::SendText { pane, text, enter } => {
+                ok_or_error(io.send_text(pane, text, enter))
+            }
+            CallPlan::SendKey { pane, key } => ok_or_error(io.send_key(pane, key)),
+            CallPlan::RequestClosePane { pane } => ok_or_error(io.request_close_pane(pane)),
+        }
+    }
+}
+
 
 /// Per-plugin sliding-window limiter. Drops are counted so the Monitor can
 /// show a resident plugin that is hammering Notify / OpenPane.
@@ -344,18 +419,6 @@ pub fn cap_screen(text: String) -> String {
     cap_chars(&text, MAX_SCREEN_CHARS)
 }
 
-/// ListPanes reports only terminal panes. A plugin Panel is not a PTY and
-/// must not appear (and is not a valid ReadScreen target).
-pub fn filter_listed_panes(
-    panes: Vec<PaneInfo>,
-    terminal_keys: &BTreeSet<PaneKey>,
-) -> Vec<PaneInfo> {
-    panes
-        .into_iter()
-        .filter(|p| terminal_keys.contains(&p.pane))
-        .collect()
-}
-
 /// Classify a terminal-pane target. Used by ReadScreen, FocusPane, SendText,
 /// SendKey, and RequestClosePane. The caller already required the matching
 /// host-call capability; no snapshot-read or [`Capability::WriteTerminal`]
@@ -388,15 +451,6 @@ pub const SEND_TEXT_NO_TERMINAL: &str = "pane has no terminal yet";
 pub const SEND_KEY_VI_MODE: &str =
     "terminal vi mode is active; the key would be consumed as scrollback motion";
 
-/// Map `TermView::insert_text`'s delivery flag to a host-call reply.
-pub fn send_text_result(delivered: bool) -> HostCallResult {
-    if delivered {
-        HostCallResult::Ok
-    } else {
-        error_result(SEND_TEXT_NO_TERMINAL)
-    }
-}
-
 /// Whether a plugin [`HostCall::SendKey`] may be delivered to this pane.
 ///
 /// Loading/failed panes have no PTY. Vi mode handles keys as scrollback
@@ -420,6 +474,92 @@ mod tests {
 
     fn key(n: u128) -> PaneKey {
         Uuid::from_u128(n)
+    }
+
+    /// In-memory `WorkspaceIo` so `CallPlan::execute` can be exercised without
+    /// gpui. Only the terminal panes it is seeded with exist; everything else
+    /// is a missing-pane error, mirroring the shell's `read_screen_access`.
+    #[derive(Default)]
+    struct FakeWorkspace {
+        panes: Vec<PaneInfo>,
+        screens: BTreeMap<PaneKey, String>,
+        sent_text: Vec<(PaneKey, String, bool)>,
+        sent_keys: Vec<(PaneKey, LogicalKey)>,
+        focused: Vec<PaneKey>,
+        closed: Vec<PaneKey>,
+        opened: Option<(Option<String>, Option<OpenCommand>)>,
+        open_reply: Option<HostCallResult>,
+    }
+
+    impl FakeWorkspace {
+        fn with_terminal(pane: PaneKey, screen: &str) -> Self {
+            let mut me = Self::default();
+            me.panes.push(PaneInfo {
+                pane,
+                cwd: Some("/work".into()),
+                title: Some("shell".into()),
+                busy: false,
+            });
+            me.screens.insert(pane, screen.into());
+            me
+        }
+
+        fn has(&self, pane: PaneKey) -> bool {
+            self.panes.iter().any(|p| p.pane == pane)
+        }
+    }
+
+    impl WorkspaceIo for FakeWorkspace {
+        fn list_terminal_panes(&mut self) -> Vec<PaneInfo> {
+            self.panes.clone()
+        }
+        fn read_screen(&mut self, pane: PaneKey) -> Result<String, String> {
+            self.screens
+                .get(&pane)
+                .cloned()
+                .ok_or_else(|| format!("pane {pane} not found"))
+        }
+        fn open_pane(
+            &mut self,
+            cwd: Option<String>,
+            command: Option<OpenCommand>,
+        ) -> HostCallResult {
+            self.opened = Some((cwd, command));
+            self.open_reply
+                .clone()
+                .unwrap_or(HostCallResult::Pane { pane: key(999) })
+        }
+        fn scroll_to_run(&mut self, _run_id: RunId) -> Result<(), String> {
+            Ok(())
+        }
+        fn focus_pane(&mut self, pane: PaneKey) -> Result<(), String> {
+            if !self.has(pane) {
+                return Err(format!("pane {pane} not found"));
+            }
+            self.focused.push(pane);
+            Ok(())
+        }
+        fn send_text(&mut self, pane: PaneKey, text: String, enter: bool) -> Result<(), String> {
+            if !self.has(pane) {
+                return Err(format!("pane {pane} not found"));
+            }
+            self.sent_text.push((pane, text, enter));
+            Ok(())
+        }
+        fn send_key(&mut self, pane: PaneKey, key: LogicalKey) -> Result<(), String> {
+            if !self.has(pane) {
+                return Err(format!("pane {pane} not found"));
+            }
+            self.sent_keys.push((pane, key));
+            Ok(())
+        }
+        fn request_close_pane(&mut self, pane: PaneKey) -> Result<(), String> {
+            if !self.has(pane) {
+                return Err(format!("pane {pane} not found"));
+            }
+            self.closed.push(pane);
+            Ok(())
+        }
     }
 
     fn notify(title: &str, body: &str) -> HostCall {
@@ -500,31 +640,6 @@ mod tests {
             }
             other => panic!("read_visible_screen must not imply ReadScreen: {other:?}"),
         }
-    }
-
-    #[test]
-    fn list_panes_excludes_plugin_panel_leaves() {
-        let terminal = key(1);
-        let panel = key(2);
-        let panes = vec![
-            PaneInfo {
-                pane: terminal,
-                cwd: Some("/tmp".into()),
-                title: Some("shell".into()),
-                busy: false,
-            },
-            PaneInfo {
-                pane: panel,
-                cwd: None,
-                title: Some("demo".into()),
-                busy: false,
-            },
-        ];
-        let mut keys = BTreeSet::new();
-        keys.insert(terminal);
-        let listed = filter_listed_panes(panes, &keys);
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].pane, terminal);
     }
 
     #[test]
@@ -1089,17 +1204,6 @@ mod tests {
     }
 
     #[test]
-    fn send_text_without_a_terminal_is_an_error_not_ok() {
-        assert_eq!(send_text_result(true), HostCallResult::Ok);
-        match send_text_result(false) {
-            HostCallResult::Error { message } => {
-                assert_eq!(message, SEND_TEXT_NO_TERMINAL);
-            }
-            other => panic!("loading pane must not reply Ok: {other:?}"),
-        }
-    }
-
-    #[test]
     fn send_key_is_not_eligible_without_a_terminal_or_in_vi_mode() {
         assert!(send_key_ready(true, false).is_ok());
         match send_key_ready(false, false) {
@@ -1118,4 +1222,140 @@ mod tests {
             Ok(()) => panic!("no terminal takes priority over vi mode"),
         }
     }
+
+    #[test]
+    fn execute_list_panes_returns_the_workspace_panes() {
+        let mut io = FakeWorkspace::with_terminal(key(1), "hello");
+        match CallPlan::ListPanes.execute(&mut io) {
+            HostCallResult::Panes { panes } => {
+                assert_eq!(panes.len(), 1);
+                assert_eq!(panes[0].pane, key(1));
+            }
+            other => panic!("expected Panes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_read_screen_hits_and_misses() {
+        let mut io = FakeWorkspace::with_terminal(key(1), "on screen");
+        match (CallPlan::ReadScreen { pane: key(1) }).execute(&mut io) {
+            HostCallResult::Screen { text } => assert_eq!(text, "on screen"),
+            other => panic!("expected Screen, got {other:?}"),
+        }
+        match (CallPlan::ReadScreen { pane: key(2) }).execute(&mut io) {
+            HostCallResult::Error { message } => assert!(message.contains("not found"), "{message}"),
+            other => panic!("missing pane must be an Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_read_screen_caps_at_the_screen_limit() {
+        let huge: String = std::iter::repeat_n('a', MAX_SCREEN_CHARS + 100).collect();
+        let mut io = FakeWorkspace::with_terminal(key(1), &huge);
+        match (CallPlan::ReadScreen { pane: key(1) }).execute(&mut io) {
+            HostCallResult::Screen { text } => {
+                assert_eq!(text.chars().count(), MAX_SCREEN_CHARS);
+            }
+            other => panic!("expected Screen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_send_text_delivers_to_the_pane_and_denies_missing() {
+        let mut io = FakeWorkspace::with_terminal(key(1), "");
+        let plan = CallPlan::SendText {
+            pane: key(1),
+            text: "ls\n".into(),
+            enter: true,
+        };
+        assert_eq!(plan.execute(&mut io), HostCallResult::Ok);
+        assert_eq!(io.sent_text, vec![(key(1), "ls\n".to_string(), true)]);
+
+        let missing = CallPlan::SendText {
+            pane: key(2),
+            text: "x".into(),
+            enter: false,
+        };
+        match missing.execute(&mut io) {
+            HostCallResult::Error { message } => assert!(message.contains("not found"), "{message}"),
+            other => panic!("missing pane must deny, got {other:?}"),
+        }
+        // The denied call left no side effect.
+        assert_eq!(io.sent_text.len(), 1);
+    }
+
+    #[test]
+    fn execute_focus_send_key_and_close_route_to_io() {
+        let mut io = FakeWorkspace::with_terminal(key(1), "");
+        assert_eq!(
+            (CallPlan::FocusPane { pane: key(1) }).execute(&mut io),
+            HostCallResult::Ok
+        );
+        assert_eq!(
+            (CallPlan::SendKey {
+                pane: key(1),
+                key: LogicalKey::CtrlC
+            })
+            .execute(&mut io),
+            HostCallResult::Ok
+        );
+        assert_eq!(
+            (CallPlan::RequestClosePane { pane: key(1) }).execute(&mut io),
+            HostCallResult::Ok
+        );
+        assert_eq!(io.focused, vec![key(1)]);
+        assert_eq!(io.sent_keys, vec![(key(1), LogicalKey::CtrlC)]);
+        assert_eq!(io.closed, vec![key(1)]);
+    }
+
+    #[test]
+    fn execute_open_pane_forwards_cwd_and_command_and_returns_the_io_reply() {
+        let mut io = FakeWorkspace::default();
+        io.open_reply = Some(HostCallResult::Pane { pane: key(7) });
+        let plan = CallPlan::OpenPane {
+            cwd: Some("/work".into()),
+            command: Some(OpenCommand {
+                program: "codex".into(),
+                args: vec!["--model".into()],
+            }),
+        };
+        match plan.execute(&mut io) {
+            HostCallResult::Pane { pane } => assert_eq!(pane, key(7)),
+            other => panic!("expected Pane, got {other:?}"),
+        }
+        let (cwd, command) = io.opened.expect("open_pane called");
+        assert_eq!(cwd.as_deref(), Some("/work"));
+        let command = command.expect("argv");
+        assert_eq!(command.program, "codex");
+        assert_eq!(command.args, ["--model"]);
+    }
+
+    #[test]
+    fn execute_reply_short_circuits_without_touching_io() {
+        let mut io = FakeWorkspace::default();
+        let plan = CallPlan::Reply(HostCallResult::Error {
+            message: "capability HostCallListPanes not granted".into(),
+        });
+        match plan.execute(&mut io) {
+            HostCallResult::Error { message } => assert!(message.contains("not granted")),
+            other => panic!("Reply must pass through, got {other:?}"),
+        }
+        assert!(io.opened.is_none() && io.sent_text.is_empty());
+    }
+
+    #[test]
+    fn execute_notify_is_never_a_workspace_call() {
+        // Planners route Notify to the host side effect, not execute. If it ever
+        // reaches here it must still produce a reply, not silently drop the id.
+        let mut io = FakeWorkspace::default();
+        let plan = CallPlan::Notify {
+            title: "t".into(),
+            body: "b".into(),
+        };
+        match plan.execute(&mut io) {
+            HostCallResult::Error { message } => assert!(message.contains("notify"), "{message}"),
+            other => panic!("notify must not be executed as a workspace verb: {other:?}"),
+        }
+    }
 }
+
