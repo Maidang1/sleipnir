@@ -7,14 +7,14 @@
 //! *that* directory.
 //!
 //! Rendering is a widget tree: the plugin projects the chart into `Widget`
-//! nodes and `render`s them into a panel. There is no separate host-side
-//! scene call.
+//! nodes and `render`s them into a panel. The host paints that tree; there is
+//! no host-local 3D scene.
 //!
 //! Two protocol facts shape the code:
 //!
-//! - The panel's real pixel size is never sent to the plugin, so the fallback
-//!   raster is built for an assumed split size and clamped to the node budget in
-//!   `view`; the host owns framing for the vector path.
+//! - The panel's real pixel size is never sent to the plugin, so the raster
+//!   is built for an assumed split size and clamped to the node budget in
+//!   `view`.
 //! - `RenderTarget::Panel` needs a `PaneKey` the host does not yet own; the host
 //!   creates the split on first render for an unknown key. The key is minted
 //!   once and reused, so every later render replaces that same panel in place.
@@ -29,7 +29,7 @@ use sleipnir_plugin_disk3d::{
     PITCH_STEP, SPIN_STEP, View, YAW_STEP, ZOOM_STEP, render, scan::scan,
 };
 
-/// Assumed panel size for the text fallback. The host does not report the
+/// Assumed panel size. The host does not report the
 /// split's cell size, so the tree is built for a typical half-window split;
 /// `view::render` auto-fits the projection and clamps the node count, so being
 /// wrong costs framing, never correctness.
@@ -166,16 +166,9 @@ impl Plugin for Disk3d {
         &mut self,
         _block_id: BlockId,
         action: &str,
-        arg: Option<&str>,
+        _arg: Option<&str>,
         ctx: &mut Context<'_>,
     ) {
-        if action == "camera" {
-            if let Some(arg) = arg {
-                self.view.apply_camera_arg(arg);
-            }
-            self.draw(ctx);
-            return;
-        }
         match action {
             "yaw-" => self.view.yaw_by(-YAW_STEP),
             "yaw+" => self.view.yaw_by(YAW_STEP),

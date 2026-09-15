@@ -1,6 +1,5 @@
 //! Plugin orchestration for the shell (ADR-0015/0016/0017/0018): event
-//! polling, render/call application, consent gating, resident lifecycle, and
-//! panel camera drag.
+//! polling, render/call application, consent gating, and resident lifecycle.
 //!
 //! This is a child module of `app_shell` so it can drive `AppShell` internals
 //! while they stay private to the shell, matching `command_dispatch.rs` and
@@ -12,7 +11,7 @@ use plugin_protocol::v2::HostCallResult;
 
 /// Enough to finish a launch after the user approves. The dialog itself
 /// renders [`crate::plugin_monitor_panel::ConsentPrompt`] only.
-pub(super) struct PluginConsentPending {
+pub(crate) struct PluginConsentPending {
     pub(super) prompt: crate::plugin_monitor_panel::ConsentPrompt,
     kind: PluginConsentKind,
     hash: plugin_grants::BinaryHash,
@@ -498,131 +497,6 @@ impl AppShell {
             log::debug!("plugin {plugin_id} Call {id} reply dropped (session gone)");
         }
     }
-    /// Rotate a plugin panel's camera from a drag delta. The host owns the
-    /// camera: it mutates the stored scene and repaints immediately (no plugin
-    /// round-trip, so the motion is smooth), then reports the new camera to the
-    /// plugin as a throttled `camera` action so the legend stays in sync.
-    pub(super) fn drag_panel_camera(
-        &mut self,
-        pane_key: PaneKey,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(drag) = self.panel_drag.as_ref() else {
-            return;
-        };
-        if drag.pane_key != pane_key {
-            return;
-        }
-        let dx = f32::from(position.x) - f32::from(drag.last.x);
-        let dy = f32::from(position.y) - f32::from(drag.last.y);
-        if dx == 0.0 && dy == 0.0 {
-            return;
-        }
-        // Pixels-to-radians: a full panel width is roughly a half turn.
-        const YAW_PER_PX: f32 = 0.01;
-        const PITCH_PER_PX: f32 = 0.01;
-        let Some(scene) = self.plugin_panels.scene(pane_key) else {
-            return;
-        };
-        let mut camera = scene.camera;
-        camera.yaw = wrap_camera_angle(camera.yaw + dx * YAW_PER_PX);
-        camera.pitch = (camera.pitch - dy * PITCH_PER_PX).clamp(0.05, 1.35);
-        self.plugin_panels.set_scene_camera(pane_key, camera);
-        if let Some(drag) = self.panel_drag.as_mut() {
-            drag.last = position;
-        }
-        cx.notify();
-        self.push_panel_camera(pane_key, false, cx);
-    }
-    /// Zoom a plugin panel's camera from a scroll-wheel delta.
-    pub(super) fn zoom_panel_camera(
-        &mut self,
-        pane_key: PaneKey,
-        ev: &gpui::ScrollWheelEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(scene) = self.plugin_panels.scene(pane_key) else {
-            return;
-        };
-        // A line of wheel travel is one zoom step; pixel deltas are scaled down.
-        let dy = match ev.delta {
-            gpui::ScrollDelta::Lines(p) => p.y,
-            gpui::ScrollDelta::Pixels(p) => f32::from(p.y) / 40.0,
-        };
-        if dy == 0.0 {
-            return;
-        }
-        let mut camera = scene.camera;
-        let factor = 1.0 + dy * 0.1;
-        camera.zoom = (camera.zoom * factor).clamp(0.5, 2.5);
-        self.plugin_panels.set_scene_camera(pane_key, camera);
-        cx.notify();
-        self.push_panel_camera(pane_key, false, cx);
-    }
-    /// End a camera drag and push the final camera unthrottled, so the plugin's
-    /// legend settles on the exact resting view.
-    pub(super) fn end_panel_camera_drag(&mut self, pane_key: PaneKey, cx: &mut Context<Self>) {
-        let is_ours = self
-            .panel_drag
-            .as_ref()
-            .is_some_and(|d| d.pane_key == pane_key);
-        if !is_ours {
-            return;
-        }
-        self.push_panel_camera(pane_key, true, cx);
-        self.panel_drag = None;
-    }
-    /// Report a panel's current camera to its plugin as a `camera` action.
-    ///
-    /// Throttled unless `force`: the local repaint already happened, so this only
-    /// keeps the plugin-owned legend in sync. Per the no-loopback rule the plugin
-    /// answers `camera` by resending chrome only, never the scene, so this cannot
-    /// bounce back and fight the drag.
-    pub(super) fn push_panel_camera(
-        &mut self,
-        pane_key: PaneKey,
-        force: bool,
-        cx: &mut Context<Self>,
-    ) {
-        const THROTTLE_MS: u64 = 40;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        if !force && now.saturating_sub(self.panel_camera_last_ms) < THROTTLE_MS {
-            return;
-        }
-        let Some((owner_instance_id, surface_id)) = self
-            .panel_drag
-            .as_ref()
-            .filter(|d| d.pane_key == pane_key)
-            .map(|d| (d.owner_instance_id, d.surface_id))
-            .or_else(|| {
-                // Wheel zoom has no active drag; look the surface up directly.
-                self.plugin_panels
-                    .get(pane_key)
-                    .map(|s| (s.owner_instance_id, s.surface_id))
-            })
-        else {
-            return;
-        };
-        let Some(scene) = self.plugin_panels.scene(pane_key) else {
-            return;
-        };
-        let camera = scene.camera;
-        // Typed payload: the same serde `SceneCamera` the scene itself carries,
-        // not a stringly key=value encoding.
-        let arg = serde_json::to_string(&camera).unwrap_or_default();
-        self.panel_camera_last_ms = now;
-        crate::plugin_runtime::push_action(
-            owner_instance_id,
-            surface_id,
-            "camera".to_string(),
-            Some(arg),
-            cx,
-        );
-    }
     fn terminal_view_for_call(
         &self,
         pane: PaneKey,
@@ -727,24 +601,22 @@ impl AppShell {
         self.dispatch_command(CommandId::TogglePluginMonitor, window, cx);
     }
     pub(super) fn toggle_plugin_monitor(&mut self, cx: &mut Context<Self>) {
-        self.mode.toggle(OverlayKind::PluginMonitor);
+        self.input.toggle_overlay(OverlayKind::PluginMonitor);
         cx.notify();
     }
     pub(super) fn close_plugin_monitor(&mut self, cx: &mut Context<Self>) {
-        self.mode.close(OverlayKind::PluginMonitor);
+        self.input.close_overlay(OverlayKind::PluginMonitor);
         cx.notify();
     }
     pub(super) fn deny_plugin_consent(&mut self, cx: &mut Context<Self>) {
         // Deny writes nothing: a dismissed prompt must not become a grant.
-        self.plugin_consent = None;
-        self.mode.close(OverlayKind::PluginConsent);
+        self.input.dismiss_consent();
         cx.notify();
     }
     pub(super) fn approve_plugin_consent(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.plugin_consent.take() else {
+        let Some(pending) = self.input.take_consent() else {
             return;
         };
-        self.mode.close(OverlayKind::PluginConsent);
         if !crate::plugin_runtime::is_current(&pending.supervisor, cx) {
             cx.notify();
             return;
@@ -836,7 +708,7 @@ impl AppShell {
                     .map(|r| r.granted.iter().copied().collect())
                     .unwrap_or_default();
                 let tier = record.map(|r| r.tier).unwrap_or(plugin_grants::Tier::Local);
-                self.plugin_consent = Some(PluginConsentPending {
+                self.input = crate::ui_mode::InputMode::Consent(PluginConsentPending {
                     supervisor: crate::plugin_runtime::supervisor(cx)
                         .expect("plugin runtime initialized"),
                     prompt: crate::plugin_monitor_panel::consent_prompt(
@@ -851,7 +723,6 @@ impl AppShell {
                     hash,
                     request,
                 });
-                self.mode.open(OverlayKind::PluginConsent);
                 cx.notify();
                 false
             }
@@ -914,7 +785,7 @@ impl AppShell {
     /// Handshake every resident. Built-ins use their compiled capability set;
     /// external first-run / binary-change / new-cap gaps need explicit consent.
     pub(super) fn start_resident_plugins(&mut self, cx: &mut Context<Self>) {
-        if self.plugin_consent.is_some() {
+        if self.input.consent().is_some() {
             return;
         }
         for plugin in crate::plugin_runtime::PluginRuntime::plugins(cx) {
@@ -1034,38 +905,6 @@ pub(super) fn run_event_to_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
-    use crate::plugin_panel::PanelSurface;
-    use plugin_protocol::v2::{Tone, Widget};
-    use uuid::Uuid;
-
-    fn text(s: &str) -> Widget {
-        Widget::Text {
-            s: s.into(),
-            fg: Tone::Fg,
-            bold: false,
-        }
-    }
-
-    fn scene(yaw: f32) -> SceneData {
-        SceneData {
-            cols: 1,
-            rows: 1,
-            floor: [1, 2, 3],
-            camera: SceneCamera {
-                yaw,
-                pitch: 0.2,
-                zoom: 1.0,
-            },
-            bars: vec![SceneBar {
-                gx: 0,
-                gz: 0,
-                height: 1.0,
-                color: [9, 8, 7],
-                selected: false,
-            }],
-        }
-    }
 
     #[test]
     fn run_started_host_event_uses_ledger_redacted_command() {
@@ -1115,55 +954,5 @@ mod tests {
         let event = run_ledger::RunEvent::PaneClosed { pane, at_ms: 10 };
         let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
         assert_eq!(host, plugin_protocol::v2::HostEvent::PaneClosed { pane });
-    }
-
-    #[test]
-    fn draw_scene_rejects_same_plugin_different_live_owner() {
-        let pane = PaneKey::from_u128(11);
-        let old_owner = Uuid::from_u128(1);
-        let new_owner = Uuid::from_u128(2);
-        let old_surface_id = Uuid::from_u128(101);
-        let mut panels = crate::plugin_panel::PanelRegistry::new();
-        panels.insert_surface(PanelSurface {
-            plugin_id: "demo".into(),
-            owner_instance_id: old_owner,
-            pane_key: pane,
-            surface_id: old_surface_id,
-            tree: text("one"),
-            stale: false,
-            scene: Some(scene(0.1)),
-        });
-
-        let result = panels.set_scene(pane, "demo", new_owner, scene(0.9));
-        assert!(!result);
-        let surface = panels.get(pane).expect("surface remains");
-        assert_eq!(surface.owner_instance_id, old_owner);
-        assert_eq!(surface.surface_id, old_surface_id);
-        assert_eq!(surface.scene.as_ref().map(|s| s.camera.yaw), Some(0.1));
-    }
-
-    #[test]
-    fn draw_scene_rejects_stale_surface_until_reclaimed_by_render() {
-        let pane = PaneKey::from_u128(12);
-        let old_owner = Uuid::from_u128(3);
-        let new_owner = Uuid::from_u128(4);
-        let old_surface_id = Uuid::from_u128(102);
-        let mut panels = crate::plugin_panel::PanelRegistry::new();
-        panels.insert_surface(PanelSurface {
-            plugin_id: "demo".into(),
-            owner_instance_id: old_owner,
-            pane_key: pane,
-            surface_id: old_surface_id,
-            tree: text("stale"),
-            stale: true,
-            scene: Some(scene(0.2)),
-        });
-
-        let result = panels.set_scene(pane, "demo", new_owner, scene(0.8));
-        assert!(!result);
-        let surface = panels.get(pane).expect("surface remains");
-        assert_eq!(surface.owner_instance_id, old_owner);
-        assert_eq!(surface.surface_id, old_surface_id);
-        assert_eq!(surface.scene.as_ref().map(|s| s.camera.yaw), Some(0.2));
     }
 }

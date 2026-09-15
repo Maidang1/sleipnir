@@ -184,8 +184,8 @@ enum SelectionType {
     Lines,
 }
 
-/// Host vs app pointer ownership for one gesture. Hover is derived from this
-/// plus `mouse_mode`: the app owning the pointer makes host hover unrepresentable.
+/// Host vs app pointer ownership for one gesture. Entering [`Self::AppMouse`]
+/// clears host hover, so a mouse-mode app cannot keep a link tooltip.
 enum PointerSession {
     Idle,
     AppMouse {
@@ -1090,12 +1090,16 @@ impl InteractionState {
         self.hovered = None;
     }
 
-    fn host_hover(&self, mouse_mode: bool) -> Option<&HoveredWord> {
-        if mouse_mode {
-            None
-        } else {
-            self.hovered.as_ref()
+    fn host_hover(&self) -> Option<&HoveredWord> {
+        match self.session {
+            PointerSession::AppMouse { .. } => None,
+            _ => self.hovered.as_ref(),
         }
+    }
+
+    fn enter_app_mouse(&mut self, last: Option<(Point, SelectionSide)>) {
+        self.session = PointerSession::AppMouse { last };
+        self.clear_hover();
     }
 
     fn selecting_drag(&self) -> bool {
@@ -1512,7 +1516,7 @@ impl Terminal {
 
     /// Host hover overlay. `None` while a mouse-mode app owns the pointer.
     pub fn hovered_word(&self) -> Option<&HoveredWord> {
-        self.interaction.host_hover(self.mouse_mode(false))
+        self.interaction.host_hover()
     }
 
     /// Mapping paint and hit-testing share. The grid's `display_offset` is
@@ -2204,10 +2208,10 @@ impl Terminal {
             self.invalidate_terminal_anchors();
         }
         let mouse = self.last_content.mode.intersects(Modes::MOUSE_MODE);
-        if alt_transitioned || (!prev_mouse && mouse) {
+        if alt_transitioned || mouse {
             // Grid coordinates and OSC 8 spans from the previous screen are
-            // meaningless after an alt-screen swap; mouse-mode apps also stop
-            // receiving FindHyperlink updates.
+            // meaningless after an alt-screen swap. While a mouse-mode app
+            // owns the pointer, host hover is cleared rather than filtered.
             self.interaction.clear_hover();
         }
         let capped_churn_without_delta = removed == 0
@@ -2240,9 +2244,7 @@ impl Terminal {
 
     fn mouse_changed(&mut self, point: Point, side: SelectionSide) -> bool {
         let PointerSession::AppMouse { last } = &mut self.interaction.session else {
-            self.interaction.session = PointerSession::AppMouse {
-                last: Some((point, side)),
-            };
+            self.interaction.enter_app_mouse(Some((point, side)));
             return true;
         };
         if *last == Some((point, side)) {
@@ -2262,8 +2264,9 @@ impl Terminal {
         if self.mouse_mode(e.modifiers.shift) {
             if !matches!(self.interaction.session, PointerSession::PendingLink(_)) {
                 if !matches!(self.interaction.session, PointerSession::AppMouse { .. }) {
-                    self.interaction.session = PointerSession::AppMouse { last: None };
+                    self.interaction.enter_app_mouse(None);
                 }
+                self.interaction.clear_hover();
                 let (point, side) = self.pointer_map().grid_point_and_side(position);
                 if self.mouse_changed(point, side) {
                     let bytes = mouse_moved_report(
@@ -2384,7 +2387,7 @@ impl Terminal {
         }
 
         if self.mouse_mode(e.modifiers.shift) {
-            self.interaction.session = PointerSession::AppMouse { last: None };
+            self.interaction.enter_app_mouse(None);
             let bytes =
                 mouse_button_report(point, e.button, e.modifiers, true, self.last_content.mode);
 
@@ -3667,6 +3670,10 @@ mod tests {
                 assert!(
                     terminal.hovered_word().is_none(),
                     "mouse-mode TUIs must not keep a host link tooltip from the previous screen"
+                );
+                assert!(
+                    terminal.interaction.hovered.is_none(),
+                    "mouse-mode must clear host hover, not hide it behind a getter"
                 );
             });
         });

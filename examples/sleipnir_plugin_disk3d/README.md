@@ -4,16 +4,17 @@ A resident v2 plugin that answers "where did my disk space go?" with a real 3D
 chart, drawn in a terminal split.
 
 Each cuboid is one direct child of the working directory; its height is that
-child's share of the bytes. The camera rotates — drag to spin, wheel to zoom —
-so bars hidden behind others can be brought into view, and the legend always
-states the exact size and percentage of the highlighted bar.
+child's share of the bytes. The camera rotates from the panel buttons
+(`yaw±` / `pitch±` / `zoom±` / `spin`) so bars hidden behind others can be
+brought into view, and the legend always states the exact size and percentage
+of the highlighted bar.
 
 ## How it renders
 
 The plugin projects the chart into a widget tree and `render`s it into a panel.
-There is no separate host-side scene call. The rasteriser's framebuffer is
-character cells (orthographic projection, per-cell z-buffer, Lambert shading
-quantised onto `░▒▓`). It looks like this:
+The host paints that tree; there is no host-local 3D scene. The rasteriser's
+framebuffer is character cells (orthographic projection, per-cell z-buffer,
+Lambert shading quantised onto `░▒▓`). It looks like this:
 
 ```
 [disk 3d]  crates  1.74M
@@ -38,9 +39,8 @@ bar 1 of 12  ·  yaw 40°  pitch 24°  zoom 1.0x
 
 ## Design constraints worth knowing
 
-- **The scene is bounded.** The host caps a scene at 256 bars on a 64×64 grid and
-  rejects bars outside the grid, so a malformed or hostile plugin cannot force an
-  absurd layout. The scanner folds to `MAX_BARS` (12) long before that.
+- **The scene is bounded.** The scanner folds to `MAX_BARS` (12) so the chart
+  stays readable and the widget tree stays inside the node budget.
 - **Bars sit on a near-square grid**, not in a line. A single row of bars would
   make the depth axis carry no information, which would make the 3D decorative.
 - **Small entries keep a visible plinth** (`MIN_BAR_SHARE`). Real directories are
@@ -51,10 +51,9 @@ bar 1 of 12  ·  yaw 40°  pitch 24°  zoom 1.0x
   Panel gets the room a chart needs and survives focus changes. The `PaneKey` is
   minted once and reused, so every later render replaces the same panel in place
   instead of opening new splits.
-- **The camera is host-driven.** Dragging rotates and the wheel zooms, handled
-  entirely host-side for smoothness; the plugin's buttons remain for keyboard-free
-  and discoverable control, and the two paths reconcile via the no-loopback rule
-  above. In the text fallback the buttons are the only input.
+- **The camera is plugin-owned.** Buttons (`yaw±` / `pitch±` / `zoom±` / `spin`)
+  mutate the plugin's camera and the next `render` redraws the raster. The host
+  does not drag, zoom, or store a 3D scene.
 - **The spin is a bounded sweep.** The SDK holds a locked stdout for the whole
   session, so a background thread cannot render, and an endless spin would stop
   the plugin answering events. "Spin ½ turn" draws a fixed number of frames.
@@ -107,7 +106,7 @@ cargo run --manifest-path examples/sleipnir_plugin_disk3d/Cargo.toml --example p
 
 | File | Responsibility |
 | --- | --- |
-| `src/raster.rs` | 3D maths, z-buffer, shading, cell framebuffer (text fallback). Knows nothing about disks. |
+| `src/raster.rs` | 3D maths, z-buffer, shading, cell framebuffer. Knows nothing about disks. |
 | `src/scan.rs` | The bounded filesystem walk that produces the numbers. |
 | `src/view.rs` | Scan + camera → scene (`build_scene_data`) / widget tree. Pure, so it is unit testable. |
-| `src/main.rs` | The resident session: events, actions, camera sync, panel identity. |
+| `src/main.rs` | The resident session: events, actions, panel identity. |

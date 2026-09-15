@@ -12,7 +12,6 @@ mod finder_service;
 mod git_service;
 mod keymap;
 mod pane_tree;
-mod panel_scene_paint;
 mod plugin_block;
 mod plugin_chrome;
 mod plugin_dispatch;

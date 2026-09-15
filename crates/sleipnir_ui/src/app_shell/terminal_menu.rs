@@ -46,7 +46,7 @@ fn has_leading_divider(item: TerminalMenuItem) -> bool {
 impl AppShell {
     /// Rows for the current menu state, in display order.
     pub(crate) fn terminal_menu_items(&self) -> Vec<TerminalMenuItem> {
-        let Some(state) = self.terminal_menu.as_ref() else {
+        let Some(state) = self.input.terminal_menu() else {
             return Vec::new();
         };
         let mut items = vec![TerminalMenuItem::Copy, TerminalMenuItem::Paste];
@@ -68,8 +68,8 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let link = self.terminal_menu.as_ref().and_then(|s| s.link.clone());
-        self.terminal_menu = None;
+        let link = self.input.terminal_menu().and_then(|s| s.link.clone());
+        let _ = self.input.take_terminal_menu();
         match item {
             TerminalMenuItem::Copy => {
                 if let Some(term) = self.active_terminal_entity(cx) {
@@ -111,8 +111,8 @@ impl AppShell {
         cx: &mut Context<AppShell>,
     ) -> impl IntoElement {
         let state = self
-            .terminal_menu
-            .as_ref()
+            .input
+            .terminal_menu()
             .expect("terminal menu state checked by caller");
         let items = self.terminal_menu_items();
         let selected = state.selected.min(items.len().saturating_sub(1));
@@ -173,21 +173,21 @@ impl AppShell {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
-                        this.terminal_menu = None;
+                        this.input.dismiss_terminal_menu();
                         cx.notify();
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, _, _, cx| {
-                        this.terminal_menu = None;
+                        this.input.dismiss_terminal_menu();
                         cx.notify();
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Middle,
                     cx.listener(move |this, _, _, cx| {
-                        this.terminal_menu = None;
+                        this.input.dismiss_terminal_menu();
                         cx.notify();
                     }),
                 )

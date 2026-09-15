@@ -84,7 +84,7 @@ impl AppShell {
             return;
         };
         let buffer = tab.path_label(cx).to_string();
-        self.rename = Some(RenameState { tab_id, buffer });
+        self.input = crate::ui_mode::InputMode::Rename(RenameState { tab_id, buffer });
         cx.notify();
     }
 
@@ -92,7 +92,7 @@ impl AppShell {
     /// the custom title so the tab falls back to the pane title (side) or cwd
     /// path (top).
     pub(super) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = self.rename.take() {
+        if let Some(state) = self.input.take_rename() {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == state.tab_id) {
                 let trimmed = state.buffer.trim();
                 tab.custom_title = if trimmed.is_empty() {
@@ -108,7 +108,7 @@ impl AppShell {
 
     /// Abandon the in-progress rename without changing the tab title.
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        if self.rename.take().is_some() {
+        if self.input.take_rename().is_some() {
             cx.notify();
         }
     }
@@ -121,7 +121,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.rename.is_none() {
+        if self.input.rename().is_none() {
             return false;
         }
         let key = event.keystroke.key.as_str();
@@ -135,7 +135,7 @@ impl AppShell {
                 true
             }
             "backspace" => {
-                if let Some(state) = self.rename.as_mut() {
+                if let Some(state) = self.input.rename_mut() {
                     state.buffer.pop();
                     cx.notify();
                 }
@@ -145,7 +145,7 @@ impl AppShell {
                 // Append any typed printable character to the buffer.
                 if let Some(ch) = event.keystroke.key_char.as_ref() {
                     if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                        if let Some(state) = self.rename.as_mut() {
+                        if let Some(state) = self.input.rename_mut() {
                             state.buffer.push_str(ch);
                             cx.notify();
                         }
@@ -164,7 +164,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return;
         }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
@@ -185,7 +185,7 @@ impl AppShell {
         if needs_confirm {
             let name =
                 first_busy.and_then(|view| view.read(cx).foreground_process_command_name(cx));
-            self.close_confirm = Some(CloseConfirmState {
+            self.input = crate::ui_mode::InputMode::Confirm(CloseConfirmState {
                 message: crate::chrome::close_copy::close_confirm_message(name.as_deref()).into(),
                 kind: ConfirmKind::CloseTab(tab_id),
             });
@@ -212,10 +212,12 @@ impl AppShell {
             },
         );
         // Drop any inline rename targeting the tab being removed.
-        if let Some(state) = self.rename.as_ref() {
-            if self.tabs[index].id == state.tab_id {
-                self.rename = None;
-            }
+        if self
+            .input
+            .rename()
+            .is_some_and(|state| self.tabs[index].id == state.tab_id)
+        {
+            let _ = self.input.take_rename();
         }
         let closed_keys = self.tabs[index].tree.all_pane_keys();
         self.plugin_panels.remove_all(closed_keys.iter().copied());
@@ -459,7 +461,6 @@ impl AppShell {
 mod tests {
     use super::*;
     use crate::pane_tree::{LeafContent, SplitAxis};
-    use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
     use crate::plugin_panel::PanelSurface;
     use plugin_protocol::v2::{Tone, Widget};
     use uuid::Uuid;
@@ -523,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn transferred_panel_surfaces_keep_surface_tree_and_scene() {
+    fn transferred_panel_surfaces_keep_surface_tree() {
         let first = Uuid::from_u128(1);
         let second = Uuid::from_u128(2);
         let mut panels = crate::plugin_panel::PanelRegistry::new();
@@ -539,23 +540,6 @@ mod tests {
                     bold: false,
                 },
                 stale: false,
-                scene: Some(SceneData {
-                    cols: 1,
-                    rows: 1,
-                    floor: [1, 2, 3],
-                    camera: SceneCamera {
-                        yaw: 0.1,
-                        pitch: 0.2,
-                        zoom: 0.3,
-                    },
-                    bars: vec![SceneBar {
-                        gx: 0,
-                        gz: 1,
-                        height: 2.0,
-                        color: [3, 4, 5],
-                        selected: true,
-                    }],
-                }),
             },
             PanelSurface {
                 plugin_id: "demo".into(),
@@ -568,7 +552,6 @@ mod tests {
                     bold: false,
                 },
                 stale: true,
-                scene: None,
             },
         ]);
 
@@ -579,7 +562,6 @@ mod tests {
         assert_eq!(moved[1].pane_key, first);
         assert_eq!(moved[1].surface_id, Uuid::from_u128(11));
         assert!(matches!(moved[1].tree, Widget::Text { .. }));
-        assert!(moved[1].scene.is_some());
     }
 
     #[test]

@@ -166,7 +166,8 @@ hex, no RGB.
 See `examples/sleipnir_plugin_disk3d` for a complete, runnable Panel example
 that renders a 3D disk-usage chart (a software rasteriser whose framebuffer is
 a `col` of `text` rows — the closed widget set is enough for that, since one
-Unicode scalar is one cell and `wrap_text` honours `\n`).
+Unicode scalar is one cell and `wrap_text` honours `\n`). The host paints that
+widget tree only; there is no host-local 3D scene pipeline.
 
 ## Example: Run Ledger (resident observer)
 

@@ -33,15 +33,8 @@ pub mod resident;
 pub const PLUGIN_API_VERSION: u32 = plugin_protocol::v2::PROTOCOL_VERSION;
 const MANIFEST_FILE: &str = "plugin.json";
 
-/// The declared lifecycle in `plugin.json`. Distinct type from the wire enum so
-/// the manifest schema lives here.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginLifecycle {
-    #[default]
-    OnDemand,
-    Resident,
-}
+/// Manifest lifecycle is the wire enum. `plugin.json` and `Ready` must agree.
+pub use plugin_protocol::v2::Lifecycle as PluginLifecycle;
 
 /// `plugin.json` (ADR-0015, extended by ADR-0016). Declares the binary,
 /// lifecycle, and the capabilities the plugin may request. The host trusts this

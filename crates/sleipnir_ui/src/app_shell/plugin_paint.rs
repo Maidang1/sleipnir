@@ -2,13 +2,12 @@
 //! status band, and the widget-tree painters they share.
 //!
 //! A child module of `app_shell`, split out of `layout.rs` so that file stays
-//! pane geometry and this one owns plugin paint. Pure projection lives in
-//! `panel_scene_paint.rs`; this module is the gpui element/painter side.
+//! pane geometry and this one owns plugin paint.
 
 use gpui::{
-    App, AppContext as _, Bounds, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
+    App, AppContext as _, ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
 use super::AppShell;
@@ -53,7 +52,6 @@ impl AppShell {
         let stale = surface.stale;
         let owner_instance_id = surface.owner_instance_id;
         let surface_id = surface.surface_id;
-        let panel_scene = surface.scene.clone();
         let mut body = div()
             .id(("plugin-panel", pane_id))
             .size_full()
@@ -62,22 +60,6 @@ impl AppShell {
             .font_family(font_family)
             .text_size(font_size)
             .overflow_hidden();
-
-        if let Some(scene) = panel_scene {
-            let border = tokens.accent;
-            body = body.child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        paint_panel_scene(&scene, bounds, border, window);
-                    },
-                )
-                .size_full()
-                .absolute()
-                .top_0()
-                .left_0(),
-            );
-        }
 
         body = paint_laid_out(body, &laid, tokens, cell_w, line_h);
 
@@ -117,8 +99,8 @@ impl AppShell {
                 .text_color(tokens.fg_muted)
                 .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
                 .child("×")
-                // Win over the panel's own mouse-down (focus / camera drag) so a
-                // click closes the panel instead of starting a rotate.
+                // Win over the panel's own mouse-down (focus / button hit-test)
+                // so a click closes the panel instead of firing a widget action.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.close_panel_pane(pane_id, pane_key, window, cx);
@@ -127,11 +109,6 @@ impl AppShell {
 
         let cell_w_click = cell_w;
         let line_h_click = line_h;
-        let has_scene = self
-            .plugin_panels
-            .get(pane_key)
-            .map(|s| s.scene.is_some())
-            .unwrap_or(false);
         body = body.on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -160,8 +137,6 @@ impl AppShell {
                         return;
                     }
                     let laid = layout_surface(surface, cols);
-                    // A button always wins over camera drag: chrome controls sit
-                    // on top of the scene.
                     if let Some(hit) = action_at(&laid, pos.col, pos.row) {
                         crate::plugin_runtime::push_action(
                             owner_instance_id,
@@ -170,43 +145,11 @@ impl AppShell {
                             hit.arg,
                             cx,
                         );
-                        this.panel_drag = None;
-                        cx.notify();
-                        return;
-                    }
-                    // Otherwise, if the panel carries a scene, begin a camera
-                    // drag. The host owns the camera; the plugin is only told
-                    // the result, throttled, so the legend stays in sync.
-                    if surface.scene.is_some() {
-                        this.panel_drag = Some(super::PanelDrag {
-                            pane_key,
-                            owner_instance_id,
-                            surface_id,
-                            last: ev.position,
-                        });
                     }
                 }
                 cx.notify();
             }),
         );
-
-        if has_scene {
-            body =
-                body.on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _window, cx| {
-                    this.drag_panel_camera(pane_key, ev.position, cx);
-                }));
-            body = body.on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _ev: &gpui::MouseUpEvent, _window, cx| {
-                    this.end_panel_camera_drag(pane_key, cx);
-                }),
-            );
-            body = body.on_scroll_wheel(cx.listener(
-                move |this, ev: &gpui::ScrollWheelEvent, _window, cx| {
-                    this.zoom_panel_camera(pane_key, ev, cx);
-                },
-            ));
-        }
         body.into_any_element()
     }
     pub(super) fn render_plugin_chrome_status(
@@ -518,53 +461,5 @@ pub(super) fn paint_node(
             .text_xs()
             .child(label.clone())
             .into_any_element(),
-    }
-}
-/// Project a plugin scene against the panel's real pixel bounds and paint it as
-/// filled polygons, back-to-front. Host-side projection is what keeps the chart
-/// crisp on resize (no bitmap scaling) and lets the camera move without a plugin
-/// round-trip. The selected bar's faces get a thin accent outline so the eye
-/// lands on the row the legend names.
-pub(super) fn paint_panel_scene(
-    scene: &crate::panel_scene_paint::SceneData,
-    bounds: Bounds<Pixels>,
-    border: Hsla,
-    window: &mut Window,
-) {
-    use crate::panel_scene_paint::project_scene;
-    use gpui::{Background, PathBuilder, point as gpui_point, px as gpui_px};
-
-    let origin = bounds.origin;
-    let width = f32::from(bounds.size.width);
-    let height = f32::from(bounds.size.height);
-    if width <= 1.0 || height <= 1.0 {
-        return;
-    }
-    let projected = project_scene(scene, width, height);
-    for face in &projected.faces {
-        let pts: Vec<gpui::Point<Pixels>> = face
-            .pts
-            .iter()
-            .map(|p| gpui_point(origin.x + gpui_px(p[0]), origin.y + gpui_px(p[1])))
-            .collect();
-        let mut builder = PathBuilder::fill();
-        builder.add_polygon(&pts, true);
-        if let Ok(path) = builder.build() {
-            let color = gpui::Rgba {
-                r: face.color[0] as f32 / 255.0,
-                g: face.color[1] as f32 / 255.0,
-                b: face.color[2] as f32 / 255.0,
-                a: 1.0,
-            };
-            window.paint_path(path, Background::from(color));
-        }
-        if face.selected {
-            // Outline each edge of the selected face with a thin stroke.
-            let mut stroke = PathBuilder::stroke(gpui_px(1.5));
-            stroke.add_polygon(&pts, true);
-            if let Ok(path) = stroke.build() {
-                window.paint_path(path, Background::from(border));
-            }
-        }
     }
 }

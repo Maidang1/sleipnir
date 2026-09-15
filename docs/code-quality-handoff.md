@@ -14,33 +14,46 @@ without deleting a concept is the failure mode of the previous extraction.
    and `agent-control.sock` all derive from one directory. Env overrides stay
    in `sleipnir_ctl::socket_path` and `agent_coordination::default_socket_path`.
 2. **Terminal pointer model**. `PointerSession` (`Idle` / `AppMouse` /
-   `PendingLink` / `Selecting`) plus hover on `InteractionState`.
-   `Terminal::hovered_word()` is `None` in mouse-mode by construction. Dead
-   gutter (paint, click, `Event::GutterClicked`, `GutterMark`) is gone. OSC-8
-   opens through `Event::Open`, not `cx.open_url`. `NewNavigationTarget` is
-   gone.
-3. **Keyboard owner**. `InputMode` + `AppShell::handle_capture_key` replaced
-   the overlay if-ladder in `Render`. TermView no longer handles NewTab /
-   settings / theme actions and no longer emits `Request*`; those bubble to
-   AppShell, same as CloseTab.
+   `PendingLink` / `Selecting`). Entering `AppMouse` (and any sync while
+   mouse-mode is on) clears host hover rather than filtering it at read.
+   Dead gutter (paint, click, `Event::GutterClicked`, `GutterMark`) is gone.
+   OSC-8 opens through `Event::Open`, not `cx.open_url`. `NewNavigationTarget`
+   is gone.
+3. **Keyboard owner is owned**. `AppShell.input: InputMode` holds Confirm /
+   Consent / TabMenu / TerminalMenu / Rename / Find / Overlay. Those are no
+   longer sibling `Option`s. `OverlayKind` has no `None` and no
+   `PluginConsent`. Capture-key matches `InputOwner` (a copy tag so the
+   match does not hold a borrow) and every modal swallows non-platform keys.
+   TermView no longer handles NewTab / settings / theme.
 4. **Partial protocol cleanup**. Host `Permission` and identity `to_v2` are
    gone. Manifests use `plugin_protocol::v2::Capability`.
    `MAX_SEND_TEXT_CHARS` lives in `plugin_protocol` and is re-exported by the
    SDK / `plugin_host_calls`.
 5. **Registry mailbox, framing, claim**. Per-session effect mailboxes;
-   interrupt names a task (idle interrupt is rejected). `try_claim(seq) ->
-   ClaimedEffect` with `commit` / drop; sidecar `Mutex<()>` is gone. A
-   `PromptDelivered` ack is `Dispatching -> Running`. JSON packing lives in
-   `frame.rs`; `Request::*Page` is gone; the client reads frames on one
-   connection. `TaskStatus::Accepted` is gone. Errors are `CoordError`.
-   Coordination `PROTOCOL_VERSION` is `2`. `registry.rs` is still one file
-   (ready to split session / task / effects / facts / validate).
-6. **DrawScene out of v2**. `Capability::HostCallDrawScene`,
-   `HostCall::DrawScene`, `HostCallResult::SceneOk`, and `SceneData` /
-   `SceneBar` / `SceneCamera` are gone from `plugin_protocol::v2`. SDK
-   `draw_scene` is gone. disk3d renders a widget tree. Host-local 3D types
-   remain in `panel_scene_paint.rs` for existing panel paint/camera; they
-   are not protocol types.
+   interrupt names a task (idle interrupt is rejected). `try_claim(seq)` is
+   a seq-typed ack lease: `ClaimedEffect::commit(ClaimOutcome)` cannot name
+   another seq; public `apply` of `*Delivered` / `BindPane` /
+   `DeliveryFailed` is `EffectNotClaimed`. Drop releases the flag; the
+   effect stays queued. Takeover drains coordinator Prompt/Interrupt/Close
+   (and Launch) and leaves `FocusRequested`. `PromptDelivered` is
+   `Dispatching -> Running`. JSON packing lives in `frame.rs`;
+   `Request::*Page` is gone; the client reads frames on one connection.
+   `TaskStatus::Accepted` is gone. Errors are `CoordError`. Coordination
+   `PROTOCOL_VERSION` is `2`. Do **not** split `registry.rs` until a concept
+   is deleted (tests are most of the line count).
+6. **DrawScene out of v2, and host-local 3D gone.**
+   `Capability::HostCallDrawScene`, `HostCall::DrawScene`,
+   `HostCallResult::SceneOk`, and `SceneData` / `SceneBar` / `SceneCamera`
+   are gone from `plugin_protocol::v2`. SDK `draw_scene` is gone. disk3d
+   renders a widget tree. Host-local 3D (`panel_scene_paint`, `set_scene`,
+   camera drag) is deleted; the host paints the widget tree only. Do not
+   invent a replacement 3D protocol. PluginHost ownership has not landed.
+7. **One `Anchor`**. `plugin_protocol::v2::Anchor` is the type; ledger and
+   row geometry `pub use` it. `plugin_block` no longer converts between two
+   copies.
+8. **One `Lifecycle`**. Host `PluginLifecycle` is
+   `pub use plugin_protocol::v2::Lifecycle`. Manifests and `Ready` share the
+   enum. ctl `Send` uses `insert_text`, same as plugin `SendText`.
 
 Verified after that pass: `agent_coordination` (85), `sleipnir_plugin_agents`
 (106), `plugin_host` (78), `plugin_protocol` (23), `sleipnir_ui --lib` (357),
@@ -54,16 +67,17 @@ Do these **in this order**.
 
 Previous extraction sliced `impl AppShell` across ~20 files. Ownership did
 not move. `PluginRuntime` is a process `Global`; execution is per-window
-(`PanelRegistry`, `ChromeRegistry`, `PluginEventWatch`, consent, camera
-drag, `handle_host_call`). `PluginDispatcher` walks every `AppShell` every
+(`PanelRegistry`, `ChromeRegistry`, `PluginEventWatch`, consent,
+`handle_host_call`). `PluginDispatcher` walks every `AppShell` every
 16 ms.
 
 Also still true:
 
-- `AppShell::handle_host_call` and `control_surface::dispatch` are two hosts
-  for the same verbs (list / read / send / open / focus / close). Send paths
-  differ (`insert_text` vs `input_bytes`).
-- `term_element.rs` (~2011 lines) paints plugin blocks and calls
+- `AppShell::handle_host_call` and `control_surface::dispatch` are still two
+  hosts for the same verbs. **Send is aligned:** both use `insert_text`
+  (paste-aware, no CSI smuggling). List/read/open/focus/close are not yet
+  one `WorkspaceIo`.
+- `term_element.rs` paints plugin blocks and calls
   `plugin_runtime::push_action`. Dual `LaidOutKind` painters (panel GPUI
   divs vs terminal quads) with "must not drift" comments.
 - Panel leaf is `LeafContent::Panel { plugin_id: String }` plus a parallel
@@ -72,25 +86,21 @@ Also still true:
   registry. Launch is not atomic: PTY exists before `BindPane`.
 - `plugin_host` supervisor has two maps (`live` by plugin id, `active` by
   instance id) and a two-phase OnDemand connect.
-- Host `PluginLifecycle` is still a clone of wire `Lifecycle`.
-- Three `Anchor` structs (`plugin_protocol::v2`, `run_ledger`,
-  `row_geometry`) with the same `{ line, column }` and the same
-  "never persist" comment. `RunId` / `PaneKey` were already single-sourced.
 
 **Do:** `Workspace` (tabs / focus / close) + `PluginHost` (session / surfaces
-/ consent / host calls) + `OverlayStack`. AppShell becomes a compositor.
-One `WorkspaceIo` for ctl and plugins. `handle_host_call` becomes
-`reply(plan.execute(io))`. One `LaidOutPainter`, or a `BlockOverlay`
-element so the grid painter never imports `plugin_runtime`.
-`pub use plugin_protocol::v2::Anchor` in ledger and row geometry.
+/ consent / host calls) + keep `InputMode` as the overlay stack. AppShell
+becomes a compositor. One `WorkspaceIo` for ctl and plugins.
+`handle_host_call` becomes `reply(plan.execute(io))`. One `LaidOutPainter`,
+or a `BlockOverlay` element so the grid painter never imports
+`plugin_runtime`.
 
 Template for Agents: `sleipnir_plugin_runledger` (`rows` / `state` / `view`).
 Leave `plugin_grants` alone.
 
 Optional leftover of the registry pass: split `registry.rs` now that mailbox
 + framing landed (session / task / effects / facts / validate). Tests move
-with the domain they pin. Host-local `panel_scene_paint` can die with the
-dual painters in this item.
+with the domain they pin. Host-local 3D is already gone; dual LaidOutKind
+painters remain in this item.
 
 ### 2. Grow `atomic_write` into the real write discipline
 
@@ -148,38 +158,36 @@ geometry still forked.
 
 **Do not:** resurrect gutter paint.
 
-### 4. Finish InputMode leftovers (derived, not owned)
+### 4. Move the plugin pump off Render
 
-`InputMode` is a read-only projection. Confirm, tab menu, terminal menu, and
-rename are still `Option` fields on `AppShell`. Illegal combinations remain
-representable. `ui_mode.rs` says this out loud.
+`InputMode` is owned. What remains:
 
-- `crates/sleipnir_ui/src/ui_mode.rs` (`OverlayKind`, `InputMode`)
-- `crates/sleipnir_ui/src/app_shell/mod.rs` (`close_confirm`, `tab_menu`,
-  `terminal_menu`, `rename`, `input_mode()`, `handle_capture_key`)
-- `command_dispatch.rs` is still a 40-arm trampoline onto `self`.
+- `command_dispatch.rs` is still a 40-arm trampoline onto `self` (fine as a
+  dispatcher; the problem is AppShell still being the god object).
 - `AppShell::render` still polls plugins and pane facts as a side-effect pump
   (`poll_plugin_events`, `sync_plugin_surfaces`).
 
-**Do:** make one owned input-mode enum so Confirm / Menu / Rename cannot
-coexist with a modal overlay. Keep `dispatch_command(CommandId)` as the only
-command entry. Move the 16 ms plugin pump and the per-frame event watch off
-`Render` (that overlaps item 1 above).
+**Do:** keep `dispatch_command(CommandId)` as the only command entry. Move
+the 16 ms plugin pump and the per-frame event watch off `Render` (that
+overlaps item 1 above).
 
 ## What not to do
 
 - Do not extract more `impl AppShell` / `impl Terminal` files while the
   owner is still the god object.
 - Do not extend v2 for another product-shaped verb like `DrawScene`.
-- Do not add another `Option<FooState>` overlay. Finish `InputMode` first.
-- Do not resurrect gutter triangles.
+- Do not add another `Option<FooState>` overlay. Put new owners on
+  `InputMode`.
+- Do not resurrect gutter triangles or host 3D scene types.
 - Do not clone `~/.config/sleipnir` again. Import `sleipnir_paths`.
+- Do not split `registry.rs` without deleting a concept.
 
 ## Suggested next session
 
-Start at **PluginHost owns surfaces (section 1)**. Registry mailbox/framing
-and DrawScene-out-of-v2 have landed. Host-local `panel_scene_paint` can die
-with the dual painters in that item.
+Start at **PluginHost owns surfaces (section 1)**. Registry claim lease,
+owned `InputMode`, host 3D deletion, and single `Anchor`/`Lifecycle` have
+landed. Dual LaidOutKind painters and the Render plugin pump remain in that
+item. PluginHost ownership has not landed.
 
 ```bash
 cargo test -p agent_coordination

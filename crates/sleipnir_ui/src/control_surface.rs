@@ -494,12 +494,14 @@ fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
         },
         ControlRequest::Send { pane, text, enter } => match view_for_pane(cx, pane) {
             Some(view) => {
-                let mut bytes = text.into_bytes();
-                if enter {
-                    bytes.push(b'\r');
+                let delivered = view.update(cx, |v, cx| v.insert_text(&text, enter, cx));
+                if delivered {
+                    ControlResponse::Send
+                } else {
+                    ControlResponse::Error {
+                        message: format!("pane {pane} is not ready"),
+                    }
                 }
-                view.update(cx, |v, cx| v.input_bytes(bytes, cx));
-                ControlResponse::Send
             }
             None => ControlResponse::Error {
                 message: format!("pane {pane} not found"),

@@ -17,10 +17,12 @@ mod tabs;
 mod terminal_menu;
 mod update;
 
+pub(crate) use plugins::PluginConsentPending;
+
 use gpui::{
     App, AppContext as _, BorrowAppContext, Bounds, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels,
-    Point, Render, ScrollHandle, SharedString, Styled as _, TitlebarOptions, Window,
+    Render, ScrollHandle, SharedString, Styled as _, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div,
     prelude::FluentBuilder as _, px, size,
 };
@@ -34,7 +36,7 @@ use crate::command_palette::{CommandId, CommandItem, commands as palette_command
 use crate::pane_tree::{CloseOutcome, Direction, PaneId, PaneRect, SplitAxis, SplitPath, neighbor};
 use crate::run_ledger_global::RunLedgerGlobal;
 pub(crate) use crate::tab_convert::Tab;
-use crate::ui_mode::{InputMode, OverlayKind, PaneFactsState, UiMode};
+use crate::ui_mode::{InputMode, InputOwner, OverlayKind, PaneFactsState, UiMode};
 use crate::{TermView, UpdateModel, UpdateUiState};
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
@@ -299,19 +301,6 @@ struct DragState {
     container: Bounds<Pixels>,
 }
 
-/// In-progress plugin-panel camera drag. The host owns the interactive camera:
-/// dragging rotates (yaw/pitch), and the last pointer position is kept so each
-/// move applies a delta. The plugin is not consulted per frame — the host
-/// mutates the stored scene camera and repaints locally, then reports the final
-/// camera as a throttled `camera` action so the legend stays in sync.
-#[derive(Clone)]
-struct PanelDrag {
-    pane_key: PaneKey,
-    owner_instance_id: uuid::Uuid,
-    surface_id: plugin_protocol::v2::BlockId,
-    last: Point<Pixels>,
-}
-
 /// Window root: unified chrome band + active terminal.
 struct SettingsState {
     section: SettingsSection,
@@ -386,22 +375,13 @@ pub struct AppShell {
     content_bounds: Option<Bounds<Pixels>>,
     /// Active divider drag, if any.
     drag: Option<DragState>,
-    /// Active plugin-panel camera drag, if any (host-owned interactive camera).
-    panel_drag: Option<PanelDrag>,
-    /// Last time a `camera` action was pushed to a plugin, ms since epoch. The
-    /// local repaint is immediate; the action is throttled so a drag does not
-    /// flood the plugin with legend redraws.
-    panel_camera_last_ms: u64,
-    /// In-progress inline tab rename, if any.
-    pub(crate) rename: Option<RenameState>,
-    /// Context menu opened for a tab chip.
-    pub(crate) tab_menu: Option<TabMenuState>,
-    pub(crate) terminal_menu: Option<TerminalMenuState>,
     /// Recently closed tabs, oldest first and capped at ten entries.
     pub(crate) closed_tabs: Vec<ClosedTab>,
-    /// Which modal overlay is showing, plus the transient find / quick-select
-    /// modes. Replaces the old one-bool-per-overlay matrix, so illegal
-    /// combinations are unrepresentable.
+    /// Owned keyboard owner. Confirm, consent, menus, rename, find, and
+    /// modal overlays are arms of this enum, so they cannot coexist.
+    pub(crate) input: InputMode,
+    /// Quick-select banner. Independent of [`InputMode`] because it is
+    /// designed to coexist with terminal content.
     pub(crate) mode: UiMode,
     settings: SettingsState,
     palette: PaletteState,
@@ -409,11 +389,6 @@ pub struct AppShell {
     find: find::FindState,
     /// Window-scoped font size override (M12 zoom); not written to settings.
     pub(crate) font_size_override: Option<Pixels>,
-    /// Close-confirm dialog pending (M12).
-    close_confirm: Option<CloseConfirmState>,
-    /// Consent prompt pending. Copied off `plugin_grants::check`; the overlay
-    /// never borrows the grants file. Approve writes a grant; Deny writes nothing.
-    plugin_consent: Option<plugins::PluginConsentPending>,
     /// Tab ids currently flashing for visual bell (M12).
     pub(crate) bell_flash_tabs: std::collections::HashSet<u64>,
     /// Fan-out keystrokes to all panes in the active tab (M13).
@@ -437,7 +412,7 @@ pub struct AppShell {
 
 /// What the shared confirm dialog is asking about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConfirmKind {
+pub(crate) enum ConfirmKind {
     ClosePane(PaneKey),
     CloseTab(u64),
     #[cfg(target_os = "linux")]
@@ -457,10 +432,10 @@ impl ConfirmKind {
 }
 
 /// Pending confirmation dialog (close pane / tab / window).
-struct CloseConfirmState {
+pub(crate) struct CloseConfirmState {
     /// Human-readable what will happen.
-    message: SharedString,
-    kind: ConfirmKind,
+    pub(crate) message: SharedString,
+    pub(crate) kind: ConfirmKind,
 }
 
 impl Focusable for AppShell {
@@ -472,32 +447,14 @@ impl Focusable for AppShell {
 impl EventEmitter<()> for AppShell {}
 
 impl AppShell {
-    fn input_mode(&self) -> InputMode {
-        if self.close_confirm.is_some() {
-            InputMode::Confirm
-        } else if self.mode.is(OverlayKind::PluginConsent) {
-            InputMode::Consent
-        } else if self.tab_menu.is_some() || self.terminal_menu.is_some() {
-            InputMode::Menu
-        } else if self.mode.overlay != OverlayKind::None {
-            InputMode::Overlay(self.mode.overlay)
-        } else if self.mode.find_open {
-            InputMode::Find
-        } else if self.rename.is_some() {
-            InputMode::Rename
-        } else {
-            InputMode::Terminal
-        }
-    }
-
     fn handle_capture_key(
         &mut self,
         event: &gpui::KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.input_mode() {
-            InputMode::Confirm => match event.keystroke.key.as_str() {
+        match self.input.owner() {
+            InputOwner::Confirm => match event.keystroke.key.as_str() {
                 "escape" => {
                     self.confirm_close_cancel(window, cx);
                     cx.stop_propagation();
@@ -506,117 +463,113 @@ impl AppShell {
                     self.confirm_close_proceed(window, cx);
                     cx.stop_propagation();
                 }
-                _ => {
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                }
+                _ => swallow_except_platform(event, cx),
             },
-            InputMode::Consent => match event.keystroke.key.as_str() {
+            InputOwner::Consent => match event.keystroke.key.as_str() {
                 "escape" | "enter" => {
                     self.deny_plugin_consent(cx);
                     cx.stop_propagation();
                 }
-                _ => {
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                }
+                _ => swallow_except_platform(event, cx),
             },
-            InputMode::Menu => {
+            InputOwner::TabMenu => {
                 let key = event.keystroke.key.as_str();
                 match key {
                     "escape" => {
-                        self.tab_menu = None;
-                        self.terminal_menu = None;
+                        self.input.dismiss_tab_menu();
                         cx.notify();
                         cx.stop_propagation();
                     }
                     "down" | "up" if !event.keystroke.modifiers.platform => {
-                        let count = if self.tab_menu.is_some() {
-                            AppShell::TAB_MENU_ITEM_COUNT
-                        } else {
-                            self.terminal_menu_items().len()
-                        };
-                        let selected = self
-                            .tab_menu
-                            .as_ref()
-                            .map(|m| m.selected)
-                            .or_else(|| self.terminal_menu.as_ref().map(|m| m.selected))
-                            .unwrap_or(0);
+                        let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
+                        let count = AppShell::TAB_MENU_ITEM_COUNT;
                         let next = if key == "down" {
-                            (selected + 1) % count.max(1)
+                            (selected + 1) % count
                         } else {
-                            (selected + count.max(1) - 1) % count.max(1)
+                            (selected + count - 1) % count
                         };
-                        if let Some(menu) = self.tab_menu.as_mut() {
-                            menu.selected = next;
-                        } else if let Some(menu) = self.terminal_menu.as_mut() {
+                        if let Some(menu) = self.input.tab_menu_mut() {
                             menu.selected = next;
                         }
                         cx.notify();
                         cx.stop_propagation();
                     }
                     "enter" => {
-                        let selected = self
-                            .tab_menu
-                            .as_ref()
-                            .map(|m| m.selected)
-                            .or_else(|| self.terminal_menu.as_ref().map(|m| m.selected))
-                            .unwrap_or(0);
-                        if self.tab_menu.is_some() {
-                            self.run_tab_menu_item(selected, window, cx);
-                        } else if let Some(item) = self.terminal_menu_items().get(selected).copied()
-                        {
+                        let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
+                        self.run_tab_menu_item(selected, window, cx);
+                        cx.stop_propagation();
+                    }
+                    _ => swallow_except_platform(event, cx),
+                }
+            }
+            InputOwner::TerminalMenu => {
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "escape" => {
+                        self.input.dismiss_terminal_menu();
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "down" | "up" if !event.keystroke.modifiers.platform => {
+                        let count = self.terminal_menu_items().len();
+                        let selected = self.input.terminal_menu().map(|m| m.selected).unwrap_or(0);
+                        let next = if key == "down" {
+                            (selected + 1) % count.max(1)
+                        } else {
+                            (selected + count.max(1) - 1) % count.max(1)
+                        };
+                        if let Some(menu) = self.input.terminal_menu_mut() {
+                            menu.selected = next;
+                        }
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "enter" => {
+                        let selected = self.input.terminal_menu().map(|m| m.selected).unwrap_or(0);
+                        if let Some(item) = self.terminal_menu_items().get(selected).copied() {
                             self.run_terminal_menu_item(item, window, cx);
                         }
                         cx.stop_propagation();
                     }
-                    _ => {
-                        if !event.keystroke.modifiers.platform {
-                            cx.stop_propagation();
-                        }
-                    }
+                    _ => swallow_except_platform(event, cx),
                 }
             }
-            InputMode::Overlay(OverlayKind::Update) => {
+            InputOwner::Overlay(OverlayKind::Update) => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_update(cx);
                     cx.stop_propagation();
                 }
-                if !event.keystroke.modifiers.platform {
-                    cx.stop_propagation();
-                }
+                swallow_except_platform(event, cx);
             }
-            InputMode::Overlay(OverlayKind::PaneFacts) => {
+            InputOwner::Overlay(OverlayKind::PaneFacts) => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_pane_facts(cx);
                     cx.stop_propagation();
                 }
+                swallow_except_platform(event, cx);
             }
-            InputMode::Overlay(OverlayKind::PluginMonitor) => {
+            InputOwner::Overlay(OverlayKind::PluginMonitor) => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_plugin_monitor(cx);
                     cx.stop_propagation();
                 }
+                swallow_except_platform(event, cx);
             }
-            InputMode::Overlay(OverlayKind::Palette) => {
+            InputOwner::Overlay(OverlayKind::Palette) => {
                 if self.palette_key_down(event, window, cx) {
                     cx.stop_propagation();
                 }
             }
-            InputMode::Overlay(OverlayKind::History) => {
+            InputOwner::Overlay(OverlayKind::History) => {
                 self.history_key_down(event, window, cx);
-                if !event.keystroke.modifiers.platform {
-                    cx.stop_propagation();
-                }
+                swallow_except_platform(event, cx);
             }
-            InputMode::Find => {
+            InputOwner::Find => {
                 if self.find_key_down(event, window, cx) {
                     cx.stop_propagation();
                 }
             }
-            InputMode::Overlay(OverlayKind::Settings) => {
+            InputOwner::Overlay(OverlayKind::Settings) => {
                 if self.settings.section == SettingsSection::Theme {
                     match event.keystroke.key.as_str() {
                         "up" | "arrowup" | "down" | "arrowdown" | "enter" => {
@@ -660,28 +613,28 @@ impl AppShell {
                     self.close_settings(window, cx);
                     cx.stop_propagation();
                 }
-                if !event.keystroke.modifiers.platform {
-                    cx.stop_propagation();
-                }
+                swallow_except_platform(event, cx);
             }
-            InputMode::Overlay(OverlayKind::Diff) => {
+            InputOwner::Overlay(OverlayKind::Diff) => {
                 if self.handle_diff_key(event, window, cx) {
                     cx.stop_propagation();
                     return;
                 }
-                if !event.keystroke.modifiers.platform {
-                    cx.stop_propagation();
-                }
+                swallow_except_platform(event, cx);
             }
-            InputMode::Rename => {
+            InputOwner::Rename => {
                 if self.rename_key_down(event, window, cx) {
                     cx.stop_propagation();
                 }
             }
-            InputMode::Terminal
-            | InputMode::Overlay(OverlayKind::None)
-            | InputMode::Overlay(OverlayKind::PluginConsent) => {}
+            InputOwner::Terminal => {}
         }
+    }
+}
+
+fn swallow_except_platform(event: &gpui::KeyDownEvent, cx: &mut Context<AppShell>) {
+    if !event.keystroke.modifiers.platform {
+        cx.stop_propagation();
     }
 }
 
@@ -799,26 +752,17 @@ impl AppShell {
             pane_rects: Vec::new(),
             content_bounds: None,
             drag: None,
-            panel_drag: None,
-            panel_camera_last_ms: 0,
-            rename: None,
-            tab_menu: None,
-            terminal_menu: None,
             closed_tabs: Vec::new(),
-            mode: UiMode {
-                overlay: if has_update_outcome {
-                    OverlayKind::Update
-                } else {
-                    OverlayKind::None
-                },
-                ..UiMode::default()
+            input: if has_update_outcome {
+                InputMode::Overlay(OverlayKind::Update)
+            } else {
+                InputMode::Terminal
             },
+            mode: UiMode::default(),
             settings: SettingsState::default(),
             palette: PaletteState::new(palette_items, plugin_commands),
             find: find::FindState::default(),
             font_size_override: None,
-            close_confirm: None,
-            plugin_consent: None,
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
             history: HistoryState::default(),
@@ -984,7 +928,7 @@ impl AppShell {
                         cx.notify();
                     }
                     crate::TermViewEvent::ContextMenu { position, link } => {
-                        this.terminal_menu = Some(TerminalMenuState {
+                        this.input = InputMode::TerminalMenu(TerminalMenuState {
                             position: *position,
                             link: link.clone(),
                             selected: 0,
@@ -1591,7 +1535,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return Err("a close confirmation is already pending".into());
         }
         let found = self
@@ -1613,7 +1557,7 @@ impl AppShell {
 
     /// Gate close on `confirm_close` setting; may open a modal instead of closing.
     fn request_close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return;
         }
         let Some(target) = self.active_pane_key() else {
@@ -1632,7 +1576,7 @@ impl AppShell {
             } else {
                 "Close this pane anyway?".into()
             };
-            self.close_confirm = Some(CloseConfirmState {
+            self.input = InputMode::Confirm(CloseConfirmState {
                 message: message.into(),
                 kind: ConfirmKind::ClosePane(target),
             });
@@ -1644,7 +1588,7 @@ impl AppShell {
 
     #[cfg(target_os = "linux")]
     pub(crate) fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return;
         }
         let policy = TerminalSettings::get_global(cx).confirm_close;
@@ -1654,7 +1598,7 @@ impl AppShell {
             ConfirmClose::Dirty => self.any_pane_is_dirty(cx),
         };
         if needs_confirm {
-            self.close_confirm = Some(CloseConfirmState {
+            self.input = InputMode::Confirm(CloseConfirmState {
                 message: "A process is still running. Close this window anyway?".into(),
                 kind: ConfirmKind::CloseWindow,
             });
@@ -1680,7 +1624,7 @@ impl AppShell {
     }
 
     fn confirm_close_proceed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = self.close_confirm.take().map(|s| s.kind);
+        let kind = self.input.take_confirm().map(|s| s.kind);
         match kind {
             Some(ConfirmKind::CloseTab(tab_id)) => {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
@@ -1728,7 +1672,7 @@ impl AppShell {
 
     /// Toggle the history overlay, resetting the query when it closes.
     fn toggle_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.mode.toggle(OverlayKind::History) {
+        if !self.input.toggle_overlay(OverlayKind::History) {
             self.history.query.clear();
             self.history.marked = None;
             self.history.selected = 0;
@@ -1909,7 +1853,7 @@ impl AppShell {
     }
 
     fn confirm_close_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_confirm = None;
+        let _ = self.input.take_confirm();
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -2013,7 +1957,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.mode.is(OverlayKind::Palette) {
+        if self.input.is_overlay(OverlayKind::Palette) {
             self.close_palette(window, cx);
         } else {
             self.open_palette(window, cx);
@@ -2021,17 +1965,6 @@ impl AppShell {
     }
 
     // ── find in scrollback (M10) ────────────────────────────────────────────
-}
-
-/// Wrap a camera yaw into `[0, 2π)` so the host-driven camera stays finite over
-/// a long drag; mirrors the plugin's own `wrap_angle`.
-fn wrap_camera_angle(a: f32) -> f32 {
-    let tau = std::f32::consts::TAU;
-    let mut a = a % tau;
-    if a < 0.0 {
-        a += tau;
-    }
-    a
 }
 
 /// Whether a pane of the *active* tab is actually painted, given the tab's
@@ -2170,11 +2103,6 @@ impl Render for AppShell {
         self.refresh_pane_facts_if_stale(cx);
         self.poll_plugin_events(cx);
         self.sync_plugin_surfaces(cx);
-        // Navigating away from the consent overlay is a deny: never grant
-        // because a different surface took the keyboard.
-        if !self.mode.is(OverlayKind::PluginConsent) {
-            self.plugin_consent = None;
-        }
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
@@ -2207,7 +2135,9 @@ impl Render for AppShell {
             // in-progress rename.
             .capture_any_mouse_down(cx.listener(
                 |this, event: &gpui::MouseDownEvent, window, cx| {
-                    if this.rename.is_some() && event.button == MouseButton::Left {
+                    if matches!(this.input, InputMode::Rename(_))
+                        && event.button == MouseButton::Left
+                    {
                         this.commit_rename(window, cx);
                     }
                 },
@@ -2288,7 +2218,7 @@ impl Render for AppShell {
                     .flex()
                     .flex_col()
                     .child(chrome_band)
-                    .when(self.mode.find_open, |el| {
+                    .when(self.input.is_find(), |el| {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
                     .child({
@@ -2361,37 +2291,37 @@ impl Render for AppShell {
                         ),
                 )
             })
-            .when(self.tab_menu.is_some(), |el| {
+            .when(self.input.tab_menu().is_some(), |el| {
                 el.child(self.render_tab_menu(&tokens, window, cx))
             })
-            .when(self.terminal_menu.is_some(), |el| {
+            .when(self.input.terminal_menu().is_some(), |el| {
                 el.child(self.render_terminal_menu(&tokens, window, cx))
             })
-            .when(self.mode.is(OverlayKind::Settings), |el| {
+            .when(self.input.is_overlay(OverlayKind::Settings), |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))
             })
-            .when(self.mode.is(OverlayKind::Update), |el| {
+            .when(self.input.is_overlay(OverlayKind::Update), |el| {
                 el.child(self.render_update_overlay(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::Palette), |el| {
+            .when(self.input.is_overlay(OverlayKind::Palette), |el| {
                 el.child(self.render_command_palette(&tokens, cx))
             })
-            .when(self.close_confirm.is_some(), |el| {
+            .when(self.input.confirm().is_some(), |el| {
                 el.child(self.render_close_confirm(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::PaneFacts), |el| {
+            .when(self.input.is_overlay(OverlayKind::PaneFacts), |el| {
                 el.child(self.render_pane_facts(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::PluginMonitor), |el| {
+            .when(self.input.is_overlay(OverlayKind::PluginMonitor), |el| {
                 el.child(self.render_plugin_monitor(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::PluginConsent), |el| {
+            .when(self.input.consent().is_some(), |el| {
                 el.child(self.render_plugin_consent(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::History), |el| {
+            .when(self.input.is_overlay(OverlayKind::History), |el| {
                 el.child(self.render_history_search(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::Diff), |el| {
+            .when(self.input.is_overlay(OverlayKind::Diff), |el| {
                 el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
             })
     }

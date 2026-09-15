@@ -64,7 +64,7 @@ impl AppShell {
     }
 
     pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.mode.open_find();
+        self.input.open_find();
         // Focus the shell so the find query box's IME input handler activates.
         window.focus(&self.focus_handle, cx);
         cx.notify();
@@ -75,8 +75,8 @@ impl AppShell {
     }
 
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode.find_open {
-            self.mode.close_find();
+        if self.input.is_find() {
+            self.input.close_find();
             self.find.marked = None;
             self.find.debounce_gen = self.find.debounce_gen.wrapping_add(1);
             self.clear_find_matches(cx);
@@ -102,7 +102,7 @@ impl AppShell {
     /// count and highlights describe the pane actually on screen. Called from
     /// `commit_workspace` (tab switches and pane focus moves).
     pub(crate) fn refresh_find_for_active_pane(&mut self, cx: &mut Context<Self>) {
-        if !self.mode.find_open || self.find.query.is_empty() {
+        if !self.input.is_find() || self.find.query.is_empty() {
             return;
         }
         let Some(view) = self.active_view(cx) else {
@@ -122,7 +122,7 @@ impl AppShell {
                 .timer(std::time::Duration::from_millis(120))
                 .await;
             this.update(cx, |this, cx| {
-                if this.find.debounce_gen == generation && this.mode.find_open {
+                if this.find.debounce_gen == generation && this.input.is_find() {
                     this.run_find(cx);
                 }
             })
@@ -163,7 +163,7 @@ impl AppShell {
                 // Search completion is asynchronous. Only the newest request
                 // for the pane that is still active may update UI state.
                 if this.find.search_gen != generation
-                    || !this.mode.find_open
+                    || !this.input.is_find()
                     || this.active_view(cx).as_ref() != Some(&view)
                 {
                     return;
@@ -204,7 +204,7 @@ impl AppShell {
 
     fn step_find(&mut self, delta: i32, cx: &mut Context<Self>) {
         if self.find.match_count == 0 {
-            if self.mode.find_open && !self.find.query.is_empty() {
+            if self.input.is_find() && !self.find.query.is_empty() {
                 self.run_find(cx);
             }
             return;
@@ -226,7 +226,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.mode.find_open {
+        if !self.input.is_find() {
             return false;
         }
         let key = event.keystroke.key.as_str();

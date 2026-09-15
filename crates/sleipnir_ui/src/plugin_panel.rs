@@ -17,9 +17,6 @@ use uuid::Uuid;
 use crate::pane_tree::PaneKey;
 use crate::plugin_surface::{StaleRegistry, Surface};
 
-/// A 3D scene stored on a panel. Host-local; not a protocol type.
-pub type PanelScene = crate::panel_scene_paint::SceneData;
-
 /// One plugin-drawn panel. The tree is data; the host stores it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PanelSurface {
@@ -31,8 +28,6 @@ pub struct PanelSurface {
     pub tree: Widget,
     /// Plugin process is gone. The last tree stays, visibly marked.
     pub stale: bool,
-    /// 3D scene from the plugin, projected and painted below the chrome.
-    pub scene: Option<PanelScene>,
 }
 
 impl Surface for PanelSurface {
@@ -134,7 +129,6 @@ impl PanelRegistry {
                 if existing.owner_instance_id != owner_instance_id {
                     existing.owner_instance_id = owner_instance_id;
                     existing.surface_id = Uuid::new_v4();
-                    existing.scene = None;
                 }
                 existing.stale = false;
                 ApplyPanel::Replace { pane_key: pane }
@@ -149,60 +143,11 @@ impl PanelRegistry {
                         surface_id: Uuid::new_v4(),
                         tree,
                         stale: false,
-                        scene: None,
                     },
                 );
                 ApplyPanel::Create { pane_key: pane }
             }
         }
-    }
-
-    /// Store a 3D scene on a panel surface owned by `plugin_id`. Returns `true`
-    /// if the scene was accepted.
-    pub fn set_scene(
-        &mut self,
-        pane: PaneKey,
-        plugin_id: &str,
-        owner_instance_id: Uuid,
-        scene: PanelScene,
-    ) -> bool {
-        match self.surfaces.get_mut(&pane) {
-            Some(surface)
-                if !surface.stale
-                    && surface.plugin_id == plugin_id
-                    && surface.owner_instance_id == owner_instance_id =>
-            {
-                surface.scene = Some(scene);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Update just the camera on an existing scene. Used for host-driven camera
-    /// moves that must not wait for the plugin to resend geometry. Returns
-    /// `true` if a scene was present to update.
-    pub fn set_scene_camera(
-        &mut self,
-        pane: PaneKey,
-        camera: crate::panel_scene_paint::SceneCamera,
-    ) -> bool {
-        match self.surfaces.get_mut(&pane) {
-            Some(surface) => match surface.scene.as_mut() {
-                Some(scene) => {
-                    scene.camera = camera;
-                    true
-                }
-                None => false,
-            },
-            None => false,
-        }
-    }
-
-    /// Read the current scene on `pane`, if any. The interactive camera reads
-    /// this to seed a drag before mutating it.
-    pub fn scene(&self, pane: PaneKey) -> Option<&PanelScene> {
-        self.surfaces.get(&pane).and_then(|s| s.scene.as_ref())
     }
 }
 
@@ -437,7 +382,6 @@ mod tests {
             surface_id: Uuid::nil(),
             tree: btn("Go", "retry"),
             stale: false,
-            scene: None,
         };
         let laid = layout_surface(&surface, 20);
         let hit = action_at(&laid, 0, 0).expect("btn");
@@ -454,7 +398,6 @@ mod tests {
             surface_id: Uuid::nil(),
             tree: text("plugin:evil"),
             stale: false,
-            scene: None,
         };
         let laid = layout_surface(&surface, 20);
         assert!(matches!(
@@ -483,102 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn set_scene_requires_owner_and_camera_update_is_in_place() {
-        use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
-        let mut reg = PanelRegistry::new();
-        let terminals = BTreeSet::new();
-        let owner = Uuid::from_u128(1);
-        reg.apply_render("demo", owner, key(1), text("hi"), true, &terminals);
-        let scene = SceneData {
-            cols: 1,
-            rows: 1,
-            floor: [1, 2, 3],
-            camera: SceneCamera {
-                yaw: 0.1,
-                pitch: 0.2,
-                zoom: 1.0,
-            },
-            bars: vec![SceneBar {
-                gx: 0,
-                gz: 0,
-                height: 1.0,
-                color: [9, 9, 9],
-                selected: true,
-            }],
-        };
-        // A different plugin cannot write into this surface.
-        assert!(!reg.set_scene(key(1), "other", owner, scene.clone()));
-        assert!(!reg.set_scene(key(1), "demo", Uuid::from_u128(2), scene.clone()));
-        assert!(reg.set_scene(key(1), "demo", owner, scene));
-        assert!(reg.scene(key(1)).is_some());
-        // Camera-only update keeps the geometry and just moves the view.
-        let cam = SceneCamera {
-            yaw: 1.0,
-            pitch: 0.5,
-            zoom: 2.0,
-        };
-        assert!(reg.set_scene_camera(key(1), cam));
-        let updated_scene = reg.scene(key(1)).unwrap().clone();
-        assert_eq!(updated_scene.camera, cam);
-        assert_eq!(updated_scene.bars.len(), 1);
-        // No scene on a fresh pane means no camera to move.
-        reg.apply_render("demo", Uuid::nil(), key(2), text("x"), true, &terminals);
-        assert!(!reg.set_scene_camera(key(2), cam));
-        reg.mark_missing_stale(&BTreeSet::new());
-        assert!(
-            !reg.set_scene(key(1), "demo", owner, updated_scene),
-            "stale surfaces must not accept a new scene"
-        );
-    }
-
-    #[test]
-    fn stale_reclaim_clears_old_scene() {
-        use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
-
-        let mut reg = PanelRegistry::new();
-        let terminals = BTreeSet::new();
-        let first_owner = Uuid::from_u128(1);
-        let second_owner = Uuid::from_u128(2);
-        reg.apply_render("demo", first_owner, key(1), text("one"), true, &terminals);
-        assert!(reg.set_scene(
-            key(1),
-            "demo",
-            first_owner,
-            SceneData {
-                cols: 1,
-                rows: 1,
-                floor: [0, 0, 0],
-                camera: SceneCamera {
-                    yaw: 0.1,
-                    pitch: 0.2,
-                    zoom: 1.0,
-                },
-                bars: vec![SceneBar {
-                    gx: 0,
-                    gz: 0,
-                    height: 1.0,
-                    color: [1, 2, 3],
-                    selected: false,
-                }],
-            }
-        ));
-        reg.mark_missing_stale(&BTreeSet::new());
-        assert_eq!(
-            reg.apply_render("demo", second_owner, key(1), text("two"), true, &terminals),
-            ApplyPanel::Replace { pane_key: key(1) }
-        );
-        let surface = reg.get(key(1)).unwrap();
-        assert_eq!(surface.owner_instance_id, second_owner);
-        assert!(
-            surface.scene.is_none(),
-            "new owner must not inherit old scene"
-        );
-    }
-
-    #[test]
-    fn clone_and_insert_surfaces_preserve_surface_identity_and_scene() {
-        use crate::panel_scene_paint::{SceneBar, SceneCamera, SceneData};
-
+    fn clone_and_insert_surfaces_preserve_surface_identity() {
         let mut source = PanelRegistry::new();
         let mut target = PanelRegistry::new();
         let terminals = BTreeSet::new();
@@ -597,28 +445,6 @@ mod tests {
             text("two"),
             true,
             &terminals,
-        );
-        source.set_scene(
-            key(1),
-            "demo",
-            Uuid::from_u128(1),
-            SceneData {
-                cols: 1,
-                rows: 1,
-                floor: [0, 0, 0],
-                camera: SceneCamera {
-                    yaw: 0.2,
-                    pitch: 0.3,
-                    zoom: 1.4,
-                },
-                bars: vec![SceneBar {
-                    gx: 1,
-                    gz: 2,
-                    height: 3.0,
-                    color: [4, 5, 6],
-                    selected: false,
-                }],
-            },
         );
         let original = source.get(key(1)).expect("source surface").clone();
 

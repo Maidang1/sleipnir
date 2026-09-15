@@ -422,7 +422,10 @@ impl EffectBody {
 
 /// Adapter/host → registry. Not a coordinator wire op.
 ///
-/// Delivery acknowledgements name the **exact effect `seq`**. A later queued
+/// Delivery acknowledgements name the **exact effect `seq`** and are applied
+/// only through [`crate::ClaimedEffect::commit`]. `Registry::apply` of
+/// `BindPane` / `*Delivered` / `DeliveryFailed` without a live matching
+/// claim is [`crate::CoordError::EffectNotClaimed`]. A later queued
 /// prompt/focus/interrupt cannot be acked by a stale delivery for an earlier
 /// request.
 #[derive(Clone, Debug, PartialEq, Eq)]

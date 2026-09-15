@@ -150,7 +150,14 @@ impl Registry {
     }
 
     /// Apply an adapter/host update. Does **not** drain facts or effects.
+    ///
+    /// Delivery acks (`BindPane` / `*Delivered` / `DeliveryFailed`) are not
+    /// accepted here; they require a live [`ClaimedEffect`] and go through
+    /// [`ClaimedEffect::commit`].
     pub fn apply(&self, update: AdapterUpdate, now_ms: u64) -> Result<(), CoordError> {
+        if delivery_ack_seq(&update).is_some() {
+            return Err(CoordError::EffectNotClaimed);
+        }
         let mut inner = self.lock();
         loop {
             if let Some(session) = inner.session_for_update(&update) {
@@ -164,9 +171,15 @@ impl Registry {
         inner.apply(update, now_ms)
     }
 
-    /// Claim a queued effect for delivery. Holds a per-session claim until
-    /// [`ClaimedEffect::commit`] or drop (which returns the effect to the mailbox).
-    /// Reads and other sessions remain available while the claim is held.
+    /// Claim a queued effect for delivery. Records `(session, seq)` until
+    /// [`ClaimedEffect::commit`] acks that seq or drop releases the lease
+    /// (the effect stays in the mailbox).
+    ///
+    /// A second `try_claim` for another seq on the same session waits. A
+    /// same-seq re-claim returns [`CoordError::EffectAlreadyClaimed`]
+    /// immediately so the holding thread cannot deadlock on itself.
+    /// Reads (`Inspect` / `List` / `Wait` / `Facts` / `Effects`) and other
+    /// sessions remain available while the claim is held.
     pub fn try_claim(&self, seq: u64) -> Result<ClaimedEffect, CoordError> {
         let mut inner = self.lock();
         loop {
@@ -174,9 +187,15 @@ impl Registry {
                 return Err(CoordError::UnknownEffect);
             };
             let session = effect.body.session();
-            if inner.session_is_claimed(session) {
-                inner = self.cv.wait(inner).unwrap_or_else(|p| p.into_inner());
-                continue;
+            match inner.claimed_seq_of(session) {
+                Some(held) if held == seq => {
+                    return Err(CoordError::EffectAlreadyClaimed);
+                }
+                Some(_) => {
+                    inner = self.cv.wait(inner).unwrap_or_else(|p| p.into_inner());
+                    continue;
+                }
+                None => {}
             }
             inner.validate_effect(&effect)?;
             inner.session_mut(session)?.claimed_seq = Some(seq);
@@ -192,11 +211,21 @@ impl Registry {
     fn commit_claimed(
         &self,
         session: AgentSessionId,
-        update: AdapterUpdate,
+        seq: u64,
+        outcome: ClaimOutcome,
         now_ms: u64,
     ) -> Result<(), CoordError> {
         let mut inner = self.lock();
-        let result = inner.apply(update, now_ms);
+        if inner.claimed_seq_of(session) != Some(seq) {
+            return Err(CoordError::EffectNotClaimed);
+        }
+        let result = match inner.effect_by_seq(seq).cloned() {
+            None => Err(CoordError::UnknownEffect),
+            Some(effect) => match claim_outcome_to_update(&effect, outcome) {
+                Err(err) => Err(err),
+                Ok(update) => inner.apply(update, now_ms),
+            },
+        };
         if let Some(s) = inner.sessions.get_mut(&session) {
             s.claimed_seq = None;
         }
@@ -251,7 +280,25 @@ impl Registry {
     }
 }
 
-/// A claimed effect. Drop returns it to the mailbox; [`Self::commit`] acks it.
+/// Outcome of a claimed delivery. The claimed effect body chooses the
+/// `AdapterUpdate`; the caller cannot name a different seq.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    /// Success for this seq. `pane` is required for `LaunchRequested`
+    /// (becomes `BindPane`) and ignored for every other effect kind.
+    Delivered { pane: Option<Uuid> },
+    /// `DeliveryFailed` for this seq.
+    Failed,
+}
+
+/// A seq-typed delivery lease. [`Self::commit`] acks and removes the effect.
+/// Drop without commit releases the per-session claim; the effect stays queued.
+///
+/// Must not call [`Registry::handle`] for a mutating request or
+/// [`Registry::try_claim`] on this session from the same thread: those wait
+/// for the claim and would deadlock. [`Request::Inspect`], `List`, `Wait`,
+/// `Facts`, and `Effects` are non-waiting reads and are safe (the adapter
+/// inspects while holding a claim).
 pub struct ClaimedEffect {
     registry: Registry,
     effect: Effect,
@@ -268,9 +315,11 @@ impl ClaimedEffect {
         self.effect.seq
     }
 
-    /// Ack this claimed effect. Consumes the claim.
-    pub fn commit(mut self, update: AdapterUpdate, now_ms: u64) -> Result<(), CoordError> {
-        let result = self.registry.commit_claimed(self.session, update, now_ms);
+    /// Ack this claimed seq. Consumes the claim.
+    pub fn commit(mut self, outcome: ClaimOutcome, now_ms: u64) -> Result<(), CoordError> {
+        let result = self
+            .registry
+            .commit_claimed(self.session, self.effect.seq, outcome, now_ms);
         self.committed = true;
         result
     }
@@ -284,6 +333,8 @@ impl Drop for ClaimedEffect {
     }
 }
 
+/// Mutating coordinator ops wait on a live session claim. `Inspect`, `List`,
+/// `Wait`, `Facts`, and `Effects` are non-waiting reads.
 fn mutating_session(inner: &Inner, req: &Request) -> Option<AgentSessionId> {
     match req {
         Request::Prompt { session, .. }
@@ -296,6 +347,48 @@ fn mutating_session(inner: &Inner, req: &Request) -> Option<AgentSessionId> {
         | Request::ReportAwaitingHuman { task, .. }
         | Request::ReportResult { task, .. } => inner.tasks.get(task).map(|task| task.session),
         _ => None,
+    }
+}
+
+fn delivery_ack_seq(update: &AdapterUpdate) -> Option<u64> {
+    match update {
+        AdapterUpdate::BindPane { seq, .. }
+        | AdapterUpdate::PromptDelivered { seq }
+        | AdapterUpdate::InterruptDelivered { seq }
+        | AdapterUpdate::FocusDelivered { seq }
+        | AdapterUpdate::CloseDelivered { seq }
+        | AdapterUpdate::DeliveryFailed { seq } => Some(*seq),
+        _ => None,
+    }
+}
+
+fn claim_outcome_to_update(
+    effect: &Effect,
+    outcome: ClaimOutcome,
+) -> Result<AdapterUpdate, CoordError> {
+    let seq = effect.seq;
+    match outcome {
+        ClaimOutcome::Failed => Ok(AdapterUpdate::DeliveryFailed { seq }),
+        ClaimOutcome::Delivered { pane } => match &effect.body {
+            EffectBody::LaunchRequested { session, .. } => {
+                let Some(pane) = pane else {
+                    return Err(CoordError::EffectKindMismatch {
+                        seq,
+                        actual: "launch_requested",
+                        expected: "bind_pane",
+                    });
+                };
+                Ok(AdapterUpdate::BindPane {
+                    seq,
+                    session: *session,
+                    pane,
+                })
+            }
+            EffectBody::PromptRequested { .. } => Ok(AdapterUpdate::PromptDelivered { seq }),
+            EffectBody::InterruptRequested { .. } => Ok(AdapterUpdate::InterruptDelivered { seq }),
+            EffectBody::FocusRequested { .. } => Ok(AdapterUpdate::FocusDelivered { seq }),
+            EffectBody::CloseRequested { .. } => Ok(AdapterUpdate::CloseDelivered { seq }),
+        },
     }
 }
 
@@ -577,6 +670,7 @@ impl Inner {
         self.ensure_effect_capacity()?;
         self.task_mut(task)?.status = TaskStatus::Interrupting;
         self.push_fact(Event::TaskInterrupting { task });
+        self.drop_prompt_requested_for(task);
         self.push_effect(EffectBody::InterruptRequested {
             session: session_id,
             task,
@@ -628,6 +722,7 @@ impl Inner {
             return Err(CoordError::HumanAlreadyOwns);
         }
         session.writer = Writer::Human;
+        self.retire_coordinator_intents(session_id)?;
         self.push_fact(Event::OwnershipChanged {
             session: session_id,
             writer: Writer::Human,
@@ -635,6 +730,38 @@ impl Inner {
         Ok(Response::TakenOver {
             session: session_id,
         })
+    }
+
+    /// Finish undeliverable coordinator work and drop Prompt/Interrupt/Close
+    /// (and Launch) from the mailbox. `FocusRequested` is visibility-only
+    /// and stays queued. In-flight tasks named by those intents become
+    /// [`TaskStatus::Unknown`], matching close-of-in-flight.
+    fn retire_coordinator_intents(&mut self, session_id: AgentSessionId) -> Result<(), CoordError> {
+        let tasks: Vec<CoordinationTaskId> = self
+            .mailbox(session_id)
+            .filter_map(|effect| match &effect.body {
+                EffectBody::LaunchRequested { task, .. }
+                | EffectBody::PromptRequested { task, .. }
+                | EffectBody::InterruptRequested { task, .. } => Some(*task),
+                _ => None,
+            })
+            .collect();
+        let mut seen = Vec::new();
+        for task in tasks {
+            if seen.contains(&task) {
+                continue;
+            }
+            seen.push(task);
+            self.finish_task(task, TaskStatus::Unknown)?;
+        }
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            let before = session.mailbox.len();
+            session
+                .mailbox
+                .retain(|effect| matches!(effect.body, EffectBody::FocusRequested { .. }));
+            self.stats.effects_drained += (before - session.mailbox.len()) as u64;
+        }
+        Ok(())
     }
 
     fn close_request(&mut self, session_id: AgentSessionId) -> Result<Response, CoordError> {
@@ -665,6 +792,11 @@ impl Inner {
     }
 
     fn apply(&mut self, update: AdapterUpdate, now_ms: u64) -> Result<(), CoordError> {
+        if let Some(seq) = delivery_ack_seq(&update) {
+            if !self.live_claim_matches(seq) {
+                return Err(CoordError::EffectNotClaimed);
+            }
+        }
         match update {
             AdapterUpdate::BindPane { seq, session, pane } => self.bind_pane(seq, session, pane),
             AdapterUpdate::PromptDelivered { seq } => self.prompt_delivered(seq),
@@ -792,8 +924,12 @@ impl Inner {
         let t = self.task_mut(task_id)?;
         match t.status {
             TaskStatus::Dispatching | TaskStatus::AwaitingHuman | TaskStatus::Interrupting => {
+                let from_dispatching = t.status == TaskStatus::Dispatching;
                 t.status = TaskStatus::Running;
                 self.push_fact(Event::TaskRunning { task: task_id });
+                if from_dispatching {
+                    self.drop_prompt_requested_for(task_id);
+                }
                 Ok(())
             }
             TaskStatus::Running => Ok(()),
@@ -818,12 +954,16 @@ impl Inner {
         if !t.status.is_in_flight() {
             return Err(CoordError::TaskNotInFlight);
         }
+        let from_dispatching = t.status == TaskStatus::Dispatching;
         t.status = TaskStatus::AwaitingHuman;
         t.detail = detail.clone();
         self.push_fact(Event::TaskAwaitingHuman {
             task: task_id,
             detail,
         });
+        if from_dispatching {
+            self.drop_prompt_requested_for(task_id);
+        }
         Ok(())
     }
 
@@ -878,6 +1018,21 @@ impl Inner {
         }
         self.push_fact(event);
         Ok(())
+    }
+
+    /// A prompt that is no longer `Dispatching` cannot be delivered; drop it
+    /// so it does not occupy the mailbox without a claimable ack.
+    fn drop_prompt_requested_for(&mut self, task: CoordinationTaskId) {
+        let Some(session_id) = self.tasks.get(&task).map(|t| t.session) else {
+            return;
+        };
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            let before = session.mailbox.len();
+            session.mailbox.retain(|effect| {
+                !matches!(&effect.body, EffectBody::PromptRequested { task: id, .. } if *id == task)
+            });
+            self.stats.effects_drained += (before - session.mailbox.len()) as u64;
+        }
     }
 
     fn record_result(
@@ -1270,9 +1425,15 @@ impl Inner {
     }
 
     fn session_is_claimed(&self, session: AgentSessionId) -> bool {
-        self.sessions
-            .get(&session)
-            .is_some_and(|s| s.claimed_seq.is_some())
+        self.claimed_seq_of(session).is_some()
+    }
+
+    fn claimed_seq_of(&self, session: AgentSessionId) -> Option<u64> {
+        self.sessions.get(&session).and_then(|s| s.claimed_seq)
+    }
+
+    fn live_claim_matches(&self, seq: u64) -> bool {
+        self.sessions.values().any(|s| s.claimed_seq == Some(seq))
     }
 
     fn session_for_update(&self, update: &AdapterUpdate) -> Option<AgentSessionId> {
@@ -1386,15 +1547,37 @@ mod tests {
             reg,
             |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
         );
-        reg.apply(
-            AdapterUpdate::BindPane {
-                seq,
-                session,
-                pane: Uuid::from_u128(pane),
+        commit_seq(
+            reg,
+            seq,
+            ClaimOutcome::Delivered {
+                pane: Some(Uuid::from_u128(pane)),
             },
             now,
-        )
-        .unwrap();
+        );
+    }
+
+    fn commit_seq(reg: &Registry, seq: u64, outcome: ClaimOutcome, now: u64) {
+        reg.try_claim(seq)
+            .expect("claim")
+            .commit(outcome, now)
+            .expect("commit");
+    }
+
+    fn delivered_ok(reg: &Registry, seq: u64, now: u64) {
+        commit_seq(reg, seq, ClaimOutcome::Delivered { pane: None }, now);
+    }
+
+    fn failed_ok(reg: &Registry, seq: u64, now: u64) {
+        commit_seq(reg, seq, ClaimOutcome::Failed, now);
+    }
+
+    fn assert_unclaimable(reg: &Registry, seq: u64, want: CoordError) {
+        match reg.try_claim(seq) {
+            Err(err) if err == want => {}
+            Err(err) => panic!("try_claim({seq}) err={err}, want={want}"),
+            Ok(_) => panic!("try_claim({seq}) unexpectedly succeeded"),
+        }
     }
 
     fn settle_launch(reg: &Registry, session: AgentSessionId, task: CoordinationTaskId, now: u64) {
@@ -1771,8 +1954,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::PromptRequested { task: t, .. } if *t == task),
         );
-        reg.apply(AdapterUpdate::PromptDelivered { seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, seq, 3);
         reg.apply(AdapterUpdate::TaskRunning { task }, 3).unwrap();
         reg.apply(AdapterUpdate::TaskAwaitingHuman { task }, 4)
             .unwrap();
@@ -1955,6 +2137,7 @@ mod tests {
             reg.apply(AdapterUpdate::InterruptDelivered { seq: stale }, 5)
                 .is_err()
         );
+        assert_unclaimable(&reg, stale, CoordError::UnknownEffect);
         assert!(matches!(
             reg.handle(req(6, Request::Wait { task: second }), 6).body,
             Response::Wait {
@@ -2022,8 +2205,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::PromptRequested { task: t, .. } if *t == task),
         );
-        reg.apply(AdapterUpdate::PromptDelivered { seq }, 2)
-            .unwrap();
+        delivered_ok(&reg, seq, 2);
         match reg.handle(req(3, Request::Wait { task }), 3).body {
             Response::Wait { status, .. } => assert_eq!(status, TaskStatus::Running),
             other => panic!("{other:?}"),
@@ -2035,7 +2217,7 @@ mod tests {
         let reg = Registry::with_limits(limits_one());
         let (session, task) = launch(&reg, 0);
         let seq = reg.peek_effects()[0].seq;
-        reg.apply(AdapterUpdate::DeliveryFailed { seq }, 1).unwrap();
+        failed_ok(&reg, seq, 1);
         match reg.handle(req(2, Request::Inspect { session }), 2).body {
             Response::Inspect { session } => assert!(!session.open),
             other => panic!("{other:?}"),
@@ -2092,8 +2274,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::InterruptDelivered { seq: interrupt_seq }, 5)
-            .unwrap();
+        delivered_ok(&reg, interrupt_seq, 5);
         assert!(
             !reg.peek_effects()
                 .iter()
@@ -2153,7 +2334,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::DeliveryFailed { seq }, 3).unwrap();
+        failed_ok(&reg, seq, 3);
         match reg.handle(req(4, Request::Wait { task }), 4).body {
             Response::Wait {
                 status, terminal, ..
@@ -2180,8 +2361,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::InterruptDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         let second = match reg
             .handle(
                 req(
@@ -2208,17 +2388,15 @@ mod tests {
         );
         assert_ne!(first_seq, second_seq);
         match reg.apply(AdapterUpdate::InterruptDelivered { seq: first_seq }, 6) {
-            Err(err) => assert!(err.to_string().contains("unknown effect"), "{err}"),
-            Ok(()) => panic!("stale seq must not settle the later task"),
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("stale seq must not settle the later task: {other:?}"),
         }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         match reg.handle(req(7, Request::Wait { task: second }), 7).body {
             Response::Wait { status, .. } => assert_eq!(status, TaskStatus::Interrupting),
             other => panic!("{other:?}"),
         }
-        match reg.apply(AdapterUpdate::InterruptDelivered { seq: second_seq }, 8) {
-            Ok(()) => {}
-            Err(err) => panic!("{err}"),
-        }
+        delivered_ok(&reg, second_seq, 8);
         match reg.handle(req(9, Request::Wait { task: second }), 9).body {
             Response::Wait {
                 status, terminal, ..
@@ -2296,7 +2474,7 @@ mod tests {
         let reg = Registry::new();
         let (_session, task) = launch(&reg, 0);
         let seq = reg.peek_effects()[0].seq;
-        reg.apply(AdapterUpdate::DeliveryFailed { seq }, 1).unwrap();
+        failed_ok(&reg, seq, 1);
         match reg.handle(req(2, Request::Wait { task }), 2).body {
             Response::Wait {
                 status, terminal, ..
@@ -2379,10 +2557,12 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::BindPane { seq, session, pane }, 1)
-            .unwrap();
-        reg.apply(AdapterUpdate::BindPane { seq, session, pane }, 2)
-            .unwrap();
+        commit_seq(&reg, seq, ClaimOutcome::Delivered { pane: Some(pane) }, 1);
+        match reg.apply(AdapterUpdate::BindPane { seq, session, pane }, 2) {
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("acked bind must not go through apply: {other:?}"),
+        }
+        assert_unclaimable(&reg, seq, CoordError::UnknownEffect);
         match reg.apply(
             AdapterUpdate::BindPane {
                 seq,
@@ -2391,8 +2571,12 @@ mod tests {
             },
             3,
         ) {
-            Err(err) => assert!(err.to_string().contains("already bound")),
-            Ok(()) => panic!("rebind must fail"),
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("rebind without a claim must fail: {other:?}"),
+        }
+        match reg.handle(req(4, Request::Inspect { session }), 4).body {
+            Response::Inspect { session: snap } => assert_eq!(snap.pane, Some(pane)),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -2563,8 +2747,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::BindPane { seq, session, pane }, 1)
-            .unwrap();
+        commit_seq(&reg, seq, ClaimOutcome::Delivered { pane: Some(pane) }, 1);
         match reg.handle(req(2, Request::Inspect { session }), 2).body {
             Response::Inspect { session: snap } => assert_eq!(snap.pane, Some(pane)),
             other => panic!("{other:?}"),
@@ -2615,8 +2798,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::PromptRequested { task: t, .. } if *t == task),
         );
-        reg.apply(AdapterUpdate::PromptDelivered { seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, seq, 3);
         reg.apply(AdapterUpdate::TaskRunning { task }, 3).unwrap();
         reg.apply(AdapterUpdate::TaskAwaitingHuman { task }, 4)
             .unwrap();
@@ -3054,8 +3236,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::PromptRequested { task, .. } if *task == first),
         );
-        reg.apply(AdapterUpdate::PromptDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         reg.apply(AdapterUpdate::TaskRunning { task: first }, 3)
             .unwrap();
         reg.apply(
@@ -3088,9 +3269,10 @@ mod tests {
         );
         assert_ne!(first_seq, second_seq);
         match reg.apply(AdapterUpdate::PromptDelivered { seq: first_seq }, 6) {
-            Err(err) => assert!(err.to_string().contains("unknown effect"), "{err}"),
-            Ok(()) => panic!("stale seq must not ack the later prompt"),
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("stale seq must not ack the later prompt: {other:?}"),
         }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         assert!(reg.peek_effects().iter().any(|e| e.seq == second_seq
             && matches!(e.body, EffectBody::PromptRequested { task, .. } if task == second)));
         match reg.handle(req(7, Request::Wait { task: second }), 7).body {
@@ -3111,8 +3293,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::FocusRequested { session: s } if *s == session),
         );
-        reg.apply(AdapterUpdate::FocusDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         assert!(matches!(
             reg.handle(req(4, Request::Focus { session }), 4).body,
             Response::FocusAccepted { .. }
@@ -3123,9 +3304,10 @@ mod tests {
         );
         assert_ne!(first_seq, second_seq);
         match reg.apply(AdapterUpdate::FocusDelivered { seq: first_seq }, 5) {
-            Err(err) => assert!(err.to_string().contains("unknown effect"), "{err}"),
-            Ok(()) => panic!("stale seq must not ack the later focus"),
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("stale seq must not ack the later focus: {other:?}"),
         }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         assert!(reg.peek_effects().iter().any(|e| e.seq == second_seq
             && matches!(e.body, EffectBody::FocusRequested { session: s } if s == session)));
     }
@@ -3139,12 +3321,20 @@ mod tests {
             |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
         );
         match reg.apply(AdapterUpdate::PromptDelivered { seq }, 1) {
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("apply is not a delivery ack path: {other:?}"),
+        }
+        match reg
+            .try_claim(seq)
+            .expect("claim")
+            .commit(ClaimOutcome::Delivered { pane: None }, 1)
+        {
             Err(err) => {
                 let message = err.to_string();
-                assert!(message.contains("not prompt_requested"), "{message}");
+                assert!(message.contains("not bind_pane"), "{message}");
                 assert!(message.contains("launch_requested"), "{message}");
             }
-            Ok(()) => panic!("kind mismatch must fail"),
+            Ok(()) => panic!("launch delivered without pane must fail"),
         }
         assert!(
             reg.peek_effects()
@@ -3158,9 +3348,10 @@ mod tests {
         let reg = Registry::new();
         launch(&reg, 0);
         match reg.apply(AdapterUpdate::FocusDelivered { seq: 99 }, 1) {
-            Err(err) => assert!(err.to_string().contains("unknown effect"), "{err}"),
-            Ok(()) => panic!("missing seq must fail"),
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("apply is not a delivery ack path: {other:?}"),
         }
+        assert_unclaimable(&reg, 99, CoordError::UnknownEffect);
         assert_eq!(reg.peek_effects().len(), 1);
     }
 
@@ -3181,25 +3372,27 @@ mod tests {
             },
             2,
         ) {
-            Err(err) => {
-                let message = err.to_string();
-                assert!(
-                    message.contains("different session")
-                        || message.contains("not launch_requested"),
-                    "{message}"
-                );
-            }
-            Ok(()) => panic!("foreign launch seq must not bind"),
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("apply is not a delivery ack path: {other:?}"),
         }
+        commit_seq(
+            &reg,
+            seq_a,
+            ClaimOutcome::Delivered {
+                pane: Some(Uuid::from_u128(1)),
+            },
+            2,
+        );
         match reg.handle(req(3, Request::Inspect { session: b }), 3).body {
             Response::Inspect { session: snap } => assert!(snap.pane.is_none()),
             other => panic!("{other:?}"),
         }
-        assert!(
-            reg.peek_effects()
-                .iter()
-                .any(|e| e.seq == seq_a && matches!(e.body, EffectBody::LaunchRequested { .. }))
-        );
+        match reg.handle(req(4, Request::Inspect { session: a }), 4).body {
+            Response::Inspect { session: snap } => {
+                assert_eq!(snap.pane, Some(Uuid::from_u128(1)));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -3214,8 +3407,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::CloseRequested { session: s } if *s == session),
         );
-        reg.apply(AdapterUpdate::CloseDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         assert!(matches!(
             reg.handle(req(4, Request::Close { session }), 4).body,
             Response::CloseAccepted { .. }
@@ -3225,9 +3417,306 @@ mod tests {
             |b| matches!(b, EffectBody::CloseRequested { session: s } if *s == session),
         );
         match reg.apply(AdapterUpdate::CloseDelivered { seq: first_seq }, 5) {
-            Err(err) => assert!(err.to_string().contains("unknown effect"), "{err}"),
-            Ok(()) => panic!("stale close seq must not ack a later close"),
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("stale close seq must not ack a later close: {other:?}"),
         }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         assert!(reg.peek_effects().iter().any(|e| e.seq == second_seq));
+    }
+
+    #[test]
+    fn claim_then_drop_restores_mutability() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        assert!(matches!(
+            reg.handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "work".into(),
+                    },
+                ),
+                2,
+            )
+            .body,
+            Response::PromptAccepted { .. }
+        ));
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { session: s, .. } if *s == session),
+        );
+        {
+            let claimed = reg.try_claim(seq).expect("claim");
+            assert_eq!(claimed.seq(), seq);
+            assert!(
+                reg.peek_effects().iter().any(|e| e.seq == seq),
+                "claim must not dequeue"
+            );
+        }
+        let claimed = reg.try_claim(seq).expect("re-claim after drop");
+        drop(claimed);
+        assert!(matches!(
+            reg.handle(req(3, Request::Focus { session }), 3).body,
+            Response::FocusAccepted { .. }
+        ));
+    }
+
+    #[test]
+    fn apply_prompt_delivered_without_claim_errors_and_leaves_mailbox() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        assert!(matches!(
+            reg.handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "work".into(),
+                    },
+                ),
+                2,
+            )
+            .body,
+            Response::PromptAccepted { .. }
+        ));
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { session: s, .. } if *s == session),
+        );
+        match reg.apply(AdapterUpdate::PromptDelivered { seq }, 3) {
+            Err(CoordError::EffectNotClaimed) => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            reg.peek_effects()
+                .iter()
+                .any(|e| e.seq == seq && matches!(e.body, EffectBody::PromptRequested { .. }))
+        );
+    }
+
+    #[test]
+    fn inspect_succeeds_while_a_claim_is_held() {
+        let reg = Registry::new();
+        let (session, _) = launch(&reg, 0);
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
+        );
+        let claimed = reg.try_claim(seq).expect("claim");
+        match reg.handle(req(2, Request::Inspect { session }), 1).body {
+            Response::Inspect { session: snap } => {
+                assert_eq!(snap.session, session);
+                assert!(snap.open);
+            }
+            other => panic!("{other:?}"),
+        }
+        drop(claimed);
+    }
+
+    #[test]
+    fn same_seq_reclaim_does_not_deadlock() {
+        let reg = Registry::new();
+        let (session, _) = launch(&reg, 0);
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
+        );
+        let claimed = reg.try_claim(seq).expect("claim");
+        assert_unclaimable(&reg, seq, CoordError::EffectAlreadyClaimed);
+        drop(claimed);
+        reg.try_claim(seq).expect("claim after drop");
+    }
+
+    #[test]
+    fn second_try_claim_on_same_session_waits_until_drop() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        assert!(matches!(
+            reg.handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "work".into(),
+                    },
+                ),
+                2,
+            )
+            .body,
+            Response::PromptAccepted { .. }
+        ));
+        assert!(matches!(
+            reg.handle(req(3, Request::Focus { session }), 3).body,
+            Response::FocusAccepted { .. }
+        ));
+        let prompt_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { session: s, .. } if *s == session),
+        );
+        let focus_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::FocusRequested { session: s } if *s == session),
+        );
+        let claimed = reg.try_claim(prompt_seq).expect("claim prompt");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = reg.clone();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = waiter.try_claim(focus_seq);
+            done_tx.send(result.map(|c| c.seq())).unwrap();
+        });
+        started_rx.recv().unwrap();
+        match done_rx.recv_timeout(std::time::Duration::from_millis(150)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(value) => panic!("second claim must wait on the live lease: {value:?}"),
+            Err(err) => panic!("{err}"),
+        }
+        drop(claimed);
+        let seq = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("waiter should proceed after drop")
+            .expect("focus claim");
+        assert_eq!(seq, focus_seq);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn takeover_drains_queued_prompt_interrupt_close_and_keeps_focus() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        let prompt = match reg
+            .handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "queued work".into(),
+                    },
+                ),
+                2,
+            )
+            .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(
+            reg.handle(req(3, Request::Focus { session }), 3).body,
+            Response::FocusAccepted { .. }
+        ));
+        assert!(matches!(
+            reg.handle(req(4, Request::Close { session }), 4).body,
+            Response::CloseAccepted { .. }
+        ));
+        match reg
+            .handle(req(5, Request::HumanTakeover { session }), 5)
+            .body
+        {
+            Response::TakenOver { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        let leftover = reg.peek_effects();
+        assert!(
+            leftover.iter().all(|e| {
+                e.body.session() != session || matches!(e.body, EffectBody::FocusRequested { .. })
+            }),
+            "takeover must not leave coordinator intents: {leftover:?}"
+        );
+        assert!(
+            leftover.iter().any(
+                |e| matches!(e.body, EffectBody::FocusRequested { session: s } if s == session)
+            ),
+            "FocusRequested may remain"
+        );
+        assert!(
+            !leftover.iter().any(|e| matches!(
+                e.body,
+                EffectBody::PromptRequested { .. }
+                    | EffectBody::InterruptRequested { .. }
+                    | EffectBody::CloseRequested { .. }
+            )),
+            "no HumanOwnsSession poison in the mailbox"
+        );
+        match reg.handle(req(6, Request::Wait { task: prompt }), 6).body {
+            Response::Wait {
+                status, terminal, ..
+            } => {
+                assert_eq!(status, TaskStatus::Unknown);
+                assert!(terminal);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let (session2, _) = ready(&reg);
+        let running = match reg
+            .handle(
+                req(
+                    7,
+                    Request::Prompt {
+                        session: session2,
+                        text: "delivered then interrupted".into(),
+                    },
+                ),
+                7,
+            )
+            .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        let prompt_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { task, .. } if *task == running),
+        );
+        delivered_ok(&reg, prompt_seq, 8);
+        assert!(matches!(
+            reg.handle(req(9, Request::Interrupt { session: session2 }), 9)
+                .body,
+            Response::InterruptAccepted { .. }
+        ));
+        assert!(matches!(
+            reg.handle(req(10, Request::Close { session: session2 }), 10)
+                .body,
+            Response::CloseAccepted { .. }
+        ));
+        match reg
+            .handle(req(11, Request::HumanTakeover { session: session2 }), 11)
+            .body
+        {
+            Response::TakenOver { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            !reg.peek_effects().iter().any(|e| {
+                e.body.session() == session2
+                    && matches!(
+                        e.body,
+                        EffectBody::InterruptRequested { .. } | EffectBody::CloseRequested { .. }
+                    )
+            }),
+            "interrupt/close must not remain after takeover"
+        );
+        match reg
+            .handle(req(12, Request::Wait { task: running }), 12)
+            .body
+        {
+            Response::Wait {
+                status, terminal, ..
+            } => {
+                assert_eq!(status, TaskStatus::Unknown);
+                assert!(terminal);
+            }
+            other => panic!("{other:?}"),
+        }
+        match reg.handle(req(13, Request::Inspect { session }), 13).body {
+            Response::Inspect { session: snap } => {
+                assert!(snap.open);
+                assert_eq!(snap.writer, Writer::Human);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(reg.stats().effects_drained >= 3);
     }
 }

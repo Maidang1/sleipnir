@@ -8,6 +8,11 @@ pub enum CoordError {
     UnknownTask,
     UnknownEffect,
     ObsoleteEffect,
+    /// Delivery ack (`*Delivered` / `BindPane` / `DeliveryFailed`) without a
+    /// live [`crate::ClaimedEffect`] for that seq.
+    EffectNotClaimed,
+    /// [`crate::Registry::try_claim`] for a seq this session already holds.
+    EffectAlreadyClaimed,
     SessionClosed,
     HumanOwnsSession,
     HumanAlreadyOwns,
@@ -70,6 +75,8 @@ impl std::fmt::Display for CoordError {
             Self::UnknownTask => write!(f, "unknown task"),
             Self::UnknownEffect => write!(f, "unknown effect"),
             Self::ObsoleteEffect => write!(f, "obsolete effect"),
+            Self::EffectNotClaimed => write!(f, "effect is not claimed"),
+            Self::EffectAlreadyClaimed => write!(f, "effect is already claimed"),
             Self::SessionClosed => write!(f, "session is closed"),
             Self::HumanOwnsSession => write!(f, "human owns this session"),
             Self::HumanAlreadyOwns => write!(f, "human already owns this session"),

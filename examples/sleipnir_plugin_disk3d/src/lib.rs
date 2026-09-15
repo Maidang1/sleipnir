@@ -6,7 +6,7 @@
 //! chart into a widget tree and renders it through the shared `Render` path.
 //! Split into testable parts:
 //!
-//! - [`raster`] — 3D maths and the cell framebuffer fallback. Knows nothing
+//! - [`raster`] — 3D maths and the cell framebuffer. Knows nothing
 //!   about disks.
 //! - [`scan`]   — the bounded filesystem walk that produces the numbers.
 //! - [`view`]   — scan + camera → scene / widget tree. Pure, so it is unit
@@ -18,7 +18,7 @@ pub mod view;
 
 pub use raster::{Camera, Canvas, Scene};
 pub use scan::{Entry, Scan, human_bytes, scan};
-pub use view::{View, render, render_chrome_only};
+pub use view::{View, render};
 
 /// Yaw step per arrow press, in radians (15°).
 pub const YAW_STEP: f32 = std::f32::consts::PI / 12.0;

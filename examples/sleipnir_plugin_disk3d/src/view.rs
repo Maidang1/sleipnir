@@ -4,7 +4,6 @@
 //! testable: given a scan and a camera, the tree is a pure function.
 
 use plugin_protocol::v2::{MAX_WIDGET_NODES, Tone, Widget, measure};
-use serde::Deserialize;
 use sleipnir_plugin::{badge, btn, col, row, sep, text};
 
 use crate::raster::{Camera, Scene, default_light};
@@ -96,32 +95,6 @@ impl View {
         self.selected = 0;
         self.scan = scan;
     }
-
-    /// Apply a camera payload `{yaw,pitch,zoom}`. Malformed values keep the
-    /// current camera; pitch/zoom are clamped to the button-control range.
-    pub fn apply_camera_arg(&mut self, arg: &str) {
-        #[derive(Deserialize)]
-        struct CameraArg {
-            #[serde(default)]
-            yaw: f32,
-            #[serde(default)]
-            pitch: f32,
-            #[serde(default)]
-            zoom: f32,
-        }
-        let Ok(cam) = serde_json::from_str::<CameraArg>(arg) else {
-            return;
-        };
-        if cam.yaw.is_finite() {
-            self.camera.yaw = wrap_angle(cam.yaw);
-        }
-        if cam.pitch.is_finite() {
-            self.camera.pitch = cam.pitch.clamp(0.05, 1.35);
-        }
-        if cam.zoom.is_finite() {
-            self.zoom = cam.zoom.clamp(0.5, 2.5);
-        }
-    }
 }
 
 fn wrap_angle(a: f32) -> f32 {
@@ -133,7 +106,7 @@ fn wrap_angle(a: f32) -> f32 {
     a
 }
 
-/// Build the raster scene for the text fallback: one cuboid per entry on a
+/// Build the raster scene: one cuboid per entry on a
 /// square-ish grid, plus a floor tick under each.
 ///
 /// This is a thin adapter over [`build_scene_data`]: grid layout, height
@@ -255,17 +228,6 @@ pub fn render(view: &View, cols: u16, rows: u16) -> Widget {
 
     root = root.child(sep()).child(legend(view)).child(controls());
     clamp_to_budget(root.into())
-}
-
-/// Chrome-only tree for the host-drawn scene: header + legend + controls, no
-/// raster rows. The host paints the geometry, so the tree carries none.
-pub fn render_chrome_only(view: &View) -> Widget {
-    let mut root = col().gap(0).child(header(view));
-    if view.scan.is_empty() {
-        root = root.child(text("Nothing to chart in this directory.").tone(Tone::Dim));
-    }
-    root = root.child(sep()).child(legend(view)).child(controls());
-    root.into()
 }
 
 fn header(view: &View) -> Widget {
@@ -703,22 +665,5 @@ mod tests {
         let scene = build_scene_data(&view);
         // Even the smallest bar keeps the visible plinth, never zero height.
         assert!(scene.bars.iter().all(|b| b.height >= MIN_BAR_SHARE - 1e-6));
-    }
-
-    #[test]
-    fn apply_camera_arg_updates_and_clamps() {
-        let mut view = sample_view();
-        view.apply_camera_arg(r#"{"yaw":1.0,"pitch":0.5,"zoom":1.5}"#);
-        assert!((view.camera.yaw - 1.0).abs() < 1e-4);
-        assert!((view.camera.pitch - 0.5).abs() < 1e-4);
-        assert!((view.zoom - 1.5).abs() < 1e-4);
-        // Out-of-range pitch and zoom are clamped, not accepted raw.
-        view.apply_camera_arg(r#"{"pitch":9.0,"zoom":99.0}"#);
-        assert!(view.camera.pitch <= 1.35);
-        assert!(view.zoom <= 2.5);
-        // Malformed payloads are ignored, leaving the current values intact.
-        let before = (view.camera.yaw, view.camera.pitch, view.zoom);
-        view.apply_camera_arg("yaw=notanumber&garbage");
-        assert_eq!((view.camera.yaw, view.camera.pitch, view.zoom), before);
     }
 }
