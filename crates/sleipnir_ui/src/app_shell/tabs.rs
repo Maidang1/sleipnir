@@ -84,7 +84,7 @@ impl AppShell {
             return;
         };
         let buffer = tab.path_label(cx).to_string();
-        self.input = crate::ui_mode::InputMode::Rename(RenameState { tab_id, buffer });
+        self.set_input(crate::ui_mode::InputMode::Rename(RenameState { tab_id, buffer }), cx);
         cx.notify();
     }
 
@@ -92,7 +92,7 @@ impl AppShell {
     /// the custom title so the tab falls back to the pane title (side) or cwd
     /// path (top).
     pub(super) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = self.input.take_rename() {
+        if let Some(state) = self.take_rename_input(cx) {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == state.tab_id) {
                 let trimmed = state.buffer.trim();
                 tab.custom_title = if trimmed.is_empty() {
@@ -108,7 +108,7 @@ impl AppShell {
 
     /// Abandon the in-progress rename without changing the tab title.
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        if self.input.take_rename().is_some() {
+        if self.take_rename_input(cx).is_some() {
             cx.notify();
         }
     }
@@ -185,10 +185,10 @@ impl AppShell {
         if needs_confirm {
             let name =
                 first_busy.and_then(|view| view.read(cx).foreground_process_command_name(cx));
-            self.input = crate::ui_mode::InputMode::Confirm(CloseConfirmState {
+            self.set_input(crate::ui_mode::InputMode::Confirm(CloseConfirmState {
                 message: crate::chrome::close_copy::close_confirm_message(name.as_deref()).into(),
                 kind: ConfirmKind::CloseTab(tab_id),
-            });
+            }), cx);
             cx.notify();
         } else {
             self.close_tab_at(index, window, cx);
@@ -217,7 +217,7 @@ impl AppShell {
             .rename()
             .is_some_and(|state| self.tabs[index].id == state.tab_id)
         {
-            let _ = self.input.take_rename();
+            let _ = self.take_rename_input(cx);
         }
         let closed_keys = self.tabs[index].tree.all_pane_keys();
         self.plugin_panels.remove_all(closed_keys.iter().copied());

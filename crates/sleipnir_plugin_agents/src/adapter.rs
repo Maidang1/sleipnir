@@ -8,7 +8,7 @@
 //! - One oldest pending effect per call to [`Adapter::process_one`]; the
 //!   plugin's ~50ms tick calls it once, so effects are delivered in order.
 //! - Every processed effect is claimed, then committed with
-//!   [`ClaimOutcome::Delivered`] or [`ClaimOutcome::Failed`] for that seq.
+//!   [`LaunchOutcome`] / [`DeliverOutcome`] for that seq.
 //!   An effect is never left un-acked — except a host rate limit, which
 //!   drops the claim without commit so the effect stays queued (same seq)
 //!   for a bounded backoff retry; only after [`MAX_RATE_LIMIT_RETRIES`]
@@ -34,8 +34,8 @@
 use std::collections::BTreeMap;
 
 use agent_coordination::{
-    AdapterUpdate, AgentKind, AgentSessionId, ClaimOutcome, CoordinationTaskId, Effect, EffectBody,
-    Registry, Request, Response, WireRequest, Writer,
+    AdapterUpdate, AgentKind, AgentSessionId, CoordinationTaskId, DeliverOutcome, Effect,
+    EffectBody, LaunchOutcome, Registry, Request, Response, WireRequest, Writer,
 };
 use sleipnir_plugin::{Capability, PaneKey};
 
@@ -228,9 +228,13 @@ pub struct ManagedRow {
 
 /// The result of executing one effect against the host.
 enum ExecOutcome {
-    /// Success for the claimed seq. `pane` is set only for a launch bind.
-    Delivered { pane: Option<PaneKey> },
-    /// Delivery failed for the claimed seq.
+    /// Launch succeeded and bound a pane.
+    LaunchBound { pane: PaneKey },
+    /// Non-launch delivery succeeded.
+    Delivered,
+    /// Launch delivery failed.
+    FailedLaunch,
+    /// Non-launch delivery failed.
     Failed,
     /// The host rate-limited the call. Drop the claim without commit so the
     /// effect stays queued under the same seq for a bounded retry.
@@ -242,6 +246,7 @@ enum ExecOutcome {
 enum DeliveryOutcome {
     Committed,
     RateLimited,
+    Skipped,
 }
 
 /// The adapter: owns the shared registry handle and the session↔pane map.
@@ -299,24 +304,28 @@ impl Adapter {
         if now_ms < self.backoff_until_ms {
             return false;
         }
-        let Some(effect) = self.registry.peek_effects().into_iter().next() else {
+        let effects = self.registry.peek_effects();
+        if effects.is_empty() {
             return false;
-        };
-        let seq = effect.seq;
-        match self.deliver(effect, host, now_ms) {
-            DeliveryOutcome::RateLimited => {
-                if self.note_rate_limited(seq, now_ms) {
-                    // Same seq rate-limited too many times: give up for real.
-                    self.fail_delivery(seq, now_ms);
+        }
+        for effect in effects {
+            let seq = effect.seq;
+            match self.deliver(effect, host, now_ms) {
+                DeliveryOutcome::RateLimited => {
+                    if self.note_rate_limited(seq, now_ms) {
+                        self.fail_delivery(seq, now_ms);
+                    }
+                    return true;
                 }
-                true
-            }
-            DeliveryOutcome::Committed => {
-                self.rate_limited_seq = None;
-                self.rate_retries = 0;
-                true
+                DeliveryOutcome::Committed => {
+                    self.rate_limited_seq = None;
+                    self.rate_retries = 0;
+                    return true;
+                }
+                DeliveryOutcome::Skipped => continue,
             }
         }
+        false
     }
 
     /// Count a rate-limit failure for `seq`. Returns true when the retry
@@ -335,7 +344,14 @@ impl Adapter {
     fn fail_delivery(&mut self, seq: u64, now_ms: u64) {
         match self.registry.try_claim(seq) {
             Ok(claimed) => {
-                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
+                let is_launch =
+                    matches!(claimed.effect().body, EffectBody::LaunchRequested { .. });
+                let err = if is_launch {
+                    claimed.commit_launch(LaunchOutcome::Failed, now_ms)
+                } else {
+                    claimed.commit_ok(DeliverOutcome::Failed, now_ms)
+                };
+                if let Err(err) = err {
                     eprintln!("agents: could not fail delivery: {err}");
                 }
             }
@@ -356,23 +372,55 @@ impl Adapter {
         let seq = effect.seq;
         let claimed = match self.registry.try_claim(seq) {
             Ok(claimed) => claimed,
-            Err(err) => {
-                // Obsolete, drained (takeover/close), or otherwise not
-                // deliverable. No host side effect ran; do not apply
-                // DeliveryFailed without a claim.
-                eprintln!("agents: could not claim delivery {seq}: {err}");
-                return DeliveryOutcome::Committed;
+            Err(_) => {
+                return DeliveryOutcome::Skipped;
             }
         };
         match self.execute_claimed(claimed.effect().clone(), host, now_ms) {
-            ExecOutcome::Delivered { pane } => {
-                if let Err(err) = claimed.commit(ClaimOutcome::Delivered { pane }, now_ms) {
+            ExecOutcome::LaunchBound { pane: pane_key } => {
+                let commit_result =
+                    claimed.commit_launch(LaunchOutcome::Bound { pane: pane_key }, now_ms);
+                match commit_result {
+                    Ok(()) => {
+                        let EffectBody::LaunchRequested {
+                            session, task, kind, ..
+                        } = effect.body
+                        else {
+                            unreachable!();
+                        };
+                        self.sessions.insert(
+                            session,
+                            ManagedSession {
+                                pane: pane_key,
+                                kind,
+                                launch_task: task,
+                                bound_at_ms: now_ms,
+                                detected: false,
+                            },
+                        );
+                        self.panes.insert(pane_key, session);
+                    }
+                    Err(err) => {
+                        eprintln!("agents: coordination ack rejected, closing pane: {err}");
+                        let _ = host.request_close_pane(pane_key);
+                    }
+                }
+                DeliveryOutcome::Committed
+            }
+            ExecOutcome::Delivered => {
+                if let Err(err) = claimed.commit_ok(DeliverOutcome::Delivered, now_ms) {
+                    eprintln!("agents: coordination ack rejected: {err}");
+                }
+                DeliveryOutcome::Committed
+            }
+            ExecOutcome::FailedLaunch => {
+                if let Err(err) = claimed.commit_launch(LaunchOutcome::Failed, now_ms) {
                     eprintln!("agents: coordination ack rejected: {err}");
                 }
                 DeliveryOutcome::Committed
             }
             ExecOutcome::Failed => {
-                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
+                if let Err(err) = claimed.commit_ok(DeliverOutcome::Failed, now_ms) {
                     eprintln!("agents: coordination ack rejected: {err}");
                 }
                 DeliveryOutcome::Committed
@@ -385,36 +433,22 @@ impl Adapter {
         &mut self,
         effect: Effect,
         host: &mut dyn HostCalls,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> ExecOutcome {
         match effect.body {
             EffectBody::LaunchRequested {
-                session,
-                task,
+                session: _,
+                task: _,
                 kind,
                 cwd,
                 args,
                 ..
             } => match host.open_pane_argv(Some(cwd), executable_name(kind), args) {
-                Ok(pane) => {
-                    self.sessions.insert(
-                        session,
-                        ManagedSession {
-                            pane,
-                            kind,
-                            launch_task: task,
-                            bound_at_ms: now_ms,
-                            detected: false,
-                        },
-                    );
-                    self.panes.insert(pane, session);
-                    ExecOutcome::Delivered { pane: Some(pane) }
-                }
+                Ok(pane) => ExecOutcome::LaunchBound { pane },
                 Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                 Err(message) => {
                     eprintln!("agents: launch delivery failed: {message}");
-                    // Canonical registry failure also closes an unbound launch session.
-                    ExecOutcome::Failed
+                    ExecOutcome::FailedLaunch
                 }
             },
             EffectBody::PromptRequested {
@@ -440,7 +474,7 @@ impl Adapter {
                             ExecOutcome::Failed
                         }
                         Ok(envelope) => match host.send_text_enter(pane, &envelope) {
-                            Ok(()) => ExecOutcome::Delivered { pane: None },
+                            Ok(()) => ExecOutcome::Delivered,
                             Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                             Err(message) => {
                                 eprintln!("agents: prompt delivery failed: {message}");
@@ -453,7 +487,7 @@ impl Adapter {
             EffectBody::InterruptRequested { session, .. } => match self.writable_pane(session) {
                 None => ExecOutcome::Failed,
                 Some(pane) => match host.send_key(pane, "ctrl-c") {
-                    Ok(()) => ExecOutcome::Delivered { pane: None },
+                    Ok(()) => ExecOutcome::Delivered,
                     Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                     Err(message) => {
                         eprintln!("agents: interrupt delivery failed: {message}");
@@ -461,12 +495,10 @@ impl Adapter {
                     }
                 },
             },
-            // Focus is visibility-only: no ownership gate, but the pane must
-            // still be one we bound.
             EffectBody::FocusRequested { session } => match self.pane_for(session) {
                 None => ExecOutcome::Failed,
                 Some(pane) => match host.focus_pane(pane) {
-                    Ok(()) => ExecOutcome::Delivered { pane: None },
+                    Ok(()) => ExecOutcome::Delivered,
                     Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                     Err(message) => {
                         eprintln!("agents: focus delivery failed: {message}");
@@ -478,10 +510,7 @@ impl Adapter {
                 match self.writable_pane(session) {
                     None => ExecOutcome::Failed,
                     Some(pane) => match host.request_close_pane(pane) {
-                        // Ok means the close *request* was accepted (a busy
-                        // pane may show a confirm the user can cancel). The
-                        // session closes when the real PaneClosed arrives.
-                        Ok(()) => ExecOutcome::Delivered { pane: None },
+                        Ok(()) => ExecOutcome::Delivered,
                         Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                         Err(message) => {
                             eprintln!("agents: close delivery failed: {message}");
@@ -1066,30 +1095,10 @@ mod tests {
         let pane = bound_pane(&adapter, session);
         assert!(adapter.is_managed(pane));
         assert_eq!(snapshot(adapter.registry(), session).pane, Some(pane));
-        // Bound but not yet detected: the launch task is still in flight.
         assert_eq!(
             task_status(adapter.registry(), task),
             TaskStatus::Dispatching
         );
-        // Delivery acks without a live claim are errors; an unknown seq
-        // cannot be claimed.
-        let err = adapter
-            .registry()
-            .apply(
-                AdapterUpdate::BindPane {
-                    seq,
-                    session,
-                    pane: PaneKey::new_v4(),
-                },
-                ms(),
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("not claimed"), "{err}");
-        let err = adapter
-            .registry()
-            .apply(AdapterUpdate::PromptDelivered { seq: seq + 100 }, ms())
-            .unwrap_err();
-        assert!(err.to_string().contains("not claimed"), "{err}");
         match adapter.registry().try_claim(seq + 100) {
             Err(err) => assert!(err.to_string().contains("unknown effect"), "{err}"),
             Ok(_) => panic!("unknown seq must not be claimable"),

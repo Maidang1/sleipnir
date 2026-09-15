@@ -102,50 +102,6 @@ impl InputMode {
         matches!(self, Self::Find)
     }
 
-    /// Show `kind`, replacing whatever owned the keyboard.
-    ///
-    /// Idempotent: re-opening the overlay that is already on screen changes
-    /// nothing, so a refresh path can call this without rebuilding the owner.
-    pub fn open_overlay(&mut self, kind: OverlayKind) {
-        if self.is_overlay(kind) {
-            return;
-        }
-        *self = Self::Overlay(kind);
-    }
-
-    /// Toggle `kind`. Returns whether it is now open.
-    pub fn toggle_overlay(&mut self, kind: OverlayKind) -> bool {
-        if self.is_overlay(kind) {
-            *self = Self::Terminal;
-            false
-        } else {
-            *self = Self::Overlay(kind);
-            true
-        }
-    }
-
-    /// Close `kind` if it is the current owner. Returns whether it closed.
-    pub fn close_overlay(&mut self, kind: OverlayKind) -> bool {
-        if !self.is_overlay(kind) {
-            return false;
-        }
-        *self = Self::Terminal;
-        true
-    }
-
-    /// Find takes the keyboard, so any previous owner is replaced.
-    pub fn open_find(&mut self) {
-        *self = Self::Find;
-    }
-
-    pub fn close_find(&mut self) -> bool {
-        if !self.is_find() {
-            return false;
-        }
-        *self = Self::Terminal;
-        true
-    }
-
     pub fn confirm(&self) -> Option<&CloseConfirmState> {
         match self {
             Self::Confirm(state) => Some(state),
@@ -154,12 +110,13 @@ impl InputMode {
     }
 
     pub fn take_confirm(&mut self) -> Option<CloseConfirmState> {
-        match std::mem::replace(self, Self::Terminal) {
-            Self::Confirm(state) => Some(state),
-            other => {
-                *self = other;
-                None
+        if matches!(self, Self::Confirm(_)) {
+            match std::mem::replace(self, Self::Terminal) {
+                Self::Confirm(state) => Some(state),
+                _ => unreachable!(),
             }
+        } else {
+            None
         }
     }
 
@@ -171,18 +128,22 @@ impl InputMode {
     }
 
     pub fn take_consent(&mut self) -> Option<PluginConsentPending> {
-        match std::mem::replace(self, Self::Terminal) {
-            Self::Consent(pending) => Some(pending),
-            other => {
-                *self = other;
-                None
+        if matches!(self, Self::Consent(_)) {
+            match std::mem::replace(self, Self::Terminal) {
+                Self::Consent(pending) => Some(pending),
+                _ => unreachable!(),
             }
+        } else {
+            None
         }
     }
 
-    pub fn dismiss_consent(&mut self) {
+    pub fn dismiss_consent(&mut self) -> bool {
         if matches!(self, Self::Consent(_)) {
             *self = Self::Terminal;
+            true
+        } else {
+            false
         }
     }
 
@@ -201,18 +162,22 @@ impl InputMode {
     }
 
     pub fn take_tab_menu(&mut self) -> Option<TabMenuState> {
-        match std::mem::replace(self, Self::Terminal) {
-            Self::TabMenu(state) => Some(state),
-            other => {
-                *self = other;
-                None
+        if matches!(self, Self::TabMenu(_)) {
+            match std::mem::replace(self, Self::Terminal) {
+                Self::TabMenu(state) => Some(state),
+                _ => unreachable!(),
             }
+        } else {
+            None
         }
     }
 
-    pub fn dismiss_tab_menu(&mut self) {
+    pub fn dismiss_tab_menu(&mut self) -> bool {
         if matches!(self, Self::TabMenu(_)) {
             *self = Self::Terminal;
+            true
+        } else {
+            false
         }
     }
 
@@ -231,18 +196,22 @@ impl InputMode {
     }
 
     pub fn take_terminal_menu(&mut self) -> Option<TerminalMenuState> {
-        match std::mem::replace(self, Self::Terminal) {
-            Self::TerminalMenu(state) => Some(state),
-            other => {
-                *self = other;
-                None
+        if matches!(self, Self::TerminalMenu(_)) {
+            match std::mem::replace(self, Self::Terminal) {
+                Self::TerminalMenu(state) => Some(state),
+                _ => unreachable!(),
             }
+        } else {
+            None
         }
     }
 
-    pub fn dismiss_terminal_menu(&mut self) {
+    pub fn dismiss_terminal_menu(&mut self) -> bool {
         if matches!(self, Self::TerminalMenu(_)) {
             *self = Self::Terminal;
+            true
+        } else {
+            false
         }
     }
 
@@ -261,13 +230,19 @@ impl InputMode {
     }
 
     pub fn take_rename(&mut self) -> Option<RenameState> {
-        match std::mem::replace(self, Self::Terminal) {
-            Self::Rename(state) => Some(state),
-            other => {
-                *self = other;
-                None
+        if matches!(self, Self::Rename(_)) {
+            match std::mem::replace(self, Self::Terminal) {
+                Self::Rename(state) => Some(state),
+                _ => unreachable!(),
             }
+        } else {
+            None
         }
+    }
+
+    /// Replace the current owner, returning the old mode for teardown.
+    pub fn replace(&mut self, next: InputMode) -> InputMode {
+        std::mem::replace(self, next)
     }
 }
 
@@ -419,7 +394,7 @@ mod tests {
     #[test]
     fn opening_settings_drops_confirm() {
         let mut input = confirm(7);
-        input.open_overlay(OverlayKind::Settings);
+        input.replace(InputMode::Overlay(OverlayKind::Settings));
         assert!(input.is_overlay(OverlayKind::Settings));
         assert!(input.confirm().is_none());
     }
@@ -447,49 +422,48 @@ mod tests {
 
     #[test]
     fn modal_open_replaces_previous_overlay() {
-        let mut input = InputMode::Terminal;
-        input.open_overlay(OverlayKind::Settings);
-        input.open_overlay(OverlayKind::Diff);
+        let mut input = InputMode::Overlay(OverlayKind::Settings);
+        input.replace(InputMode::Overlay(OverlayKind::Diff));
         assert!(input.is_overlay(OverlayKind::Diff));
         assert!(!input.is_overlay(OverlayKind::Settings));
     }
 
     #[test]
     fn find_replaces_modal_overlay() {
-        let mut input = InputMode::Terminal;
-        input.open_overlay(OverlayKind::Palette);
-        input.open_find();
+        let mut input = InputMode::Overlay(OverlayKind::Palette);
+        input.replace(InputMode::Find);
         assert!(input.is_find());
         assert!(!input.is_overlay(OverlayKind::Palette));
     }
 
-    /// Re-opening the overlay that is already on screen is a no-op.
     #[test]
-    fn reopening_the_current_overlay_is_a_noop() {
-        let mut input = InputMode::Terminal;
-        input.open_overlay(OverlayKind::Diff);
-        input.open_overlay(OverlayKind::Diff);
+    fn reopening_the_current_overlay_is_identity() {
+        let mut input = InputMode::Overlay(OverlayKind::Diff);
+        input.replace(InputMode::Overlay(OverlayKind::Diff));
         assert!(input.is_overlay(OverlayKind::Diff));
 
-        input.open_overlay(OverlayKind::Settings);
+        input.replace(InputMode::Overlay(OverlayKind::Settings));
         assert!(input.is_overlay(OverlayKind::Settings));
         assert!(!input.is_overlay(OverlayKind::Diff));
     }
 
     #[test]
-    fn toggle_closes_only_the_matching_overlay() {
+    fn toggle_pattern_closes_only_the_matching_overlay() {
         let mut input = InputMode::Terminal;
-        assert!(input.toggle_overlay(OverlayKind::History));
-        assert!(!input.toggle_overlay(OverlayKind::History));
+        // open
+        input.replace(InputMode::Overlay(OverlayKind::History));
+        assert!(input.is_overlay(OverlayKind::History));
+        // close
+        input.replace(InputMode::Terminal);
         assert!(matches!(input, InputMode::Terminal));
-        assert!(!input.close_overlay(OverlayKind::Diff));
+        // close_overlay on a different kind is a no-op
+        assert!(!input.is_overlay(OverlayKind::Diff));
     }
 
     #[test]
     fn overlay_replaces_the_plugin_monitor() {
-        let mut input = InputMode::Terminal;
-        input.open_overlay(OverlayKind::PluginMonitor);
-        input.open_overlay(OverlayKind::Settings);
+        let mut input = InputMode::Overlay(OverlayKind::PluginMonitor);
+        input.replace(InputMode::Overlay(OverlayKind::Settings));
         assert!(input.is_overlay(OverlayKind::Settings));
         assert!(!input.is_overlay(OverlayKind::PluginMonitor));
     }
@@ -498,8 +472,7 @@ mod tests {
     fn quick_select_survives_modal_overlays() {
         let mut mode = UiMode::default();
         assert!(mode.toggle_quick_select());
-        let mut input = InputMode::Terminal;
-        input.open_overlay(OverlayKind::Settings);
+        let input = InputMode::Overlay(OverlayKind::Settings);
         assert!(mode.quick_select_open);
         assert!(input.is_overlay(OverlayKind::Settings));
     }

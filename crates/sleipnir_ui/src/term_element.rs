@@ -845,8 +845,6 @@ fn try_block_click(
     let cell_w = f32::from(content.terminal_bounds.cell_width);
     let line_h = f32::from(content.terminal_bounds.line_height);
     let pos = crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
-    // Only consume the click when it actually lands on a button. The rest of
-    // a block's area must stay available for text selection and Alt+click-to-move.
     let Some(surface) = view.read(cx).blocks().get(id).cloned() else {
         return false;
     };
@@ -857,7 +855,6 @@ fn try_block_click(
         return false;
     };
     if surface.stale {
-        // Dead block UI: its buttons render but must not fire.
         return true;
     }
     crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
@@ -1196,26 +1193,7 @@ fn paint_block(
 /// dropped exactly that way, and because layout still reserves its cells the
 /// symptom was correctly-sized blank space with nothing logged.
 fn block_text_for(kind: &sleipnir_widget::LaidOutKind) -> Option<String> {
-    use sleipnir_widget::LaidOutKind;
-    match kind {
-        LaidOutKind::Text { lines, .. } => Some(lines.join("\n")),
-        LaidOutKind::Code { lines } => Some(
-            lines
-                .iter()
-                .map(|l| l.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => Some(text.clone()),
-        LaidOutKind::Attribution { label, .. } => Some(label.clone()),
-        LaidOutKind::Unknown => Some("[?]".into()),
-        LaidOutKind::Truncated => Some("… truncated".into()),
-        // Shared ramp, so a sparkline reads the same in a Block and a Panel.
-        LaidOutKind::Spark { levels } => Some(sleipnir_widget::spark_glyphs(levels)),
-        // Painted as quads by the caller, which needs bounds this cannot see.
-        LaidOutKind::Sep | LaidOutKind::Bar { .. } => None,
-        LaidOutKind::Col | LaidOutKind::Row => None,
-    }
+    kind.text_content()
 }
 
 /// Whether a laid-out node paints bold.
@@ -1224,7 +1202,7 @@ fn block_text_for(kind: &sleipnir_widget::LaidOutKind) -> Option<String> {
 /// ignored it would render the same tree differently depending on where it is
 /// mounted. Split out from the painter so it is testable without a `Window`.
 fn block_is_bold(kind: &sleipnir_widget::LaidOutKind) -> bool {
-    matches!(kind, sleipnir_widget::LaidOutKind::Text { bold: true, .. })
+    kind.is_bold()
 }
 
 fn paint_laid_node(

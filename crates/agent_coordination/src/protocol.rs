@@ -115,8 +115,8 @@ pub enum TaskStatus {
     /// answer that prompt.
     AwaitingHuman,
     /// An interrupt effect is pending or unconfirmed. Still in flight.
-    /// [`AdapterUpdate::InterruptDelivered`] settles these; the interrupt
-    /// *request* does not.
+    /// The interrupt delivery ack (via `ClaimedEffect::commit_ok`) settles
+    /// these; the interrupt *request* does not.
     Interrupting,
     /// The assignment is no longer in flight. This is not success.
     Settled,
@@ -420,42 +420,10 @@ impl EffectBody {
     }
 }
 
-/// Adapter/host → registry. Not a coordinator wire op.
-///
-/// Delivery acknowledgements name the **exact effect `seq`** and are applied
-/// only through [`crate::ClaimedEffect::commit`]. `Registry::apply` of
-/// `BindPane` / `*Delivered` / `DeliveryFailed` without a live matching
-/// claim is [`crate::CoordError::EffectNotClaimed`]. A later queued
-/// prompt/focus/interrupt cannot be acked by a stale delivery for an earlier
-/// request.
+/// Adapter/host → registry. Host-fact updates only; delivery acks go through
+/// [`crate::ClaimedEffect::commit_launch`] / [`crate::ClaimedEffect::commit_ok`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdapterUpdate {
-    /// Bind the session to a host pane and ack `LaunchRequested` at `seq`.
-    /// Same pane is idempotent; a different pane is an error.
-    BindPane {
-        seq: u64,
-        session: AgentSessionId,
-        pane: Uuid,
-    },
-    PromptDelivered {
-        seq: u64,
-    },
-    /// Ack `InterruptRequested` at `seq` and settle in-flight tasks on that
-    /// session. Settled means no longer in flight, not success.
-    InterruptDelivered {
-        seq: u64,
-    },
-    FocusDelivered {
-        seq: u64,
-    },
-    CloseDelivered {
-        seq: u64,
-    },
-    /// Adapter could not carry out the effect. Related in-flight work
-    /// becomes [`TaskStatus::FailedDelivery`] or [`TaskStatus::Unknown`].
-    DeliveryFailed {
-        seq: u64,
-    },
     TaskRunning {
         task: CoordinationTaskId,
     },

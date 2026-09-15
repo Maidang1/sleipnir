@@ -33,7 +33,7 @@ pub use cells::{
 };
 pub use geom::{CellPos, CellRect};
 pub use hit::{Hit, hit_test};
-pub use layout::{CodeLine, LaidOut, LaidOutKind, Layout, Walk, layout};
+pub use layout::{ChromeLabel, CodeLine, LaidOut, LaidOutKind, Layout, Walk, layout};
 pub use plugin_protocol::v2::{
     MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Tone, TreeStats, Widget, measure,
 };

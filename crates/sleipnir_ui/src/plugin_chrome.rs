@@ -291,7 +291,7 @@ impl ChromeRegistry {
                     LaidOutKind::Code { lines } => lines.truncate(1),
                     _ => {}
                 }
-                let item_width = compact_width(&kind);
+                let item_width = kind.compact_width();
                 let next_width = width + u32::from(!items.is_empty()) + item_width;
                 if next_width > u32::from(cols) {
                     break 'plugins;
@@ -327,21 +327,6 @@ impl ChromeRegistry {
     pub fn status_computes(&self) -> u32 {
         self.status_cache.as_ref().map(|c| c.computes).unwrap_or(0)
     }
-}
-
-fn compact_width(kind: &LaidOutKind) -> u32 {
-    use sleipnir_widget::{CHIP_PAD, cell_cols};
-    match kind {
-        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => {
-            cell_cols(text) + 2 * CHIP_PAD
-        }
-        LaidOutKind::Text { lines, .. } => lines.first().map_or(0, |line| cell_cols(line)),
-        LaidOutKind::Code { lines } => lines.first().map_or(0, |line| cell_cols(&line.text)),
-        LaidOutKind::Spark { levels } => levels.len() as u32,
-        LaidOutKind::Bar { width, .. } => *width,
-        _ => 1,
-    }
-    .max(1)
 }
 
 /// Display title that cannot be mistaken for a built-in. The plugin id is

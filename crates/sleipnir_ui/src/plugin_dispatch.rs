@@ -181,12 +181,17 @@ impl PluginDispatcher {
             }
         }
         if changed {
-            for handle in windows {
+            for handle in &windows {
                 let _ = handle.update(cx, |shell, _, cx| {
                     shell.sync_plugin_surfaces(cx);
                     cx.notify();
                 });
             }
+        }
+        for handle in &windows {
+            let _ = handle.update(cx, |shell, _, cx| {
+                shell.poll_plugin_events(cx);
+            });
         }
     }
 }

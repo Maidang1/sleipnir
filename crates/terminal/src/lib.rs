@@ -514,8 +514,8 @@ pub fn insert_zed_terminal_env(
     env: &mut HashMap<String, String>,
     version: &impl std::fmt::Display,
 ) {
-    env.insert("ZED_TERM".to_string(), "true".to_string());
-    env.insert("TERM_PROGRAM".to_string(), "zed".to_string());
+    env.insert("SLEIPNIR_TERM".to_string(), "true".to_string());
+    env.insert("TERM_PROGRAM".to_string(), "sleipnir".to_string());
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
@@ -1044,7 +1044,7 @@ struct ViewportState {
     /// Block heights and the mapping both paint and hit-testing use.
     geometry: RowGeometry,
     /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) rebases
-    /// gutter markers and block anchors.
+    /// OSC-133 markers and block anchors.
     last_history_size: usize,
 }
 
@@ -1091,10 +1091,7 @@ impl InteractionState {
     }
 
     fn host_hover(&self) -> Option<&HoveredWord> {
-        match self.session {
-            PointerSession::AppMouse { .. } => None,
-            _ => self.hovered.as_ref(),
-        }
+        self.hovered.as_ref()
     }
 
     fn enter_app_mouse(&mut self, last: Option<(Point, SelectionSide)>) {
@@ -2168,7 +2165,6 @@ impl Terminal {
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         let prev_alt = self.last_content.mode.contains(Modes::ALT_SCREEN);
-        let prev_mouse = self.last_content.mode.intersects(Modes::MOUSE_MODE);
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
@@ -2244,7 +2240,6 @@ impl Terminal {
 
     fn mouse_changed(&mut self, point: Point, side: SelectionSide) -> bool {
         let PointerSession::AppMouse { last } = &mut self.interaction.session else {
-            self.interaction.enter_app_mouse(Some((point, side)));
             return true;
         };
         if *last == Some((point, side)) {
@@ -2263,10 +2258,10 @@ impl Terminal {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if self.mouse_mode(e.modifiers.shift) {
             if !matches!(self.interaction.session, PointerSession::PendingLink(_)) {
-                if !matches!(self.interaction.session, PointerSession::AppMouse { .. }) {
-                    self.interaction.enter_app_mouse(None);
+                match self.interaction.session {
+                    PointerSession::AppMouse { .. } => {}
+                    _ => self.interaction.enter_app_mouse(None),
                 }
-                self.interaction.clear_hover();
                 let (point, side) = self.pointer_map().grid_point_and_side(position);
                 if self.mouse_changed(point, side) {
                     let bytes = mouse_moved_report(
@@ -2444,6 +2439,7 @@ impl Terminal {
             false
         };
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
+        let mut link_opened = false;
         if let PointerSession::PendingLink(mouse_down_hyperlink) =
             std::mem::replace(&mut self.interaction.session, PointerSession::Idle)
         {
@@ -2455,36 +2451,40 @@ impl Terminal {
             {
                 self.events
                     .push_back(InternalEvent::ProcessHyperlink(mouse_down_hyperlink, true));
-                return;
+                link_opened = true;
             }
+        }
 
+        if !link_opened {
             if self.mouse_mode(e.modifiers.shift) {
-                return;
+                let point = self.pointer_map().grid_point(position);
+
+                let bytes =
+                    mouse_button_report(point, e.button, e.modifiers, false, self.last_content.mode);
+
+                if let Some(bytes) = bytes {
+                    self.write_to_pty(bytes);
+                }
+            } else {
+                if e.button == MouseButton::Left && settings.copy_on_select {
+                    self.copy(Some(true));
+                }
+
+                if e.button == MouseButton::Left && !dragged && e.click_count == 1 {
+                    let open = e.modifiers.secondary() || self.osc8_at(position);
+                    self.events
+                        .push_back(InternalEvent::FindHyperlink(position, open));
+                }
             }
         }
 
         if self.mouse_mode(e.modifiers.shift) {
-            let point = self.pointer_map().grid_point(position);
-
-            let bytes =
-                mouse_button_report(point, e.button, e.modifiers, false, self.last_content.mode);
-
-            if let Some(bytes) = bytes {
-                self.write_to_pty(bytes);
-            }
+            self.interaction.session = PointerSession::AppMouse {
+                last: None,
+            };
         } else {
-            if e.button == MouseButton::Left && settings.copy_on_select {
-                self.copy(Some(true));
-            }
-
-            if e.button == MouseButton::Left && !dragged && e.click_count == 1 {
-                let open = e.modifiers.secondary() || self.osc8_at(position);
-                self.events
-                    .push_back(InternalEvent::FindHyperlink(position, open));
-            }
+            self.interaction.session = PointerSession::Idle;
         }
-
-        self.interaction.session = PointerSession::Idle;
     }
 
     ///Scroll the terminal

@@ -37,33 +37,24 @@ pub fn frame_response(resp: WireResponse) -> Result<Vec<String>, String> {
     }
 }
 
-fn frame_agents(id: u64, agents: Vec<SessionSnapshot>) -> Result<Vec<String>, String> {
-    frame_agent_pages(id, &agents)
-}
-
-fn frame_agent_pages(id: u64, agents: &[SessionSnapshot]) -> Result<Vec<String>, String> {
-    if agents.is_empty() {
-        return Ok(vec![encode_response_line(&WireResponse {
-            id,
-            body: Response::Agents {
-                agents: vec![],
-                next_offset: None,
-            },
-        })?]);
+fn pack_pages<T: Clone, F>(
+    items: &[T],
+    make_response: F,
+    item_err: &str,
+) -> Result<Vec<String>, String>
+where
+    F: Fn(&[T], bool, usize) -> WireResponse,
+{
+    if items.is_empty() {
+        return Ok(vec![encode_response_line(&make_response(&[], false, 0))?]);
     }
     let mut frames = Vec::new();
     let mut start = 0;
-    while start < agents.len() {
+    while start < items.len() {
         let mut best: Option<(usize, String)> = None;
-        for end in start + 1..=agents.len() {
-            let next_offset = (end < agents.len()).then_some(end);
-            let resp = WireResponse {
-                id,
-                body: Response::Agents {
-                    agents: agents[start..end].to_vec(),
-                    next_offset,
-                },
-            };
+        for end in start + 1..=items.len() {
+            let has_more = end < items.len();
+            let resp = make_response(&items[start..end], has_more, end);
             let line = encode_response_line(&resp)?;
             if line.len() <= MAX_LINE_BYTES {
                 best = Some((end, line));
@@ -72,90 +63,59 @@ fn frame_agent_pages(id: u64, agents: &[SessionSnapshot]) -> Result<Vec<String>,
             }
         }
         let Some((end, line)) = best else {
-            return Err("session snapshot exceeds line length cap".into());
+            return Err(item_err.into());
         };
         frames.push(line);
         start = end;
     }
     Ok(frames)
+}
+
+fn frame_agents(id: u64, agents: Vec<SessionSnapshot>) -> Result<Vec<String>, String> {
+    pack_pages(
+        &agents,
+        |slice, has_more, end| WireResponse {
+            id,
+            body: Response::Agents {
+                agents: slice.to_vec(),
+                next_offset: has_more.then_some(end),
+            },
+        },
+        "session snapshot exceeds line length cap",
+    )
 }
 
 fn frame_inspect(id: u64, session: SessionSnapshot) -> Result<Vec<String>, String> {
     let tasks = session.tasks.clone();
-    if tasks.is_empty() {
-        let mut snap = session;
-        snap.next_task_offset = None;
-        return Ok(vec![encode_response_line(&WireResponse {
-            id,
-            body: Response::Inspect { session: snap },
-        })?]);
-    }
-    let mut frames = Vec::new();
-    let mut start = 0;
-    while start < tasks.len() {
-        let mut best: Option<(usize, String)> = None;
-        for end in start + 1..=tasks.len() {
-            let next_task_offset = (end < tasks.len()).then_some(end);
+    pack_pages(
+        &tasks,
+        |slice, has_more, end| {
             let snap = SessionSnapshot {
-                tasks: tasks[start..end].to_vec(),
-                next_task_offset,
+                tasks: slice.to_vec(),
+                next_task_offset: has_more.then_some(end),
                 ..session.clone()
             };
-            let line = encode_response_line(&WireResponse {
+            WireResponse {
                 id,
                 body: Response::Inspect { session: snap },
-            })?;
-            if line.len() <= MAX_LINE_BYTES {
-                best = Some((end, line));
-            } else {
-                break;
             }
-        }
-        let Some((end, line)) = best else {
-            return Err("task snapshot exceeds line length cap".into());
-        };
-        frames.push(line);
-        start = end;
-    }
-    Ok(frames)
+        },
+        "task snapshot exceeds line length cap",
+    )
 }
 
 fn frame_effects(id: u64, effects: Vec<Effect>) -> Result<Vec<String>, String> {
-    if effects.is_empty() {
-        return Ok(vec![encode_response_line(&WireResponse {
+    pack_pages(
+        &effects,
+        |slice, has_more, _end| WireResponse {
             id,
             body: Response::Effects {
-                effects: vec![],
-                next_cursor: None,
+                effects: slice.to_vec(),
+                next_cursor: has_more.then(|| slice.last().unwrap().seq),
             },
-        })?]);
-    }
-    let mut frames = Vec::new();
-    let mut start = 0;
-    while start < effects.len() {
-        let mut best: Option<(usize, String)> = None;
-        for end in start + 1..=effects.len() {
-            let next_cursor = (end < effects.len()).then_some(effects[end - 1].seq);
-            let line = encode_response_line(&WireResponse {
-                id,
-                body: Response::Effects {
-                    effects: effects[start..end].to_vec(),
-                    next_cursor,
-                },
-            })?;
-            if line.len() <= MAX_LINE_BYTES {
-                best = Some((end, line));
-            } else {
-                break;
-            }
-        }
-        let Some((end, line)) = best else {
-            return Err("effect exceeds line length cap".into());
-        };
-        frames.push(line);
-        start = end;
-    }
-    Ok(frames)
+        },
+        "effect exceeds line length cap",
+    )
 }
 
 fn frame_facts(

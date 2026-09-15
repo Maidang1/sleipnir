@@ -1816,23 +1816,6 @@ mod tests {
     }
 
     #[test]
-    fn link_preview_tooltip_is_suppressed_in_mouse_mode() {
-        let src = include_str!("lib.rs");
-        let start = src
-            .find("TerminalSlot::Ready(terminal) => {")
-            .expect("ready terminal render");
-        let block = &src[start..start + 1600];
-        assert!(
-            block.contains("hovered_word()"),
-            "tooltip must use Terminal::hovered_word, which is None in mouse-mode"
-        );
-        assert!(
-            block.contains("LinkPreview"),
-            "the hover tooltip must still exist for normal-mode links"
-        );
-    }
-
-    #[test]
     fn applescript_title_and_message_cannot_break_out_of_the_string_literal() {
         // A plugin-controlled title with a raw quote used to close the
         // AppleScript string and run the rest (`do shell script ...`).

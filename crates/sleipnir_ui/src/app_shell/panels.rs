@@ -718,7 +718,7 @@ impl AppShell {
     }
 
     pub(super) fn toggle_pane_facts(&mut self, cx: &mut Context<Self>) {
-        if self.input.toggle_overlay(OverlayKind::PaneFacts) {
+        if self.toggle_overlay(OverlayKind::PaneFacts, cx) {
             self.refresh_pane_facts(cx);
         } else {
             self.discard_pane_facts();
@@ -730,12 +730,12 @@ impl AppShell {
     /// collection lands as stale, because it checks both the overlay and the
     /// pane it was started for before storing anything.
     pub(super) fn close_pane_facts(&mut self, cx: &mut Context<Self>) {
-        self.input.close_overlay(OverlayKind::PaneFacts);
+        self.close_overlay(OverlayKind::PaneFacts, cx);
         self.discard_pane_facts();
         cx.notify();
     }
 
-    fn discard_pane_facts(&mut self) {
+    pub(crate) fn discard_pane_facts(&mut self) {
         self.facts = PaneFactsState::Idle;
     }
 

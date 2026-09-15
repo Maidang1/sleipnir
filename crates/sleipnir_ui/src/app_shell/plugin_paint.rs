@@ -159,7 +159,6 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         use crate::plugin_chrome::MAX_STATUS_COLS;
-        use sleipnir_widget::LaidOutKind;
         if self.plugin_chrome.is_empty() {
             return div().into_any_element();
         }
@@ -197,35 +196,15 @@ impl AppShell {
             if builtins.contains(&item.plugin_id) && item.plugin_id == "agents" {
                 continue;
             }
-            let (label, tone, action) = match &item.kind {
-                LaidOutKind::Btn { text, action, arg } => {
-                    (text.clone(), Tone::Fg, Some((action.clone(), arg.clone())))
-                }
-                LaidOutKind::Badge { text, tone } => (text.clone(), *tone, None),
-                LaidOutKind::Text { lines, tone, .. } => {
-                    (lines.first().cloned().unwrap_or_default(), *tone, None)
-                }
-                LaidOutKind::Code { lines } => (
-                    lines
-                        .first()
-                        .map(|line| line.text.clone())
-                        .unwrap_or_default(),
-                    Tone::Dim,
-                    None,
-                ),
-                LaidOutKind::Spark { levels } => {
-                    (sleipnir_widget::spark_glyphs(levels), Tone::Accent, None)
-                }
-                LaidOutKind::Bar { filled, width } => (
-                    format!("{}%", filled * 100 / width.max(&1)),
-                    Tone::Dim,
-                    None,
-                ),
-                LaidOutKind::Sep => ("|".into(), Tone::Dim, None),
-                LaidOutKind::Truncated => ("…".into(), Tone::Dim, None),
-                LaidOutKind::Unknown => ("[?]".into(), Tone::Dim, None),
-                _ => continue,
+            let Some(cl) = item.kind.chrome_label() else {
+                continue;
             };
+            let (label, tone, action) = (
+                cl.label,
+                cl.tone,
+                cl.action
+                    .map(|(a, arg)| (a.to_string(), arg.map(str::to_string))),
+            );
             let builtin = builtins.contains(&item.plugin_id);
             // External contributions remain visibly attributed. Built-in
             // identity comes from host provenance, never a plugin-supplied id.

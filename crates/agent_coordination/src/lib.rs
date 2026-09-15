@@ -27,5 +27,5 @@ pub use protocol::{
     encode_effect_line, encode_event_line, encode_fact_line, encode_request_line,
     encode_response_line,
 };
-pub use registry::{ClaimOutcome, ClaimedEffect, Limits, Registry};
+pub use registry::{ClaimedEffect, DeliverOutcome, LaunchOutcome, Limits, Registry};
 pub use server::{CLIENT_READ_TIMEOUT, MAX_CLIENTS, Server, ServerError, default_socket_path};

@@ -342,7 +342,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<AppShell>,
     ) {
-        let Some(state) = self.input.take_tab_menu() else {
+        let Some(state) = self.take_tab_menu_input(cx) else {
             return;
         };
         let cwd = self

@@ -447,6 +447,101 @@ impl Focusable for AppShell {
 impl EventEmitter<()> for AppShell {}
 
 impl AppShell {
+    /// Replace the keyboard owner, running teardown for the outgoing mode.
+    /// Every path that changes `self.input` must go through here so that
+    /// Find highlights, IME state, menu selection, and theme query are cleaned
+    /// up regardless of which mode is being replaced.
+    pub(crate) fn set_input(&mut self, next: InputMode, cx: &mut Context<Self>) {
+        let old = self.input.owner();
+        self.input.replace(next);
+        self.teardown_input(old, cx);
+    }
+
+    pub(crate) fn open_overlay(&mut self, kind: OverlayKind, cx: &mut Context<Self>) {
+        if self.input.is_overlay(kind) {
+            return;
+        }
+        self.set_input(InputMode::Overlay(kind), cx);
+    }
+
+    pub(crate) fn toggle_overlay(&mut self, kind: OverlayKind, cx: &mut Context<Self>) -> bool {
+        if self.input.is_overlay(kind) {
+            self.set_input(InputMode::Terminal, cx);
+            false
+        } else {
+            self.set_input(InputMode::Overlay(kind), cx);
+            true
+        }
+    }
+
+    pub(crate) fn close_overlay(&mut self, kind: OverlayKind, cx: &mut Context<Self>) -> bool {
+        if !self.input.is_overlay(kind) {
+            return false;
+        }
+        self.set_input(InputMode::Terminal, cx);
+        true
+    }
+
+    pub(crate) fn dismiss_tab_menu(&mut self, cx: &mut Context<Self>) {
+        if self.input.dismiss_tab_menu() {
+            self.teardown_input(InputOwner::TabMenu, cx);
+        }
+    }
+
+    pub(crate) fn dismiss_terminal_menu(&mut self, cx: &mut Context<Self>) {
+        if self.input.dismiss_terminal_menu() {
+            self.teardown_input(InputOwner::TerminalMenu, cx);
+        }
+    }
+
+    pub(crate) fn dismiss_consent_input(&mut self, cx: &mut Context<Self>) {
+        if self.input.dismiss_consent() {
+            self.teardown_input(InputOwner::Consent, cx);
+        }
+    }
+
+    pub(crate) fn take_confirm_input(&mut self, cx: &mut Context<Self>) -> Option<CloseConfirmState> {
+        let r = self.input.take_confirm()?;
+        self.teardown_input(InputOwner::Confirm, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_consent_input(&mut self, cx: &mut Context<Self>) -> Option<PluginConsentPending> {
+        let r = self.input.take_consent()?;
+        self.teardown_input(InputOwner::Consent, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_tab_menu_input(&mut self, cx: &mut Context<Self>) -> Option<TabMenuState> {
+        let r = self.input.take_tab_menu()?;
+        self.teardown_input(InputOwner::TabMenu, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_rename_input(&mut self, cx: &mut Context<Self>) -> Option<RenameState> {
+        let r = self.input.take_rename()?;
+        self.teardown_input(InputOwner::Rename, cx);
+        Some(r)
+    }
+
+    fn teardown_input(&mut self, old: InputOwner, cx: &mut Context<Self>) {
+        match old {
+            InputOwner::Find => {
+                self.find.teardown();
+                self.clear_find_matches(cx);
+            }
+            InputOwner::Rename => {}
+            InputOwner::TabMenu | InputOwner::TerminalMenu => {}
+            InputOwner::Overlay(OverlayKind::Settings) => {
+                self.settings.theme_query.clear();
+            }
+            InputOwner::Overlay(OverlayKind::PaneFacts) => {
+                self.discard_pane_facts();
+            }
+            _ => {}
+        }
+    }
+
     fn handle_capture_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -463,22 +558,21 @@ impl AppShell {
                     self.confirm_close_proceed(window, cx);
                     cx.stop_propagation();
                 }
-                _ => swallow_except_platform(event, cx),
+                _ => cx.stop_propagation(),
             },
             InputOwner::Consent => match event.keystroke.key.as_str() {
                 "escape" | "enter" => {
                     self.deny_plugin_consent(cx);
                     cx.stop_propagation();
                 }
-                _ => swallow_except_platform(event, cx),
+                _ => cx.stop_propagation(),
             },
             InputOwner::TabMenu => {
                 let key = event.keystroke.key.as_str();
                 match key {
                     "escape" => {
-                        self.input.dismiss_tab_menu();
+                        self.dismiss_tab_menu(cx);
                         cx.notify();
-                        cx.stop_propagation();
                     }
                     "down" | "up" if !event.keystroke.modifiers.platform => {
                         let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
@@ -492,23 +586,21 @@ impl AppShell {
                             menu.selected = next;
                         }
                         cx.notify();
-                        cx.stop_propagation();
                     }
                     "enter" => {
                         let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
                         self.run_tab_menu_item(selected, window, cx);
-                        cx.stop_propagation();
                     }
-                    _ => swallow_except_platform(event, cx),
+                    _ => {}
                 }
+                cx.stop_propagation();
             }
             InputOwner::TerminalMenu => {
                 let key = event.keystroke.key.as_str();
                 match key {
                     "escape" => {
-                        self.input.dismiss_terminal_menu();
+                        self.dismiss_terminal_menu(cx);
                         cx.notify();
-                        cx.stop_propagation();
                     }
                     "down" | "up" if !event.keystroke.modifiers.platform => {
                         let count = self.terminal_menu_items().len();
@@ -522,38 +614,34 @@ impl AppShell {
                             menu.selected = next;
                         }
                         cx.notify();
-                        cx.stop_propagation();
                     }
                     "enter" => {
                         let selected = self.input.terminal_menu().map(|m| m.selected).unwrap_or(0);
                         if let Some(item) = self.terminal_menu_items().get(selected).copied() {
                             self.run_terminal_menu_item(item, window, cx);
                         }
-                        cx.stop_propagation();
                     }
-                    _ => swallow_except_platform(event, cx),
+                    _ => {}
                 }
+                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::Update) => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_update(cx);
-                    cx.stop_propagation();
                 }
-                swallow_except_platform(event, cx);
+                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::PaneFacts) => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_pane_facts(cx);
-                    cx.stop_propagation();
                 }
-                swallow_except_platform(event, cx);
+                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::PluginMonitor) => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_plugin_monitor(cx);
-                    cx.stop_propagation();
                 }
-                swallow_except_platform(event, cx);
+                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::Palette) => {
                 if self.palette_key_down(event, window, cx) {
@@ -562,7 +650,7 @@ impl AppShell {
             }
             InputOwner::Overlay(OverlayKind::History) => {
                 self.history_key_down(event, window, cx);
-                swallow_except_platform(event, cx);
+                cx.stop_propagation();
             }
             InputOwner::Find => {
                 if self.find_key_down(event, window, cx) {
@@ -611,16 +699,15 @@ impl AppShell {
                 }
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_settings(window, cx);
-                    cx.stop_propagation();
                 }
-                swallow_except_platform(event, cx);
+                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::Diff) => {
                 if self.handle_diff_key(event, window, cx) {
                     cx.stop_propagation();
                     return;
                 }
-                swallow_except_platform(event, cx);
+                cx.stop_propagation();
             }
             InputOwner::Rename => {
                 if self.rename_key_down(event, window, cx) {
@@ -629,12 +716,6 @@ impl AppShell {
             }
             InputOwner::Terminal => {}
         }
-    }
-}
-
-fn swallow_except_platform(event: &gpui::KeyDownEvent, cx: &mut Context<AppShell>) {
-    if !event.keystroke.modifiers.platform {
-        cx.stop_propagation();
     }
 }
 
@@ -1576,10 +1657,10 @@ impl AppShell {
             } else {
                 "Close this pane anyway?".into()
             };
-            self.input = InputMode::Confirm(CloseConfirmState {
+            self.set_input(InputMode::Confirm(CloseConfirmState {
                 message: message.into(),
                 kind: ConfirmKind::ClosePane(target),
-            });
+            }), cx);
             cx.notify();
         } else {
             self.close_active_pane(window, cx);
@@ -1598,10 +1679,10 @@ impl AppShell {
             ConfirmClose::Dirty => self.any_pane_is_dirty(cx),
         };
         if needs_confirm {
-            self.input = InputMode::Confirm(CloseConfirmState {
+            self.set_input(InputMode::Confirm(CloseConfirmState {
                 message: "A process is still running. Close this window anyway?".into(),
                 kind: ConfirmKind::CloseWindow,
-            });
+            }), cx);
             cx.notify();
         } else {
             self.finish_window_close(window, cx);
@@ -1624,7 +1705,7 @@ impl AppShell {
     }
 
     fn confirm_close_proceed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = self.input.take_confirm().map(|s| s.kind);
+        let kind = self.take_confirm_input(cx).map(|s| s.kind);
         match kind {
             Some(ConfirmKind::CloseTab(tab_id)) => {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
@@ -1672,7 +1753,7 @@ impl AppShell {
 
     /// Toggle the history overlay, resetting the query when it closes.
     fn toggle_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input.toggle_overlay(OverlayKind::History) {
+        if !self.toggle_overlay(OverlayKind::History, cx) {
             self.history.query.clear();
             self.history.marked = None;
             self.history.selected = 0;
@@ -1853,7 +1934,7 @@ impl AppShell {
     }
 
     fn confirm_close_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.input.take_confirm();
+        let _ = self.take_confirm_input(cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -2095,14 +2176,13 @@ mod tests {
         assert_eq!(ids.next_id, 2);
         assert_eq!(ids.next_pane_id, 2);
     }
+
 }
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_ledger_focus(window, cx);
         self.refresh_pane_facts_if_stale(cx);
-        self.poll_plugin_events(cx);
-        self.sync_plugin_surfaces(cx);
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);

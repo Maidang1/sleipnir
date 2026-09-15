@@ -42,7 +42,7 @@ fn resolve_cwd(raw: &str) -> Option<PathBuf> {
 }
 
 impl AppShell {
-    pub(super) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
         if !self
             .plugin_watch
@@ -601,20 +601,20 @@ impl AppShell {
         self.dispatch_command(CommandId::TogglePluginMonitor, window, cx);
     }
     pub(super) fn toggle_plugin_monitor(&mut self, cx: &mut Context<Self>) {
-        self.input.toggle_overlay(OverlayKind::PluginMonitor);
+        self.toggle_overlay(OverlayKind::PluginMonitor, cx);
         cx.notify();
     }
     pub(super) fn close_plugin_monitor(&mut self, cx: &mut Context<Self>) {
-        self.input.close_overlay(OverlayKind::PluginMonitor);
+        self.close_overlay(OverlayKind::PluginMonitor, cx);
         cx.notify();
     }
     pub(super) fn deny_plugin_consent(&mut self, cx: &mut Context<Self>) {
         // Deny writes nothing: a dismissed prompt must not become a grant.
-        self.input.dismiss_consent();
+        self.dismiss_consent_input(cx);
         cx.notify();
     }
     pub(super) fn approve_plugin_consent(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.input.take_consent() else {
+        let Some(pending) = self.take_consent_input(cx) else {
             return;
         };
         if !crate::plugin_runtime::is_current(&pending.supervisor, cx) {
@@ -708,7 +708,7 @@ impl AppShell {
                     .map(|r| r.granted.iter().copied().collect())
                     .unwrap_or_default();
                 let tier = record.map(|r| r.tier).unwrap_or(plugin_grants::Tier::Local);
-                self.input = crate::ui_mode::InputMode::Consent(PluginConsentPending {
+                self.set_input(crate::ui_mode::InputMode::Consent(PluginConsentPending {
                     supervisor: crate::plugin_runtime::supervisor(cx)
                         .expect("plugin runtime initialized"),
                     prompt: crate::plugin_monitor_panel::consent_prompt(
@@ -722,7 +722,7 @@ impl AppShell {
                     kind,
                     hash,
                     request,
-                });
+                }), cx);
                 cx.notify();
                 false
             }
