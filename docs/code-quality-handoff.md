@@ -133,7 +133,8 @@ Do these **in this order**.
 - `AppShell::render` still drives the pane-facts refresh side-effect pump
   (item 4). The 16 ms plugin pump already runs off `Render` in
   `plugin_dispatch` (poll vs route split); the event watch is walked there.
-- `plugin_host` supervisor still has two maps (`live` + `active`).
+- `plugin_host` supervisor still has ~~two maps (`live` + `active`)~~ one map
+  (`instances`) plus a `resident_index`. Landed.
 
 **Landed (adapter launch atomicity + single pane source of truth):**
 
@@ -151,7 +152,9 @@ Do these **in this order**.
   `foreground_changed`, `containing_run_exited`, `housekeeping`, and
   `is_managed` all read the registry for the pane binding.
 
-**Do (remaining):** Supervisor two maps (`live` + `active`). Keep `InputMode`
+**Do (remaining):** ~~Supervisor two maps (`live` + `active`).~~ Landed: one
+`instances: HashMap<Uuid, Arc<Session>>` by instance id, plus
+`resident_index: HashMap<String, Uuid>` for plugin_id lookups. Keep `InputMode`
 as the overlay stack and `plugin_grants` alone.
 
 ### 2. Grow `atomic_write` into the real write discipline
