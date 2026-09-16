@@ -386,82 +386,104 @@ impl TerminalSettings {
         apply_loaded(settings, cx);
     }
 
+    /// One in-memory document, one persist path. `change` edits the live
+    /// settings snapshot; `patch` edits the persisted JSON document (under
+    /// the file lock, published by `save_atomic`, unknown keys preserved).
+    /// The in-memory change applies only when the persist succeeds.
+    /// Returns whether the update was persisted and applied.
+    fn update(
+        change: impl FnOnce(&mut TerminalSettings),
+        patch: impl FnOnce(&mut serde_json::Value),
+        cx: &mut App,
+        what: &str,
+    ) -> bool {
+        let mut settings = Self::get_global(cx).clone();
+        change(&mut settings);
+        let path = config_path();
+        match patch_settings_file_at_path(&path, patch) {
+            Ok(()) => {
+                apply_loaded(settings, cx);
+                log::info!("{what} (persisted)");
+                true
+            }
+            Err(err) => {
+                log::warn!("failed to persist {what}: {err}");
+                false
+            }
+        }
+    }
+
     /// Set the active theme, refresh the palette, and persist to settings.json.
     pub fn set_theme(theme: ThemeSetting, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.theme = theme.clone();
-        settings.custom_theme = None;
-        if let Err(err) = persist_theme(&theme) {
-            log::warn!("failed to persist theme={:?}: {err}", theme.as_str());
-        } else {
-            apply_loaded(settings, cx);
-            log::info!("theme -> {} (persisted)", theme.as_str());
-        }
+        let what = format!("theme -> {}", theme.as_str());
+        Self::update(
+            |s| {
+                s.theme = theme.clone();
+                s.custom_theme = None;
+            },
+            |doc| patch_theme_document(doc, &theme),
+            cx,
+            &what,
+        );
     }
 
     /// Toggle font ligatures and persist under `terminal.font_ligatures`.
     pub fn set_font_ligatures(enabled: bool, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.font_ligatures = enabled;
-        settings.font_features = Some(if enabled {
-            FontFeatures::default()
-        } else {
-            FontFeatures::disable_ligatures()
-        });
-        if let Err(err) = persist_terminal_bool("font_ligatures", enabled) {
-            log::warn!("failed to persist font_ligatures={enabled}: {err}");
-        } else {
-            apply_loaded(settings, cx);
-            log::info!("font_ligatures -> {enabled} (persisted)");
-        }
+        Self::update(
+            |s| {
+                s.font_ligatures = enabled;
+                s.font_features = Some(if enabled {
+                    FontFeatures::default()
+                } else {
+                    FontFeatures::disable_ligatures()
+                });
+            },
+            |doc| set_document_bool(doc, "terminal", "font_ligatures", enabled),
+            cx,
+            &format!("font_ligatures -> {enabled}"),
+        );
     }
 
     /// Toggle copy-on-select and persist under `terminal.copy_on_select`.
     pub fn set_copy_on_select(enabled: bool, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.copy_on_select = enabled;
-        if let Err(err) = persist_terminal_bool("copy_on_select", enabled) {
-            log::warn!("failed to persist copy_on_select={enabled}: {err}");
-        } else {
-            apply_loaded(settings, cx);
-            log::info!("copy_on_select -> {enabled} (persisted)");
-        }
+        Self::update(
+            |s| s.copy_on_select = enabled,
+            |doc| set_document_bool(doc, "terminal", "copy_on_select", enabled),
+            cx,
+            &format!("copy_on_select -> {enabled}"),
+        );
     }
 
     /// Toggle the agent panel and persist under `plugins.agent_panel`.
     pub fn set_agent_panel(enabled: bool, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.plugins.agent_panel = enabled;
-        if let Err(err) = persist_plugins_bool("agent_panel", enabled) {
-            log::warn!("failed to persist agent_panel={enabled}: {err}");
-        } else {
-            apply_loaded(settings, cx);
-            log::info!("agent_panel -> {enabled} (persisted)");
-        }
+        Self::update(
+            |s| s.plugins.agent_panel = enabled,
+            |doc| set_document_bool(doc, "plugins", "agent_panel", enabled),
+            cx,
+            &format!("agent_panel -> {enabled}"),
+        );
     }
 
     /// Toggle the built-in agents plugin and persist under `plugins.builtin_agents`.
     pub fn set_builtin_agents(enabled: bool, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.plugins.builtin_agents = enabled;
-        if let Err(err) = persist_plugins_bool("builtin_agents", enabled) {
-            log::warn!("failed to persist builtin_agents={enabled}: {err}");
-        } else {
-            apply_loaded(settings, cx);
-            log::info!("builtin_agents -> {enabled} (persisted)");
-        }
+        Self::update(
+            |s| s.plugins.builtin_agents = enabled,
+            |doc| set_document_bool(doc, "plugins", "builtin_agents", enabled),
+            cx,
+            &format!("builtin_agents -> {enabled}"),
+        );
     }
 
     /// Toggle the starfield and persist under `terminal.starfield`.
     pub fn set_starfield(enabled: bool, cx: &mut App) {
-        let mut settings = Self::get_global(cx).clone();
-        settings.starfield = enabled;
-        if let Err(err) = persist_terminal_bool("starfield", enabled) {
-            log::warn!("failed to persist starfield={enabled}: {err}");
-        } else {
-            apply_loaded(settings, cx);
+        let persisted = Self::update(
+            |s| s.starfield = enabled,
+            |doc| set_document_bool(doc, "terminal", "starfield", enabled),
+            cx,
+            &format!("starfield -> {enabled}"),
+        );
+        if persisted {
             cx.refresh_windows();
-            log::info!("starfield -> {enabled} (persisted)");
         }
     }
 
@@ -929,37 +951,15 @@ fn patch_settings_file_at_path(
     })
 }
 
-fn persist_theme(theme: &ThemeSetting) -> anyhow::Result<()> {
-    let path = config_path();
-    patch_settings_file_at_path(&path, |doc| patch_theme_document(doc, theme))
-}
-
-fn persist_terminal_bool(key: &str, value: bool) -> anyhow::Result<()> {
-    let path = config_path();
-    patch_settings_file_at_path(&path, |doc| {
-        patch_terminal_bool_document(doc, key, value);
-    })
-}
-
-fn patch_terminal_bool_document(doc: &mut serde_json::Value, key: &str, value: bool) {
-    if !doc.get("terminal").map(|t| t.is_object()).unwrap_or(false) {
-        doc["terminal"] = serde_json::json!({});
+/// Set `doc[section][key] = value`, creating the section object if missing.
+/// The key is a literal at each call site; unknown document keys are kept.
+fn set_document_bool(doc: &mut serde_json::Value, section: &str, key: &str, value: bool) {
+    if !doc.get(section).is_some_and(|s| s.is_object()) {
+        doc[section] = serde_json::json!({});
     }
-    if let Some(terminal) = doc.get_mut("terminal").and_then(|t| t.as_object_mut()) {
-        terminal.insert(key.to_string(), serde_json::Value::Bool(value));
+    if let Some(obj) = doc.get_mut(section).and_then(|s| s.as_object_mut()) {
+        obj.insert(key.to_string(), serde_json::Value::Bool(value));
     }
-}
-
-fn persist_plugins_bool(key: &str, value: bool) -> anyhow::Result<()> {
-    let path = config_path();
-    patch_settings_file_at_path(&path, |doc| {
-        if !doc.get("plugins").map(|p| p.is_object()).unwrap_or(false) {
-            doc["plugins"] = serde_json::json!({});
-        }
-        if let Some(plugins) = doc.get_mut("plugins").and_then(|p| p.as_object_mut()) {
-            plugins.insert(key.to_string(), serde_json::Value::Bool(value));
-        }
-    })
 }
 
 pub fn init(cx: &mut App) {
@@ -1175,7 +1175,7 @@ mod tests {
         .unwrap();
         for enabled in [true, false] {
             patch_settings_file_at_path(&path, |doc| {
-                patch_terminal_bool_document(doc, "starfield", enabled);
+                set_document_bool(doc, "terminal", "starfield", enabled);
             })
             .unwrap();
             let raw = std::fs::read_to_string(&path).unwrap();

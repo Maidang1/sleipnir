@@ -80,36 +80,25 @@ concept is the failure mode of the previous extraction.
     are independent; empty inbound still walks the watch). Ledger focus and
     pane-facts refresh run on AppShell's 200 ms `_housekeeping` timer, not
     `Render`.
+16. **Hook install goes through `atomic_write`.** `agent_hooks.rs` publishes
+    the hook script with `with_file_lock` + `save_atomic_with` (staged at
+    `0o755`, no write-then-chmod window) and patches `~/.claude/settings.json`
+    as one locked read-modify-write ending in `save_atomic`, the same
+    discipline as settings/ledger. `plugin_grants` stays on `save_atomic`.
+17. **Settings document model + theme table.** All setters go through
+    `TerminalSettings::update(change, patch, cx, what)`: one in-memory
+    document mutate, then persist as a locked JSON-document patch published
+    by `save_atomic` (unknown keys preserved). `persist_terminal_bool` /
+    `persist_plugins_bool` / `persist_theme` are gone; call sites set literal
+    keys via `set_document_bool`. The 14 `fn mocha()`-style constructors in
+    `themes.rs` are one `ThemeSpec` data table plus `spec_for`.
 
 ## Remaining work
 
-Do these **in this order**. Do not reopen items 9–15.
-
-### 1. Hook install still bypasses `atomic_write`
-
-`crates/sleipnir_settings/src/agent_hooks.rs` writes the hook script and
-Claude/Codex JSON with raw `fs::write` into `~/.claude` / `~/.codex`.
-
-**Do:** same lock + `save_atomic` as settings/ledger. Socket path is already
-`sleipnir_paths::agent_control_socket_path`. Do **not** move the crate into
-the agents plugin in the same pass unless that move is small and tests stay
-green.
-
-Keep `plugin_grants` on `atomic_write::save_atomic` (already).
-
-### 2. Settings document model (optional; not merge-blocking)
-
-`sleipnir_settings` is still a GPUI kitchen sink. `merge_file` is a long
-`if let Some` chain. `inject_osc133` / `run_ledger` / `theme` exist at top
-level and under `terminal { }`. `persist_terminal_bool` is stringly JSON.
-Setters clone-patch-apply.
-
-**Do (when picked up):** one in-memory document; `update(|s| …)` then persist
-through `with_file_lock` + `save_atomic`. Delete `persist_terminal_bool`.
-
-Themes: 14 copy-paste `fn mocha() -> TerminalPalette` constructors in
-`themes.rs` should become one `ThemeSpec` table. Data, not a new abstraction
-layer.
+Nothing merge-blocking remains. Known accepted smells in `sleipnir_settings`:
+`merge_file` is a long `if let Some` chain (serde merge, kept explicit), and
+`inject_osc133` / `run_ledger` / `theme` parse at top level and under
+`terminal { }` for Zed-schema compatibility.
 
 ## What not to do
 
@@ -131,9 +120,10 @@ layer.
 
 ## Suggested next session
 
-Start at **hook install uses `atomic_write` (remaining §1)**. PluginHost
-ownership, launch binding, supervisor maps, file-lock discipline for app
-config, Terminal `AbsLine`/hover, and Render pumps have landed.
+Every listed item has landed. Pick the next target from a fresh review, not
+from this document. PluginHost ownership, launch binding, supervisor maps,
+file-lock discipline for app config and hook install, Terminal
+`AbsLine`/hover, Render pumps, and the settings document model have landed.
 
 ```bash
 cargo test -p agent_coordination
