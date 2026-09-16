@@ -788,8 +788,8 @@ impl AppShell {
         let Some(pane) = self.active_pane_key() else {
             return;
         };
-        // Render calls this every frame; never stack a second collection for a
-        // pane that already has one in flight.
+        // The housekeeping timer calls this periodically; never stack a second
+        // collection for a pane that already has one in flight.
         if self.facts.is_collecting_for(pane) {
             return;
         }

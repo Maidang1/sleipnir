@@ -402,6 +402,9 @@ pub struct AppShell {
     diff_gen: u64,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
+    /// Per-window housekeeping timer: ledger focus sync + pane-facts refresh.
+    /// Runs on a fixed interval so these side-effects are decoupled from Render.
+    _housekeeping: gpui::Task<()>,
     /// Per-window plugin surfaces: panel registry, chrome contributions, and
     /// the polled pane-fact watch. `PluginRuntime` (supervisor / catalog /
     /// pump) stays a process `Global`; this is the window-scoped half.
@@ -860,6 +863,7 @@ impl AppShell {
             diff_gen: 0,
             facts: PaneFactsState::default(),
             _quit_subscription: None,
+            _housekeeping: gpui::Task::ready(()),
             plugin: crate::plugin_window::PluginHost::new(),
         };
         // Seed the current system appearance and follow future changes so the
@@ -886,6 +890,22 @@ impl AppShell {
         // Resident plugins need a live session to receive events. This is
         // where first-run consent is asked; a grant is never implied.
         shell.start_resident_plugins(cx);
+
+        // Per-window housekeeping: ledger focus + pane-facts refresh run on a
+        // fixed 200 ms timer so Render stays paint-only.
+        shell._housekeeping = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    this.sync_ledger_focus(window, cx);
+                    this.refresh_pane_facts_if_stale(cx);
+                })
+                .ok();
+            }
+        });
+
         shell
     }
 
@@ -2174,8 +2194,6 @@ mod tests {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_ledger_focus(window, cx);
-        self.refresh_pane_facts_if_stale(cx);
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
