@@ -1,15 +1,10 @@
-//! Per-window plugin surface owner (code-quality handoff item 1, slice 1).
+//! Per-window plugin surface owner (code-quality handoff item 1, slices 1–2b).
 //!
 //! `PluginRuntime` stays a process `Global` (supervisor, catalog, 16 ms pump).
-//! What is *per window* — the panel surfaces, the chrome contributions, and the
-//! debounced event watch — lives here, in one owner that [`crate::app_shell::AppShell`]
-//! holds as a single field. AppShell paints from it and keeps `InputMode`,
-//! tabs, and focus; it no longer carries three sibling registries.
-//!
-//! The three registries are **private**. Every caller goes through a method on
-//! `PluginHost` (`apply_panel_render`, `apply_chrome_status`, `sync_live`,
-//! `watch_*`, the panel accessors), so this is an ownership move, not a struct
-//! that re-exposes the same three fields under a new name.
+//! What is *per window* — the chrome contributions and the debounced event
+//! watch — lives here, in one owner that [`crate::app_shell::AppShell`] holds
+//! as a single field. Panel surfaces are owned by the pane tree
+//! (`LeafContent::Panel(PanelView)`) since slice 2b.
 
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -19,15 +14,12 @@ use crate::plugin_chrome::{
     ApplyChrome, ChromeRegistry, PaletteContribution, PluginTabBadge, StatusLayout,
 };
 use crate::plugin_event_watch::{PaneUiFacts, PluginEventWatch};
-use crate::plugin_panel::{ApplyPanel, PanelRegistry, PanelSurface};
-use crate::plugin_surface::StaleRegistry as _;
 use plugin_protocol::v2::{HostEvent, Widget};
 
-/// Window-scoped plugin state: panel surfaces, chrome contributions, and the
-/// polled pane-fact watch. Owned by one `AppShell`.
+/// Window-scoped plugin state: chrome contributions and the polled pane-fact
+/// watch. Panel surfaces are tree-owned since slice 2b. Owned by one `AppShell`.
 #[derive(Default)]
 pub(crate) struct PluginHost {
-    panels: PanelRegistry,
     chrome: ChromeRegistry,
     watch: PluginEventWatch,
 }
@@ -35,57 +27,6 @@ pub(crate) struct PluginHost {
 impl PluginHost {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    // --- Panel surfaces -----------------------------------------------------
-
-    /// The surface mounted at `pane`, if any. Painting reads this.
-    pub(crate) fn panel(&self, pane: PaneKey) -> Option<&PanelSurface> {
-        self.panels.get(pane)
-    }
-
-    /// Apply a whole-tree panel `Render`. Pure registry decision; the caller
-    /// performs the pane_tree split for [`ApplyPanel::Create`].
-    pub(crate) fn apply_panel_render(
-        &mut self,
-        plugin_id: &str,
-        owner_instance_id: Uuid,
-        pane: PaneKey,
-        tree: Widget,
-        granted: bool,
-        terminal_panes: &BTreeSet<PaneKey>,
-    ) -> ApplyPanel {
-        self.panels
-            .apply_render(plugin_id, owner_instance_id, pane, tree, granted, terminal_panes)
-    }
-
-    /// Drop a single panel surface (failed create, closed leaf).
-    pub(crate) fn remove_panel(&mut self, pane: PaneKey) {
-        self.panels.remove(pane);
-    }
-
-    /// Drop every listed panel surface (tab / window close).
-    pub(crate) fn remove_panels(&mut self, keys: impl IntoIterator<Item = PaneKey>) {
-        self.panels.remove_all(keys);
-    }
-
-    /// Snapshot surfaces for the given keys, for transfer to another window.
-    pub(crate) fn clone_panel_surfaces(
-        &self,
-        keys: impl IntoIterator<Item = PaneKey>,
-    ) -> Vec<PanelSurface> {
-        self.panels.clone_surfaces(keys)
-    }
-
-    /// Adopt transferred surfaces (tab detach into a new window).
-    pub(crate) fn insert_panel_surfaces(&mut self, surfaces: impl IntoIterator<Item = PanelSurface>) {
-        self.panels.insert_surfaces(surfaces);
-    }
-
-    /// Mark surfaces whose owning instance is no longer live as stale (the last
-    /// tree stays on screen, visibly dimmed).
-    pub(crate) fn mark_panels_stale(&mut self, live: &BTreeSet<Uuid>) {
-        self.panels.mark_missing_stale(live);
     }
 
     // --- Chrome contributions ----------------------------------------------

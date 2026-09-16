@@ -152,11 +152,25 @@ impl AppShell {
             .filter(|snap| snap.state == ConnectionState::Live)
             .map(|snap| snap.instance_id)
             .collect();
-        self.plugin.mark_panels_stale(&live);
+        // Walk all panel leaves and mark stale.
+        for tab in &mut self.tabs {
+            let mut panel_keys = Vec::new();
+            {
+                let mut all = Vec::new();
+                tab.tree.walk_leaves(&mut all);
+                for (_, k, c) in all {
+                    if let crate::LeafContent::Panel(view) = c {
+                        if !live.contains(&view.surface.owner_instance_id) {
+                            panel_keys.push(k);
+                        }
+                    }
+                }
+            }
+            for key in panel_keys {
+                tab.tree.mark_panel_stale(key);
+            }
+        }
         self.mark_missing_blocks_stale(&live, cx);
-        // Chrome is the exception: transient decoration is dropped, not
-        // dimmed, so a dead plugin cannot leave a badge misreporting live
-        // state (see `plugin_surface`).
         if self.plugin.sync_chrome_live(&live) {
             self.rebuild_palette_items();
         }
@@ -170,11 +184,14 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::plugin_panel::ApplyPanel;
+        use crate::plugin_panel::PanelSurface;
         use plugin_protocol::v2::Capability;
-        // Same source as the event bus: Hello.granted, not "the plugin asked".
         let granted =
             crate::plugin_runtime::has_grant_for_instance(instance_id, Capability::RenderPanel, cx);
+        if !granted {
+            log::warn!("plugin {plugin_id} RenderPanel denied (no grant)");
+            return;
+        }
         let mut terminals = std::collections::BTreeSet::new();
         for tab in &self.tabs {
             let mut out = Vec::new();
@@ -183,33 +200,71 @@ impl AppShell {
                 terminals.insert(key);
             }
         }
-        match self.plugin.apply_panel_render(
-            plugin_id,
-            instance_id,
-            pane,
-            tree,
-            granted,
-            &terminals,
-        ) {
-            ApplyPanel::Create { pane_key } => {
-                if !self.insert_panel_leaf(pane_key, plugin_id, window, cx) {
-                    self.plugin.remove_panel(pane_key);
+        if terminals.contains(&pane) {
+            log::warn!("plugin {plugin_id} tried to draw into a terminal pane");
+            return;
+        }
+        // Check existing panel leaf for this pane_key.
+        let existing = self.tabs.iter().flat_map(|tab| {
+            let mut all = Vec::new();
+            tab.tree.walk_leaves(&mut all);
+            all.into_iter()
+                .filter(|(_, k, _)| *k == pane)
+                .map(|(_, _, c)| c.clone())
+                .collect::<Vec<_>>()
+        }).next();
+        match existing {
+            Some(crate::LeafContent::Panel(ref view)) => {
+                if view.surface.plugin_id != plugin_id {
+                    log::warn!("plugin {plugin_id} tried to take another plugin's panel");
+                    return;
                 }
+                if view.surface.owner_instance_id != instance_id && !view.surface.stale {
+                    log::warn!(
+                        "plugin {plugin_id} instance {instance_id} tried to take a live panel owned by another instance"
+                    );
+                    return;
+                }
+                // Replace: update the surface in-place on the leaf.
+                let new_surface_id = if view.surface.owner_instance_id != instance_id {
+                    uuid::Uuid::new_v4()
+                } else {
+                    view.surface.surface_id
+                };
+                let updated = PanelSurface {
+                    plugin_id: plugin_id.to_string(),
+                    owner_instance_id: instance_id,
+                    pane_key: pane,
+                    surface_id: new_surface_id,
+                    tree,
+                    stale: false,
+                };
+                for tab in &mut self.tabs {
+                    let mut all = Vec::new();
+                    tab.tree.walk_leaves(&mut all);
+                    if all.iter().any(|(_, k, _)| *k == pane) {
+                        tab.tree.update_panel_surface(pane, updated);
+                        break;
+                    }
+                }
+                cx.notify();
             }
-            ApplyPanel::Replace { .. } => cx.notify(),
-            ApplyPanel::DeniedGrant => {
-                log::warn!("plugin {plugin_id} RenderPanel denied (no grant)");
-            }
-            ApplyPanel::DeniedTerminal => {
+            Some(crate::LeafContent::Terminal(_)) => {
                 log::warn!("plugin {plugin_id} tried to draw into a terminal pane");
             }
-            ApplyPanel::DeniedOccupied => {
-                log::warn!("plugin {plugin_id} tried to take another plugin's panel");
-            }
-            ApplyPanel::DeniedOwnerInstance => {
-                log::warn!(
-                    "plugin {plugin_id} instance {instance_id} tried to take a live panel owned by another instance"
-                );
+            None => {
+                // Create: insert a new panel leaf.
+                let surface = PanelSurface {
+                    plugin_id: plugin_id.to_string(),
+                    owner_instance_id: instance_id,
+                    pane_key: pane,
+                    surface_id: uuid::Uuid::new_v4(),
+                    tree,
+                    stale: false,
+                };
+                if !self.insert_panel_leaf(pane, surface, window, cx) {
+                    // Failed insert: entity is not in the tree, nothing to clean up.
+                }
             }
         }
     }
@@ -322,7 +377,7 @@ impl AppShell {
     pub(super) fn insert_panel_leaf(
         &mut self,
         pane_key: PaneKey,
-        plugin_id: &str,
+        surface: crate::plugin_panel::PanelSurface,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -332,9 +387,7 @@ impl AppShell {
         let target = tab.active_pane;
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let content = crate::LeafContent::Panel {
-            plugin_id: plugin_id.to_string(),
-        };
+        let content = crate::LeafContent::Panel(crate::pane_tree::PanelView::new(surface));
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return false;
         };

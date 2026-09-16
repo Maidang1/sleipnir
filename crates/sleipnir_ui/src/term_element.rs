@@ -9,7 +9,7 @@ use gpui::{
     UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use itertools::Itertools;
-use row_geometry::{HitTarget, RowGeometry};
+use row_geometry::RowGeometry;
 use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
 use std::time::{Duration, Instant};
@@ -304,14 +304,6 @@ pub struct LayoutState {
     /// Whether to request another animation frame (M11).
     blink_animating: bool,
     map: PaintMap,
-    block_paints: Vec<BlockPaint>,
-}
-
-struct BlockPaint {
-    display_line: i32,
-    layout: sleipnir_widget::Layout,
-    stale: bool,
-    frozen: bool,
 }
 
 impl Element for TermElement {
@@ -444,7 +436,6 @@ impl Element for TermElement {
                     top_abs,
                     sub,
                 };
-                let frozen = geom.is_frozen();
                 let skip_lines: std::collections::HashSet<i32> = if content
                     .mode
                     .contains(Modes::ALT_SCREEN)
@@ -546,32 +537,6 @@ impl Element for TermElement {
                         TerminalBlink::TerminalControlled => terminal_wants_blink,
                     };
 
-                let mut block_paints = Vec::new();
-                if !content.mode.contains(Modes::ALT_SCREEN) {
-                    let rows = dimensions.num_lines() as i32;
-                    view.read(cx).blocks().iter().for_each(|surface| {
-                        let display_line = absolute_to_display_line(
-                            surface.anchor.line,
-                            history,
-                            content.display_offset,
-                        );
-                        // One extra row of overscan at each edge so a sub-row
-                        // remainder does not clip a partial Block.
-                        if display_line < -1 || display_line > rows {
-                            return;
-                        }
-                        let Some(laid) = surface.laid.clone() else {
-                            return;
-                        };
-                        block_paints.push(BlockPaint {
-                            display_line,
-                            layout: laid,
-                            stale: surface.stale,
-                            frozen,
-                        });
-                    });
-                }
-
                 LayoutState {
                     hitbox,
                     dimensions,
@@ -592,7 +557,6 @@ impl Element for TermElement {
                     blink_alpha,
                     blink_animating,
                     map,
-                    block_paints,
                 }
             },
         )
@@ -662,9 +626,6 @@ impl Element for TermElement {
                     for batch in &layout.batches {
                         batch.paint(origin, &layout.dimensions, &layout.map, window, cx);
                     }
-                    for block in &layout.block_paints {
-                        paint_block(origin, block, &layout.dimensions, &layout.map, window, cx);
-                    }
 
                     if self.focused
                         && let Some((col, line, ch, shape)) = layout.cursor
@@ -713,7 +674,7 @@ impl TermElement {
                 let focus = focus.clone();
                 move |e: &MouseDownEvent, window, cx| {
                     window.focus(&focus, cx);
-                    if button == MouseButton::Left && try_block_click(&terminal, &view, e, cx) {
+                    if button == MouseButton::Left && view.read(cx).try_block_click(e, cx) {
                         return;
                     }
                     if button == MouseButton::Right {
@@ -824,41 +785,6 @@ fn paint_underline(
         size(cols * dimensions.cell_width, h),
     );
     window.paint_quad(fill(rect, bg.color));
-}
-
-fn try_block_click(
-    terminal: &Entity<Terminal>,
-    view: &Entity<crate::TermView>,
-    e: &MouseDownEvent,
-    cx: &mut App,
-) -> bool {
-    let content = terminal.read(cx).last_content().clone();
-    if content.mode.contains(Modes::ALT_SCREEN) {
-        return false;
-    }
-    let origin = content.terminal_bounds.bounds.origin;
-    let local = gpui::point(e.position.x - origin.x, e.position.y - origin.y);
-    let hit = terminal.read(cx).hit_local(local);
-    let HitTarget::Block { id, local_y } = hit else {
-        return false;
-    };
-    let cell_w = f32::from(content.terminal_bounds.cell_width);
-    let line_h = f32::from(content.terminal_bounds.line_height);
-    let pos = crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
-    let Some(surface) = view.read(cx).blocks().get(id).cloned() else {
-        return false;
-    };
-    let Some(laid) = surface.laid.as_ref() else {
-        return false;
-    };
-    let Some(hit) = crate::plugin_block::action_at(laid, pos.col, pos.row) else {
-        return false;
-    };
-    if surface.stale {
-        return true;
-    }
-    crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
-    true
 }
 
 /// Convert a terminal point range into display-space background rects.
@@ -1129,184 +1055,6 @@ fn paint_terminal_cursor(
     }
 }
 
-fn paint_block(
-    origin: GpuiPoint<Pixels>,
-    block: &BlockPaint,
-    dimensions: &TerminalBounds,
-    map: &PaintMap,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let palette = TerminalPalette::get_global(cx);
-    let top = map.y(origin, block.display_line);
-    let height = map.h(block.display_line).max(px(1.));
-    let width = dimensions.bounds.size.width;
-    let bounds = Bounds::new(point(origin.x, top), size(width, height));
-    let bg = if block.frozen {
-        palette.background.blend(gpui::Hsla::black().opacity(0.12))
-    } else if block.stale {
-        palette.background.blend(gpui::Hsla::black().opacity(0.2))
-    } else {
-        palette.background
-    };
-    window.paint_quad(fill(bounds, bg));
-    if block.frozen {
-        return;
-    }
-    let cell_w = dimensions.cell_width;
-    let line_h = dimensions.line_height;
-    let font_size = TerminalSettings::get_global(cx)
-        .font_size
-        .unwrap_or(px(14.));
-    for node in block.layout.walk() {
-        paint_laid_node(
-            origin.x,
-            top,
-            node,
-            cell_w,
-            line_h,
-            palette.as_ref(),
-            font_size,
-            window,
-            cx,
-        );
-    }
-    paint_laid_node(
-        origin.x,
-        top,
-        &block.layout.attribution,
-        cell_w,
-        line_h,
-        palette.as_ref(),
-        font_size,
-        window,
-        cx,
-    );
-}
-
-/// Text a Block paints for one laid-out node, or `None` when the node draws no
-/// text (containers, and the two kinds painted as quads).
-///
-/// Pure so the Block/Panel parity this had to be fixed for is testable without
-/// a window. There is deliberately **no catch-all**: a new [`LaidOutKind`] must
-/// be decided here, not silently rendered as the empty string. `Spark` was
-/// dropped exactly that way, and because layout still reserves its cells the
-/// symptom was correctly-sized blank space with nothing logged.
-fn block_text_for(kind: &sleipnir_widget::LaidOutKind) -> Option<String> {
-    kind.text_content()
-}
-
-/// Whether a laid-out node paints bold.
-///
-/// `bold` is part of the schema and the Panel painter honours it; a Block that
-/// ignored it would render the same tree differently depending on where it is
-/// mounted. Split out from the painter so it is testable without a `Window`.
-fn block_is_bold(kind: &sleipnir_widget::LaidOutKind) -> bool {
-    kind.is_bold()
-}
-
-fn paint_laid_node(
-    origin_x: Pixels,
-    block_top: Pixels,
-    node: &sleipnir_widget::LaidOut,
-    cell_w: Pixels,
-    line_h: Pixels,
-    palette: &TerminalPalette,
-    font_size: Pixels,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    use sleipnir_widget::LaidOutKind;
-    let r = node.rect;
-    let x = origin_x + cell_w * r.col as f32;
-    let y = block_top + line_h * r.row as f32;
-    let w = cell_w * r.width as f32;
-    let h = line_h * r.height.max(1) as f32;
-    let color = match &node.kind {
-        LaidOutKind::Text { tone, .. } | LaidOutKind::Badge { tone, .. } => match tone {
-            sleipnir_widget::Tone::Fg => palette.foreground,
-            sleipnir_widget::Tone::Dim => palette.foreground.opacity(0.55),
-            sleipnir_widget::Tone::Accent => palette.ansi[4],
-            sleipnir_widget::Tone::Ok => palette.ansi[2],
-            sleipnir_widget::Tone::Warn => palette.ansi[3],
-            sleipnir_widget::Tone::Err => palette.ansi[1],
-        },
-        LaidOutKind::Attribution { .. } => palette.foreground.opacity(0.55),
-        LaidOutKind::Btn { .. } => palette.ansi[4],
-        LaidOutKind::Truncated => palette.ansi[3],
-        // Matches the Panel painter's accent for sparklines.
-        LaidOutKind::Spark { .. } => palette.ansi[4],
-        // No catch-all: a new `LaidOutKind` must be considered here, not
-        // silently painted in the default foreground. The Panel painter
-        // (`app_shell/plugin_paint.rs`) is exhaustive for the same reason;
-        // the two must not drift.
-        LaidOutKind::Col
-        | LaidOutKind::Row
-        | LaidOutKind::Code { .. }
-        | LaidOutKind::Bar { .. }
-        | LaidOutKind::Sep
-        | LaidOutKind::Unknown => palette.foreground,
-    };
-    let mut font = window.text_style().font();
-    if block_is_bold(&node.kind) {
-        font.weight = gpui::FontWeight::BOLD;
-    }
-    let line_texts: Vec<String> = match &node.kind {
-        LaidOutKind::Sep => {
-            window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.))), color));
-            return;
-        }
-        LaidOutKind::Bar { filled, width: bw } => {
-            let fill_w = w * (*filled as f32 / (*bw).max(1) as f32);
-            window.paint_quad(fill(
-                Bounds::new(point(x, y), size(w, h)),
-                palette.background.blend(gpui::Hsla::black().opacity(0.15)),
-            ));
-            window.paint_quad(fill(
-                Bounds::new(point(x, y), size(fill_w, h)),
-                palette.ansi[4],
-            ));
-            return;
-        }
-        LaidOutKind::Text { lines, .. } => lines.clone(),
-        LaidOutKind::Code { lines } => lines.iter().map(|line| line.text.clone()).collect(),
-        kind => match block_text_for(kind) {
-            Some(text) => vec![text],
-            None => return,
-        },
-    };
-    if line_texts.is_empty() {
-        return;
-    }
-    for (line_ix, text) in line_texts.into_iter().enumerate() {
-        debug_assert!(
-            !text.contains('\n'),
-            "block line painter expects one laid-out line at a time"
-        );
-        if text.is_empty() {
-            continue;
-        }
-        let style = TextRun {
-            len: text.len(),
-            font: font.clone(),
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let _ = window
-            .text_system()
-            .shape_line(text.into(), font_size, &[style], None)
-            .paint(
-                point(x, y + line_h * line_ix as f32),
-                line_h,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-    }
-}
 
 /// A subtle white overlay, independent of the terminal's ANSI accent colors.
 fn selection_background() -> gpui::Hsla {
@@ -1540,7 +1288,7 @@ mod tests {
         ];
 
         for kind in visible {
-            let text = block_text_for(&kind);
+            let text = kind.text_content();
             assert!(
                 text.is_some_and(|t| !t.is_empty()),
                 "{kind:?} renders as nothing in a Block; \
@@ -1551,7 +1299,7 @@ mod tests {
         // Containers and the two quad-painted kinds legitimately produce no
         // text; they are drawn as geometry or not at all.
         for kind in [LaidOutKind::Col, LaidOutKind::Row] {
-            assert!(block_text_for(&kind).is_none(), "{kind:?} is a container");
+            assert!(kind.text_content().is_none(), "{kind:?} is a container");
         }
     }
 
@@ -1560,10 +1308,10 @@ mod tests {
     #[test]
     fn spark_renders_as_ramp_glyphs() {
         use sleipnir_widget::LaidOutKind;
-        let text = block_text_for(&LaidOutKind::Spark {
+        let kind = LaidOutKind::Spark {
             levels: vec![0, 4, 8],
-        })
-        .expect("spark renders");
+        };
+        let text = kind.text_content().expect("spark renders");
         assert_eq!(text, " ▄█");
         assert_eq!(text.chars().count(), 3, "one glyph per reserved cell");
     }
@@ -1584,13 +1332,14 @@ mod tests {
             tone: Tone::Fg,
             bold: false,
         };
-        assert!(block_is_bold(&bold), "bold text must paint bold");
-        assert!(!block_is_bold(&plain), "plain text must not paint bold");
+        assert!(bold.is_bold(), "bold text must paint bold");
+        assert!(!plain.is_bold(), "plain text must not paint bold");
         assert!(
-            !block_is_bold(&LaidOutKind::Badge {
+            !LaidOutKind::Badge {
                 text: "x".into(),
                 tone: Tone::Ok,
-            }),
+            }
+            .is_bold(),
             "only Text carries bold in the schema"
         );
     }
@@ -1599,15 +1348,16 @@ mod tests {
     fn block_text_for_joins_multiline_text_and_code_with_newlines() {
         use sleipnir_widget::{CodeLine, LaidOutKind, Tone};
 
-        let text = block_text_for(&LaidOutKind::Text {
+        let text = LaidOutKind::Text {
             lines: vec!["alpha".into(), "beta".into()],
             tone: Tone::Fg,
             bold: false,
-        })
+        }
+        .text_content()
         .expect("text renders");
         assert_eq!(text, "alpha\nbeta");
 
-        let code = block_text_for(&LaidOutKind::Code {
+        let code = LaidOutKind::Code {
             lines: vec![
                 CodeLine {
                     text: "let x = 1;".into(),
@@ -1618,7 +1368,8 @@ mod tests {
                     truncated: false,
                 },
             ],
-        })
+        }
+        .text_content()
         .expect("code renders");
         assert_eq!(code, "let x = 1;\nx += 1;");
     }

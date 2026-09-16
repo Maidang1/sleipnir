@@ -36,13 +36,6 @@ fn next_detached_pane_id(tree: &PaneNode) -> PaneId {
         .saturating_add(1)
 }
 
-fn transferred_panel_surfaces(
-    plugin: &crate::plugin_window::PluginHost,
-    pane_keys: impl IntoIterator<Item = PaneKey>,
-) -> Vec<crate::plugin_panel::PanelSurface> {
-    plugin.clone_panel_surfaces(pane_keys)
-}
-
 fn can_extract_terminal_pane(tab: &Tab, pane_id: PaneId) -> bool {
     tab.tree.is_terminal_leaf(pane_id) && tab.tree.terminal_count() > 1
 }
@@ -220,7 +213,6 @@ impl AppShell {
             let _ = self.take_rename_input(cx);
         }
         let closed_keys = self.tabs[index].tree.all_pane_keys();
-        self.plugin.remove_panels(closed_keys.iter().copied());
         for pane in closed_keys {
             self.apply_pane_closed(pane, cx);
         }
@@ -317,20 +309,18 @@ impl AppShell {
             return;
         };
         let tab = self.tabs[idx].clone();
-        let panel_surfaces =
-            transferred_panel_surfaces(&self.plugin, tab.tree.all_pane_keys());
         let options = terminal_window_options(cx);
         match cx.open_window(options, move |window, cx| {
             let tab = tab.clone();
             cx.new(|cx| {
                 let mut shell = AppShell::new(window, cx);
-                shell.adopt_tab_with_panels(tab, panel_surfaces, window, cx);
+                shell.adopt_tab(tab, window, cx);
                 shell
             })
         }) {
             Ok(_) => {
                 let removed = self.tabs.remove(idx);
-                self.plugin.remove_panels(removed.tree.all_pane_keys());
+                let _ = removed;
                 self.active = new_active;
                 self.commit_workspace(window, cx);
             }
@@ -400,14 +390,12 @@ impl AppShell {
         self.commit_workspace(window, cx);
     }
 
-    fn adopt_tab_with_panels(
+    fn adopt_tab(
         &mut self,
         tab: Tab,
-        panel_surfaces: Vec<crate::plugin_panel::PanelSurface>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Drop the placeholder tab `new` created (its shell exits).
         self.tabs.clear();
         let mut tab = tab;
         let mut leaves = Vec::new();
@@ -417,7 +405,6 @@ impl AppShell {
         self.next_id = adopted.next_id;
         self.next_pane_id = adopted.next_pane_id;
         let views: Vec<Entity<TermView>> = leaves.into_iter().map(|(_, v)| v.clone()).collect();
-        self.plugin.insert_panel_surfaces(panel_surfaces);
         self.tabs.push(tab);
         self.active = 0;
         for view in &views {
@@ -489,11 +476,26 @@ mod tests {
         );
     }
 
+    fn demo_surface(pane_key: Uuid) -> PanelSurface {
+        PanelSurface {
+            plugin_id: "demo".into(),
+            owner_instance_id: Uuid::nil(),
+            pane_key,
+            surface_id: Uuid::nil(),
+            tree: Widget::Text {
+                s: "test".into(),
+                fg: Tone::Fg,
+                bold: false,
+            },
+            stale: false,
+        }
+    }
+
     fn panel_tab(id: u64, panes: &[(PaneId, PaneKey)]) -> Tab {
         let tree = panes
             .iter()
             .copied()
-            .map(|(pane_id, key)| PaneNode::panel_leaf(pane_id, key, "demo"))
+            .map(|(pane_id, key)| PaneNode::panel_leaf(pane_id, key, demo_surface(key)))
             .reduce(|first, second| PaneNode::Split {
                 axis: SplitAxis::Horizontal,
                 ratio: 0.5,
@@ -524,44 +526,17 @@ mod tests {
     }
 
     #[test]
-    fn transferred_panel_surfaces_keep_surface_tree() {
+    fn transferred_panel_surfaces_are_tree_owned() {
         let first = Uuid::from_u128(1);
         let second = Uuid::from_u128(2);
-        let mut plugin = crate::plugin_window::PluginHost::new();
-        plugin.insert_panel_surfaces([
-            PanelSurface {
-                plugin_id: "demo".into(),
-                owner_instance_id: Uuid::from_u128(101),
-                pane_key: first,
-                surface_id: Uuid::from_u128(11),
-                tree: Widget::Text {
-                    s: "alpha".into(),
-                    fg: Tone::Fg,
-                    bold: false,
-                },
-                stale: false,
-            },
-            PanelSurface {
-                plugin_id: "demo".into(),
-                owner_instance_id: Uuid::from_u128(102),
-                pane_key: second,
-                surface_id: Uuid::from_u128(12),
-                tree: Widget::Text {
-                    s: "beta".into(),
-                    fg: Tone::Fg,
-                    bold: false,
-                },
-                stale: true,
-            },
-        ]);
-
-        let moved = transferred_panel_surfaces(&plugin, [second, first]);
-        assert_eq!(moved.len(), 2);
-        assert_eq!(moved[0].pane_key, second);
-        assert_eq!(moved[0].surface_id, Uuid::from_u128(12));
-        assert_eq!(moved[1].pane_key, first);
-        assert_eq!(moved[1].surface_id, Uuid::from_u128(11));
-        assert!(matches!(moved[1].tree, Widget::Text { .. }));
+        // With tree-owned surfaces, tab detach moves the leaf wholesale.
+        // The old test verified clone_panel_surfaces; now we verify the
+        // surfaces live in the tree.
+        let tab = panel_tab(99, &[(10, first), (20, second)]);
+        let mut all = Vec::new();
+        tab.tree.walk_leaves(&mut all);
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|(_, _, c)| c.is_panel()));
     }
 
     #[test]
@@ -572,15 +547,15 @@ mod tests {
         let mixed = PaneNode::Split {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
-            first: Box::new(PaneNode::panel_leaf(10, Uuid::from_u128(1), "demo")),
-            second: Box::new(PaneNode::panel_leaf(20, Uuid::from_u128(2), "demo")),
+            first: Box::new(PaneNode::panel_leaf(10, Uuid::from_u128(1), demo_surface(Uuid::from_u128(1)))),
+            second: Box::new(PaneNode::panel_leaf(20, Uuid::from_u128(2), demo_surface(Uuid::from_u128(2)))),
         };
         let mut leaves = Vec::new();
         mixed.walk_leaves(&mut leaves);
         assert!(
             leaves
                 .iter()
-                .all(|(_, _, content)| matches!(content, LeafContent::Panel { .. }))
+                .all(|(_, _, content)| matches!(content, LeafContent::Panel(_)))
         );
     }
 }

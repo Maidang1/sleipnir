@@ -35,19 +35,27 @@ impl AppShell {
             .or_else(|| self.content_bounds.map(|b| f32::from(b.size.width)))
             .unwrap_or(80.0);
         let cols = cols_from_pixels(pixel_width, cell_w);
-        let Some(surface) = self.plugin.panel(pane_key) else {
+        // Read the surface from the tree leaf, not a parallel registry.
+        let panel_view = self.tabs.iter().flat_map(|tab| {
+            let mut all = Vec::new();
+            tab.tree.walk_leaves(&mut all);
+            all.into_iter()
+                .filter_map(|(_, k, c)| {
+                    if k == pane_key {
+                        c.as_panel().cloned()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        }).next();
+        let Some(panel) = panel_view else {
             return div()
                 .size_full()
                 .bg(tokens.surface)
-                .child(
-                    div()
-                        .p_2()
-                        .text_xs()
-                        .text_color(tokens.fg_muted)
-                        .child("plugin panel"),
-                )
                 .into_any_element();
         };
+        let surface = &panel.surface;
         let laid = layout_surface(surface, cols);
         let stale = surface.stale;
         let owner_instance_id = surface.owner_instance_id;
@@ -69,7 +77,6 @@ impl AppShell {
                     .id(("plugin-panel-stale", pane_id))
                     .absolute()
                     .top_0()
-                    // Sit left of the close control so both stay legible.
                     .right(px(26.0))
                     .px_2()
                     .py_0p5()
@@ -80,9 +87,6 @@ impl AppShell {
             );
         }
 
-        // Host-owned close control (ADR-0017): the panel is a host surface, so
-        // the user can always dismiss it even when the plugin offers no way out.
-        // Closing removes the leaf and drops the surface from the registry.
         body = body.child(
             div()
                 .id(("plugin-panel-close", pane_id))
@@ -99,8 +103,6 @@ impl AppShell {
                 .text_color(tokens.fg_muted)
                 .hover(|el| el.bg(tokens.hover).text_color(tokens.fg))
                 .child("×")
-                // Win over the panel's own mouse-down (focus / button hit-test)
-                // so a click closes the panel instead of firing a widget action.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.close_panel_pane(pane_id, pane_key, window, cx);
@@ -131,12 +133,22 @@ impl AppShell {
                 let local_x = f32::from(ev.position.x) - f32::from(origin.x);
                 let local_y = f32::from(ev.position.y) - f32::from(origin.y);
                 let pos = cell_from_pixels(local_x, local_y, cell_w_click, line_h_click);
-                if let Some(surface) = this.plugin.panel(pane_key) {
-                    if surface.stale {
+                // Re-read surface from the tree for the click handler.
+                let panel = this.tabs.iter().flat_map(|tab| {
+                    let mut all = Vec::new();
+                    tab.tree.walk_leaves(&mut all);
+                    all.into_iter()
+                        .filter_map(|(_, k, c)| {
+                            if k == pane_key { c.as_panel().cloned() } else { None }
+                        })
+                        .collect::<Vec<_>>()
+                }).next();
+                if let Some(panel) = panel {
+                    if panel.surface.stale {
                         cx.notify();
                         return;
                     }
-                    let laid = layout_surface(surface, cols);
+                    let laid = layout_surface(&panel.surface, cols);
                     if let Some(hit) = action_at(&laid, pos.col, pos.row) {
                         crate::plugin_runtime::push_action(
                             owner_instance_id,
@@ -277,7 +289,7 @@ impl Render for StatusProvenance {
     }
 }
 
-pub(super) fn panel_cell_metrics(
+pub(crate) fn panel_cell_metrics(
     window: &Window,
     cx: &App,
     font_size_override: Option<Pixels>,
@@ -333,7 +345,7 @@ pub(super) fn slot_color(tokens: &ChromeTokens, tone: Tone) -> Hsla {
         Tone::Err => tokens.err,
     }
 }
-pub(super) fn paint_laid_out(
+pub(crate) fn paint_laid_out(
     mut root: gpui::Stateful<gpui::Div>,
     laid: &sleipnir_widget::Layout,
     tokens: &ChromeTokens,

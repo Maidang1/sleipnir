@@ -51,8 +51,8 @@ pub use keymap::{
     font_zoom_key_bindings, last_window_close_quits, tmux_preset_bindings,
 };
 pub use pane_tree::{
-    Branch, CloseOutcome, Direction, LeafContent, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis,
-    SplitPath, neighbor,
+    Branch, CloseOutcome, Direction, LeafContent, MIN_RATIO, PaneId, PaneNode, PaneRect, PanelView,
+    SplitAxis, SplitPath, neighbor,
 };
 pub use run_ledger_global::RunLedgerGlobal;
 pub use term_element::TermElement;
@@ -668,6 +668,48 @@ impl TermView {
         )
     }
 
+    /// Block click handling (ADR-0018): moved out of `term_element.rs` so the
+    /// grid painter never imports `plugin_runtime`.
+    pub(crate) fn try_block_click(&self, e: &gpui::MouseDownEvent, cx: &App) -> bool {
+        let Some(terminal) = self.terminal_entity() else {
+            return false;
+        };
+        let content = terminal.read(cx).last_content().clone();
+        if content.mode.contains(Modes::ALT_SCREEN) {
+            return false;
+        }
+        let origin = content.terminal_bounds.bounds.origin;
+        let local = gpui::point(e.position.x - origin.x, e.position.y - origin.y);
+        let hit = terminal.read(cx).hit_local(local);
+        let row_geometry::HitTarget::Block { id, local_y } = hit else {
+            return false;
+        };
+        let cell_w = f32::from(content.terminal_bounds.cell_width);
+        let line_h = f32::from(content.terminal_bounds.line_height);
+        let pos =
+            crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
+        let Some(surface) = self.blocks.get(id) else {
+            return false;
+        };
+        let Some(laid) = surface.laid.as_ref() else {
+            return false;
+        };
+        let Some(hit) = crate::plugin_panel::action_at(laid, pos.col, pos.row) else {
+            return false;
+        };
+        if surface.stale {
+            return true;
+        }
+        crate::plugin_runtime::push_action(
+            surface.owner_instance_id,
+            id,
+            hit.action,
+            hit.arg,
+            cx,
+        );
+        true
+    }
+
     /// Whether the cursor animation should keep requesting frames.
     pub fn blink_needs_animation(&self, cx: &App) -> bool {
         match TerminalSettings::get_global(cx).blinking {
@@ -1036,7 +1078,7 @@ impl Render for TermView {
                         body
                     };
 
-                    body.child(
+                    let mut body = body.child(
                         TermElement::new(
                             terminal.clone(),
                             cx.entity(),
@@ -1047,8 +1089,112 @@ impl Render for TermView {
                             self.terminal_wants_blink,
                         )
                         .with_starfield_time(starfield_time),
-                    )
-                    .into_any_element()
+                    );
+
+                    // Block overlays (ADR-0018): GPUI elements on top of the
+                    // grid, using the shared Panel painter from
+                    // `app_shell/plugin_paint`. Click handling stays in
+                    // `try_block_click` via the TermElement mouse handler.
+                    if !terminal
+                        .read(cx)
+                        .last_content()
+                        .mode
+                        .contains(Modes::ALT_SCREEN)
+                    {
+                        let content = terminal.read(cx).last_content();
+                        let dims = content.terminal_bounds;
+                        let history = terminal.read(cx).history_size() as i32;
+                        let display_offset = content.display_offset;
+                        let geom = terminal.read(cx).row_geometry().clone();
+                        let frozen = geom.is_frozen();
+                        let rows = dims.num_lines() as i32;
+                        let cell_w = f32::from(dims.cell_width);
+                        let line_h = f32::from(dims.line_height);
+                        let top_abs =
+                            terminal::viewport_top_abs(history, display_offset);
+                        let sub = terminal.read(cx).viewport_sub();
+                        let tokens = chrome::ChromeTokens::from_palette(
+                            &palette,
+                            window.is_window_active(),
+                        );
+                        let width = f32::from(dims.bounds.size.width);
+                        let (font_family, font_size) = {
+                            let settings =
+                                sleipnir_settings::TerminalSettings::get_global(cx);
+                            (
+                                settings.font_family.clone().unwrap_or_else(|| {
+                                    sleipnir_settings::default_font_family().into()
+                                }),
+                                settings
+                                    .font_size
+                                    .unwrap_or(gpui::px(14.))
+                                    .max(gpui::px(8.)),
+                            )
+                        };
+
+                        for (idx, surface) in self.blocks.iter().enumerate() {
+                            let display_line =
+                                terminal::absolute_to_display_line(
+                                    surface.anchor.line,
+                                    history,
+                                    display_offset,
+                                );
+                            // One extra row of overscan at each edge so a
+                            // sub-row remainder does not clip a partial Block.
+                            if display_line < -1 || display_line > rows {
+                                continue;
+                            }
+                            let Some(ref laid) = surface.laid else {
+                                continue;
+                            };
+                            let y = terminal::y_for_display(
+                                &geom,
+                                display_line,
+                                top_abs,
+                                sub,
+                            );
+                            let h = geom.height_of(
+                                top_abs.saturating_add(display_line),
+                            );
+                            if !h.is_finite() || h <= 0.0 {
+                                continue;
+                            }
+
+                            let bg = if frozen {
+                                palette
+                                    .background
+                                    .blend(gpui::Hsla::black().opacity(0.12))
+                            } else if surface.stale {
+                                palette
+                                    .background
+                                    .blend(gpui::Hsla::black().opacity(0.2))
+                            } else {
+                                palette.background
+                            };
+
+                            let mut block_el = div()
+                                .id(("block-overlay", idx))
+                                .absolute()
+                                .top(gpui::px(y))
+                                .left_0()
+                                .w(gpui::px(width))
+                                .h(gpui::px(h))
+                                .bg(bg)
+                                .font_family(font_family.clone())
+                                .text_size(font_size);
+
+                            if !frozen {
+                                block_el =
+                                    crate::app_shell::plugin_paint::paint_laid_out(
+                                        block_el, laid, &tokens, cell_w, line_h,
+                                    );
+                            }
+
+                            body = body.child(block_el);
+                        }
+                    }
+
+                    body.into_any_element()
                 }
             })
             .when(show_copy_toast, |el| {
@@ -1874,7 +2020,7 @@ mod tests {
             .find("pub(super) fn render_plugin_chrome_status(")
             .unwrap();
         let end = src[start..]
-            .find("pub(super) fn panel_cell_metrics(")
+            .find("pub(crate) fn panel_cell_metrics(")
             .unwrap()
             + start;
         let chrome = &src[start..end];

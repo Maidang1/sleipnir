@@ -93,24 +93,44 @@ Do these **in this order**.
   16 ms pump); surfaces are per-window (tab detach transfers panel surfaces
   through `clone_panel_surfaces` / `insert_panel_surfaces`).
 
-**Still AppShell-owned / not done (slice 2+ of this item):**
+**Slice 2a landed (BlockOverlay):**
 
-- `term_element.rs` still paints plugin blocks and calls
-  `plugin_runtime::push_action`. Dual `LaidOutKind` painters (panel GPUI divs
-  vs terminal quads) with "must not drift" comments remain. No `BlockOverlay`.
-- Panel leaf is still `LeafContent::Panel { plugin_id: String }` plus the
-  `PanelRegistry` keyed by `PaneKey`; it has **not** become
-  `LeafContent::Panel(Entity<…>)`.
+- `term_element.rs` no longer imports `plugin_runtime`. Block painting moved to
+  GPUI div overlays in `TermView::render`, using the shared `paint_laid_out` /
+  `paint_node` from `app_shell/plugin_paint.rs`. The quad-based
+  `paint_laid_node` / `paint_block` and the dual `LaidOutKind` match in
+  `term_element.rs` are deleted. Block clicks route through
+  `TermView::try_block_click` (uses `terminal.hit_local` + `push_action`).
+  Alt-screen still skips blocks.
+
+**Slice 2b landed (PanelView tree-owned, PanelRegistry gone from PluginHost):**
+
+- `LeafContent::Panel(PanelView)` owns the `PanelSurface` directly in the pane
+  tree. `PanelView` is a plain struct (not a gpui Entity) holding the surface
+  data. `PanelRegistry` is no longer used by `PluginHost` — panel surfaces
+  travel with the tree on clone/detach instead of through
+  `clone_panel_surfaces` / `insert_panel_surfaces`.
+- `apply_panel_render` in `plugins.rs` does its own grant/terminal/occupied/
+  owner-instance checks inline and writes directly to the tree via
+  `update_panel_surface` (Replace) or `insert_panel_leaf` (Create).
+- `render_plugin_panel` reads the surface from the tree leaf instead of
+  `self.plugin.panel()`.
+- `sync_plugin_surfaces` walks tree leaves to mark stale instead of
+  `plugin.mark_panels_stale()`.
+- Close and tab-detach paths no longer call `remove_panel` / `remove_panels`;
+  dropping the `PaneNode` drops the surface.
+
+**Still AppShell-owned / not done (slice 2c+ of this item):**
+
 - `AppShell::render` still drives the pane-facts refresh side-effect pump
   (item 4). The 16 ms plugin pump already runs off `Render` in
   `plugin_dispatch` (poll vs route split); the event watch is walked there.
 - Agents `adapter.rs` second session/pane map and launch atomicity are
   untouched. `plugin_host` supervisor still has two maps.
 
-**Do (remaining):** finish the compositor split — one `LaidOutPainter` or a
-`BlockOverlay` element so the grid painter never imports `plugin_runtime`, then
-`LeafContent::Panel(Entity<…>)` to retire the parallel `PanelRegistry`. Keep
-`InputMode` as the overlay stack and `plugin_grants` alone.
+**Do (remaining):** Delete dead `PanelRegistry` code from `plugin_panel.rs`
+(the struct, its methods, and its tests). Keep `PanelSurface` and `ApplyPanel`.
+Keep `InputMode` as the overlay stack and `plugin_grants` alone.
 
 ### 2. Grow `atomic_write` into the real write discipline
 

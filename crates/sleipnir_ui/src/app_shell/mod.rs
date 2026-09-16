@@ -9,7 +9,7 @@ mod find;
 mod layout;
 mod palette;
 mod panels;
-mod plugin_paint;
+pub(crate) mod plugin_paint;
 mod plugins;
 mod query;
 mod settings;
@@ -207,8 +207,8 @@ impl Tab {
         let mut all = Vec::new();
         self.tree.walk_leaves(&mut all);
         let active = all.iter().find(|(id, _, _)| *id == self.active_pane);
-        if let Some((_, _, crate::LeafContent::Panel { plugin_id })) = active {
-            return plugin_id.clone().into();
+        if let Some((_, _, crate::LeafContent::Panel(view))) = active {
+            return view.plugin_id().to_string().into();
         }
         let mut leaves = Vec::new();
         self.tree.leaves(&mut leaves);
@@ -1491,18 +1491,6 @@ impl AppShell {
         if crate::plugin_panel::tab_close_policy(terminals_after)
             == crate::plugin_panel::TabClosePolicy::CloseTab
         {
-            // Last shell is going away. Panels cannot keep the tab alive:
-            // a tab of only plugin UI would look like a workspace with no
-            // PTY (ADR-0001). Close the tab, dropping guest panels.
-            let mut all = Vec::new();
-            tab.tree.walk_leaves(&mut all);
-            let panel_keys: Vec<_> = all
-                .into_iter()
-                .filter(|(_, _, c)| c.is_panel())
-                .map(|(_, k, _)| k)
-                .collect();
-            self.plugin.remove_panels(panel_keys);
-            self.plugin.remove_panel(closed_key);
             self.close_tab_at(index, window, cx);
             return;
         }
@@ -1520,7 +1508,6 @@ impl AppShell {
             }
             CloseOutcome::NotFound => {}
             CloseOutcome::Closed => {
-                self.plugin.remove_panel(closed_key);
                 self.apply_pane_closed(closed_key, cx);
                 if was_active {
                     if let Some(tab) = self.tabs.get_mut(index) {
@@ -1543,7 +1530,7 @@ impl AppShell {
     fn close_panel_pane(
         &mut self,
         pane_id: PaneId,
-        pane_key: PaneKey,
+        _pane_key: PaneKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1552,16 +1539,12 @@ impl AppShell {
         };
         match tab.tree.close(pane_id) {
             CloseOutcome::Closed => {
-                self.plugin.remove_panel(pane_key);
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.active_pane = tab.tree.first_leaf_id();
                 }
                 self.commit_workspace(window, cx);
             }
-            // TreeEmpty would mean the panel was the tab's only leaf, which the
-            // insert path forbids; fall back to the tab-close path just in case.
             CloseOutcome::TreeEmpty => {
-                self.plugin.remove_panel(pane_key);
                 self.close_active_tab(window, cx);
             }
             CloseOutcome::NotFound => {}
@@ -2422,10 +2405,25 @@ mod workspace_regression_tests {
     use super::{ConfirmKind, PaneKey, Tab};
     use crate::pane_tree::{CloseOutcome, PaneNode, SplitAxis};
 
+    fn demo_surface() -> crate::plugin_panel::PanelSurface {
+        crate::plugin_panel::PanelSurface {
+            plugin_id: "test".into(),
+            owner_instance_id: uuid::Uuid::nil(),
+            pane_key: PaneKey::new_v4(),
+            surface_id: uuid::Uuid::new_v4(),
+            tree: plugin_protocol::v2::Widget::Text {
+                s: "test".into(),
+                fg: plugin_protocol::v2::Tone::Fg,
+                bold: false,
+            },
+            stale: false,
+        }
+    }
+
     fn tab(id: u64, pane_id: u64, key: PaneKey) -> Tab {
         Tab {
             id,
-            tree: PaneNode::panel_leaf(pane_id, key, "test"),
+            tree: PaneNode::panel_leaf(pane_id, key, demo_surface()),
             active_pane: pane_id,
             custom_title: None,
             zoomed_pane: None,
@@ -2441,7 +2439,7 @@ mod workspace_regression_tests {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
             first: Box::new(tabs[0].tree.clone()),
-            second: Box::new(PaneNode::panel_leaf(20, second, "test")),
+            second: Box::new(PaneNode::panel_leaf(20, second, demo_surface())),
         };
         let pending = ConfirmKind::ClosePane(first);
         // A second request changes focus while the first dialog is pending.
@@ -2475,7 +2473,7 @@ mod workspace_regression_tests {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
             first: Box::new(tab.tree),
-            second: Box::new(PaneNode::panel_leaf(20, PaneKey::new_v4(), "test")),
+            second: Box::new(PaneNode::panel_leaf(20, PaneKey::new_v4(), demo_surface())),
         };
         tab.active_pane = 20;
         tab.reconcile_pane_focus();
