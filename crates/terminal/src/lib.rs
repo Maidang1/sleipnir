@@ -5,8 +5,8 @@
 //! the display-line geometry helpers (`row_map`) that route every y
 //! coordinate through `row_geometry`.
 //!
-//! No GPUI rendering lives here; the crate stops at terminal state and
-//! events. `sleipnir_ui` owns painting.
+//! The crate accepts GPUI input events (`Mouse*Event`, `Window`) for pointer
+//! session tracking; `sleipnir_ui` owns painting and element layout.
 
 mod mappings;
 mod row_map;
@@ -22,7 +22,7 @@ pub mod terminal_settings;
 
 pub use osc_notify::{OscNotify, scan_osc_notify};
 pub use osc133::{
-    Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
+    AbsLine, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
     rebase_markers_after_history_shrink,
 };
 pub(crate) use row_map::PointerMap;
@@ -508,9 +508,9 @@ const DEBUG_TERMINAL_HEIGHT: Pixels = px(30.);
 const DEBUG_CELL_WIDTH: Pixels = px(5.);
 const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 
-/// Inserts Zed-specific environment variables for terminal sessions.
+/// Inserts Sleipnir-specific environment variables for terminal sessions.
 /// Used by both local terminals and remote terminals (via SSH).
-pub fn insert_zed_terminal_env(
+pub fn insert_sleipnir_terminal_env(
     env: &mut HashMap<String, String>,
     version: &impl std::fmt::Display,
 ) {
@@ -816,7 +816,7 @@ impl TerminalBuilder {
                     .or_insert_with(|| "en_US.UTF-8".to_string());
             }
 
-            insert_zed_terminal_env(&mut env, &version);
+            insert_sleipnir_terminal_env(&mut env, &version);
 
             #[derive(Default)]
             struct ShellParams {
@@ -943,7 +943,7 @@ impl TerminalBuilder {
         // as soon as the `on_app_quit` futures resolve. Perform the same
         // escalation in a quit observer, whose future keeps the app alive for
         // the grace period, so that processes ignoring SIGHUP/SIGTERM don't
-        // outlive Zed (#47412). The subscription can't be stored on `Terminal`
+        // outlive Sleipnir (#47412). The subscription can't be stored on `Terminal`
         // (`Subscription` is not `Send`, and `TerminalBuilder` is built on a
         // background thread), so its lifetime is tied to the entity's release
         // instead.
@@ -1105,6 +1105,38 @@ impl InteractionState {
             PointerSession::Selecting { dragging: true, .. }
         )
     }
+
+    fn next_link_id(&mut self) -> usize {
+        let res = self.next_link_id;
+        self.next_link_id = self.next_link_id.wrapping_add(1);
+        res
+    }
+
+    fn update_hover(
+        &mut self,
+        prev_word: Option<HoveredWord>,
+        word_match: Range,
+        word: String,
+    ) -> bool {
+        if let Some(prev_word) = prev_word
+            && prev_word.word == word
+            && prev_word.word_match == word_match
+        {
+            self.hovered = Some(HoveredWord {
+                word,
+                word_match,
+                id: prev_word.id,
+            });
+            return false;
+        }
+        let id = self.next_link_id();
+        self.hovered = Some(HoveredWord {
+            word,
+            word_match,
+            id,
+        });
+        true
+    }
 }
 
 struct SemanticsState {
@@ -1137,6 +1169,51 @@ impl SemanticsState {
             started_at: Instant::now(),
             cwd_timeline: CwdTimeline::new(initial_cwd),
         }
+    }
+
+    fn mono_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    fn prompt_marker_lines(&self) -> Vec<i32> {
+        self.prompt_markers
+            .iter()
+            .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
+            .filter_map(|m| m.line)
+            .collect()
+    }
+
+    fn publish_rebase(&mut self, removed: i32) {
+        if removed <= 0 {
+            return;
+        }
+        match self.pending_block_anchor_changes.as_mut_slice() {
+            [BlockAnchorChange::Invalidate] => {}
+            [BlockAnchorChange::Rebase(total)] => {
+                *total = total.saturating_add(removed);
+            }
+            [] => self
+                .pending_block_anchor_changes
+                .push(BlockAnchorChange::Rebase(removed)),
+            _ => unreachable!("block anchor change queue is producer-canonicalized"),
+        }
+    }
+
+    fn publish_invalidate(&mut self) {
+        self.pending_block_anchor_changes.clear();
+        self.pending_block_anchor_changes
+            .push(BlockAnchorChange::Invalidate);
+    }
+
+    fn cwd_at_line(
+        &self,
+        line: i32,
+        history_size: usize,
+        history_limit: usize,
+        current: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        self.cwd_timeline
+            .cwd_at_line(line, history_size, history_limit, current)
     }
 }
 
@@ -1481,30 +1558,9 @@ impl Terminal {
         word: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(prev_word) = prev_word
-            && prev_word.word == word
-            && prev_word.word_match == word_match
-        {
-            self.interaction.hovered = Some(HoveredWord {
-                word,
-                word_match,
-                id: prev_word.id,
-            });
-            return;
+        if self.interaction.update_hover(prev_word, word_match, word) {
+            cx.notify()
         }
-
-        self.interaction.hovered = Some(HoveredWord {
-            word,
-            word_match,
-            id: self.next_link_id(),
-        });
-        cx.notify()
-    }
-
-    fn next_link_id(&mut self) -> usize {
-        let res = self.interaction.next_link_id;
-        self.interaction.next_link_id = self.interaction.next_link_id.wrapping_add(1);
-        res
     }
 
     pub fn last_content(&self) -> &Content {
@@ -1635,7 +1691,7 @@ impl Terminal {
     }
 
     fn mono_ms(&self) -> u64 {
-        self.semantics.started_at.elapsed().as_millis() as u64
+        self.semantics.mono_ms()
     }
 
     fn emit_tracker_out(&mut self, out: TrackerOut, cx: &mut Context<Self>) {
@@ -1671,9 +1727,10 @@ impl Terminal {
     /// Scroll so `absolute` line (OSC 133 marker coords) is near the top.
     /// Sets `sub` to 0 so a Block at that anchor lands flush (ADR-0018).
     pub fn scroll_to_absolute(&mut self, absolute: i32, column: usize) {
+        let abs = AbsLine(absolute);
         let history = self.term.lock_unfair().history_size() as i32;
-        let grid_line = absolute_to_grid_line(absolute, history);
-        self.viewport.position.jump_to_anchor(absolute);
+        let grid_line = abs.to_grid(history);
+        self.viewport.position.jump_to_anchor(abs.0);
         self.events
             .push_back(InternalEvent::ScrollToPoint(Point::new(grid_line, column)));
     }
@@ -1699,7 +1756,7 @@ impl Terminal {
         let term = self.term.lock_unfair();
         let history = term.history_size() as i32;
         let cursor = term.grid().cursor.point;
-        let start_line = absolute_to_grid_line(start_abs, history);
+        let start_line = AbsLine(start_abs).to_grid(history);
         let text = grid_text_range(&term, start_line, start_col, cursor.line.0, cursor.column.0);
         drop(term);
         if text.trim().is_empty() {
@@ -1711,12 +1768,7 @@ impl Terminal {
 
     /// Scrollback lines that mark prompt starts (for jump navigation).
     pub fn prompt_marker_lines(&self) -> Vec<i32> {
-        self.semantics
-            .prompt_markers
-            .iter()
-            .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
-            .filter_map(|m| m.line)
-            .collect()
+        self.semantics.prompt_marker_lines()
     }
 
     /// Option/Alt-click: CSI left/right to the clicked cell when it is inside
@@ -1741,7 +1793,7 @@ impl Terminal {
         // points are alacritty grid lines. Convert the prompt line to grid so all
         // three share one coordinate space.
         let history_size = self.term.lock_unfair().history_size() as i32;
-        let prompt_line = prompt_line_abs.map(|abs| absolute_to_grid_line(abs, history_size));
+        let prompt_line = prompt_line_abs.map(|abs| AbsLine(abs).to_grid(history_size));
         let cursor = self.last_content.cursor.point;
         click_to_move_sequence(ClickToMove {
             click_line: point.line,
@@ -1763,32 +1815,30 @@ impl Terminal {
         }
         let current = {
             let term = self.term.lock_unfair();
-            // Top of viewport in absolute scrollback coords.
-            let offset = term.grid().display_offset() as i32;
+            let offset = term.grid().display_offset();
             let history = term.history_size() as i32;
-            history - offset
+            AbsLine(viewport_top_abs(history, offset))
         };
         let target = if delta < 0 {
-            lines.iter().rev().find(|&&l| l < current).copied()
+            lines.iter().rev().find(|&&l| l < current.0).copied()
         } else {
-            lines.iter().find(|&&l| l > current).copied()
+            lines.iter().find(|&&l| l > current.0).copied()
         };
         let Some(target_line) = target else {
             return false;
         };
-        // Scroll so target is near the top of the viewport.
+        let target_abs = AbsLine(target_line);
         let term = self.term.lock_unfair();
         let history = term.history_size() as i32;
         drop(term);
-        let target_offset = (history - target_line).max(0) as usize;
+        let target_offset = (history - target_abs.0).max(0) as usize;
         let mut term = self.term.lock();
         let now = term.grid().display_offset() as i32;
         let delta_lines = target_offset as i32 - now;
         if delta_lines != 0 {
             scroll_display(&mut term, Scroll::Delta(delta_lines));
         }
-        // Flush so a Block at the prompt lands against the viewport edge.
-        self.viewport.position.jump_to_anchor(target_line);
+        self.viewport.position.jump_to_anchor(target_abs.0);
         true
     }
 
@@ -2607,7 +2657,7 @@ impl Terminal {
     /// that's running inside the terminal.
     ///
     /// This does *not* return the working directory of the shell that runs on the
-    /// remote host, in case Zed is connected to a remote host.
+    /// remote host, in case Sleipnir is connected to a remote host.
     fn client_side_working_directory(&self) -> Option<PathBuf> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info
@@ -2633,28 +2683,11 @@ impl Terminal {
     }
 
     fn publish_rebase(&mut self, removed: i32) {
-        if removed <= 0 {
-            return;
-        }
-
-        match self.semantics.pending_block_anchor_changes.as_mut_slice() {
-            [BlockAnchorChange::Invalidate] => {}
-            [BlockAnchorChange::Rebase(total)] => {
-                *total = total.saturating_add(removed);
-            }
-            [] => self
-                .semantics
-                .pending_block_anchor_changes
-                .push(BlockAnchorChange::Rebase(removed)),
-            _ => unreachable!("block anchor change queue is producer-canonicalized"),
-        }
+        self.semantics.publish_rebase(removed);
     }
 
     fn publish_invalidate(&mut self) {
-        self.semantics.pending_block_anchor_changes.clear();
-        self.semantics
-            .pending_block_anchor_changes
-            .push(BlockAnchorChange::Invalidate);
+        self.semantics.publish_invalidate();
     }
 
     fn invalidate_terminal_anchors(&mut self) {
@@ -2665,7 +2698,7 @@ impl Terminal {
     }
 
     fn cwd_at_line(&self, line: i32, history_size: usize) -> Option<PathBuf> {
-        self.semantics.cwd_timeline.cwd_at_line(
+        self.semantics.cwd_at_line(
             line,
             history_size,
             self.term_config.scrolling_history,

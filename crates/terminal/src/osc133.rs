@@ -45,9 +45,26 @@ pub struct Osc133Marker {
     pub column: Option<usize>,
 }
 
+/// An absolute scrollback line — `cursor.line + history_size` at record time.
+///
+/// All coordinate conversions (grid line, display line) go through this type
+/// so callers never hand-roll `absolute - history + offset`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AbsLine(pub i32);
+
+impl AbsLine {
+    pub fn to_grid(self, history_size: i32) -> i32 {
+        self.0 - history_size
+    }
+
+    pub fn to_display(self, history_size: i32, display_offset: usize) -> i32 {
+        self.0 - history_size + display_offset as i32
+    }
+}
+
 /// Convert an absolute marker line into a viewport display line.
 pub fn absolute_to_display_line(absolute: i32, history_size: i32, display_offset: usize) -> i32 {
-    absolute - history_size + display_offset as i32
+    AbsLine(absolute).to_display(history_size, display_offset)
 }
 
 /// Rebase marker lines after the scrollback history shrank by `removed` lines

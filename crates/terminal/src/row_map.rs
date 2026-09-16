@@ -47,7 +47,7 @@ pub fn hit_display(geom: &RowGeometry, local_y: f32, top_abs: i32, sub: f32) -> 
 
 /// Alacritty `Point.line` for an absolute scrollback line.
 pub fn abs_to_grid_point_line(abs: i32, history_size: i32) -> i32 {
-    abs.saturating_sub(history_size)
+    crate::osc133::AbsLine(abs).to_grid(history_size)
 }
 
 /// Snapshot the mouse mapper needs. Built from [`crate::Terminal`] so paint
