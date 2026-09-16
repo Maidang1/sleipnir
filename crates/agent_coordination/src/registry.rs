@@ -288,6 +288,16 @@ impl Registry {
             .collect()
     }
 
+    /// The session that owns `pane`, if any.
+    pub fn session_for_pane(&self, pane: Uuid) -> Option<AgentSessionId> {
+        let inner = self.lock();
+        inner
+            .sessions
+            .values()
+            .find(|s| s.pane == Some(pane))
+            .map(|s| s.id)
+    }
+
     /// Host-local bounded preview, never a second copy of a complete result.
     pub fn result_excerpt(&self, task: CoordinationTaskId, max_chars: usize) -> Option<String> {
         self.lock()

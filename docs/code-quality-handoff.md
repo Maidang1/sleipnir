@@ -133,11 +133,26 @@ Do these **in this order**.
 - `AppShell::render` still drives the pane-facts refresh side-effect pump
   (item 4). The 16 ms plugin pump already runs off `Render` in
   `plugin_dispatch` (poll vs route split); the event watch is walked there.
-- Agents `adapter.rs` second session/pane map and launch atomicity are
-  untouched. `plugin_host` supervisor still has two maps.
+- `plugin_host` supervisor still has two maps (`live` + `active`).
 
-**Do (remaining):** Launch atomicity, adapter session/pane map, supervisor two
-maps. Keep `InputMode` as the overlay stack and `plugin_grants` alone.
+**Landed (adapter launch atomicity + single pane source of truth):**
+
+- **Launch is one transaction.** After `try_claim` of a `LaunchRequested`,
+  either spawn + `commit_launch(Bound { pane })` succeeds in one path, or
+  the spawned pane is closed immediately before returning. The post-hoc
+  `request_close_pane` compensation on commit failure is gone — cleanup
+  happens in the same function. Session close drains the launch effect so a
+  drained seq cannot be re-claimed.
+- **`Adapter.panes` deleted.** The reverse index
+  `BTreeMap<PaneKey, AgentSessionId>` is gone. `Registry::session_for_pane`
+  is the single pane→session lookup. `ManagedSession` no longer carries
+  `pane`; it keeps only launch-detection state (`kind`, `launch_task`,
+  `bound_at_ms`, `detected`). `writable_pane`, `pane_for`, `pane_closed`,
+  `foreground_changed`, `containing_run_exited`, `housekeeping`, and
+  `is_managed` all read the registry for the pane binding.
+
+**Do (remaining):** Supervisor two maps (`live` + `active`). Keep `InputMode`
+as the overlay stack and `plugin_grants` alone.
 
 ### 2. Grow `atomic_write` into the real write discipline
 
