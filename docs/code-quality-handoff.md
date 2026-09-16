@@ -120,7 +120,15 @@ Do these **in this order**.
 - Close and tab-detach paths no longer call `remove_panel` / `remove_panels`;
   dropping the `PaneNode` drops the surface.
 
-**Still AppShell-owned / not done (slice 2c+ of this item):**
+**Slice 2c landed (PanelRegistry deleted):**
+
+- `PanelRegistry`, its `impl`, its `StaleRegistry` impl, `ApplyPanel`, and all
+  registry-pinning tests are deleted from `plugin_panel.rs`. `PanelSurface`,
+  layout/hit-test helpers, `TabClosePolicy`, and pixel-conversion helpers remain.
+  Decision tests (grant / terminal / occupied / owner-instance) are covered by
+  the inline checks in `plugins.rs::apply_panel_render` and the pane-tree tests.
+
+**Still AppShell-owned / not done (remaining of this item):**
 
 - `AppShell::render` still drives the pane-facts refresh side-effect pump
   (item 4). The 16 ms plugin pump already runs off `Render` in
@@ -128,9 +136,8 @@ Do these **in this order**.
 - Agents `adapter.rs` second session/pane map and launch atomicity are
   untouched. `plugin_host` supervisor still has two maps.
 
-**Do (remaining):** Delete dead `PanelRegistry` code from `plugin_panel.rs`
-(the struct, its methods, and its tests). Keep `PanelSurface` and `ApplyPanel`.
-Keep `InputMode` as the overlay stack and `plugin_grants` alone.
+**Do (remaining):** Launch atomicity, adapter session/pane map, supervisor two
+maps. Keep `InputMode` as the overlay stack and `plugin_grants` alone.
 
 ### 2. Grow `atomic_write` into the real write discipline
 
