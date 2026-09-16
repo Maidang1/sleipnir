@@ -19,7 +19,7 @@ use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels, px};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap as StdHashMap;
-use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -786,19 +786,19 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
 }
 
-/// Write a default settings file if missing.
+/// Write a default settings file if missing (atomic + locked).
 pub fn ensure_default_config_file() -> anyhow::Result<()> {
     let path = config_path();
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(&default_settings_file())?;
-    std::fs::write(&path, format!("{json}\n"))?;
-    log::info!("wrote default settings to {}", path.display());
-    Ok(())
+    with_settings_file_lock(&path, || {
+        if path.exists() {
+            return Ok(());
+        }
+        let json = serde_json::to_string_pretty(&default_settings_file())?;
+        save_atomic(path.as_ref(), format!("{json}\n").as_bytes())
+            .map_err(|e| anyhow::anyhow!(e))?;
+        log::info!("wrote default settings to {}", path.display());
+        Ok(())
+    })
 }
 
 fn default_settings_file() -> SettingsFile {
@@ -912,30 +912,10 @@ fn with_settings_file_lock<T>(
     path: &Path,
     body: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-
-    let lock_path = atomic_write::sibling_path(path, ".lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("failed to open settings lock {}", lock_path.display()))?;
-    lock.lock()
-        .with_context(|| format!("failed to lock settings file {}", path.display()))?;
-
-    let result = body();
-    match (result, lock.unlock()) {
-        (Ok(_), Err(err)) => {
-            Err(err).with_context(|| format!("failed to unlock settings file {}", path.display()))
-        }
-        (result, _) => result,
-    }
+    atomic_write::with_file_lock(path, || {
+        body().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    })
+    .map_err(Into::into)
 }
 
 fn patch_settings_file_at_path(
