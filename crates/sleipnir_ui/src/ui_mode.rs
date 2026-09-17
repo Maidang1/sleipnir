@@ -49,7 +49,9 @@ impl UiMode {
 
 /// Who currently owns capture-phase keyboard input. Stored as one field on
 /// the shell; the payload lives in the matching arm.
+#[derive(Default)]
 pub(crate) enum InputMode {
+    #[default]
     Terminal,
     Confirm(CloseConfirmState),
     Consent(PluginConsentPending),
@@ -58,12 +60,6 @@ pub(crate) enum InputMode {
     Rename(RenameState),
     Find,
     Overlay(OverlayKind),
-}
-
-impl Default for InputMode {
-    fn default() -> Self {
-        Self::Terminal
-    }
 }
 
 /// Copy tag of [`InputMode`] for capture-key dispatch. Payloads stay in the

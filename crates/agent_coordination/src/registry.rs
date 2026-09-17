@@ -3539,7 +3539,7 @@ mod tests {
         let claimed = reg.try_claim(prompt_seq).expect("claim prompt");
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let waiter = reg.clone();
+        let waiter = reg;
         let thread = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
             let result = waiter.try_claim(focus_seq);

@@ -318,7 +318,6 @@ impl AppShell {
         let tab = self.tabs[idx].clone();
         let options = terminal_window_options(cx);
         match cx.open_window(options, move |window, cx| {
-            let tab = tab.clone();
             cx.new(|cx| {
                 let mut shell = AppShell::new(window, cx);
                 shell.adopt_tab(tab, window, cx);

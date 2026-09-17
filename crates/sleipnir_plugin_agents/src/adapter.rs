@@ -776,8 +776,8 @@ impl Adapter {
     /// from the registry so ownership is never stale.
     pub fn managed_rows(&self) -> BTreeMap<PaneKey, ManagedRow> {
         self.sessions
-            .iter()
-            .filter_map(|(session, _managed)| {
+            .keys()
+            .filter_map(|session| {
                 let snap = self.inspect(*session)?;
                 let pane = snap.pane?;
                 let human_owned = snap.writer == Writer::Human;
