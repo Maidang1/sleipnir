@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.7
 
 ### Features
 - Drag files from Finder/Desktop onto a terminal pane to insert their shell-quoted paths through bracketed paste (Terminal.app / iTerm2 / Ghostty parity). The target pane shows a highlight frame while files hover over it, and drops focus the pane. Drag gestures no longer leak synthetic mouse moves/releases into mouse-mode apps (vim-style TUIs).
