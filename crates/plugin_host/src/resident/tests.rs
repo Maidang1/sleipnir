@@ -2265,10 +2265,14 @@ fn resident_stores_one_arc_not_two() {
     // The session Arc held by the caller plus one in the instance map = 2.
     // Before the one-map refactor, two maps each held an Arc (caller + live +
     // active = 3). This pins the single-map invariant.
-    assert_eq!(
-        Arc::strong_count(&session),
-        2,
-        "resident session must appear in exactly one map, not two"
+    // I/O threads briefly upgrade their Weak<Session> to deliver lines (e.g.
+    // the handshake reply), which transiently bumps the count to 3 — under
+    // QEMU aarch64 that window reliably overlaps an immediate assert, so wait
+    // for the steady state instead of sampling once. The two-map regression
+    // still fails here because its third Arc is never dropped.
+    wait_until(
+        || Arc::strong_count(&session) == 2,
+        "resident session must appear in exactly one map, not two",
     );
 
     let snaps = env.sup.snapshots();
