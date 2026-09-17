@@ -5,15 +5,18 @@
 //!
 //! Discipline:
 //!
-//! - One oldest pending effect per call to [`Adapter::process_one`]; the
-//!   plugin's ~50ms tick calls it once, so effects are delivered in order.
-//! - Every processed effect gets exactly one acknowledgement naming its
-//!   exact `seq`: `BindPane` / `PromptDelivered` / `InterruptDelivered` /
-//!   `FocusDelivered` / `CloseDelivered` on success, `DeliveryFailed` on any
-//!   refusal or host error. An effect is never left un-acked — except a
-//!   host rate limit, which leaves the effect queued (same seq) for a
-//!   bounded backoff retry; only after [`MAX_RATE_LIMIT_RETRIES`] consecutive
-//!   rate-limit failures does the effect fail delivery.
+//! - One oldest *claimable* effect per call to [`Adapter::process_one`]; the
+//!   plugin's ~50ms tick calls it once. Effects are attempted oldest-first,
+//!   skipping any head effect that is no longer claimable (already retired by
+//!   a registry drain), so a younger claimable effect may be delivered first.
+//! - Every processed effect is claimed, then committed with a
+//!   [`ClaimOutcome`] for that seq.
+//!   An effect is never left un-acked — except a host rate limit, which
+//!   drops the claim without commit so the effect stays queued (same seq)
+//!   for a bounded backoff retry; only after [`MAX_RATE_LIMIT_RETRIES`]
+//!   consecutive rate-limit failures does the effect fail delivery. Claim
+//!   failure does not `apply(DeliveryFailed)`: if the effect is already
+//!   obsolete or retired (e.g. takeover), leaving it is correct.
 //! - The registry is the ownership gate: prompts, interrupts, and closes are
 //!   re-checked at execution time and fail delivery when the session is
 //!   human-owned, closed, or unbound. There is no approval operation —
@@ -33,10 +36,10 @@
 use std::collections::BTreeMap;
 
 use agent_coordination::{
-    AdapterUpdate, AgentKind, AgentSessionId, CoordinationTaskId, Effect, EffectBody, Registry,
-    Request, Response, WireRequest, Writer,
+    AdapterUpdate, AgentKind, AgentSessionId, ClaimOutcome, CoordinationTaskId, Effect, EffectBody,
+    Registry, Request, Response, WireRequest, Writer,
 };
-use sleipnir_plugin::{Capability, PaneKey};
+use sleipnir_plugin::{Capability, MAX_SEND_TEXT_CHARS, PaneKey};
 
 /// The executable each agent kind maps to. Direct program name, never a
 /// shell line — the host spawns `program` + `args` via `open_pane_argv`.
@@ -79,12 +82,6 @@ pub const MAX_RATE_LIMIT_RETRIES: u32 = 10;
 pub fn is_rate_limited(message: &str) -> bool {
     message == "rate limited"
 }
-
-/// The host's SendText payload cap, in characters (mirrors
-/// `plugin_host_calls::MAX_SEND_TEXT_CHARS`, which the plugin cannot import).
-/// An envelope that would exceed it is rejected *before* the host call —
-/// never truncated.
-pub const SEND_TEXT_CAP_CHARS: usize = 8 * 1024;
 
 /// Single-quote a path for display inside shell instructions. The envelope
 /// is pasted into an agent's UI, not executed by a shell we control — but
@@ -142,9 +139,9 @@ fn build_prompt_envelope_with_command(
          {text}\n\
          ----- end task -----"
     );
-    if envelope.chars().count() > SEND_TEXT_CAP_CHARS {
+    if envelope.chars().count() > MAX_SEND_TEXT_CHARS {
         return Err(format!(
-            "prompt envelope exceeds the host send-text cap of {SEND_TEXT_CAP_CHARS} characters"
+            "prompt envelope exceeds the host send-text cap of {MAX_SEND_TEXT_CHARS} characters"
         ));
     }
     Ok(envelope)
@@ -208,10 +205,10 @@ pub trait HostCalls {
     fn request_close_pane(&mut self, pane: PaneKey) -> Result<(), String>;
 }
 
-/// One session this adapter launched and tracks.
+/// One session this adapter launched and tracks. Only launch-detection state
+/// lives here; the canonical session→pane binding is in the registry.
 #[derive(Clone, Debug)]
 struct ManagedSession {
-    pane: PaneKey,
     kind: AgentKind,
     launch_task: CoordinationTaskId,
     /// When the pane was bound (adapter clock). Drives the launch-detection
@@ -231,26 +228,43 @@ pub struct ManagedRow {
 
 /// The result of executing one effect against the host.
 enum ExecOutcome {
-    /// Ack the effect's exact seq with these updates, in order. The task is
-    /// marked `Running` only after a successful `PromptDelivered` ack.
-    Ack(Vec<AdapterUpdate>, Option<CoordinationTaskId>),
-    /// The host rate-limited the call. The effect stays queued under the
-    /// same seq for a bounded retry; no state changes.
+    /// Launch succeeded and bound a pane. Carries the launch bookkeeping the
+    /// commit path records, so `deliver` never re-destructures the effect.
+    LaunchBound {
+        pane: PaneKey,
+        session: AgentSessionId,
+        task: CoordinationTaskId,
+        kind: AgentKind,
+    },
+    /// Non-launch delivery succeeded.
+    Delivered,
+    /// Launch delivery failed.
+    FailedLaunch,
+    /// Non-launch delivery failed.
+    Failed,
+    /// The host rate-limited the call. Drop the claim without commit so the
+    /// effect stays queued under the same seq for a bounded retry.
     RateLimited,
 }
 
 /// Result after the delivery lease has either committed every acknowledgement
 /// or deliberately left the effect queued for a rate-limit retry.
 enum DeliveryOutcome {
+    /// The effect was acked (delivered or failed); the claim is released.
     Committed,
+    /// The host rate-limited the call; the effect stays queued for retry.
     RateLimited,
+    /// The effect could not be claimed (already retired/obsolete); skip to the
+    /// next oldest effect.
+    Skipped,
 }
 
-/// The adapter: owns the shared registry handle and the session↔pane map.
+/// The adapter: owns the shared registry handle and managed-session state.
+/// The reverse index (pane → session) is served by the registry's
+/// `session_for_pane`; the adapter never duplicates it.
 pub struct Adapter {
     registry: Registry,
     sessions: BTreeMap<AgentSessionId, ManagedSession>,
-    panes: BTreeMap<PaneKey, AgentSessionId>,
     /// `SLEIPNIR_AGENT_CONTROL_SOCKET` when set: workers get a `--socket`
     /// argument in their prompt envelope.
     socket_override: Option<String>,
@@ -267,7 +281,6 @@ impl Adapter {
         Self {
             registry,
             sessions: BTreeMap::new(),
-            panes: BTreeMap::new(),
             socket_override: None,
             control_command: "sleipnir-agentctl".into(),
             backoff_until_ms: 0,
@@ -293,32 +306,37 @@ impl Adapter {
         &self.registry
     }
 
-    /// Process at most one oldest pending effect. Returns true when one was
-    /// attempted. Every attempted effect is acked with its exact seq —
-    /// success or `DeliveryFailed` — unless the host rate-limited the call,
-    /// which leaves the effect queued (same seq) for a bounded retry.
+    /// Process at most one oldest *claimable* effect. Returns true when one was
+    /// attempted. Head effects that can no longer be claimed (retired by a
+    /// registry drain) are skipped. Every attempted effect is acked with its
+    /// exact seq — success or `DeliveryFailed` — unless the host rate-limited
+    /// the call, which leaves the effect queued (same seq) for a bounded retry.
     pub fn process_one(&mut self, host: &mut dyn HostCalls, now_ms: u64) -> bool {
         if now_ms < self.backoff_until_ms {
             return false;
         }
-        let Some(effect) = self.registry.peek_effects().into_iter().next() else {
+        let effects = self.registry.peek_effects();
+        if effects.is_empty() {
             return false;
-        };
-        let seq = effect.seq;
-        match self.deliver(effect, host, now_ms) {
-            DeliveryOutcome::RateLimited => {
-                if self.note_rate_limited(seq, now_ms) {
-                    // Same seq rate-limited too many times: give up for real.
-                    self.fail_delivery(seq, now_ms);
+        }
+        for effect in effects {
+            let seq = effect.seq;
+            match self.deliver(effect, host, now_ms) {
+                DeliveryOutcome::RateLimited => {
+                    if self.note_rate_limited(seq, now_ms) {
+                        self.fail_delivery(seq, now_ms);
+                    }
+                    return true;
                 }
-                true
-            }
-            DeliveryOutcome::Committed => {
-                self.rate_limited_seq = None;
-                self.rate_retries = 0;
-                true
+                DeliveryOutcome::Committed => {
+                    self.rate_limited_seq = None;
+                    self.rate_retries = 0;
+                    return true;
+                }
+                DeliveryOutcome::Skipped => continue,
             }
         }
+        false
     }
 
     /// Count a rate-limit failure for `seq`. Returns true when the retry
@@ -335,72 +353,89 @@ impl Adapter {
     }
 
     fn fail_delivery(&mut self, seq: u64, now_ms: u64) {
-        if let Err(err) = self
-            .registry
-            .apply(AdapterUpdate::DeliveryFailed { seq }, now_ms)
-        {
-            eprintln!("agents: could not fail delivery: {err}");
+        match self.registry.try_claim(seq) {
+            Ok(claimed) => {
+                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
+                    eprintln!("agents: could not fail delivery: {err}");
+                }
+            }
+            Err(err) => {
+                eprintln!("agents: could not claim delivery {seq} to fail it: {err}");
+            }
         }
     }
 
-    /// Execute and acknowledge one effect while its session delivery lease is
-    /// held. This is the only commit path for an attempted host side effect.
+    /// Execute and acknowledge one effect while its session claim is held.
+    /// This is the only commit path for an attempted host side effect.
     fn deliver(
         &mut self,
         effect: Effect,
         host: &mut dyn HostCalls,
         now_ms: u64,
     ) -> DeliveryOutcome {
-        let registry = self.registry.clone();
         let seq = effect.seq;
-        match registry.deliver(&effect, |delivery| {
-            match self.execute_claimed(effect.clone(), host, now_ms) {
-                ExecOutcome::Ack(updates, prompt_task) => {
-                    for update in updates {
-                        if let Err(err) = delivery.apply(update, now_ms) {
-                            // The host side effect already ran. Retire the
-                            // effect under the same lease rather than allowing
-                            // another consumer to replay it.
-                            eprintln!("agents: coordination ack rejected: {err}");
-                            let _ = delivery.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms);
-                            return DeliveryOutcome::Committed;
-                        }
-                    }
-                    if let Some(task) = prompt_task
-                        && let Err(err) =
-                            delivery.apply(AdapterUpdate::TaskRunning { task }, now_ms)
-                    {
-                        eprintln!("agents: could not mark prompt running: {err}");
-                    }
-                    DeliveryOutcome::Committed
-                }
-                ExecOutcome::RateLimited => DeliveryOutcome::RateLimited,
+        let claimed = match self.registry.try_claim(seq) {
+            Ok(claimed) => claimed,
+            Err(_) => {
+                return DeliveryOutcome::Skipped;
             }
-        }) {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                // The effect became obsolete or ownership changed before the
-                // lease was acquired. No host side effect ran, so retire the
-                // stale intent through the rejection path. Successful effects
-                // are still acknowledged only inside the delivery lease.
-                eprintln!("agents: could not claim delivery {seq}: {err}");
-                if let Err(fail_err) = registry.apply(AdapterUpdate::DeliveryFailed { seq }, now_ms)
-                {
-                    eprintln!("agents: could not retire rejected delivery {seq}: {fail_err}");
+        };
+        match self.execute_claimed(claimed.effect(), host) {
+            ExecOutcome::LaunchBound {
+                pane: pane_key,
+                session,
+                task,
+                kind,
+            } => {
+                let commit_result = claimed.commit(
+                    ClaimOutcome::Delivered {
+                        pane: Some(pane_key),
+                    },
+                    now_ms,
+                );
+                match commit_result {
+                    Ok(()) => {
+                        self.sessions.insert(
+                            session,
+                            ManagedSession {
+                                kind,
+                                launch_task: task,
+                                bound_at_ms: now_ms,
+                                detected: false,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        eprintln!("agents: coordination ack rejected, closing pane: {err}");
+                        let _ = host.request_close_pane(pane_key);
+                    }
                 }
                 DeliveryOutcome::Committed
             }
+            ExecOutcome::Delivered => {
+                if let Err(err) = claimed.commit(ClaimOutcome::Delivered { pane: None }, now_ms) {
+                    eprintln!("agents: coordination ack rejected: {err}");
+                }
+                DeliveryOutcome::Committed
+            }
+            ExecOutcome::FailedLaunch => {
+                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
+                    eprintln!("agents: coordination ack rejected: {err}");
+                }
+                DeliveryOutcome::Committed
+            }
+            ExecOutcome::Failed => {
+                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
+                    eprintln!("agents: coordination ack rejected: {err}");
+                }
+                DeliveryOutcome::Committed
+            }
+            ExecOutcome::RateLimited => DeliveryOutcome::RateLimited,
         }
     }
 
-    fn execute_claimed(
-        &mut self,
-        effect: Effect,
-        host: &mut dyn HostCalls,
-        now_ms: u64,
-    ) -> ExecOutcome {
-        let seq = effect.seq;
-        match effect.body {
+    fn execute_claimed(&mut self, effect: &Effect, host: &mut dyn HostCalls) -> ExecOutcome {
+        match &effect.body {
             EffectBody::LaunchRequested {
                 session,
                 task,
@@ -408,26 +443,18 @@ impl Adapter {
                 cwd,
                 args,
                 ..
-            } => match host.open_pane_argv(Some(cwd), executable_name(kind), args) {
-                Ok(pane) => {
-                    self.sessions.insert(
-                        session,
-                        ManagedSession {
-                            pane,
-                            kind,
-                            launch_task: task,
-                            bound_at_ms: now_ms,
-                            detected: false,
-                        },
-                    );
-                    self.panes.insert(pane, session);
-                    ExecOutcome::Ack(vec![AdapterUpdate::BindPane { seq, session, pane }], None)
-                }
+            } => match host.open_pane_argv(Some(cwd.clone()), executable_name(*kind), args.clone())
+            {
+                Ok(pane) => ExecOutcome::LaunchBound {
+                    pane,
+                    session: *session,
+                    task: *task,
+                    kind: *kind,
+                },
                 Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                 Err(message) => {
                     eprintln!("agents: launch delivery failed: {message}");
-                    // Canonical registry failure also closes an unbound launch session.
-                    ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                    ExecOutcome::FailedLaunch
                 }
             },
             EffectBody::PromptRequested {
@@ -435,13 +462,13 @@ impl Adapter {
                 task,
                 text,
                 ..
-            } => match self.writable_pane(session) {
-                None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
+            } => match self.writable_pane(*session) {
+                None => ExecOutcome::Failed,
                 Some(pane) => {
                     let envelope = build_prompt_envelope_with_command(
-                        session,
-                        task,
-                        &text,
+                        *session,
+                        *task,
+                        text,
                         self.socket_override.as_deref(),
                         &self.control_command,
                     );
@@ -450,88 +477,73 @@ impl Adapter {
                         // coordinator's text is never truncated.
                         Err(message) => {
                             eprintln!("agents: prompt delivery failed: {message}");
-                            ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                            ExecOutcome::Failed
                         }
                         Ok(envelope) => match host.send_text_enter(pane, &envelope) {
-                            Ok(()) => ExecOutcome::Ack(
-                                vec![AdapterUpdate::PromptDelivered { seq }],
-                                Some(task),
-                            ),
+                            Ok(()) => ExecOutcome::Delivered,
                             Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                             Err(message) => {
                                 eprintln!("agents: prompt delivery failed: {message}");
-                                ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                                ExecOutcome::Failed
                             }
                         },
                     }
                 }
             },
-            EffectBody::InterruptRequested { session, .. } => match self.writable_pane(session) {
-                None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
+            EffectBody::InterruptRequested { session, .. } => match self.writable_pane(*session) {
+                None => ExecOutcome::Failed,
                 Some(pane) => match host.send_key(pane, "ctrl-c") {
-                    Ok(()) => {
-                        ExecOutcome::Ack(vec![AdapterUpdate::InterruptDelivered { seq }], None)
-                    }
+                    Ok(()) => ExecOutcome::Delivered,
                     Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                     Err(message) => {
                         eprintln!("agents: interrupt delivery failed: {message}");
-                        ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                        ExecOutcome::Failed
                     }
                 },
             },
-            // Focus is visibility-only: no ownership gate, but the pane must
-            // still be one we bound.
-            EffectBody::FocusRequested { session } => match self.pane_for(session) {
-                None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
+            EffectBody::FocusRequested { session } => match self.pane_for(*session) {
+                None => ExecOutcome::Failed,
                 Some(pane) => match host.focus_pane(pane) {
-                    Ok(()) => ExecOutcome::Ack(vec![AdapterUpdate::FocusDelivered { seq }], None),
+                    Ok(()) => ExecOutcome::Delivered,
                     Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                     Err(message) => {
                         eprintln!("agents: focus delivery failed: {message}");
-                        ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
+                        ExecOutcome::Failed
                     }
                 },
             },
-            EffectBody::CloseRequested { session } => {
-                match self.writable_pane(session) {
-                    None => ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None),
-                    Some(pane) => match host.request_close_pane(pane) {
-                        // Ok means the close *request* was accepted (a busy
-                        // pane may show a confirm the user can cancel). The
-                        // session closes when the real PaneClosed arrives.
-                        Ok(()) => {
-                            ExecOutcome::Ack(vec![AdapterUpdate::CloseDelivered { seq }], None)
-                        }
-                        Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
-                        Err(message) => {
-                            eprintln!("agents: close delivery failed: {message}");
-                            ExecOutcome::Ack(vec![AdapterUpdate::DeliveryFailed { seq }], None)
-                        }
-                    },
-                }
-            }
+            EffectBody::CloseRequested { session } => match self.writable_pane(*session) {
+                None => ExecOutcome::Failed,
+                Some(pane) => match host.request_close_pane(pane) {
+                    Ok(()) => ExecOutcome::Delivered,
+                    Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
+                    Err(message) => {
+                        eprintln!("agents: close delivery failed: {message}");
+                        ExecOutcome::Failed
+                    }
+                },
+            },
         }
     }
 
     /// The pane a write may target: session open, coordinator-owned, pane
-    /// bound in the registry, and the registry's binding agrees with ours.
+    /// bound in the registry, and the session is managed by this adapter.
     /// Re-checked at execution time because a takeover can land between the
     /// coordinator's request and this tick. Gates prompts, interrupts, and
     /// closes; focus stays visibility-only.
     fn writable_pane(&self, session: AgentSessionId) -> Option<PaneKey> {
-        let ours = *self.sessions.get(&session).map(|m| &m.pane)?;
+        if !self.sessions.contains_key(&session) {
+            return None;
+        }
         let snap = self.inspect(session)?;
         if !snap.open || snap.writer != Writer::Coordinator {
             return None;
         }
-        if snap.pane != Some(ours) {
-            return None;
-        }
-        Some(ours)
+        snap.pane
     }
 
     fn pane_for(&self, session: AgentSessionId) -> Option<PaneKey> {
-        self.sessions.get(&session).map(|m| m.pane)
+        self.inspect(session).and_then(|snap| snap.pane)
     }
 
     fn inspect(&self, session: AgentSessionId) -> Option<agent_coordination::SessionSnapshot> {
@@ -554,7 +566,7 @@ impl Adapter {
     /// ignored.
     pub fn foreground_changed(&mut self, pane: PaneKey, agent: Option<&str>, now_ms: u64) {
         let Some(agent) = agent else { return };
-        let Some(session) = self.panes.get(&pane).copied() else {
+        let Some(session) = self.registry.session_for_pane(pane) else {
             return;
         };
         let Some(managed) = self.sessions.get_mut(&session) else {
@@ -579,7 +591,7 @@ impl Adapter {
     /// `PaneClosed` on a managed pane: the pane is gone, so the coordination
     /// session closes and its in-flight tasks become `Unknown`.
     pub fn pane_closed(&mut self, pane: PaneKey, now_ms: u64) {
-        let Some(session) = self.panes.remove(&pane) else {
+        let Some(session) = self.registry.session_for_pane(pane) else {
             return;
         };
         self.sessions.remove(&session);
@@ -591,7 +603,7 @@ impl Adapter {
     /// session closes. Never used to settle a prompt task — in-flight tasks
     /// become `Unknown` via the close.
     pub fn containing_run_exited(&mut self, pane: PaneKey, now_ms: u64) {
-        let Some(session) = self.panes.remove(&pane) else {
+        let Some(session) = self.registry.session_for_pane(pane) else {
             return;
         };
         self.sessions.remove(&session);
@@ -635,7 +647,6 @@ impl Adapter {
                     session.as_uuid(),
                     executable_name(managed.kind)
                 );
-                self.panes.remove(&managed.pane);
             }
             self.close_session(session, now_ms);
         }
@@ -765,25 +776,27 @@ impl Adapter {
     /// from the registry so ownership is never stale.
     pub fn managed_rows(&self) -> BTreeMap<PaneKey, ManagedRow> {
         self.sessions
-            .iter()
-            .map(|(session, managed)| {
-                let human_owned = self
-                    .inspect(*session)
-                    .is_some_and(|snap| snap.writer == Writer::Human);
-                (
-                    managed.pane,
+            .keys()
+            .filter_map(|session| {
+                let snap = self.inspect(*session)?;
+                let pane = snap.pane?;
+                let human_owned = snap.writer == Writer::Human;
+                Some((
+                    pane,
                     ManagedRow {
                         session: *session,
                         human_owned,
                     },
-                )
+                ))
             })
             .collect()
     }
 
     /// Whether the pane belongs to a managed session.
     pub fn is_managed(&self, pane: PaneKey) -> bool {
-        self.panes.contains_key(&pane)
+        self.registry
+            .session_for_pane(pane)
+            .is_some_and(|session| self.sessions.contains_key(&session))
     }
 }
 
@@ -1086,30 +1099,14 @@ mod tests {
         let pane = bound_pane(&adapter, session);
         assert!(adapter.is_managed(pane));
         assert_eq!(snapshot(adapter.registry(), session).pane, Some(pane));
-        // Bound but not yet detected: the launch task is still in flight.
         assert_eq!(
             task_status(adapter.registry(), task),
             TaskStatus::Dispatching
         );
-        // The binding is pinned: a rebind to a *different* pane is an error,
-        // and acking an unknown seq is an error.
-        let err = adapter
-            .registry()
-            .apply(
-                AdapterUpdate::BindPane {
-                    seq,
-                    session,
-                    pane: PaneKey::new_v4(),
-                },
-                ms(),
-            )
-            .unwrap_err();
-        assert!(err.contains("already bound"), "{err}");
-        let err = adapter
-            .registry()
-            .apply(AdapterUpdate::PromptDelivered { seq: seq + 100 }, ms())
-            .unwrap_err();
-        assert!(err.contains("unknown effect"), "{err}");
+        match adapter.registry().try_claim(seq + 100) {
+            Err(err) => assert!(err.to_string().contains("unknown effect"), "{err}"),
+            Ok(_) => panic!("unknown seq must not be claimable"),
+        }
     }
 
     #[test]
@@ -1125,8 +1122,8 @@ mod tests {
             Response::FocusAccepted { .. }
         ));
         assert!(matches!(
-            call(adapter.registry(), Request::Interrupt { session }),
-            Response::InterruptAccepted { .. }
+            call(adapter.registry(), Request::Close { session }),
+            Response::CloseAccepted { .. }
         ));
         let pending = adapter.registry().peek_effects();
         assert_eq!(pending.len(), 2);
@@ -1134,7 +1131,7 @@ mod tests {
         assert!(matches!(pending[0].body, EffectBody::FocusRequested { .. }));
         assert!(adapter.process_one(&mut host, ms()));
         assert_eq!(host.focuses.len(), 1);
-        assert_eq!(host.keys.len(), 0, "interrupt not processed yet");
+        assert_eq!(host.closes.len(), 0, "close not processed yet");
         let remaining = adapter.registry().peek_effects();
         assert_eq!(remaining.len(), 1);
         assert_ne!(
@@ -1184,13 +1181,14 @@ mod tests {
             call(adapter.registry(), Request::Interrupt { session }),
             Response::InterruptAccepted { .. }
         ));
-        // The human takes over between acceptance and delivery.
+        // The human takes over between acceptance and delivery; takeover
+        // retires the queued interrupt without a host write.
         call(adapter.registry(), Request::HumanTakeover { session });
-        assert!(adapter.process_one(&mut host, ms()));
         assert!(host.keys.is_empty(), "never interrupt a human-owned pane");
         let _ = pane;
         assert!(adapter.registry().peek_effects().is_empty());
         assert_eq!(task_status(adapter.registry(), prompt), TaskStatus::Unknown);
+        assert!(!adapter.process_one(&mut host, ms()));
     }
 
     #[test]
@@ -1203,9 +1201,9 @@ mod tests {
             Response::CloseAccepted { .. }
         ));
         call(adapter.registry(), Request::HumanTakeover { session });
-        assert!(adapter.process_one(&mut host, ms()));
         assert!(host.closes.is_empty(), "never close a human-owned pane");
         assert!(adapter.registry().peek_effects().is_empty());
+        assert!(!adapter.process_one(&mut host, ms()));
         // The failed close does not close the session; the human keeps it.
         assert!(snapshot(adapter.registry(), session).open);
     }
@@ -1373,18 +1371,16 @@ mod tests {
             Response::PromptAccepted { task } => task,
             other => panic!("{other:?}"),
         };
-        // The human takes over between acceptance and delivery.
+        // The human takes over between acceptance and delivery; takeover
+        // retires the queued prompt (close-of-in-flight → Unknown).
         assert!(matches!(
             call(adapter.registry(), Request::HumanTakeover { session }),
             Response::TakenOver { .. }
         ));
-        assert!(adapter.process_one(&mut host, ms()));
         assert!(host.texts.is_empty(), "never type into a human-owned pane");
         assert!(adapter.registry().peek_effects().is_empty());
-        assert_eq!(
-            task_status(adapter.registry(), prompt),
-            TaskStatus::FailedDelivery
-        );
+        assert_eq!(task_status(adapter.registry(), prompt), TaskStatus::Unknown);
+        assert!(!adapter.process_one(&mut host, ms()));
     }
 
     #[test]
@@ -1986,15 +1982,15 @@ mod tests {
         let session = AgentSessionId::new();
         let task = CoordinationTaskId::new();
         let overhead = envelope_overhead(session, task, None);
-        let fits = "x".repeat(SEND_TEXT_CAP_CHARS - overhead);
+        let fits = "x".repeat(MAX_SEND_TEXT_CHARS - overhead);
         let ok = build_prompt_envelope(session, task, &fits, None).unwrap();
-        assert_eq!(ok.chars().count(), SEND_TEXT_CAP_CHARS);
+        assert_eq!(ok.chars().count(), MAX_SEND_TEXT_CHARS);
         assert!(ok.contains(&fits), "user text is never truncated");
 
-        let over = "x".repeat(SEND_TEXT_CAP_CHARS - overhead + 1);
+        let over = "x".repeat(MAX_SEND_TEXT_CHARS - overhead + 1);
         let err = build_prompt_envelope(session, task, &over, None).unwrap_err();
         assert!(
-            err.contains(&SEND_TEXT_CAP_CHARS.to_string()),
+            err.contains(&MAX_SEND_TEXT_CHARS.to_string()),
             "cap named in the error: {err}"
         );
     }
@@ -2017,7 +2013,7 @@ mod tests {
         let mut host = FakeHost::default();
         let (session, _, _) = launched_and_detected_pane(&mut adapter, &mut host);
         let overhead = envelope_overhead(session, CoordinationTaskId::new(), None);
-        let over = "y".repeat(SEND_TEXT_CAP_CHARS - overhead + 1);
+        let over = "y".repeat(MAX_SEND_TEXT_CHARS - overhead + 1);
         let prompt = match call(
             adapter.registry(),
             Request::Prompt {
@@ -2046,7 +2042,7 @@ mod tests {
         let mut host = FakeHost::default();
         let (session, _, pane) = launched_and_detected_pane(&mut adapter, &mut host);
         let overhead = envelope_overhead(session, CoordinationTaskId::new(), None);
-        let fits = "z".repeat(SEND_TEXT_CAP_CHARS - overhead);
+        let fits = "z".repeat(MAX_SEND_TEXT_CHARS - overhead);
         let prompt = match call(
             adapter.registry(),
             Request::Prompt {
@@ -2060,7 +2056,7 @@ mod tests {
         assert!(adapter.process_one(&mut host, ms()));
         assert_eq!(host.texts.len(), 1);
         assert_eq!(host.texts[0].0, pane);
-        assert_eq!(host.texts[0].1.chars().count(), SEND_TEXT_CAP_CHARS);
+        assert_eq!(host.texts[0].1.chars().count(), MAX_SEND_TEXT_CHARS);
         assert!(host.texts[0].1.contains(&fits));
         assert_eq!(task_status(adapter.registry(), prompt), TaskStatus::Running);
     }
@@ -2109,5 +2105,34 @@ mod tests {
             "empty override is treated as unset: {}",
             host.texts[0].1
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Tests for atomic launch + registry-authoritative pane lookups
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn closed_session_drains_its_launch_effect() {
+        // A closed session drains its launch effect. The adapter's
+        // process_one finds nothing to claim and never opens a pane, so
+        // the effect can never be spawned a second time under that seq.
+        let mut adapter = Adapter::new(Registry::new());
+        let mut host = FakeHost::default();
+        let (session, _task) = launch(adapter.registry(), AgentKind::Claude);
+        adapter
+            .registry()
+            .apply(AdapterUpdate::SessionClosed { session }, ms())
+            .unwrap();
+        assert!(
+            adapter.registry().peek_effects().is_empty(),
+            "session close drains its effects"
+        );
+        assert!(
+            !adapter.process_one(&mut host, ms()),
+            "nothing to process: the effect was drained"
+        );
+        assert!(host.opened.is_empty(), "no pane was opened");
+        assert!(!adapter.process_one(&mut host, ms()), "still nothing");
+        assert!(host.opened.is_empty(), "still no pane");
     }
 }

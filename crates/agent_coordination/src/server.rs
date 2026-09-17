@@ -47,24 +47,15 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
-/// `$SLEIPNIR_AGENT_CONTROL_SOCKET` if set and non-empty, else
-/// `~/.config/sleipnir/agent-control.sock`.
+/// `$SLEIPNIR_AGENT_CONTROL_SOCKET` if set and non-empty, else the canonical
+/// `agent-control.sock` under [`sleipnir_paths::config_dir`].
 pub fn default_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("SLEIPNIR_AGENT_CONTROL_SOCKET") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
     }
-    if cfg!(windows) {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-            .join("agent-control.sock")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir/agent-control.sock")
-    }
+    sleipnir_paths::agent_control_socket_path()
 }
 
 #[derive(Debug)]
@@ -264,8 +255,9 @@ fn accept_loop(
 fn handle_connection(stream: std::os::unix::net::UnixStream, registry: Registry) {
     use std::io::{BufReader, Write};
 
+    use crate::frame::frame_response;
     use crate::line::{BoundedRead, MAX_LINE_BYTES, drain_until_newline, read_bounded_line};
-    use crate::protocol::{decode_request_line, encode_response_line};
+    use crate::protocol::decode_request_line;
 
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(CLIENT_READ_TIMEOUT));
@@ -291,26 +283,29 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, registry: Registry)
                 if line.trim().is_empty() {
                     continue;
                 }
-                let reply = match decode_request_line(&line) {
+                let frames = match decode_request_line(&line) {
                     Ok(req) => {
                         let resp = registry.handle(req, now_ms());
-                        match encode_response_line(&resp) {
-                            Ok(line) if line.len() <= MAX_LINE_BYTES => line,
-                            Ok(_) => error_json(
-                                resp.id,
-                                "response exceeds line length cap; result is retained without truncation",
-                            ),
-                            Err(err) => error_json(resp.id, &err),
+                        match frame_response(resp) {
+                            Ok(frames) => frames,
+                            Err(err) => vec![error_json(salvage_id(&line), &err)],
                         }
                     }
-                    Err(err) => error_json(salvage_id(&line), &format!("malformed request: {err}")),
+                    Err(err) => {
+                        vec![error_json(
+                            salvage_id(&line),
+                            &format!("malformed request: {err}"),
+                        )]
+                    }
                 };
-                let reply = if reply.len() > MAX_LINE_BYTES {
-                    error_json(salvage_id(&line), "response exceeds line length cap")
-                } else {
-                    reply
-                };
-                if writeln!(writer, "{reply}").is_err() {
+                let mut failed = false;
+                for reply in frames {
+                    if writeln!(writer, "{reply}").is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed {
                     break;
                 }
             }
@@ -329,15 +324,30 @@ fn salvage_id(line: &str) -> u64 {
 
 #[cfg(unix)]
 fn error_json(id: u64, message: &str) -> String {
+    use crate::line::MAX_LINE_BYTES;
     use crate::protocol::{Response, WireResponse, encode_response_line};
 
-    encode_response_line(&WireResponse {
-        id,
-        body: Response::Error {
-            message: message.to_string(),
-        },
-    })
-    .unwrap_or_else(|_| format!(r#"{{"id":{id},"op":"error","message":"failed to encode error"}}"#))
+    let mut message = message.to_string();
+    loop {
+        let encoded = encode_response_line(&WireResponse {
+            id,
+            body: Response::Error {
+                message: message.clone(),
+            },
+        })
+        .unwrap_or_else(|_| {
+            format!(r#"{{"id":{id},"op":"error","message":"failed to encode error"}}"#)
+        });
+        if encoded.len() <= MAX_LINE_BYTES {
+            return encoded;
+        }
+        if message.len() <= 32 {
+            return format!(
+                r#"{{"id":{id},"op":"error","message":"error exceeds line length cap"}}"#
+            );
+        }
+        message.truncate(message.len() / 2);
+    }
 }
 
 #[cfg(unix)]
@@ -402,7 +412,7 @@ mod tests {
         }
         let path = default_socket_path();
         assert!(path.ends_with("agent-control.sock"), "{}", path.display());
-        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 
     #[cfg(unix)]
@@ -701,7 +711,7 @@ mod tests {
                 next_result_offset,
                 ..
             } => {
-                assert_eq!(result, Some(payload));
+                assert_eq!(result.as_deref(), Some(payload.as_str()));
                 assert!(detail.is_none());
                 assert!(next_result_offset.is_none());
             }
@@ -713,8 +723,8 @@ mod tests {
                 next_result_offset,
                 ..
             } => {
-                assert!(result.is_some());
-                assert!(next_result_offset.is_some());
+                assert_eq!(result.as_deref(), Some(payload.as_str()));
+                assert!(next_result_offset.is_none());
             }
             other => panic!("{other:?}"),
         }

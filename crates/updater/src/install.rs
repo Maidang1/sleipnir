@@ -686,19 +686,7 @@ pub fn write_health_marker(
     };
     let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
     let path = transaction_path.parent().unwrap().join("health-ready.json");
-    let tmp = transaction_path
-        .parent()
-        .unwrap()
-        .join("health-ready.json.tmp");
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(target_os = "macos")]
-    options.mode(0o600);
-    let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, path).map_err(|e| e.to_string())?;
+    atomic_write::save_atomic(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 

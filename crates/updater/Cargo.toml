@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+atomic_write.workspace = true
 dirs.workspace = true
 ed25519-dalek = "2"
 log.workspace = true

@@ -1,23 +1,29 @@
 //! Window UI modes and focused-pane facts state.
 //!
-//! At most one modal overlay is open at a time, and `OverlayKind` makes that a
-//! property of the type rather than something the callers have to maintain. The
-//! find bar and quick-select remain independent transient modes because they
-//! intentionally coexist with normal terminal content.
+//! [`InputMode`] is the owned keyboard owner on [`crate::app_shell::AppShell`].
+//! Opening any owner replaces the previous one, so confirm, consent, menus,
+//! rename, find, and a modal overlay cannot coexist. Dismissed overlay is
+//! [`InputMode::Terminal`] (or Find), not an `Overlay(None)` sentinel.
 //!
-//! Note that the confirm dialog (`AppShell::close_confirm`) is a third modal
-//! surface that lives outside this enum and can coexist with any overlay; the
-//! key-down chain gives it priority.
+//! [`OverlayKind`] names the modal overlays that carry no extra session data.
+//! Consent is [`InputMode::Consent`], not an overlay kind.
+//!
+//! Quick-select is independent: it is designed to coexist with terminal
+//! content and does not take the keyboard.
 
+use crate::app_shell::{
+    CloseConfirmState, PluginConsentPending, RenameState, TabMenuState, TerminalMenuState,
+};
 use crate::chrome::pane_facts::PaneFacts;
 use run_ledger::PaneKey;
 use std::time::{Duration, Instant};
 
-/// The modal overlay currently on screen, if any.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Modal overlays that do not carry their own session payload.
+///
+/// There is no `None` and no `PluginConsent`. Dismissed overlay is
+/// [`InputMode::Terminal`]; consent is [`InputMode::Consent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayKind {
-    #[default]
-    None,
     Settings,
     Update,
     Palette,
@@ -25,74 +31,187 @@ pub(crate) enum OverlayKind {
     History,
     Diff,
     PluginMonitor,
-    PluginConsent,
 }
 
+/// Independent of [`InputMode`]: quick-select banners the terminal without
+/// taking capture-phase keys.
 #[derive(Default)]
 pub(crate) struct UiMode {
-    pub overlay: OverlayKind,
-    pub find_open: bool,
     pub quick_select_open: bool,
 }
 
 impl UiMode {
-    pub fn is(&self, overlay: OverlayKind) -> bool {
-        self.overlay == overlay
-    }
-
-    /// Show `overlay`, replacing whatever was open.
-    ///
-    /// Idempotent: re-opening the overlay that is already on screen changes
-    /// nothing, so a refresh path can call this without disturbing the find bar.
-    /// Use `close` to dismiss; `OverlayKind::None` is not a thing to "open".
-    pub fn open(&mut self, overlay: OverlayKind) {
-        debug_assert_ne!(
-            overlay,
-            OverlayKind::None,
-            "use close()/close_any() to dismiss an overlay"
-        );
-        if self.overlay == overlay {
-            return;
-        }
-        self.overlay = overlay;
-        // A newly opened overlay takes the keyboard, so the find bar goes away.
-        self.find_open = false;
-    }
-
-    /// Toggle `overlay`, returning whether it is now open.
-    pub fn toggle(&mut self, overlay: OverlayKind) -> bool {
-        if self.overlay == overlay {
-            self.overlay = OverlayKind::None;
-            false
-        } else {
-            self.open(overlay);
-            true
-        }
-    }
-
-    /// Close `overlay` if it is the one on screen. Returns whether it closed.
-    pub fn close(&mut self, overlay: OverlayKind) -> bool {
-        if self.overlay != overlay {
-            return false;
-        }
-        self.overlay = OverlayKind::None;
-        true
-    }
-
-    /// Show the find bar. Find is not a modal overlay, but it takes the
-    /// keyboard, so any open overlay closes first.
-    pub fn open_find(&mut self) {
-        self.overlay = OverlayKind::None;
-        self.find_open = true;
-    }
-
-    pub fn close_find(&mut self) {
-        self.find_open = false;
-    }
-
     pub fn toggle_quick_select(&mut self) -> bool {
         self.quick_select_open = !self.quick_select_open;
         self.quick_select_open
+    }
+}
+
+/// Who currently owns capture-phase keyboard input. Stored as one field on
+/// the shell; the payload lives in the matching arm.
+#[derive(Default)]
+pub(crate) enum InputMode {
+    #[default]
+    Terminal,
+    Confirm(CloseConfirmState),
+    Consent(PluginConsentPending),
+    TabMenu(TabMenuState),
+    TerminalMenu(TerminalMenuState),
+    Rename(RenameState),
+    Find,
+    Overlay(OverlayKind),
+}
+
+/// Copy tag of [`InputMode`] for capture-key dispatch. Payloads stay in the
+/// owned enum; this exists so a match does not hold a borrow across `&mut self`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputOwner {
+    Terminal,
+    Confirm,
+    Consent,
+    TabMenu,
+    TerminalMenu,
+    Rename,
+    Find,
+    Overlay(OverlayKind),
+}
+
+/// Generate a `take_*` accessor: if `self` is `$variant`, replace it with
+/// `Terminal` and return the owned payload, else `None`. The `matches!` guard
+/// makes the `mem::replace` arm total, so the fallback is `unreachable!`.
+macro_rules! take_variant {
+    ($name:ident, $variant:ident, $payload:ty) => {
+        pub fn $name(&mut self) -> Option<$payload> {
+            if matches!(self, Self::$variant(_)) {
+                match std::mem::replace(self, Self::Terminal) {
+                    Self::$variant(state) => Some(state),
+                    _ => unreachable!(),
+                }
+            } else {
+                None
+            }
+        }
+    };
+}
+
+impl InputMode {
+    pub fn owner(&self) -> InputOwner {
+        match self {
+            Self::Terminal => InputOwner::Terminal,
+            Self::Confirm(_) => InputOwner::Confirm,
+            Self::Consent(_) => InputOwner::Consent,
+            Self::TabMenu(_) => InputOwner::TabMenu,
+            Self::TerminalMenu(_) => InputOwner::TerminalMenu,
+            Self::Rename(_) => InputOwner::Rename,
+            Self::Find => InputOwner::Find,
+            Self::Overlay(kind) => InputOwner::Overlay(*kind),
+        }
+    }
+
+    pub fn is_overlay(&self, kind: OverlayKind) -> bool {
+        matches!(self, Self::Overlay(k) if *k == kind)
+    }
+
+    pub fn is_find(&self) -> bool {
+        matches!(self, Self::Find)
+    }
+
+    pub fn confirm(&self) -> Option<&CloseConfirmState> {
+        match self {
+            Self::Confirm(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    take_variant!(take_confirm, Confirm, CloseConfirmState);
+
+    pub fn consent(&self) -> Option<&PluginConsentPending> {
+        match self {
+            Self::Consent(pending) => Some(pending),
+            _ => None,
+        }
+    }
+
+    take_variant!(take_consent, Consent, PluginConsentPending);
+
+    pub fn dismiss_consent(&mut self) -> bool {
+        if matches!(self, Self::Consent(_)) {
+            *self = Self::Terminal;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn tab_menu(&self) -> Option<&TabMenuState> {
+        match self {
+            Self::TabMenu(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn tab_menu_mut(&mut self) -> Option<&mut TabMenuState> {
+        match self {
+            Self::TabMenu(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    take_variant!(take_tab_menu, TabMenu, TabMenuState);
+
+    pub fn dismiss_tab_menu(&mut self) -> bool {
+        if matches!(self, Self::TabMenu(_)) {
+            *self = Self::Terminal;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn terminal_menu(&self) -> Option<&TerminalMenuState> {
+        match self {
+            Self::TerminalMenu(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn terminal_menu_mut(&mut self) -> Option<&mut TerminalMenuState> {
+        match self {
+            Self::TerminalMenu(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    take_variant!(take_terminal_menu, TerminalMenu, TerminalMenuState);
+
+    pub fn dismiss_terminal_menu(&mut self) -> bool {
+        if matches!(self, Self::TerminalMenu(_)) {
+            *self = Self::Terminal;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn rename(&self) -> Option<&RenameState> {
+        match self {
+            Self::Rename(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn rename_mut(&mut self) -> Option<&mut RenameState> {
+        match self {
+            Self::Rename(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    take_variant!(take_rename, Rename, RenameState);
+
+    /// Replace the current owner, returning the old mode for teardown.
+    pub fn replace(&mut self, next: InputMode) -> InputMode {
+        std::mem::replace(self, next)
     }
 }
 
@@ -196,66 +315,135 @@ impl PaneFactsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_shell::ConfirmKind;
+    use gpui::{point, px};
+
+    fn confirm(tab_id: u64) -> InputMode {
+        InputMode::Confirm(CloseConfirmState {
+            message: "close?".into(),
+            kind: ConfirmKind::CloseTab(tab_id),
+        })
+    }
+
+    fn tab_menu(tab_id: u64) -> InputMode {
+        InputMode::TabMenu(TabMenuState {
+            tab_id,
+            position: point(px(1.0), px(2.0)),
+            selected: 0,
+        })
+    }
+
+    fn terminal_menu(selected: usize) -> InputMode {
+        InputMode::TerminalMenu(TerminalMenuState {
+            position: point(px(3.0), px(4.0)),
+            link: None,
+            selected,
+        })
+    }
+
+    /// Compile-time pin: `OverlayKind` has no `None` and no `PluginConsent`.
+    /// Adding either back is a type error here, not a runtime surprise.
+    #[test]
+    fn overlay_kind_has_no_none_or_plugin_consent() {
+        fn name(kind: OverlayKind) -> &'static str {
+            match kind {
+                OverlayKind::Settings => "settings",
+                OverlayKind::Update => "update",
+                OverlayKind::Palette => "palette",
+                OverlayKind::PaneFacts => "facts",
+                OverlayKind::History => "history",
+                OverlayKind::Diff => "diff",
+                OverlayKind::PluginMonitor => "monitor",
+            }
+        }
+        assert_eq!(name(OverlayKind::Settings), "settings");
+        assert_eq!(name(OverlayKind::PluginMonitor), "monitor");
+    }
+
+    #[test]
+    fn opening_settings_drops_confirm() {
+        let mut input = confirm(7);
+        input.replace(InputMode::Overlay(OverlayKind::Settings));
+        assert!(input.is_overlay(OverlayKind::Settings));
+        assert!(input.confirm().is_none());
+    }
+
+    #[test]
+    fn opening_tab_menu_clears_terminal_menu() {
+        let mut input = terminal_menu(2);
+        assert!(input.terminal_menu().is_some_and(|m| m.selected == 2));
+        input = tab_menu(9);
+        assert!(input.tab_menu().is_some_and(|m| m.tab_id == 9));
+        assert!(input.terminal_menu().is_none());
+    }
+
+    #[test]
+    fn consent_payload_exists_only_on_the_consent_arm() {
+        assert!(InputMode::Terminal.consent().is_none());
+        assert!(confirm(1).consent().is_none());
+        assert!(
+            InputMode::Overlay(OverlayKind::PluginMonitor)
+                .consent()
+                .is_none()
+        );
+        assert!(InputMode::Find.consent().is_none());
+    }
 
     #[test]
     fn modal_open_replaces_previous_overlay() {
-        let mut mode = UiMode::default();
-        mode.open(OverlayKind::Settings);
-        mode.open(OverlayKind::Diff);
-        assert!(mode.is(OverlayKind::Diff));
-        assert!(!mode.is(OverlayKind::Settings));
+        let mut input = InputMode::Overlay(OverlayKind::Settings);
+        input.replace(InputMode::Overlay(OverlayKind::Diff));
+        assert!(input.is_overlay(OverlayKind::Diff));
+        assert!(!input.is_overlay(OverlayKind::Settings));
     }
 
     #[test]
-    fn find_closes_modal_overlay() {
-        let mut mode = UiMode::default();
-        mode.open(OverlayKind::Palette);
-        mode.open_find();
-        assert_eq!(mode.overlay, OverlayKind::None);
-        assert!(mode.find_open);
-    }
-
-    /// Regression: a diff refresh re-opens the overlay that is already on
-    /// screen. That must not close the find bar the user is typing in.
-    #[test]
-    fn reopening_the_current_overlay_leaves_find_alone() {
-        let mut mode = UiMode::default();
-        mode.open(OverlayKind::Diff);
-        mode.find_open = true;
-
-        mode.open(OverlayKind::Diff);
-        assert!(mode.find_open, "re-opening the same overlay is a no-op");
-        assert!(mode.is(OverlayKind::Diff));
-
-        // Switching to a *different* overlay does take the keyboard.
-        mode.open(OverlayKind::Settings);
-        assert!(!mode.find_open);
+    fn find_replaces_modal_overlay() {
+        let mut input = InputMode::Overlay(OverlayKind::Palette);
+        input.replace(InputMode::Find);
+        assert!(input.is_find());
+        assert!(!input.is_overlay(OverlayKind::Palette));
     }
 
     #[test]
-    fn toggle_closes_only_the_matching_overlay() {
-        let mut mode = UiMode::default();
-        assert!(mode.toggle(OverlayKind::History));
-        assert!(!mode.toggle(OverlayKind::History));
-        assert_eq!(mode.overlay, OverlayKind::None);
-        assert!(!mode.close(OverlayKind::Diff));
+    fn reopening_the_current_overlay_is_identity() {
+        let mut input = InputMode::Overlay(OverlayKind::Diff);
+        input.replace(InputMode::Overlay(OverlayKind::Diff));
+        assert!(input.is_overlay(OverlayKind::Diff));
+
+        input.replace(InputMode::Overlay(OverlayKind::Settings));
+        assert!(input.is_overlay(OverlayKind::Settings));
+        assert!(!input.is_overlay(OverlayKind::Diff));
     }
 
     #[test]
-    fn plugin_consent_replaces_the_monitor() {
-        let mut mode = UiMode::default();
-        mode.open(OverlayKind::PluginMonitor);
-        mode.open(OverlayKind::PluginConsent);
-        assert!(mode.is(OverlayKind::PluginConsent));
-        assert!(!mode.is(OverlayKind::PluginMonitor));
+    fn toggle_pattern_closes_only_the_matching_overlay() {
+        let mut input = InputMode::Terminal;
+        // open
+        input.replace(InputMode::Overlay(OverlayKind::History));
+        assert!(input.is_overlay(OverlayKind::History));
+        // close
+        input.replace(InputMode::Terminal);
+        assert!(matches!(input, InputMode::Terminal));
+        // close_overlay on a different kind is a no-op
+        assert!(!input.is_overlay(OverlayKind::Diff));
+    }
+
+    #[test]
+    fn overlay_replaces_the_plugin_monitor() {
+        let mut input = InputMode::Overlay(OverlayKind::PluginMonitor);
+        input.replace(InputMode::Overlay(OverlayKind::Settings));
+        assert!(input.is_overlay(OverlayKind::Settings));
+        assert!(!input.is_overlay(OverlayKind::PluginMonitor));
     }
 
     #[test]
     fn quick_select_survives_modal_overlays() {
         let mut mode = UiMode::default();
         assert!(mode.toggle_quick_select());
-        mode.open(OverlayKind::Settings);
+        let input = InputMode::Overlay(OverlayKind::Settings);
         assert!(mode.quick_select_open);
+        assert!(input.is_overlay(OverlayKind::Settings));
     }
 
     #[test]

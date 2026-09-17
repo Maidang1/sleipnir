@@ -30,17 +30,17 @@ impl AppShell {
     }
 
     pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode.is(OverlayKind::Diff) {
+        if self.input.is_overlay(OverlayKind::Diff) {
             self.close_diff(window, cx);
             return;
         }
-        self.mode.open(OverlayKind::Diff);
+        self.open_overlay(OverlayKind::Diff, cx);
         self.refresh_diff(false, window, cx);
         cx.notify();
     }
 
     pub(crate) fn close_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.mode.close(OverlayKind::Diff) {
+        if !self.close_overlay(OverlayKind::Diff, cx) {
             return;
         }
         self.focus_active(window, cx);
@@ -60,7 +60,7 @@ impl AppShell {
         if !force {
             if let Some(crate::diff::DiffView::Ready(session)) = self.diff_view.as_ref() {
                 if session.still_fresh(&root) {
-                    self.mode.open(OverlayKind::Diff);
+                    self.open_overlay(OverlayKind::Diff, cx);
                     cx.notify();
                     return;
                 }
@@ -81,7 +81,7 @@ impl AppShell {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
         self.diff_view = Some(crate::diff::DiffView::Loading { title, generation });
-        self.mode.open(OverlayKind::Diff);
+        self.open_overlay(OverlayKind::Diff, cx);
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn(async move { crate::git_service::fetch_worktree_patch(&cwd) })
@@ -222,7 +222,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.mode.is(OverlayKind::Diff) {
+        if !self.input.is_overlay(OverlayKind::Diff) {
             return false;
         }
         let key = event.keystroke.key.as_str();

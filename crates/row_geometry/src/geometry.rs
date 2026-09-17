@@ -7,15 +7,7 @@
 use crate::Px;
 use plugin_protocol::v2::{BlockId, RunId};
 
-/// Scrollback position of a Block. Same shape as `run_ledger::run::Anchor`,
-/// and process-local for the same reason: a restored Block would claim a line
-/// that no longer means anything (ADR-0018 lifecycle). Never persisted.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Anchor {
-    /// Absolute line (`cursor.line + history_size` when the Run was recorded).
-    pub line: i32,
-    pub column: usize,
-}
+pub use plugin_protocol::v2::Anchor;
 
 /// One Block placed in scrollback, anchored to a Run.
 ///

@@ -177,29 +177,9 @@ impl LedgerState {
     }
 }
 
-/// Where `runs.json` lives for this user. Mirrors
-/// `plugin_host::default_plugin_dir_for` minus the trailing `plugins`:
-/// `~/.config/sleipnir` everywhere but Windows, so the plugin keeps reading
-/// the same file the core used to write.
-pub fn default_config_dir() -> PathBuf {
-    default_config_dir_for(cfg!(windows))
-}
-
-pub fn default_config_dir_for(windows: bool) -> PathBuf {
-    if windows {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleipnir")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".config/sleipnir")
-    }
-}
-
 /// The default ledger file for this user.
 pub fn default_runs_file() -> PathBuf {
-    default_runs_path(&default_config_dir())
+    default_runs_path(&sleipnir_paths::config_dir())
 }
 
 #[cfg(test)]
@@ -483,14 +463,5 @@ mod tests {
         let mut state = state_in(dir.path());
         state.apply_finished(RunId::new_v4(), Some(1), 100);
         assert_eq!(state.ledger.runs().count(), 0);
-    }
-
-    #[test]
-    fn config_dir_mirrors_plugin_host_layout() {
-        let unix = default_config_dir_for(false);
-        assert!(unix.ends_with(".config/sleipnir"), "unix: {unix:?}");
-        let win = default_config_dir_for(true);
-        assert!(win.ends_with("sleipnir"), "windows: {win:?}");
-        assert!(!win.ends_with("plugins"));
     }
 }

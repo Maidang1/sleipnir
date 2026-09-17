@@ -26,15 +26,22 @@ Requests acknowledge **acceptance**, never execution (`launch_accepted`,
 | **Effects** | adapter (single consumer) | `LaunchRequested` (kind/cwd/name/args), `PromptRequested` (text), `InterruptRequested`, `FocusRequested`, `CloseRequested` | durable until adapter ack / `DeliveryFailed` |
 | **Facts** | coordinator clients / UI (per-cursor) | session/task/ownership observations | capped ring; overflow increments `facts_dropped` |
 
-`Registry::peek_effects` does not consume. `Registry::facts_since(cursor)`
-does not touch the effect log. `Registry::apply` never drains either queue.
+Each session has its own effect mailbox. `Registry::peek_effects` flattens
+them oldest-seq-first and does not consume. `Registry::try_claim(seq)`
+records a per-session lease on that seq until
+`ClaimedEffect::commit(ClaimOutcome)` acks it, or drop releases the lease
+(the effect stays queued). Delivery outcomes (`*Delivered`, `BindPane`,
+`DeliveryFailed`) go **only** through that commit; `Registry::apply` of
+those updates without a live matching claim is an error.
+`Registry::facts_since(cursor)` does not touch the effect log.
+`Registry::apply` never drains either queue. JSON line packing lives in
+the server (`frame`), not the registry.
 
 Each effect has a monotonic `seq`. Peek is oldest-first. The adapter
-acknowledges by **exact `seq`** (`BindPane { seq, session, pane }`,
-`PromptDelivered { seq }`, `InterruptDelivered { seq }`,
-`FocusDelivered { seq }`, `CloseDelivered { seq }`, or
-`DeliveryFailed { seq }`). A stale delivery cannot ack a later queued
-request. Kind mismatch and unknown seq are errors and leave the log
+acknowledges by claiming the exact `seq` and committing `ClaimOutcome`
+(`Delivered` maps to `BindPane` / `*Delivered` from the claimed body;
+`Failed` is `DeliveryFailed { seq }`). A stale delivery cannot ack a later
+queued request. Kind mismatch and unknown seq are errors and leave the log
 untouched.
 
 If the effect log is full, a new request is **rejected** (`effects_rejected`);
@@ -43,7 +50,7 @@ payloads already queued are not dropped.
 ## Protocol
 
 One JSON object per line. Tagged unions, `snake_case`, additive fields via
-`#[serde(default)]`. `PROTOCOL_VERSION` is `1`.
+`#[serde(default)]`. `PROTOCOL_VERSION` is `2`.
 
 Requests carry a correlation `id`. The matching response echoes it.
 
@@ -55,10 +62,10 @@ Requests carry a correlation `id`. The matching response echoes it.
 | `launch` | `kind`, `cwd`, `name?`, `args?` | `launch_accepted` | queue `LaunchRequested`; `kind` is `codex` / `claude` / `gemini` / `opencode`; `cwd` must be absolute and NUL-free; `args` is argv |
 | `prompt` | `session`, `text` | `prompt_accepted` | queue `PromptRequested` with the text |
 | `wait` | `task` | `wait` | **immediate snapshot**: `status`, `terminal`, optional `result` / `detail`. Stop polling when `terminal` is true. The client owns any timeout. |
-| `interrupt` | `session` | `interrupt_accepted` | queue `InterruptRequested`; in-flight tasks become `interrupting` — **not** settled until `InterruptDelivered` |
+| `interrupt` | `session` | `interrupt_accepted` | queue `InterruptRequested` naming the in-flight task (rejected if idle); that task becomes `interrupting` — **not** settled until `InterruptDelivered` |
 | `focus` | `session` | `focus_accepted` | queue `FocusRequested`; requires a bound pane |
 | `inspect` | `session` | `inspect` | full snapshot including tasks (`result` / `detail` on each task) |
-| `human_takeover` | `session` | `taken_over` | writer → human |
+| `human_takeover` | `session` | `taken_over` | writer → human; queued Launch/Prompt/Interrupt/Close are retired (undelivered in-flight tasks → `unknown`); `FocusRequested` remains |
 | `close` | `session` | `close_accepted` | queue `CloseRequested`; session stays open until the adapter confirms |
 | `report_running` | `task` | `reported_running` | worker self-report: task is in flight. Same-user clients can spoof this. |
 | `report_awaiting_human` | `task`, `detail?` | `reported_awaiting_human` | worker self-report: native agent waiting on a person; coordinator prompts stay refused. Not an approval answer. |
@@ -83,7 +90,7 @@ Example:
 
 ### Task status
 
-`accepted` → `dispatching` → `running` ⇄ `awaiting_human` → `settled` | `unknown` | `failed_delivery`
+`dispatching` → `running` ⇄ `awaiting_human` → `settled` | `unknown` | `failed_delivery`
 
 `interrupting` is in-flight: an interrupt was accepted and is not yet
 confirmed. The interrupt **request** never settles a task. When the adapter
@@ -110,7 +117,9 @@ and do not resurrect the task. A second result after `settled` emits
 Exactly one writer per open session: `coordinator` or `human`.
 
 - Prompts, interrupts, and close require the coordinator.
-- `human_takeover` is an explicit coordinator request.
+- `human_takeover` is an explicit coordinator request. It also retires
+  queued coordinator intents in that session's mailbox so they cannot
+  occupy `max_effects` under a human owner.
 - `release_to_coordinator` is **only** an adapter/host update (the human
   or host gives the lock back). The excluded writer cannot reclaim it
   over the coordinator wire.
@@ -204,13 +213,13 @@ wanted.
 
 The built-in Agents plugin consumes effects and shares this `Registry`:
 
-- `LaunchRequested` → open a visible pane → `BindPane { seq, session, pane }`
-- `PromptRequested` → host `SendText` if coordinator owns that session → `PromptDelivered { seq }`
-- `InterruptRequested` → allowlisted interrupt key → `InterruptDelivered { seq }`
-  (settles in-flight tasks on that session; failure → `Unknown`)
-- `FocusRequested` → host `focus_pane` (owning window only) → `FocusDelivered { seq }`
-- `CloseRequested` → close/quit the pane → `CloseDelivered { seq }` / `SessionClosed`
-- delivery failure → `DeliveryFailed { seq }`
+- `LaunchRequested` → open a visible pane → claim + `ClaimOutcome::Delivered { pane }`
+- `PromptRequested` → host `SendText` if coordinator owns that session → `ClaimOutcome::Delivered`
+- `InterruptRequested` → allowlisted interrupt key → `ClaimOutcome::Delivered`
+  (named in-flight task → `Unknown`; failure → `Unknown`)
+- `FocusRequested` → host `focus_pane` (owning window only) → `ClaimOutcome::Delivered`
+- `CloseRequested` → close/quit the pane → `ClaimOutcome::Delivered` / `SessionClosed`
+- delivery failure → `ClaimOutcome::Failed` (requires the live claim)
 
 Observe pane/run facts → `TaskRunning` / `TaskAwaitingHuman` /
 `TaskResult` / `SessionClosed`. Human returning the pane →

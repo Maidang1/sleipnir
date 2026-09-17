@@ -9,14 +9,14 @@ use gpui::{
     UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use itertools::Itertools;
-use row_geometry::{HitTarget, RowGeometry};
+use row_geometry::RowGeometry;
 use sleipnir_settings::{TerminalBlink, TerminalPalette, TerminalSettings, get_color_at_index};
 use std::ops::Range as StdRange;
 use std::time::{Duration, Instant};
 use terminal::{
-    Cell, Color, CursorShape, GutterKind, IndexedCell, Modes, NamedColor, Range as TerminalRange,
-    Terminal, TerminalBounds, absolute_to_display_line, is_default_background_color,
-    viewport_top_abs, y_for_display,
+    Cell, Color, CursorShape, IndexedCell, Modes, NamedColor, Range as TerminalRange, Terminal,
+    TerminalBounds, absolute_to_display_line, is_default_background_color, viewport_top_abs,
+    y_for_display,
 };
 
 pub struct TermElement {
@@ -303,22 +303,7 @@ pub struct LayoutState {
     blink_alpha: f32,
     /// Whether to request another animation frame (M11).
     blink_animating: bool,
-    gutter: Vec<GutterPaint>,
     map: PaintMap,
-    block_paints: Vec<BlockPaint>,
-}
-
-struct BlockPaint {
-    display_line: i32,
-    layout: sleipnir_widget::Layout,
-    stale: bool,
-    frozen: bool,
-}
-
-struct GutterPaint {
-    display_line: i32,
-    kind: GutterKind,
-    color: gpui::Hsla,
 }
 
 impl Element for TermElement {
@@ -451,7 +436,6 @@ impl Element for TermElement {
                     top_abs,
                     sub,
                 };
-                let frozen = geom.is_frozen();
                 let skip_lines: std::collections::HashSet<i32> = if content
                     .mode
                     .contains(Modes::ALT_SCREEN)
@@ -507,11 +491,13 @@ impl Element for TermElement {
                     search_rects.extend(range_rects(m, content.display_offset, color));
                 }
 
-                // URL / path hover underline (M11).
+                // URL / path hover underline (M11). `hovered_word()` is None
+                // while a mouse-mode TUI owns the pointer.
                 let link_color = palette.ansi[4].opacity(0.85);
                 let mut hover_underlines = Vec::new();
-                let hover_link = content.last_hovered_word.is_some();
-                if let Some(hovered) = content.last_hovered_word.as_ref() {
+                let hovered = terminal.read(cx).hovered_word().cloned();
+                let hover_link = hovered.is_some();
+                if let Some(hovered) = hovered.as_ref() {
                     hover_underlines.extend(range_rects(
                         hovered.word_match,
                         content.display_offset,
@@ -542,37 +528,6 @@ impl Element for TermElement {
                     )),
                 };
 
-                let gutter = {
-                    use sleipnir_settings::RunLedgerMode;
-                    if content.mode.contains(Modes::ALT_SCREEN)
-                        || TerminalSettings::get_global(cx).run_ledger == RunLedgerMode::Off
-                    {
-                        Vec::new()
-                    } else {
-                        let rows = dimensions.num_lines() as i32;
-                        terminal
-                            .read(cx)
-                            .gutter_overlay()
-                            .into_iter()
-                            .filter_map(|mark| {
-                                let display_line = absolute_to_display_line(
-                                    mark.line,
-                                    history,
-                                    content.display_offset,
-                                );
-                                if display_line < 0 || display_line >= rows {
-                                    return None;
-                                }
-                                Some(GutterPaint {
-                                    display_line,
-                                    kind: mark.kind,
-                                    color: gutter_color(mark.status, palette.as_ref()),
-                                })
-                            })
-                            .collect()
-                    }
-                };
-
                 let blink_alpha =
                     cursor_blink_alpha(last_input_at.elapsed(), terminal_wants_blink, blinking);
                 let blink_animating = focused
@@ -581,32 +536,6 @@ impl Element for TermElement {
                         TerminalBlink::On => true,
                         TerminalBlink::TerminalControlled => terminal_wants_blink,
                     };
-
-                let mut block_paints = Vec::new();
-                if !content.mode.contains(Modes::ALT_SCREEN) {
-                    let rows = dimensions.num_lines() as i32;
-                    view.read(cx).blocks().iter().for_each(|surface| {
-                        let display_line = absolute_to_display_line(
-                            surface.anchor.line,
-                            history,
-                            content.display_offset,
-                        );
-                        // One extra row of overscan at each edge so a sub-row
-                        // remainder does not clip a partial Block.
-                        if display_line < -1 || display_line > rows {
-                            return;
-                        }
-                        let Some(laid) = surface.laid.clone() else {
-                            return;
-                        };
-                        block_paints.push(BlockPaint {
-                            display_line,
-                            layout: laid,
-                            stale: surface.stale,
-                            frozen,
-                        });
-                    });
-                }
 
                 LayoutState {
                     hitbox,
@@ -627,9 +556,7 @@ impl Element for TermElement {
                     hover_link,
                     blink_alpha,
                     blink_animating,
-                    gutter,
                     map,
-                    block_paints,
                 }
             },
         )
@@ -699,18 +626,6 @@ impl Element for TermElement {
                     for batch in &layout.batches {
                         batch.paint(origin, &layout.dimensions, &layout.map, window, cx);
                     }
-                    for mark in &layout.gutter {
-                        paint_gutter_triangle(
-                            origin,
-                            mark,
-                            &layout.dimensions,
-                            &layout.map,
-                            window,
-                        );
-                    }
-                    for block in &layout.block_paints {
-                        paint_block(origin, block, &layout.dimensions, &layout.map, window, cx);
-                    }
 
                     if self.focused
                         && let Some((col, line, ch, shape)) = layout.cursor
@@ -759,10 +674,7 @@ impl TermElement {
                 let focus = focus.clone();
                 move |e: &MouseDownEvent, window, cx| {
                     window.focus(&focus, cx);
-                    if button == MouseButton::Left && try_block_click(&terminal, &view, e, cx) {
-                        return;
-                    }
-                    if button == MouseButton::Left && try_gutter_click(&terminal, e, cx) {
+                    if button == MouseButton::Left && view.read(cx).try_block_click(e, cx) {
                         return;
                     }
                     if button == MouseButton::Right {
@@ -873,120 +785,6 @@ fn paint_underline(
         size(cols * dimensions.cell_width, h),
     );
     window.paint_quad(fill(rect, bg.color));
-}
-
-fn gutter_color(status: Option<i32>, palette: &TerminalPalette) -> gpui::Hsla {
-    match status {
-        Some(0) => palette.ansi[2],
-        Some(_) => palette.ansi[1],
-        None => palette.ansi[3],
-    }
-}
-
-fn paint_gutter_triangle(
-    origin: GpuiPoint<Pixels>,
-    mark: &GutterPaint,
-    _dimensions: &TerminalBounds,
-    map: &PaintMap,
-    window: &mut Window,
-) {
-    let row_h = map.h(mark.display_line);
-    let mid_y = map.y(origin, mark.display_line) + row_h * 0.5;
-    let h = row_h.min(px(8.0));
-    let step = px(2.0);
-    let x0 = origin.x + px(1.0);
-    for i in 0..3 {
-        let inset = px(i as f32);
-        let hh = h - inset * 2.0;
-        if hh <= px(0.5) {
-            break;
-        }
-        let x = match mark.kind {
-            GutterKind::Start => x0 + step * i as f32,
-            GutterKind::End => x0 + step * (2 - i) as f32,
-        };
-        window.paint_quad(fill(
-            Bounds::new(point(x, mid_y - hh * 0.5), size(step, hh)),
-            mark.color,
-        ));
-    }
-}
-
-fn try_block_click(
-    terminal: &Entity<Terminal>,
-    view: &Entity<crate::TermView>,
-    e: &MouseDownEvent,
-    cx: &mut App,
-) -> bool {
-    let content = terminal.read(cx).last_content().clone();
-    if content.mode.contains(Modes::ALT_SCREEN) {
-        return false;
-    }
-    let origin = content.terminal_bounds.bounds.origin;
-    let local = gpui::point(e.position.x - origin.x, e.position.y - origin.y);
-    let hit = terminal.read(cx).hit_local(local);
-    let HitTarget::Block { id, local_y } = hit else {
-        return false;
-    };
-    let cell_w = f32::from(content.terminal_bounds.cell_width);
-    let line_h = f32::from(content.terminal_bounds.line_height);
-    let pos = crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
-    // Only consume the click when it actually lands on a button. The rest of
-    // a block's area must stay available for text selection and Alt+click-to-move.
-    let Some(surface) = view.read(cx).blocks().get(id).cloned() else {
-        return false;
-    };
-    let Some(laid) = surface.laid.as_ref() else {
-        return false;
-    };
-    let Some(hit) = crate::plugin_block::action_at(laid, pos.col, pos.row) else {
-        return false;
-    };
-    if surface.stale {
-        // Dead block UI: its buttons render but must not fire.
-        return true;
-    }
-    crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
-    true
-}
-
-fn try_gutter_click(terminal: &Entity<Terminal>, e: &MouseDownEvent, cx: &mut App) -> bool {
-    let content = terminal.read(cx).last_content().clone();
-    if content.mode.contains(Modes::ALT_SCREEN) {
-        return false;
-    }
-    let origin = content.terminal_bounds.bounds.origin;
-    let x = e.position.x - origin.x;
-    if x < px(0.) || x > px(8.) {
-        return false;
-    }
-    let y = e.position.y - origin.y;
-    if y < px(0.) {
-        return false;
-    }
-    let history = terminal.read(cx).history_size() as i32;
-    let hit = terminal.read(cx).hit_local(gpui::point(x, y));
-    let abs = match hit {
-        HitTarget::Cell { line } => line,
-        HitTarget::Block { id, .. } => terminal
-            .read(cx)
-            .row_geometry()
-            .get(id)
-            .map(|b| b.anchor.line)
-            .unwrap_or(0),
-    };
-    let display_line = absolute_to_display_line(abs, history, content.display_offset);
-    let marks = terminal.read(cx).gutter_overlay();
-    let Some(mark) = marks.into_iter().find(|m| {
-        absolute_to_display_line(m.line, history, content.display_offset) == display_line
-    }) else {
-        return false;
-    };
-    terminal.update(cx, |term, cx| {
-        term.emit_gutter_click(mark.line, cx);
-        cx.notify();
-    });
-    true
 }
 
 /// Convert a terminal point range into display-space background rects.
@@ -1257,204 +1055,6 @@ fn paint_terminal_cursor(
     }
 }
 
-fn paint_block(
-    origin: GpuiPoint<Pixels>,
-    block: &BlockPaint,
-    dimensions: &TerminalBounds,
-    map: &PaintMap,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let palette = TerminalPalette::get_global(cx);
-    let top = map.y(origin, block.display_line);
-    let height = map.h(block.display_line).max(px(1.));
-    let width = dimensions.bounds.size.width;
-    let bounds = Bounds::new(point(origin.x, top), size(width, height));
-    let bg = if block.frozen {
-        palette.background.blend(gpui::Hsla::black().opacity(0.12))
-    } else if block.stale {
-        palette.background.blend(gpui::Hsla::black().opacity(0.2))
-    } else {
-        palette.background
-    };
-    window.paint_quad(fill(bounds, bg));
-    if block.frozen {
-        return;
-    }
-    let cell_w = dimensions.cell_width;
-    let line_h = dimensions.line_height;
-    let font_size = TerminalSettings::get_global(cx)
-        .font_size
-        .unwrap_or(px(14.));
-    for node in block.layout.walk() {
-        paint_laid_node(
-            origin.x,
-            top,
-            node,
-            cell_w,
-            line_h,
-            palette.as_ref(),
-            font_size,
-            window,
-            cx,
-        );
-    }
-    paint_laid_node(
-        origin.x,
-        top,
-        &block.layout.attribution,
-        cell_w,
-        line_h,
-        palette.as_ref(),
-        font_size,
-        window,
-        cx,
-    );
-}
-
-/// Text a Block paints for one laid-out node, or `None` when the node draws no
-/// text (containers, and the two kinds painted as quads).
-///
-/// Pure so the Block/Panel parity this had to be fixed for is testable without
-/// a window. There is deliberately **no catch-all**: a new [`LaidOutKind`] must
-/// be decided here, not silently rendered as the empty string. `Spark` was
-/// dropped exactly that way, and because layout still reserves its cells the
-/// symptom was correctly-sized blank space with nothing logged.
-fn block_text_for(kind: &sleipnir_widget::LaidOutKind) -> Option<String> {
-    use sleipnir_widget::LaidOutKind;
-    match kind {
-        LaidOutKind::Text { lines, .. } => Some(lines.join("\n")),
-        LaidOutKind::Code { lines } => Some(
-            lines
-                .iter()
-                .map(|l| l.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => Some(text.clone()),
-        LaidOutKind::Attribution { label, .. } => Some(label.clone()),
-        LaidOutKind::Unknown => Some("[?]".into()),
-        LaidOutKind::Truncated => Some("… truncated".into()),
-        // Shared ramp, so a sparkline reads the same in a Block and a Panel.
-        LaidOutKind::Spark { levels } => Some(sleipnir_widget::spark_glyphs(levels)),
-        // Painted as quads by the caller, which needs bounds this cannot see.
-        LaidOutKind::Sep | LaidOutKind::Bar { .. } => None,
-        LaidOutKind::Col | LaidOutKind::Row => None,
-    }
-}
-
-/// Whether a laid-out node paints bold.
-///
-/// `bold` is part of the schema and the Panel painter honours it; a Block that
-/// ignored it would render the same tree differently depending on where it is
-/// mounted. Split out from the painter so it is testable without a `Window`.
-fn block_is_bold(kind: &sleipnir_widget::LaidOutKind) -> bool {
-    matches!(kind, sleipnir_widget::LaidOutKind::Text { bold: true, .. })
-}
-
-fn paint_laid_node(
-    origin_x: Pixels,
-    block_top: Pixels,
-    node: &sleipnir_widget::LaidOut,
-    cell_w: Pixels,
-    line_h: Pixels,
-    palette: &TerminalPalette,
-    font_size: Pixels,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    use sleipnir_widget::LaidOutKind;
-    let r = node.rect;
-    let x = origin_x + cell_w * r.col as f32;
-    let y = block_top + line_h * r.row as f32;
-    let w = cell_w * r.width as f32;
-    let h = line_h * r.height.max(1) as f32;
-    let color = match &node.kind {
-        LaidOutKind::Text { tone, .. } | LaidOutKind::Badge { tone, .. } => match tone {
-            sleipnir_widget::Tone::Fg => palette.foreground,
-            sleipnir_widget::Tone::Dim => palette.foreground.opacity(0.55),
-            sleipnir_widget::Tone::Accent => palette.ansi[4],
-            sleipnir_widget::Tone::Ok => palette.ansi[2],
-            sleipnir_widget::Tone::Warn => palette.ansi[3],
-            sleipnir_widget::Tone::Err => palette.ansi[1],
-        },
-        LaidOutKind::Attribution { .. } => palette.foreground.opacity(0.55),
-        LaidOutKind::Btn { .. } => palette.ansi[4],
-        LaidOutKind::Truncated => palette.ansi[3],
-        // Matches the Panel painter's accent for sparklines.
-        LaidOutKind::Spark { .. } => palette.ansi[4],
-        // No catch-all: a new `LaidOutKind` must be considered here, not
-        // silently painted in the default foreground. The Panel painter
-        // (`app_shell/plugin_paint.rs`) is exhaustive for the same reason;
-        // the two must not drift.
-        LaidOutKind::Col
-        | LaidOutKind::Row
-        | LaidOutKind::Code { .. }
-        | LaidOutKind::Bar { .. }
-        | LaidOutKind::Sep
-        | LaidOutKind::Unknown => palette.foreground,
-    };
-    let mut font = window.text_style().font();
-    if block_is_bold(&node.kind) {
-        font.weight = gpui::FontWeight::BOLD;
-    }
-    let line_texts: Vec<String> = match &node.kind {
-        LaidOutKind::Sep => {
-            window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(1.))), color));
-            return;
-        }
-        LaidOutKind::Bar { filled, width: bw } => {
-            let fill_w = w * (*filled as f32 / (*bw).max(1) as f32);
-            window.paint_quad(fill(
-                Bounds::new(point(x, y), size(w, h)),
-                palette.background.blend(gpui::Hsla::black().opacity(0.15)),
-            ));
-            window.paint_quad(fill(
-                Bounds::new(point(x, y), size(fill_w, h)),
-                palette.ansi[4],
-            ));
-            return;
-        }
-        LaidOutKind::Text { lines, .. } => lines.clone(),
-        LaidOutKind::Code { lines } => lines.iter().map(|line| line.text.clone()).collect(),
-        kind => match block_text_for(kind) {
-            Some(text) => vec![text],
-            None => return,
-        },
-    };
-    if line_texts.is_empty() {
-        return;
-    }
-    for (line_ix, text) in line_texts.into_iter().enumerate() {
-        debug_assert!(
-            !text.contains('\n'),
-            "block line painter expects one laid-out line at a time"
-        );
-        if text.is_empty() {
-            continue;
-        }
-        let style = TextRun {
-            len: text.len(),
-            font: font.clone(),
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let _ = window
-            .text_system()
-            .shape_line(text.into(), font_size, &[style], None)
-            .paint(
-                point(x, y + line_h * line_ix as f32),
-                line_h,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-    }
-}
-
 /// A subtle white overlay, independent of the terminal's ANSI accent colors.
 fn selection_background() -> gpui::Hsla {
     gpui::Hsla::white().opacity(0.10)
@@ -1526,6 +1126,34 @@ struct TerminalInputHandler {
 mod tests {
     use super::*;
     use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
+
+    /// Text a Block would paint for a laid-out widget kind. Lives here (not on
+    /// `LaidOutKind`) because these projections have no production caller — only
+    /// the block-parity tests below assert on them.
+    fn text_content(kind: &sleipnir_widget::LaidOutKind) -> Option<String> {
+        use sleipnir_widget::LaidOutKind;
+        match kind {
+            LaidOutKind::Text { lines, .. } => Some(lines.join("\n")),
+            LaidOutKind::Code { lines } => Some(
+                lines
+                    .iter()
+                    .map(|l| l.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => Some(text.clone()),
+            LaidOutKind::Attribution { label, .. } => Some(label.clone()),
+            LaidOutKind::Unknown => Some("[?]".into()),
+            LaidOutKind::Truncated => Some("… truncated".into()),
+            LaidOutKind::Spark { levels } => Some(sleipnir_widget::spark_glyphs(levels)),
+            LaidOutKind::Sep | LaidOutKind::Bar { .. } => None,
+            LaidOutKind::Col | LaidOutKind::Row => None,
+        }
+    }
+
+    fn is_bold(kind: &sleipnir_widget::LaidOutKind) -> bool {
+        matches!(kind, sleipnir_widget::LaidOutKind::Text { bold: true, .. })
+    }
 
     #[test]
     fn wide_cell_backgrounds_do_not_overlap() {
@@ -1687,7 +1315,7 @@ mod tests {
         ];
 
         for kind in visible {
-            let text = block_text_for(&kind);
+            let text = text_content(&kind);
             assert!(
                 text.is_some_and(|t| !t.is_empty()),
                 "{kind:?} renders as nothing in a Block; \
@@ -1698,7 +1326,7 @@ mod tests {
         // Containers and the two quad-painted kinds legitimately produce no
         // text; they are drawn as geometry or not at all.
         for kind in [LaidOutKind::Col, LaidOutKind::Row] {
-            assert!(block_text_for(&kind).is_none(), "{kind:?} is a container");
+            assert!(text_content(&kind).is_none(), "{kind:?} is a container");
         }
     }
 
@@ -1707,10 +1335,10 @@ mod tests {
     #[test]
     fn spark_renders_as_ramp_glyphs() {
         use sleipnir_widget::LaidOutKind;
-        let text = block_text_for(&LaidOutKind::Spark {
+        let kind = LaidOutKind::Spark {
             levels: vec![0, 4, 8],
-        })
-        .expect("spark renders");
+        };
+        let text = text_content(&kind).expect("spark renders");
         assert_eq!(text, " ▄█");
         assert_eq!(text.chars().count(), 3, "one glyph per reserved cell");
     }
@@ -1731,10 +1359,10 @@ mod tests {
             tone: Tone::Fg,
             bold: false,
         };
-        assert!(block_is_bold(&bold), "bold text must paint bold");
-        assert!(!block_is_bold(&plain), "plain text must not paint bold");
+        assert!(is_bold(&bold), "bold text must paint bold");
+        assert!(!is_bold(&plain), "plain text must not paint bold");
         assert!(
-            !block_is_bold(&LaidOutKind::Badge {
+            !is_bold(&LaidOutKind::Badge {
                 text: "x".into(),
                 tone: Tone::Ok,
             }),
@@ -1746,7 +1374,7 @@ mod tests {
     fn block_text_for_joins_multiline_text_and_code_with_newlines() {
         use sleipnir_widget::{CodeLine, LaidOutKind, Tone};
 
-        let text = block_text_for(&LaidOutKind::Text {
+        let text = text_content(&LaidOutKind::Text {
             lines: vec!["alpha".into(), "beta".into()],
             tone: Tone::Fg,
             bold: false,
@@ -1754,7 +1382,7 @@ mod tests {
         .expect("text renders");
         assert_eq!(text, "alpha\nbeta");
 
-        let code = block_text_for(&LaidOutKind::Code {
+        let code = text_content(&LaidOutKind::Code {
             lines: vec![
                 CodeLine {
                     text: "let x = 1;".into(),

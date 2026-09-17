@@ -1,8 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::Write as _;
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -230,36 +226,19 @@ fn unix_time_ms() -> u64 {
 
 pub fn save_atomic(path: &Path, transaction: &Transaction) -> Result<(), TransactionError> {
     transaction.validate()?;
-    let parent = path.parent().ok_or_else(|| {
-        error(
-            UpdateErrorCode::InvalidTransaction,
-            "transaction path has no parent",
-        )
-    })?;
-    std::fs::create_dir_all(parent)
-        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    #[cfg(unix)]
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(transaction)
         .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(&tmp)
-        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))?;
-    if let Ok(directory) = std::fs::File::open(parent) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
+    atomic_write::save_atomic_with(
+        path,
+        &bytes,
+        atomic_write::SaveOptions {
+            #[cfg(unix)]
+            mode: 0o600,
+            #[cfg(unix)]
+            parent_mode: Some(0o700),
+        },
+    )
+    .map_err(|err| error(UpdateErrorCode::InvalidTransaction, err.to_string()))
 }
 
 pub fn force_recovery_required(

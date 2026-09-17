@@ -12,7 +12,6 @@ mod finder_service;
 mod git_service;
 mod keymap;
 mod pane_tree;
-mod panel_scene_paint;
 mod plugin_block;
 mod plugin_chrome;
 mod plugin_dispatch;
@@ -84,18 +83,6 @@ use util::shell::Shell;
 #[derive(Clone, Debug)]
 pub enum TermViewEvent {
     TitleChanged,
-    /// Request the shell open a new tab (avoids TermView holding a WeakEntity<AppShell>).
-    RequestNewTab,
-    /// Request switching to the next tab.
-    RequestNextTab,
-    /// Request switching to the previous tab.
-    RequestPrevTab,
-    /// Request reload of settings.
-    RequestReloadSettings,
-    /// Request cycling the theme.
-    RequestCycleTheme,
-    /// Request opening the settings panel.
-    RequestOpenSettings,
     /// Terminal BEL — shell may flash tab chrome (visual bell).
     Bell,
     /// Right-click on the terminal in normal mode. The shell shows the
@@ -115,10 +102,6 @@ pub enum TermViewEvent {
     /// The current command in this pane finished.
     RunFinished {
         exit_code: Option<i32>,
-    },
-    /// Overlay triangle on a command start/end line was clicked.
-    GutterClicked {
-        line: i32,
     },
     /// The user sent input to this pane (keystroke, paste, IME).
     UserTyped,
@@ -574,7 +557,6 @@ impl TermView {
                     cx.emit(TermViewEvent::TitleChanged);
                     cx.notify();
                 }
-                Event::NewNavigationTarget(_) => {}
                 Event::Open(target) => {
                     open_navigation_target(target, cx);
                 }
@@ -606,9 +588,6 @@ impl TermView {
                     cx.emit(TermViewEvent::RunFinished {
                         exit_code: *exit_code,
                     });
-                }
-                Event::GutterClicked { line } => {
-                    cx.emit(TermViewEvent::GutterClicked { line: *line });
                 }
             },
         )
@@ -686,6 +665,42 @@ impl TermView {
             self.terminal_wants_blink,
             settings,
         )
+    }
+
+    /// Block click handling (ADR-0018): moved out of `term_element.rs` so the
+    /// grid painter never imports `plugin_runtime`.
+    pub(crate) fn try_block_click(&self, e: &gpui::MouseDownEvent, cx: &App) -> bool {
+        let Some(terminal) = self.terminal_entity() else {
+            return false;
+        };
+        let content = terminal.read(cx).last_content().clone();
+        if content.mode.contains(Modes::ALT_SCREEN) {
+            return false;
+        }
+        let origin = content.terminal_bounds.bounds.origin;
+        let local = gpui::point(e.position.x - origin.x, e.position.y - origin.y);
+        let hit = terminal.read(cx).hit_local(local);
+        let row_geometry::HitTarget::Block { id, local_y } = hit else {
+            return false;
+        };
+        let cell_w = f32::from(content.terminal_bounds.cell_width);
+        let line_h = f32::from(content.terminal_bounds.line_height);
+        let pos =
+            crate::plugin_panel::cell_from_pixels(f32::from(local.x), local_y, cell_w, line_h);
+        let Some(surface) = self.blocks.get(id) else {
+            return false;
+        };
+        let Some(laid) = surface.laid.as_ref() else {
+            return false;
+        };
+        let Some(hit) = crate::plugin_panel::action_at(laid, pos.col, pos.row) else {
+            return false;
+        };
+        if surface.stale {
+            return true;
+        }
+        crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
+        true
     }
 
     /// Whether the cursor animation should keep requesting frames.
@@ -933,35 +948,6 @@ impl TermView {
             .map(|t| t.read(cx).last_content().mode.contains(Modes::ALT_SCREEN))
             .unwrap_or(false)
     }
-
-    fn new_tab(&mut self, _: &NewTab, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestNewTab);
-    }
-
-    fn next_tab(&mut self, _: &NextTab, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestNextTab);
-    }
-
-    fn prev_tab(&mut self, _: &PrevTab, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestPrevTab);
-    }
-
-    fn reload_settings(
-        &mut self,
-        _: &ReloadSettings,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.emit(TermViewEvent::RequestReloadSettings);
-    }
-
-    fn cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestCycleTheme);
-    }
-
-    fn open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(TermViewEvent::RequestOpenSettings);
-    }
 }
 
 /// Hover tooltip previewing the hyperlink/path under the pointer (M16).
@@ -1041,17 +1027,9 @@ impl Render for TermView {
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::send_text))
             .on_action(cx.listener(Self::send_keystroke))
-            .on_action(cx.listener(Self::new_tab))
-            // CloseTab (⌘W) is intentionally NOT handled here. TermView would
-            // nest-update AppShell and drop *this* entity while it is still
-            // leased for the action — that panics and tears down the window.
-            // AppShell owns the close path (close active pane, or tab if last)
-            // and receives the action via bubble phase, same as SplitRight.
-            .on_action(cx.listener(Self::next_tab))
-            .on_action(cx.listener(Self::prev_tab))
-            .on_action(cx.listener(Self::reload_settings))
-            .on_action(cx.listener(Self::cycle_theme))
-            .on_action(cx.listener(Self::open_settings))
+            // Shell actions (NewTab, CloseTab, settings, …) bubble to AppShell.
+            // Handling them here nest-updates AppShell and can drop this entity
+            // while it is still leased for the action.
             .on_key_down(cx.listener(Self::on_key_down))
             .child(match &self.terminal {
                 TerminalSlot::Loading => div()
@@ -1071,12 +1049,7 @@ impl Render for TermView {
                     .child(err.clone())
                     .into_any_element(),
                 TerminalSlot::Ready(terminal) => {
-                    let hovered = terminal
-                        .read(cx)
-                        .last_content()
-                        .last_hovered_word
-                        .as_ref()
-                        .map(|w| w.word.clone());
+                    let hovered = terminal.read(cx).hovered_word().map(|w| w.word.clone());
 
                     let a11y_text: SharedString = terminal.read(cx).visible_screen_text().into();
                     let body = div()
@@ -1098,7 +1071,7 @@ impl Render for TermView {
                         body
                     };
 
-                    body.child(
+                    let mut body = body.child(
                         TermElement::new(
                             terminal.clone(),
                             cx.entity(),
@@ -1109,8 +1082,95 @@ impl Render for TermView {
                             self.terminal_wants_blink,
                         )
                         .with_starfield_time(starfield_time),
-                    )
-                    .into_any_element()
+                    );
+
+                    // Block overlays (ADR-0018): GPUI elements on top of the
+                    // grid, using the shared Panel painter from
+                    // `app_shell/plugin_paint`. Click handling stays in
+                    // `try_block_click` via the TermElement mouse handler.
+                    if !terminal
+                        .read(cx)
+                        .last_content()
+                        .mode
+                        .contains(Modes::ALT_SCREEN)
+                    {
+                        let content = terminal.read(cx).last_content();
+                        let dims = content.terminal_bounds;
+                        let history = terminal.read(cx).history_size() as i32;
+                        let display_offset = content.display_offset;
+                        let geom = terminal.read(cx).row_geometry().clone();
+                        let frozen = geom.is_frozen();
+                        let rows = dims.num_lines() as i32;
+                        let cell_w = f32::from(dims.cell_width);
+                        let line_h = f32::from(dims.line_height);
+                        let top_abs = terminal::viewport_top_abs(history, display_offset);
+                        let sub = terminal.read(cx).viewport_sub();
+                        let tokens =
+                            chrome::ChromeTokens::from_palette(&palette, window.is_window_active());
+                        let width = f32::from(dims.bounds.size.width);
+                        let (font_family, font_size) = {
+                            let settings = sleipnir_settings::TerminalSettings::get_global(cx);
+                            (
+                                settings.font_family.clone().unwrap_or_else(|| {
+                                    sleipnir_settings::default_font_family().into()
+                                }),
+                                settings
+                                    .font_size
+                                    .unwrap_or(gpui::px(14.))
+                                    .max(gpui::px(8.)),
+                            )
+                        };
+
+                        for (idx, surface) in self.blocks.iter().enumerate() {
+                            let display_line = terminal::absolute_to_display_line(
+                                surface.anchor.line,
+                                history,
+                                display_offset,
+                            );
+                            // One extra row of overscan at each edge so a
+                            // sub-row remainder does not clip a partial Block.
+                            if display_line < -1 || display_line > rows {
+                                continue;
+                            }
+                            let Some(ref laid) = surface.laid else {
+                                continue;
+                            };
+                            let y = terminal::y_for_display(&geom, display_line, top_abs, sub);
+                            let h = geom.height_of(top_abs.saturating_add(display_line));
+                            if !h.is_finite() || h <= 0.0 {
+                                continue;
+                            }
+
+                            let bg = if frozen {
+                                palette.background.blend(gpui::Hsla::black().opacity(0.12))
+                            } else if surface.stale {
+                                palette.background.blend(gpui::Hsla::black().opacity(0.2))
+                            } else {
+                                palette.background
+                            };
+
+                            let mut block_el = div()
+                                .id(("block-overlay", idx))
+                                .absolute()
+                                .top(gpui::px(y))
+                                .left_0()
+                                .w(gpui::px(width))
+                                .h(gpui::px(h))
+                                .bg(bg)
+                                .font_family(font_family.clone())
+                                .text_size(font_size);
+
+                            if !frozen {
+                                block_el = crate::app_shell::plugin_paint::paint_laid_out(
+                                    block_el, laid, &tokens, cell_w, line_h,
+                                );
+                            }
+
+                            body = body.child(block_el);
+                        }
+                    }
+
+                    body.into_any_element()
                 }
             })
             .when(show_copy_toast, |el| {
@@ -1303,12 +1363,12 @@ fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
 /// Open web URLs, and path-like targets when `path_links` is enabled (M12).
 pub(crate) fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
     match target {
-        MaybeNavigationTarget::Url(url) if is_web_url(url) => {
+        MaybeNavigationTarget::Url(url) => {
+            // OSC8 links carry an explicit URI the emitter chose; open any scheme
+            // (mailto:, vscode://, obsidian://, …), not only web URLs. file:// is
+            // resolved to a path by hyperlink_target before it reaches here.
             log::info!("opening url: {url}");
             cx.open_url(url);
-        }
-        MaybeNavigationTarget::Url(url) => {
-            log::debug!("ignoring non-web url: {url}");
         }
         MaybeNavigationTarget::PathLike(path) => {
             if !TerminalSettings::get_global(cx).path_links {
@@ -1511,14 +1571,6 @@ fn looks_like_method_call(s: &str) -> bool {
     s.contains("()") || (s.contains('.') && s.contains('(') && s.ends_with(')'))
 }
 
-fn is_web_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("ftp://")
-}
-
 /// Monotonic counter for unique temp file names (avoids clock-regression issues).
 static PASTE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1693,16 +1745,6 @@ mod tests {
         let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")];
         assert_eq!(format_external_paths(&paths), " /tmp/a '/tmp/b c' ");
         assert_eq!(format_external_paths(&[]), "");
-    }
-
-    #[test]
-    fn is_web_url_accepts_common_schemes() {
-        assert!(is_web_url("https://example.com"));
-        assert!(is_web_url("HTTP://example.com"));
-        assert!(is_web_url("mailto:a@b.com"));
-        assert!(is_web_url("ftp://files.example"));
-        assert!(!is_web_url("file:///tmp/x"));
-        assert!(!is_web_url("not-a-url"));
     }
 
     #[test]
@@ -1936,7 +1978,7 @@ mod tests {
             .find("pub(super) fn render_plugin_chrome_status(")
             .unwrap();
         let end = src[start..]
-            .find("pub(super) fn panel_cell_metrics(")
+            .find("pub(crate) fn panel_cell_metrics(")
             .unwrap()
             + start;
         let chrome = &src[start..end];

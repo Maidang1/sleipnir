@@ -34,7 +34,7 @@ impl AppShell {
             return;
         }
         // Open the update dialog and start a check.
-        self.mode.open(OverlayKind::Update);
+        self.open_overlay(OverlayKind::Update, cx);
         self.spawn_update_check(window, cx);
     }
 
@@ -55,7 +55,7 @@ impl AppShell {
                 *state = UpdateUiState::Idle;
             }
         }
-        self.mode.close(OverlayKind::Update);
+        self.close_overlay(OverlayKind::Update, cx);
         cx.notify();
     }
 

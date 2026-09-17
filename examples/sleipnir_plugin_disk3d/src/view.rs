@@ -3,9 +3,7 @@
 //! Kept free of I/O and of the wire protocol so the whole view is unit
 //! testable: given a scan and a camera, the tree is a pure function.
 
-use plugin_protocol::v2::{
-    MAX_WIDGET_NODES, SceneBar, SceneCamera, SceneData, Tone, Widget, measure,
-};
+use plugin_protocol::v2::{MAX_WIDGET_NODES, Tone, Widget, measure};
 use sleipnir_plugin::{badge, btn, col, row, sep, text};
 
 use crate::raster::{Camera, Scene, default_light};
@@ -97,27 +95,6 @@ impl View {
         self.selected = 0;
         self.scan = scan;
     }
-
-    /// Apply a host-driven camera. The host owns the interactive camera (drag to
-    /// rotate, wheel to zoom) and reports the new state as a `camera` action
-    /// whose arg is a JSON [`SceneCamera`] — the same typed payload the scene
-    /// itself carries. Missing or malformed payloads keep the current values,
-    /// and pitch/zoom are clamped to the same readable range the button
-    /// controls use, so a stray value cannot flatten or explode the view.
-    pub fn apply_camera_arg(&mut self, arg: &str) {
-        let Ok(cam) = serde_json::from_str::<SceneCamera>(arg) else {
-            return;
-        };
-        if cam.yaw.is_finite() {
-            self.camera.yaw = wrap_angle(cam.yaw);
-        }
-        if cam.pitch.is_finite() {
-            self.camera.pitch = cam.pitch.clamp(0.05, 1.35);
-        }
-        if cam.zoom.is_finite() {
-            self.zoom = cam.zoom.clamp(0.5, 2.5);
-        }
-    }
 }
 
 fn wrap_angle(a: f32) -> f32 {
@@ -129,34 +106,44 @@ fn wrap_angle(a: f32) -> f32 {
     a
 }
 
-/// Build the raster scene for the text fallback: one cuboid per entry on a
-/// square-ish grid, plus a floor tick under each.
+/// Normalised bar height for `bytes` against the largest entry, in `0..=1`.
+/// The [`MIN_BAR_SHARE`] floor keeps a tiny directory visible as a plinth next
+/// to a dominant one instead of collapsing to zero height.
+fn bar_share(bytes: u64, largest: u64) -> f32 {
+    let share = bytes as f32 / largest.max(1) as f32;
+    share.max(MIN_BAR_SHARE).clamp(0.0, 1.0)
+}
+
+/// Build the raster scene: one cuboid per entry on a square-ish grid, plus a
+/// floor tick under each.
 ///
-/// This is a thin adapter over [`build_scene_data`]: grid layout, height
-/// normalisation and selected colouring live there, so the two render paths
-/// can never disagree about the model. Here the normalised heights are scaled
-/// back to world units and the grid is centred on the origin so auto-fit
-/// framing stays stable as the entry count changes.
+/// Entries are laid out on a near-square grid (`grid_cols` per row), heights are
+/// normalised shares of the largest entry scaled to world units, and the grid
+/// is centred on the origin so auto-fit framing stays stable as the entry count
+/// changes.
 pub fn build_scene(view: &View) -> Scene {
     let mut scene = Scene::new();
-    let data = build_scene_data(view);
-    if data.bars.is_empty() {
+    let entries = &view.scan.entries;
+    if entries.is_empty() {
         return scene;
     }
+    let cols = grid_cols(entries.len());
+    let rows = entries.len().div_ceil(cols);
+    let largest = view.scan.largest_bytes().max(1);
     let light = default_light();
-    let x0 = -((data.cols as f32 - 1.0) * BAR_PITCH) * 0.5;
-    let z0 = -((data.rows as f32 - 1.0) * BAR_PITCH) * 0.5;
-    for bar in &data.bars {
-        let x = x0 + bar.gx as f32 * BAR_PITCH;
-        let z = z0 + bar.gz as f32 * BAR_PITCH;
+    let x0 = -((cols as f32 - 1.0) * BAR_PITCH) * 0.5;
+    let z0 = -((rows as f32 - 1.0) * BAR_PITCH) * 0.5;
+    for (i, entry) in entries.iter().enumerate() {
+        let x = x0 + (i % cols) as f32 * BAR_PITCH;
+        let z = z0 + (i / cols) as f32 * BAR_PITCH;
         scene.floor_tick(x, z);
         scene.bar(
             x,
             z,
             BAR_HALF,
-            bar.height * MAX_BAR_HEIGHT,
+            bar_share(entry.bytes, largest) * MAX_BAR_HEIGHT,
             light,
-            bar.selected,
+            i == view.selected,
         );
     }
     scene
@@ -166,83 +153,6 @@ pub fn build_scene(view: &View) -> Scene {
 /// compact from every angle instead of a long wall.
 pub fn grid_cols(n: usize) -> usize {
     (n as f64).sqrt().ceil().max(1.0) as usize
-}
-
-/// Bar colours, cycled by entry index. RGB so the host paints them directly
-/// (the widget schema's semantic tones do not reach the projected scene).
-const PALETTE: &[[u8; 3]] = &[
-    [102, 178, 242],
-    [242, 140, 89],
-    [115, 217, 128],
-    [230, 115, 166],
-    [178, 140, 230],
-    [242, 204, 89],
-    [128, 204, 204],
-    [217, 153, 115],
-];
-
-/// Selected bar colour: bright so it reads next to the legend.
-const SELECTED_COLOR: [u8; 3] = [255, 255, 153];
-
-/// Floor plane colour.
-const FLOOR_COLOR: [u8; 3] = [46, 46, 56];
-
-/// Build the compact scene description the host projects and paints.
-///
-/// The grid is the reason this is 3D rather than a bar chart drawn in
-/// perspective: entries occupy both floor axes, so rotating the camera reveals
-/// bars that were behind others, and a dozen directories stay readable in a
-/// width that a single row of bars could not fit.
-///
-/// Heights are linear in share of the largest entry, normalised to `0.0..=1.0`
-/// with a visible floor at [`MIN_BAR_SHARE`], so a directory dominated by one
-/// entry still shows its small children; a log scale would flatter small dirs.
-/// The host owns projection, so this carries geometry and colour only — no
-/// pixels. The text fallback reuses this via [`build_scene`].
-pub fn build_scene_data(view: &View) -> SceneData {
-    let entries = &view.scan.entries;
-    let cols = if entries.is_empty() {
-        0
-    } else {
-        grid_cols(entries.len()) as u32
-    };
-    let rows = if entries.is_empty() {
-        0
-    } else {
-        entries.len().div_ceil(cols.max(1) as usize) as u32
-    };
-    let largest = view.scan.largest_bytes().max(1);
-    let bars = entries
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let share = entry.bytes as f32 / largest as f32;
-            let height = share.max(MIN_BAR_SHARE).clamp(0.0, 1.0);
-            let selected = i == view.selected;
-            SceneBar {
-                gx: (i as u32) % cols.max(1),
-                gz: (i as u32) / cols.max(1),
-                height,
-                color: if selected {
-                    SELECTED_COLOR
-                } else {
-                    PALETTE[i % PALETTE.len()]
-                },
-                selected,
-            }
-        })
-        .collect();
-    SceneData {
-        cols,
-        rows,
-        floor: FLOOR_COLOR,
-        camera: SceneCamera {
-            yaw: view.camera.yaw,
-            pitch: view.camera.pitch,
-            zoom: view.zoom,
-        },
-        bars,
-    }
 }
 
 /// Rows available to the raster on a surface of `rows` total.
@@ -284,17 +194,6 @@ pub fn render(view: &View, cols: u16, rows: u16) -> Widget {
 
     root = root.child(sep()).child(legend(view)).child(controls());
     clamp_to_budget(root.into())
-}
-
-/// Chrome-only tree for the host-drawn scene: header + legend + controls, no
-/// raster rows. The host paints the geometry, so the tree carries none.
-pub fn render_chrome_only(view: &View) -> Widget {
-    let mut root = col().gap(0).child(header(view));
-    if view.scan.is_empty() {
-        root = root.child(text("Nothing to chart in this directory.").tone(Tone::Dim));
-    }
-    root = root.child(sep()).child(legend(view)).child(controls());
-    root.into()
 }
 
 fn header(view: &View) -> Widget {
@@ -698,62 +597,43 @@ mod tests {
     }
 
     #[test]
-    fn scene_data_is_normalised_and_grid_bounded() {
+    fn bar_shares_are_normalised_to_the_largest_entry() {
         let view = sample_view();
-        let scene = build_scene_data(&view);
-        assert!(scene.cols >= 1 && scene.rows >= 1);
-        assert_eq!(scene.bars.len(), 4);
-        // The tallest entry is a full-height (1.0) bar; all heights are shares.
-        assert!((scene.bars[0].height - 1.0).abs() < 1e-4);
-        for bar in &scene.bars {
-            assert!((0.0..=1.0).contains(&bar.height), "height {bar:?}");
-            assert!(bar.gx < scene.cols, "gx out of grid: {bar:?}");
-            assert!(bar.gz < scene.rows, "gz out of grid: {bar:?}");
+        let largest = view.scan.largest_bytes();
+        assert_eq!(largest, 900_000_000);
+        // The tallest entry is a full-height (1.0) bar; the rest are shares in
+        // (0, 1], each floored at MIN_BAR_SHARE so it stays visible.
+        assert!((bar_share(largest, largest) - 1.0).abs() < 1e-4);
+        for entry in &view.scan.entries {
+            let h = bar_share(entry.bytes, largest);
+            assert!((0.0..=1.0).contains(&h), "share {h} out of range");
+            assert!(
+                h >= MIN_BAR_SHARE - 1e-6,
+                "share {h} below the plinth floor"
+            );
         }
-        // Exactly the selected entry carries the selected flag/colour.
-        assert!(scene.bars[0].selected);
-        assert_eq!(scene.bars[0].color, SELECTED_COLOR);
-        assert!(scene.bars.iter().skip(1).all(|b| !b.selected));
-        // The camera mirrors the view.
-        assert_eq!(scene.camera.yaw, view.camera.yaw);
-        assert_eq!(scene.camera.pitch, view.camera.pitch);
-        assert_eq!(scene.camera.zoom, view.zoom);
     }
 
     #[test]
-    fn empty_scene_data_has_no_bars_and_no_grid() {
-        let scene = build_scene_data(&View::new(scan_of(vec![])));
-        assert_eq!(scene.cols, 0);
-        assert_eq!(scene.rows, 0);
-        assert!(scene.bars.is_empty());
+    fn an_empty_scan_builds_an_empty_scene() {
+        let scene = build_scene(&View::new(scan_of(vec![])));
+        assert!(scene.is_empty());
     }
 
     #[test]
-    fn a_dominated_directory_keeps_small_bars_visible_in_the_scene() {
+    fn a_dominated_directory_keeps_small_bars_above_the_plinth_floor() {
         let view = View::new(scan_of(vec![
             entry("target", 6_000_000_000, true),
             entry("crates", 1_700_000, true),
             entry("README.md", 2_390, false),
         ]));
-        let scene = build_scene_data(&view);
+        let largest = view.scan.largest_bytes();
         // Even the smallest bar keeps the visible plinth, never zero height.
-        assert!(scene.bars.iter().all(|b| b.height >= MIN_BAR_SHARE - 1e-6));
-    }
-
-    #[test]
-    fn apply_camera_arg_updates_and_clamps() {
-        let mut view = sample_view();
-        view.apply_camera_arg(r#"{"yaw":1.0,"pitch":0.5,"zoom":1.5}"#);
-        assert!((view.camera.yaw - 1.0).abs() < 1e-4);
-        assert!((view.camera.pitch - 0.5).abs() < 1e-4);
-        assert!((view.zoom - 1.5).abs() < 1e-4);
-        // Out-of-range pitch and zoom are clamped, not accepted raw.
-        view.apply_camera_arg(r#"{"pitch":9.0,"zoom":99.0}"#);
-        assert!(view.camera.pitch <= 1.35);
-        assert!(view.zoom <= 2.5);
-        // Malformed payloads are ignored, leaving the current values intact.
-        let before = (view.camera.yaw, view.camera.pitch, view.zoom);
-        view.apply_camera_arg("yaw=notanumber&garbage");
-        assert_eq!((view.camera.yaw, view.camera.pitch, view.zoom), before);
+        assert!(
+            view.scan
+                .entries
+                .iter()
+                .all(|e| bar_share(e.bytes, largest) >= MIN_BAR_SHARE - 1e-6)
+        );
     }
 }

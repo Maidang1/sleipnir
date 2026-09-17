@@ -347,7 +347,7 @@ impl AppShell {
         use crate::plugin_monitor_panel::{
             approve_label, capability_label, consent_copy, deny_label, tier_badge,
         };
-        let prompt = self.plugin_consent.as_ref().map(|p| p.prompt.clone());
+        let prompt = self.input.consent().map(|p| p.prompt.clone());
         let (title, lead, warning, caps, tier) = match prompt.as_ref() {
             Some(prompt) => {
                 let copy = consent_copy(prompt);
@@ -503,7 +503,7 @@ impl AppShell {
         use crate::plugin_monitor_panel::{live_plugin_count, running_indicator_label};
         let snapshots = crate::plugin_runtime::snapshots(cx);
         let n = live_plugin_count(&snapshots);
-        let open = self.mode.is(OverlayKind::PluginMonitor);
+        let open = self.input.is_overlay(OverlayKind::PluginMonitor);
         // Zero running plugins renders nothing: ADR-0016 §7 requires the
         // indicator to be unsuppressible *by a plugin*, and a plugin cannot
         // reach zero on its own behalf — the host owns this count. Showing
@@ -596,7 +596,7 @@ impl AppShell {
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (title, message, ok_label) = match self.close_confirm.as_ref() {
+        let (title, message, ok_label) = match self.input.confirm() {
             Some(s) => ("Close pane?", s.message.clone(), "Close"),
             None => (
                 "Close pane?",
@@ -718,7 +718,7 @@ impl AppShell {
     }
 
     pub(super) fn toggle_pane_facts(&mut self, cx: &mut Context<Self>) {
-        if self.mode.toggle(OverlayKind::PaneFacts) {
+        if self.toggle_overlay(OverlayKind::PaneFacts, cx) {
             self.refresh_pane_facts(cx);
         } else {
             self.discard_pane_facts();
@@ -730,12 +730,12 @@ impl AppShell {
     /// collection lands as stale, because it checks both the overlay and the
     /// pane it was started for before storing anything.
     pub(super) fn close_pane_facts(&mut self, cx: &mut Context<Self>) {
-        self.mode.close(OverlayKind::PaneFacts);
+        self.close_overlay(OverlayKind::PaneFacts, cx);
         self.discard_pane_facts();
         cx.notify();
     }
 
-    fn discard_pane_facts(&mut self) {
+    pub(crate) fn discard_pane_facts(&mut self) {
         self.facts = PaneFactsState::Idle;
     }
 
@@ -768,7 +768,9 @@ impl AppShell {
             this.update(cx, |this, cx| {
                 // Focus may have moved, or the panel closed, while we were off
                 // thread. Either way this snapshot is no longer what is shown.
-                if !this.mode.is(OverlayKind::PaneFacts) || this.active_pane_key() != Some(pane) {
+                if !this.input.is_overlay(OverlayKind::PaneFacts)
+                    || this.active_pane_key() != Some(pane)
+                {
                     return;
                 }
                 this.facts.finish_collection(pane, facts);
@@ -780,14 +782,14 @@ impl AppShell {
     }
 
     pub(super) fn refresh_pane_facts_if_stale(&mut self, cx: &mut Context<Self>) {
-        if !self.mode.is(OverlayKind::PaneFacts) {
+        if !self.input.is_overlay(OverlayKind::PaneFacts) {
             return;
         }
         let Some(pane) = self.active_pane_key() else {
             return;
         };
-        // Render calls this every frame; never stack a second collection for a
-        // pane that already has one in flight.
+        // The housekeeping timer calls this periodically; never stack a second
+        // collection for a pane that already has one in flight.
         if self.facts.is_collecting_for(pane) {
             return;
         }

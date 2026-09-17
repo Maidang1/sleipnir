@@ -11,10 +11,11 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use uuid::Uuid;
 
+use crate::error::CoordError;
 use crate::protocol::{
     AdapterUpdate, AgentKind, AgentSessionId, CoordinationTaskId, Effect, EffectBody, Event, Fact,
     FactBatch, RegistryStats, Request, Response, SessionSnapshot, TaskSnapshot, TaskStatus,
@@ -72,6 +73,7 @@ impl Default for Limits {
 #[derive(Clone)]
 pub struct Registry {
     inner: Arc<Mutex<Inner>>,
+    cv: Arc<Condvar>,
 }
 
 struct Inner {
@@ -79,7 +81,6 @@ struct Inner {
     sessions: BTreeMap<AgentSessionId, Session>,
     tasks: BTreeMap<CoordinationTaskId, Task>,
     facts: VecDeque<Fact>,
-    effects: VecDeque<Effect>,
     next_fact_seq: u64,
     next_effect_seq: u64,
     stats: RegistryStats,
@@ -95,8 +96,8 @@ struct Session {
     pane: Option<Uuid>,
     tasks: Vec<CoordinationTaskId>,
     closed_at_ms: Option<u64>,
-    /// Orders delivery against ownership/terminal mutations without holding `Inner` during I/O.
-    delivery: Arc<Mutex<()>>,
+    mailbox: VecDeque<Effect>,
+    claimed_seq: Option<u64>,
 }
 
 struct Task {
@@ -120,90 +121,149 @@ impl Registry {
                 sessions: BTreeMap::new(),
                 tasks: BTreeMap::new(),
                 facts: VecDeque::new(),
-                effects: VecDeque::new(),
                 next_fact_seq: 1,
                 next_effect_seq: 1,
                 stats: RegistryStats::default(),
             })),
+            cv: Arc::new(Condvar::new()),
         }
     }
 
     pub fn handle(&self, req: WireRequest, now_ms: u64) -> WireResponse {
-        let order = {
-            let inner = self.lock();
-            let session = match &req.body {
-                Request::Prompt { session, .. }
-                | Request::Interrupt { session }
-                | Request::HumanTakeover { session }
-                | Request::Close { session }
-                | Request::ReportSessionClosed { session } => Some(*session),
-                Request::ReportRunning { task }
-                | Request::ReportAwaitingHuman { task, .. }
-                | Request::ReportResult { task, .. } => {
-                    inner.tasks.get(task).map(|task| task.session)
-                }
-                _ => None,
-            };
-            session.and_then(|id| inner.sessions.get(&id).map(|s| s.delivery.clone()))
-        };
-        let _ordered = order
-            .as_ref()
-            .map(|lock| lock.lock().unwrap_or_else(|p| p.into_inner()));
-        let body = match self.lock().handle(req.body, now_ms) {
+        let mut inner = self.lock_when_unclaimed(|inner| mutating_session(inner, &req.body));
+        let body = match inner.handle(req.body, now_ms) {
             Ok(body) => body,
-            Err(message) => Response::Error { message },
+            Err(err) => Response::Error {
+                message: err.to_string(),
+            },
         };
         WireResponse { id: req.id, body }
     }
 
-    /// Apply an adapter/host update. Does **not** drain facts or effects.
-    pub fn apply(&self, update: AdapterUpdate, now_ms: u64) -> Result<(), String> {
-        let order = {
-            let inner = self.lock();
-            let session = match &update {
-                AdapterUpdate::TaskRunning { task }
-                | AdapterUpdate::TaskAwaitingHuman { task }
-                | AdapterUpdate::TaskResult { task, .. } => {
-                    inner.tasks.get(task).map(|t| t.session)
-                }
-                AdapterUpdate::SessionClosed { session }
-                | AdapterUpdate::ReleaseToCoordinator { session }
-                | AdapterUpdate::BindPane { session, .. } => Some(*session),
-                AdapterUpdate::PromptDelivered { seq }
-                | AdapterUpdate::InterruptDelivered { seq }
-                | AdapterUpdate::FocusDelivered { seq }
-                | AdapterUpdate::CloseDelivered { seq }
-                | AdapterUpdate::DeliveryFailed { seq } => inner
-                    .effects
-                    .iter()
-                    .find(|e| e.seq == *seq)
-                    .map(|e| e.body.session()),
-            };
-            session.and_then(|id| inner.sessions.get(&id).map(|s| s.delivery.clone()))
-        };
-        let _ordered = order
-            .as_ref()
-            .map(|lock| lock.lock().unwrap_or_else(|p| p.into_inner()));
-        self.lock().apply(update, now_ms)
+    /// Apply an adapter/host update. Delivery acks go through
+    /// [`ClaimedEffect::commit`].
+    pub fn apply(&self, update: AdapterUpdate, now_ms: u64) -> Result<(), CoordError> {
+        let mut inner = self.lock_when_unclaimed(|inner| inner.session_for_update(&update));
+        inner.apply(update, now_ms)
     }
 
-    /// Claim an exact queued intent under the session delivery lease. The callback
-    /// may perform host I/O, but must not synchronously mutate this same session.
-    /// Reads and other sessions remain available throughout the callback.
-    pub fn deliver<T>(
+    /// Acquire the registry lock, waiting on the condvar while the session that
+    /// `session_of` resolves for the pending work is under a live claim. The
+    /// session is re-resolved after each wakeup because a claim may retire the
+    /// task the work names. Requests with no mutating session take the lock
+    /// immediately.
+    fn lock_when_unclaimed(
         &self,
+        session_of: impl Fn(&Inner) -> Option<AgentSessionId>,
+    ) -> std::sync::MutexGuard<'_, Inner> {
+        let mut inner = self.lock();
+        loop {
+            match session_of(&inner) {
+                Some(session) if inner.session_is_claimed(session) => {
+                    inner = self.cv.wait(inner).unwrap_or_else(|p| p.into_inner());
+                }
+                _ => return inner,
+            }
+        }
+    }
+
+    /// Claim a queued effect for delivery. Records `(session, seq)` until
+    /// [`ClaimedEffect::commit`] acks that seq or drop releases the lease
+    /// (the effect stays in the mailbox).
+    ///
+    /// A second `try_claim` for another seq on the same session waits. A
+    /// same-seq re-claim returns [`CoordError::EffectAlreadyClaimed`]
+    /// immediately so the holding thread cannot deadlock on itself.
+    /// Reads (`Inspect` / `List` / `Wait` / `Facts` / `Effects`) and other
+    /// sessions remain available while the claim is held.
+    pub fn try_claim(&self, seq: u64) -> Result<ClaimedEffect, CoordError> {
+        let mut inner = self.lock();
+        loop {
+            let Some(effect) = inner.effect_by_seq(seq).cloned() else {
+                return Err(CoordError::UnknownEffect);
+            };
+            let session = effect.body.session();
+            match inner.claimed_seq_of(session) {
+                Some(held) if held == seq => {
+                    return Err(CoordError::EffectAlreadyClaimed);
+                }
+                Some(_) => {
+                    inner = self.cv.wait(inner).unwrap_or_else(|p| p.into_inner());
+                    continue;
+                }
+                None => {}
+            }
+            inner.validate_effect(&effect)?;
+            inner.session_mut(session)?.claimed_seq = Some(seq);
+            return Ok(ClaimedEffect {
+                registry: self.clone(),
+                effect,
+                session,
+            });
+        }
+    }
+
+    /// Ack the claimed effect. Never touches `claimed_seq`: the lease ends only
+    /// when [`ClaimedEffect`] drops, so a failed ack (e.g. an
+    /// [`CoordError::EffectKindMismatch`]) still releases the claim and wakes
+    /// any waiter. Callers must not early-return before the ack while holding
+    /// the claim; every path here falls through to a `result`.
+    fn commit_claimed_direct(
+        &self,
+        session: AgentSessionId,
         effect: &Effect,
-        deliver: impl FnOnce(&Delivery<'_>) -> T,
-    ) -> Result<T, String> {
-        let order = self.lock().session(effect.body.session())?.delivery.clone();
-        let _ordered = order.lock().unwrap_or_else(|p| p.into_inner());
-        self.lock().validate_effect(effect)?;
-        Ok(deliver(&Delivery { registry: self }))
+        outcome: ClaimOutcome,
+        now_ms: u64,
+    ) -> Result<(), CoordError> {
+        let seq = effect.seq;
+        let mut inner = self.lock();
+        if inner.claimed_seq_of(session) != Some(seq) {
+            return Err(CoordError::EffectNotClaimed);
+        }
+        match outcome {
+            ClaimOutcome::Failed => inner.delivery_failed(session, seq, now_ms),
+            ClaimOutcome::Delivered { pane } => match &effect.body {
+                EffectBody::LaunchRequested { .. } => {
+                    let pane = pane.ok_or(CoordError::EffectKindMismatch {
+                        seq,
+                        actual: "launch_requested",
+                        expected: "launch delivery must bind a pane",
+                    })?;
+                    inner.bind_pane(session, seq, pane)
+                }
+                EffectBody::PromptRequested { .. } => inner.prompt_delivered(session, seq),
+                EffectBody::InterruptRequested { .. } => inner.interrupt_delivered(session, seq),
+                EffectBody::FocusRequested { .. } => inner
+                    .ack_exact(
+                        session,
+                        seq,
+                        |b| matches!(b, EffectBody::FocusRequested { .. }),
+                        "focus_requested",
+                    )
+                    .map(|_| ()),
+                EffectBody::CloseRequested { .. } => inner
+                    .ack_exact(
+                        session,
+                        seq,
+                        |b| matches!(b, EffectBody::CloseRequested { .. }),
+                        "close_requested",
+                    )
+                    .map(|_| ()),
+            },
+        }
+    }
+
+    fn release_claim(&self, session: AgentSessionId) {
+        let mut inner = self.lock();
+        if let Some(s) = inner.sessions.get_mut(&session) {
+            s.claimed_seq = None;
+        }
+        self.cv.notify_all();
     }
 
     /// Pending adapter intents, oldest first. Does not consume them.
     pub fn peek_effects(&self) -> Vec<Effect> {
-        self.lock().effects.iter().cloned().collect()
+        self.lock().all_effects()
     }
 
     /// Coordinator-facing facts with `seq > cursor`. Independent of effects.
@@ -221,12 +281,18 @@ impl Registry {
         inner
             .sessions
             .values()
-            .filter_map(|session| {
-                inner
-                    .snapshot_page(session, session.tasks.len().saturating_sub(1), true)
-                    .ok()
-            })
+            .filter_map(|session| inner.snapshot_latest(session).ok())
             .collect()
+    }
+
+    /// The session that owns `pane`, if any.
+    pub fn session_for_pane(&self, pane: Uuid) -> Option<AgentSessionId> {
+        let inner = self.lock();
+        inner
+            .sessions
+            .values()
+            .find(|s| s.pane == Some(pane))
+            .map(|s| s.id)
     }
 
     /// Host-local bounded preview, never a second copy of a complete result.
@@ -244,15 +310,73 @@ impl Registry {
     }
 }
 
-/// Acknowledgements issued while the session delivery lease is still held.
-/// Prevents a second consumer from replaying a successful-but-not-yet-acked effect.
-pub struct Delivery<'a> {
-    registry: &'a Registry,
+/// The delivery outcome the adapter commits for a claimed effect. `Delivered`
+/// acks the effect (a `LaunchRequested` must carry the bound `pane`; every
+/// other kind ignores it); `Failed` records `DeliveryFailed { seq }`. The kind
+/// dispatch lives in [`Registry::commit_claimed_direct`], which already matches
+/// the claimed body, so callers never re-derive the effect kind to report an
+/// outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    Delivered { pane: Option<Uuid> },
+    Failed,
 }
 
-impl Delivery<'_> {
-    pub fn apply(&self, update: AdapterUpdate, now_ms: u64) -> Result<(), String> {
-        self.registry.lock().apply(update, now_ms)
+/// A seq-typed delivery lease. [`Self::commit`] acks the effect; **drop is the
+/// only releaser** of the per-session claim, so a failed ack still ends the
+/// lease and wakes any waiter. On a successful ack the effect is removed from
+/// the mailbox; on failure it stays queued.
+///
+/// Must not call [`Registry::handle`] for a mutating request or
+/// [`Registry::try_claim`] on this session from the same thread: those wait
+/// for the claim and would deadlock. [`Request::Inspect`], `List`, `Wait`,
+/// `Facts`, and `Effects` are non-waiting reads and are safe (the adapter
+/// inspects while holding a claim).
+pub struct ClaimedEffect {
+    registry: Registry,
+    effect: Effect,
+    session: AgentSessionId,
+}
+
+impl ClaimedEffect {
+    pub fn effect(&self) -> &Effect {
+        &self.effect
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.effect.seq
+    }
+
+    /// Ack the claimed effect with its delivery outcome. A `LaunchRequested`
+    /// commit must supply `ClaimOutcome::Delivered { pane: Some(_) }`; the
+    /// pane requirement is enforced against the claimed body. The claim is
+    /// released on drop regardless of whether the ack succeeded.
+    pub fn commit(self, outcome: ClaimOutcome, now_ms: u64) -> Result<(), CoordError> {
+        self.registry
+            .commit_claimed_direct(self.session, &self.effect, outcome, now_ms)
+    }
+}
+
+impl Drop for ClaimedEffect {
+    fn drop(&mut self) {
+        self.registry.release_claim(self.session);
+    }
+}
+
+/// Mutating coordinator ops wait on a live session claim. `Inspect`, `List`,
+/// `Wait`, `Facts`, and `Effects` are non-waiting reads.
+fn mutating_session(inner: &Inner, req: &Request) -> Option<AgentSessionId> {
+    match req {
+        Request::Prompt { session, .. }
+        | Request::Interrupt { session }
+        | Request::Focus { session }
+        | Request::HumanTakeover { session }
+        | Request::Close { session }
+        | Request::ReportSessionClosed { session } => Some(*session),
+        Request::ReportRunning { task }
+        | Request::ReportAwaitingHuman { task, .. }
+        | Request::ReportResult { task, .. } => inner.tasks.get(task).map(|task| task.session),
+        _ => None,
     }
 }
 
@@ -263,48 +387,43 @@ impl Default for Registry {
 }
 
 impl Inner {
-    fn validate_effect(&self, effect: &Effect) -> Result<(), String> {
-        if !self.effects.iter().any(|pending| pending == effect) {
-            return Err("obsolete effect".into());
+    fn validate_effect(&self, effect: &Effect) -> Result<(), CoordError> {
+        let session_id = effect.body.session();
+        let session = self.session(session_id)?;
+        if !session.mailbox.iter().any(|e| e.seq == effect.seq) {
+            return Err(CoordError::UnknownEffect);
         }
-        let session = self.session(effect.body.session())?;
         if !session.open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         if !matches!(effect.body, EffectBody::FocusRequested { .. })
             && session.writer != Writer::Coordinator
         {
-            return Err("human owns this session".into());
+            return Err(CoordError::HumanOwnsSession);
         }
         let task = match effect.body {
-            EffectBody::LaunchRequested { task, .. } | EffectBody::PromptRequested { task, .. } => {
-                Some(task)
-            }
-            EffectBody::InterruptRequested { task, .. } => task,
+            EffectBody::LaunchRequested { task, .. }
+            | EffectBody::PromptRequested { task, .. }
+            | EffectBody::InterruptRequested { task, .. } => Some(task),
             _ => None,
         };
         if let Some(task) = task {
             let status = self.task(task)?.status;
             if !status.is_in_flight() {
-                return Err("task is not in flight".into());
+                return Err(CoordError::TaskNotInFlight);
             }
             if matches!(effect.body, EffectBody::PromptRequested { .. })
                 && status != TaskStatus::Dispatching
             {
-                return Err("prompt is no longer dispatchable".into());
+                return Err(CoordError::PromptNotDispatchable);
             }
         }
         Ok(())
     }
 
-    fn handle(&mut self, req: Request, now_ms: u64) -> Result<Response, String> {
+    fn handle(&mut self, req: Request, now_ms: u64) -> Result<Response, CoordError> {
         match req {
-            Request::List => self.list_page(0),
-            Request::ListPage { offset } => self.list_page(offset),
-            Request::InspectPage { session, offset } => Ok(Response::Inspect {
-                session: self.snapshot_page(self.session(session)?, offset, false)?,
-            }),
-            Request::EffectsPage { cursor } => Ok(self.effects_page(cursor)),
+            Request::List => self.list(),
             Request::Launch {
                 kind,
                 cwd,
@@ -312,8 +431,7 @@ impl Inner {
                 args,
             } => self.launch(kind, cwd, name, args, now_ms),
             Request::Prompt { session, text } => self.prompt(session, text, now_ms),
-            Request::Wait { task } => self.wait_page(task, 0),
-            Request::WaitPage { task, offset } => self.wait_page(task, offset),
+            Request::Wait { task } => self.wait(task),
             Request::Interrupt { session } => self.interrupt(session),
             Request::Focus { session } => self.focus(session),
             Request::Inspect { session } => self.inspect(session),
@@ -325,13 +443,17 @@ impl Inner {
             }
             Request::ReportResult { task, text } => self.report_result(task, text),
             Request::ReportSessionClosed { session } => self.report_session_closed(session, now_ms),
-            Request::Effects => Ok(self.effects_page(0)),
+            Request::Effects => Ok(Response::Effects {
+                effects: self.all_effects(),
+                next_cursor: None,
+            }),
             Request::Facts { cursor } => {
                 let batch = self.facts_since(cursor);
                 Ok(Response::Facts {
                     facts: batch.facts,
                     next_cursor: batch.next_cursor,
                     missed: batch.missed,
+                    more: false,
                 })
             }
         }
@@ -344,17 +466,16 @@ impl Inner {
         name: Option<String>,
         args: Vec<String>,
         now_ms: u64,
-    ) -> Result<Response, String> {
+    ) -> Result<Response, CoordError> {
         self.check_cwd(&cwd)?;
         self.check_name(name.as_deref())?;
         self.check_args(&args)?;
         self.prune(now_ms);
         let open = self.sessions.values().filter(|s| s.open).count();
         if open >= self.limits.max_sessions {
-            return Err(format!(
-                "session limit {} reached",
-                self.limits.max_sessions
-            ));
+            return Err(CoordError::SessionLimit {
+                max: self.limits.max_sessions,
+            });
         }
         self.ensure_task_capacity()?;
         self.ensure_effect_capacity()?;
@@ -372,7 +493,8 @@ impl Inner {
                 pane: None,
                 tasks: vec![task_id],
                 closed_at_ms: None,
-                delivery: Arc::new(Mutex::new(())),
+                mailbox: VecDeque::new(),
+                claimed_seq: None,
             },
         );
         self.tasks.insert(
@@ -413,34 +535,28 @@ impl Inner {
         session_id: AgentSessionId,
         text: String,
         now_ms: u64,
-    ) -> Result<Response, String> {
+    ) -> Result<Response, CoordError> {
         self.check_prompt(&text)?;
         self.prune(now_ms);
         let session = self.session(session_id)?;
         if !session.open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         if session.writer != Writer::Coordinator {
-            return Err("human owns this session".into());
+            return Err(CoordError::HumanOwnsSession);
         }
         let existing = session.tasks.clone();
         for id in &existing {
             if let Some(task) = self.tasks.get(id) {
                 if task.status == TaskStatus::AwaitingHuman {
-                    return Err("coordinator cannot answer native approvals".into());
+                    return Err(CoordError::NativeApproval);
                 }
                 if task.status.is_in_flight() {
-                    return Err("session already has an in-flight task".into());
+                    return Err(CoordError::AlreadyInFlight);
                 }
             }
         }
         self.ensure_task_capacity()?;
-        let before = self.effects.len();
-        self.effects.retain(|effect| {
-            !matches!(effect.body,
-            EffectBody::InterruptRequested { session, task: None } if session == session_id)
-        });
-        self.stats.effects_drained += (before - self.effects.len()) as u64;
         self.ensure_effect_capacity()?;
         let task_id = CoordinationTaskId::new();
         self.session_mut(session_id)?.tasks.push(task_id);
@@ -468,26 +584,19 @@ impl Inner {
         Ok(Response::PromptAccepted { task: task_id })
     }
 
-    fn wait_page(&self, task_id: CoordinationTaskId, offset: usize) -> Result<Response, String> {
+    fn wait(&self, task_id: CoordinationTaskId) -> Result<Response, CoordError> {
         let task = self.task(task_id)?;
-        let (result, next_result_offset) = self.wait_result_page(
-            task_id,
-            task.status,
-            task.result.as_deref(),
-            task.detail.as_deref(),
-            offset,
-        )?;
         Ok(Response::Wait {
             task: task_id,
             status: task.status,
             terminal: task.status.is_terminal(),
-            result,
+            result: task.result.clone(),
             detail: task.detail.clone(),
-            next_result_offset,
+            next_result_offset: None,
         })
     }
 
-    fn report_running(&mut self, task_id: CoordinationTaskId) -> Result<Response, String> {
+    fn report_running(&mut self, task_id: CoordinationTaskId) -> Result<Response, CoordError> {
         self.task_running(task_id)?;
         Ok(Response::ReportedRunning { task: task_id })
     }
@@ -496,7 +605,7 @@ impl Inner {
         &mut self,
         task_id: CoordinationTaskId,
         detail: Option<String>,
-    ) -> Result<Response, String> {
+    ) -> Result<Response, CoordError> {
         self.task_awaiting_human(task_id, detail)?;
         Ok(Response::ReportedAwaitingHuman { task: task_id })
     }
@@ -505,7 +614,7 @@ impl Inner {
         &mut self,
         task_id: CoordinationTaskId,
         text: String,
-    ) -> Result<Response, String> {
+    ) -> Result<Response, CoordError> {
         self.record_result(task_id, text)?;
         Ok(Response::ReportedResult { task: task_id })
     }
@@ -514,43 +623,42 @@ impl Inner {
         &mut self,
         session_id: AgentSessionId,
         now_ms: u64,
-    ) -> Result<Response, String> {
+    ) -> Result<Response, CoordError> {
         self.close_session(session_id, now_ms)?;
         Ok(Response::ReportedSessionClosed {
             session: session_id,
         })
     }
 
-    fn interrupt(&mut self, session_id: AgentSessionId) -> Result<Response, String> {
+    fn interrupt(&mut self, session_id: AgentSessionId) -> Result<Response, CoordError> {
         let (open, writer, ids) = {
             let session = self.session(session_id)?;
             (session.open, session.writer, session.tasks.clone())
         };
         if !open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         if writer != Writer::Coordinator {
-            return Err("human owns this session".into());
+            return Err(CoordError::HumanOwnsSession);
         }
-        if self
-            .effects
-            .iter()
-            .any(|e| matches!(&e.body, EffectBody::InterruptRequested { session, .. } if *session == session_id))
-        {
+        if self.mailbox(session_id).any(|e| {
+            matches!(&e.body, EffectBody::InterruptRequested { session, .. } if *session == session_id)
+        }) {
             return Ok(Response::InterruptAccepted {
                 session: session_id,
             });
         }
+        let task = ids
+            .into_iter()
+            .find(|id| {
+                self.tasks
+                    .get(id)
+                    .is_some_and(|task| task.status.is_in_flight())
+            })
+            .ok_or(CoordError::NothingInFlight)?;
         self.ensure_effect_capacity()?;
-        let task = ids.into_iter().find(|id| {
-            self.tasks
-                .get(id)
-                .is_some_and(|task| task.status.is_in_flight())
-        });
-        if let Some(id) = task {
-            self.task_mut(id)?.status = TaskStatus::Interrupting;
-            self.push_fact(Event::TaskInterrupting { task: id });
-        }
+        self.set_status(task, TaskStatus::Interrupting)?;
+        self.push_fact(Event::TaskInterrupting { task });
         self.push_effect(EffectBody::InterruptRequested {
             session: session_id,
             task,
@@ -560,18 +668,18 @@ impl Inner {
         })
     }
 
-    fn focus(&mut self, session_id: AgentSessionId) -> Result<Response, String> {
+    fn focus(&mut self, session_id: AgentSessionId) -> Result<Response, CoordError> {
         let (open, pane) = {
             let session = self.session(session_id)?;
             (session.open, session.pane)
         };
         if !open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         if pane.is_none() {
-            return Err("pane is not bound".into());
+            return Err(CoordError::PaneNotBound);
         }
-        if self.effects.iter().any(
+        if self.mailbox(session_id).any(
             |e| matches!(&e.body, EffectBody::FocusRequested { session } if *session == session_id),
         ) {
             return Ok(Response::FocusAccepted {
@@ -587,21 +695,22 @@ impl Inner {
         })
     }
 
-    fn inspect(&self, session_id: AgentSessionId) -> Result<Response, String> {
+    fn inspect(&self, session_id: AgentSessionId) -> Result<Response, CoordError> {
         Ok(Response::Inspect {
             session: self.snapshot(self.session(session_id)?)?,
         })
     }
 
-    fn human_takeover(&mut self, session_id: AgentSessionId) -> Result<Response, String> {
+    fn human_takeover(&mut self, session_id: AgentSessionId) -> Result<Response, CoordError> {
         let session = self.session_mut(session_id)?;
         if !session.open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         if session.writer == Writer::Human {
-            return Err("human already owns this session".into());
+            return Err(CoordError::HumanAlreadyOwns);
         }
         session.writer = Writer::Human;
+        self.retire_coordinator_intents(session_id)?;
         self.push_fact(Event::OwnershipChanged {
             session: session_id,
             writer: Writer::Human,
@@ -611,18 +720,50 @@ impl Inner {
         })
     }
 
-    fn close_request(&mut self, session_id: AgentSessionId) -> Result<Response, String> {
+    /// Finish undeliverable coordinator work and drop Prompt/Interrupt/Close
+    /// (and Launch) from the mailbox. `FocusRequested` is visibility-only
+    /// and stays queued. In-flight tasks named by those intents become
+    /// [`TaskStatus::Unknown`], matching close-of-in-flight.
+    fn retire_coordinator_intents(&mut self, session_id: AgentSessionId) -> Result<(), CoordError> {
+        let tasks: Vec<CoordinationTaskId> = self
+            .mailbox(session_id)
+            .filter_map(|effect| match &effect.body {
+                EffectBody::LaunchRequested { task, .. }
+                | EffectBody::PromptRequested { task, .. }
+                | EffectBody::InterruptRequested { task, .. } => Some(*task),
+                _ => None,
+            })
+            .collect();
+        let mut seen = Vec::new();
+        for task in tasks {
+            if seen.contains(&task) {
+                continue;
+            }
+            seen.push(task);
+            self.finish_task(task, TaskStatus::Unknown)?;
+        }
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            let before = session.mailbox.len();
+            session
+                .mailbox
+                .retain(|effect| matches!(effect.body, EffectBody::FocusRequested { .. }));
+            self.stats.effects_drained += (before - session.mailbox.len()) as u64;
+        }
+        Ok(())
+    }
+
+    fn close_request(&mut self, session_id: AgentSessionId) -> Result<Response, CoordError> {
         let (open, writer) = {
             let session = self.session(session_id)?;
             (session.open, session.writer)
         };
         if !open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         if writer != Writer::Coordinator {
-            return Err("human owns this session".into());
+            return Err(CoordError::HumanOwnsSession);
         }
-        if self.effects.iter().any(
+        if self.mailbox(session_id).any(
             |e| matches!(&e.body, EffectBody::CloseRequested { session } if *session == session_id),
         ) {
             return Ok(Response::CloseAccepted {
@@ -638,28 +779,8 @@ impl Inner {
         })
     }
 
-    fn apply(&mut self, update: AdapterUpdate, now_ms: u64) -> Result<(), String> {
+    fn apply(&mut self, update: AdapterUpdate, now_ms: u64) -> Result<(), CoordError> {
         match update {
-            AdapterUpdate::BindPane { seq, session, pane } => self.bind_pane(seq, session, pane),
-            AdapterUpdate::PromptDelivered { seq } => self.prompt_delivered(seq),
-            AdapterUpdate::InterruptDelivered { seq } => self.interrupt_delivered(seq),
-            AdapterUpdate::FocusDelivered { seq } => {
-                self.ack_exact(
-                    seq,
-                    |b| matches!(b, EffectBody::FocusRequested { .. }),
-                    "focus_requested",
-                )?;
-                Ok(())
-            }
-            AdapterUpdate::CloseDelivered { seq } => {
-                self.ack_exact(
-                    seq,
-                    |b| matches!(b, EffectBody::CloseRequested { .. }),
-                    "close_requested",
-                )?;
-                Ok(())
-            }
-            AdapterUpdate::DeliveryFailed { seq } => self.delivery_failed(seq, now_ms),
             AdapterUpdate::TaskRunning { task } => self.task_running(task),
             AdapterUpdate::TaskAwaitingHuman { task } => self.task_awaiting_human(task, None),
             AdapterUpdate::TaskResult { task, text } => self.record_result(task, text),
@@ -670,63 +791,61 @@ impl Inner {
 
     fn bind_pane(
         &mut self,
-        seq: u64,
         session_id: AgentSessionId,
+        seq: u64,
         pane: Uuid,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordError> {
         let (open, existing) = {
             let s = self.session(session_id)?;
             (s.open, s.pane)
         };
         if !open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         match existing {
             Some(bound) if bound == pane => {
                 // Same pane is idempotent. Ack the launch effect if `seq` still
                 // names it; an already-acked seq is not an error.
-                match self.effects.iter().position(|e| e.seq == seq) {
+                match self.effect_by_seq_in(session_id, seq) {
                     None => Ok(()),
-                    Some(pos) => match &self.effects[pos].body {
-                        EffectBody::LaunchRequested { session, .. } if *session == session_id => {
-                            self.effects.remove(pos);
+                    Some(effect) => match &effect.body {
+                        EffectBody::LaunchRequested { .. } => {
+                            self.remove_effect_in(session_id, seq);
                             Ok(())
                         }
-                        other => Err(format!(
-                            "effect {seq} is {}, not launch_requested for this session",
-                            other.kind_name()
-                        )),
+                        other => Err(CoordError::EffectKindMismatch {
+                            seq,
+                            actual: other.kind_name(),
+                            expected: "launch_requested for this session",
+                        }),
                     },
                 }
             }
-            Some(_) => Err("pane is already bound".into()),
+            Some(_) => Err(CoordError::PaneAlreadyBound),
             None => {
-                let pos = self
-                    .effects
-                    .iter()
-                    .position(|e| e.seq == seq)
-                    .ok_or_else(|| "unknown effect".to_string())?;
-                match &self.effects[pos].body {
-                    EffectBody::LaunchRequested { session, .. } if *session == session_id => {}
-                    EffectBody::LaunchRequested { .. } => {
-                        return Err("effect belongs to a different session".into());
-                    }
+                let effect = self
+                    .effect_by_seq_in(session_id, seq)
+                    .ok_or(CoordError::UnknownEffect)?;
+                match &effect.body {
+                    EffectBody::LaunchRequested { .. } => {}
                     other => {
-                        return Err(format!(
-                            "effect {seq} is {}, not launch_requested",
-                            other.kind_name()
-                        ));
+                        return Err(CoordError::EffectKindMismatch {
+                            seq,
+                            actual: other.kind_name(),
+                            expected: "launch_requested",
+                        });
                     }
                 }
-                self.effects.remove(pos);
+                self.remove_effect_in(session_id, seq);
                 self.session_mut(session_id)?.pane = Some(pane);
                 Ok(())
             }
         }
     }
 
-    fn interrupt_delivered(&mut self, seq: u64) -> Result<(), String> {
+    fn interrupt_delivered(&mut self, session: AgentSessionId, seq: u64) -> Result<(), CoordError> {
         let effect = self.ack_exact(
+            session,
             seq,
             |b| matches!(b, EffectBody::InterruptRequested { .. }),
             "interrupt_requested",
@@ -734,50 +853,62 @@ impl Inner {
         let EffectBody::InterruptRequested { task, .. } = effect.body else {
             return Ok(());
         };
-        if let Some(task) = task {
-            // A successful key write is not evidence that the worker stopped.
-            // Retire only the captured assignment, with an explicitly unknown outcome.
-            self.finish_task(task, TaskStatus::Unknown)?;
-        }
+        // A successful key write is not evidence that the worker stopped.
+        // Retire only the captured assignment, with an explicitly unknown outcome.
+        self.finish_task(task, TaskStatus::Unknown)?;
         Ok(())
     }
 
-    fn prompt_delivered(&mut self, seq: u64) -> Result<(), String> {
-        let pos = self
-            .effects
-            .iter()
-            .position(|e| e.seq == seq)
-            .ok_or_else(|| "unknown effect".to_string())?;
-        let task_id = match &self.effects[pos].body {
+    fn prompt_delivered(&mut self, session: AgentSessionId, seq: u64) -> Result<(), CoordError> {
+        let effect = self
+            .effect_by_seq_in(session, seq)
+            .ok_or(CoordError::UnknownEffect)?;
+        let task = match &effect.body {
             EffectBody::PromptRequested { task, .. } => *task,
             other => {
-                return Err(format!(
-                    "effect {seq} is {}, not prompt_requested",
-                    other.kind_name()
-                ));
+                return Err(CoordError::EffectKindMismatch {
+                    seq,
+                    actual: other.kind_name(),
+                    expected: "prompt_requested",
+                });
             }
         };
-        let task = self.task(task_id)?;
-        if !task.status.is_in_flight() {
-            return Err("task is not in flight".into());
+        if !self.task(task)?.status.is_in_flight() {
+            return Err(CoordError::TaskNotInFlight);
         }
-        self.effects.remove(pos);
+        let dispatching = self.task(task)?.status == TaskStatus::Dispatching;
+        self.remove_effect_in(session, seq);
+        if dispatching {
+            self.set_status(task, TaskStatus::Running)?;
+            self.push_fact(Event::TaskRunning { task });
+        }
         Ok(())
     }
 
-    fn task_running(&mut self, task_id: CoordinationTaskId) -> Result<(), String> {
-        let t = self.task_mut(task_id)?;
-        match t.status {
-            TaskStatus::Accepted
-            | TaskStatus::Dispatching
-            | TaskStatus::AwaitingHuman
-            | TaskStatus::Interrupting => {
-                t.status = TaskStatus::Running;
+    /// Write a task's non-terminal status. This is the single chokepoint for a
+    /// task *leaving* `Dispatching`: the moment it does, its queued
+    /// `PromptRequested` can no longer be delivered (a prompt is only claimable
+    /// while `Dispatching`), so it is retired here rather than at each caller.
+    /// [`validate_effect`]'s `PromptNotDispatchable` gate is the matching lazy
+    /// guard; terminal transitions go through [`finish_task`] instead.
+    fn set_status(&mut self, task: CoordinationTaskId, next: TaskStatus) -> Result<(), CoordError> {
+        let prev = self.task(task)?.status;
+        self.task_mut(task)?.status = next;
+        if prev == TaskStatus::Dispatching && next != TaskStatus::Dispatching {
+            self.drop_prompt_requested_for(task);
+        }
+        Ok(())
+    }
+
+    fn task_running(&mut self, task_id: CoordinationTaskId) -> Result<(), CoordError> {
+        match self.task(task_id)?.status {
+            TaskStatus::Dispatching | TaskStatus::AwaitingHuman | TaskStatus::Interrupting => {
+                self.set_status(task_id, TaskStatus::Running)?;
                 self.push_fact(Event::TaskRunning { task: task_id });
                 Ok(())
             }
             TaskStatus::Running => Ok(()),
-            other => Err(format!("task is {other:?}, not runnable")),
+            other => Err(CoordError::TaskNotRunnable { status: other }),
         }
     }
 
@@ -785,7 +916,7 @@ impl Inner {
         &mut self,
         task_id: CoordinationTaskId,
         detail: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordError> {
         let detail = match detail {
             None => None,
             Some(s) if s.trim().is_empty() => None,
@@ -794,12 +925,11 @@ impl Inner {
                 Some(s)
             }
         };
-        let t = self.task_mut(task_id)?;
-        if !t.status.is_in_flight() {
-            return Err("task is not in flight".into());
+        if !self.task(task_id)?.status.is_in_flight() {
+            return Err(CoordError::TaskNotInFlight);
         }
-        t.status = TaskStatus::AwaitingHuman;
-        t.detail = detail.clone();
+        self.set_status(task_id, TaskStatus::AwaitingHuman)?;
+        self.task_mut(task_id)?.detail = detail.clone();
         self.push_fact(Event::TaskAwaitingHuman {
             task: task_id,
             detail,
@@ -807,10 +937,15 @@ impl Inner {
         Ok(())
     }
 
-    fn delivery_failed(&mut self, seq: u64, now_ms: u64) -> Result<(), String> {
+    fn delivery_failed(
+        &mut self,
+        session: AgentSessionId,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<(), CoordError> {
         let effect = self
-            .remove_effect(seq)
-            .ok_or_else(|| "unknown effect".to_string())?;
+            .remove_effect_in(session, seq)
+            .ok_or(CoordError::UnknownEffect)?;
         match effect.body {
             EffectBody::LaunchRequested { task, session, .. } => {
                 self.finish_task(task, TaskStatus::FailedDelivery)?;
@@ -825,20 +960,21 @@ impl Inner {
                     self.finish_task(task, TaskStatus::FailedDelivery)?;
                 }
             }
-            EffectBody::InterruptRequested {
-                task: Some(task), ..
-            } => {
+            EffectBody::InterruptRequested { task, .. } => {
                 self.finish_task(task, TaskStatus::Unknown)?;
             }
-            EffectBody::InterruptRequested { task: None, .. }
-            | EffectBody::FocusRequested { .. }
-            | EffectBody::CloseRequested { .. } => {}
+            EffectBody::FocusRequested { .. } | EffectBody::CloseRequested { .. } => {}
         }
         Ok(())
     }
 
     /// Terminal state and stale-intent retirement are one registry mutation.
-    fn finish_task(&mut self, id: CoordinationTaskId, status: TaskStatus) -> Result<(), String> {
+    fn finish_task(
+        &mut self,
+        id: CoordinationTaskId,
+        status: TaskStatus,
+    ) -> Result<(), CoordError> {
+        let session_id = self.task(id)?.session;
         let task = self.task_mut(id)?;
         if !task.status.is_in_flight() {
             return Ok(());
@@ -850,21 +986,37 @@ impl Inner {
             TaskStatus::FailedDelivery => Event::TaskFailedDelivery { task: id },
             _ => unreachable!("terminal transition required"),
         };
-        let before = self.effects.len();
-        self.effects.retain(|effect| match effect.body {
-            EffectBody::LaunchRequested { task, .. }
-            | EffectBody::PromptRequested { task, .. }
-            | EffectBody::InterruptRequested {
-                task: Some(task), ..
-            } => task != id,
-            _ => true,
-        });
-        self.stats.effects_drained += (before - self.effects.len()) as u64;
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            let before = session.mailbox.len();
+            session
+                .mailbox
+                .retain(|effect| !superseded_by_finished_task(&effect.body, id));
+            self.stats.effects_drained += (before - session.mailbox.len()) as u64;
+        }
         self.push_fact(event);
         Ok(())
     }
 
-    fn record_result(&mut self, task_id: CoordinationTaskId, text: String) -> Result<(), String> {
+    /// A prompt that is no longer `Dispatching` cannot be delivered; drop it
+    /// so it does not occupy the mailbox without a claimable ack.
+    fn drop_prompt_requested_for(&mut self, task: CoordinationTaskId) {
+        let Some(session_id) = self.tasks.get(&task).map(|t| t.session) else {
+            return;
+        };
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            let before = session.mailbox.len();
+            session.mailbox.retain(|effect| {
+                !matches!(&effect.body, EffectBody::PromptRequested { task: id, .. } if *id == task)
+            });
+            self.stats.effects_drained += (before - session.mailbox.len()) as u64;
+        }
+    }
+
+    fn record_result(
+        &mut self,
+        task_id: CoordinationTaskId,
+        text: String,
+    ) -> Result<(), CoordError> {
         self.check_payload("result", &text, self.limits.max_result_chars, true)?;
         let task = self.task(task_id)?;
         match task.status {
@@ -876,8 +1028,7 @@ impl Inner {
                 self.push_fact(Event::DuplicateResult { task: task_id });
                 Ok(())
             }
-            TaskStatus::Accepted
-            | TaskStatus::Dispatching
+            TaskStatus::Dispatching
             | TaskStatus::Running
             | TaskStatus::AwaitingHuman
             | TaskStatus::Interrupting => {
@@ -889,7 +1040,7 @@ impl Inner {
         }
     }
 
-    fn close_session(&mut self, session_id: AgentSessionId, now_ms: u64) -> Result<(), String> {
+    fn close_session(&mut self, session_id: AgentSessionId, now_ms: u64) -> Result<(), CoordError> {
         let session = self.session_mut(session_id)?;
         if !session.open {
             return Ok(());
@@ -908,13 +1059,13 @@ impl Inner {
         Ok(())
     }
 
-    fn release(&mut self, session_id: AgentSessionId) -> Result<(), String> {
+    fn release(&mut self, session_id: AgentSessionId) -> Result<(), CoordError> {
         let session = self.session_mut(session_id)?;
         if !session.open {
-            return Err("session is closed".into());
+            return Err(CoordError::SessionClosed);
         }
         if session.writer == Writer::Coordinator {
-            return Err("coordinator already owns this session".into());
+            return Err(CoordError::CoordinatorAlreadyOwns);
         }
         session.writer = Writer::Coordinator;
         self.push_fact(Event::OwnershipChanged {
@@ -924,70 +1075,37 @@ impl Inner {
         Ok(())
     }
 
-    fn list_page(&self, offset: usize) -> Result<Response, String> {
+    fn list(&self) -> Result<Response, CoordError> {
         let mut agents = Vec::new();
-        let mut bytes = 256;
-        for session in self.sessions.values().skip(offset) {
-            // Lists expose the latest assignment; inspect owns task history.
-            let snapshot =
-                self.snapshot_page(session, session.tasks.len().saturating_sub(1), true)?;
-            let size = serde_json::to_vec(&snapshot)
-                .map_err(|e| e.to_string())?
-                .len()
-                + 1;
-            if !agents.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
-                break;
-            }
-            bytes += size;
-            agents.push(snapshot);
+        for session in self.sessions.values() {
+            agents.push(self.snapshot_latest(session)?);
         }
-        let next = offset.saturating_add(agents.len());
         Ok(Response::Agents {
             agents,
-            next_offset: (next < self.sessions.len()).then_some(next),
+            next_offset: None,
         })
     }
 
-    fn effects_page(&self, cursor: u64) -> Response {
-        let mut effects = Vec::new();
-        let mut bytes = 256;
-        let mut next_cursor = None;
-        for effect in self.effects.iter().filter(|e| e.seq > cursor) {
-            let size = serde_json::to_vec(effect)
-                .map(|line| line.len())
-                .unwrap_or(crate::MAX_LINE_BYTES)
-                + 1;
-            if !effects.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
-                next_cursor = effects.last().map(|e: &Effect| e.seq);
-                break;
-            }
-            bytes += size;
-            effects.push(effect.clone());
-        }
-        Response::Effects {
-            effects,
-            next_cursor,
-        }
+    fn snapshot(&self, session: &Session) -> Result<SessionSnapshot, CoordError> {
+        self.snapshot_tasks(session, 0, false)
     }
 
-    fn snapshot(&self, session: &Session) -> Result<SessionSnapshot, String> {
-        self.snapshot_page(session, 0, false)
+    fn snapshot_latest(&self, session: &Session) -> Result<SessionSnapshot, CoordError> {
+        self.snapshot_tasks(session, session.tasks.len().saturating_sub(1), true)
     }
 
-    fn snapshot_page(
+    fn snapshot_tasks(
         &self,
         session: &Session,
         offset: usize,
         latest_only: bool,
-    ) -> Result<SessionSnapshot, String> {
+    ) -> Result<SessionSnapshot, CoordError> {
         let mut tasks = Vec::new();
-        // Reserve the full encoded session metadata and envelope before history.
-        let mut bytes = 8192;
         for id in session.tasks.iter().skip(offset) {
             let Some(task) = self.tasks.get(id) else {
                 continue;
             };
-            let summary = TaskSnapshot {
+            tasks.push(TaskSnapshot {
                 task: task.id,
                 session: task.session,
                 status: task.status,
@@ -997,16 +1115,10 @@ impl Inner {
                     .detail
                     .as_deref()
                     .map(|detail| detail.chars().take(80).collect()),
-            };
-            let size = serde_json::to_vec(&summary)
-                .map_err(|e| e.to_string())?
-                .len()
-                + 1;
-            if !tasks.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
+            });
+            if latest_only {
                 break;
             }
-            bytes += size;
-            tasks.push(summary);
         }
         Ok(SessionSnapshot {
             session: session.id,
@@ -1016,280 +1128,128 @@ impl Inner {
             writer: session.writer,
             open: session.open,
             pane: session.pane,
-            next_task_offset: (!latest_only && offset + tasks.len() < session.tasks.len())
-                .then_some(offset + tasks.len()),
+            next_task_offset: None,
             tasks,
         })
     }
 
-    fn wait_result_page(
-        &self,
-        task_id: CoordinationTaskId,
-        status: TaskStatus,
-        result: Option<&str>,
-        detail: Option<&str>,
-        offset: usize,
-    ) -> Result<(Option<String>, Option<usize>), String> {
-        let Some(result) = result else {
-            if offset == 0 {
-                return Ok((None, None));
-            }
-            return Err("result offset out of range".into());
-        };
-
-        let mut boundaries: Vec<usize> = result.char_indices().map(|(i, _)| i).collect();
-        boundaries.push(result.len());
-        let total_chars = boundaries.len().saturating_sub(1);
-        if offset > total_chars {
-            return Err("result offset out of range".into());
-        }
-        if offset == total_chars {
-            return Ok((Some(String::new()), None));
-        }
-
-        if let Some(full) = self.wait_result_candidate(
-            task_id,
-            status,
-            detail,
-            result,
-            &boundaries,
-            offset,
-            total_chars,
-            None,
-        )? {
-            return Ok((Some(full), None));
-        }
-
-        if offset + 1 > total_chars {
-            return Err("wait result page did not advance".into());
-        }
-        if self
-            .wait_result_candidate(
-                task_id,
-                status,
-                detail,
-                result,
-                &boundaries,
-                offset,
-                offset + 1,
-                Some(offset + 1),
-            )?
-            .is_none()
-        {
-            return Err("wait response exceeds line length cap".into());
-        }
-
-        let mut low = offset + 1;
-        let mut high = total_chars;
-        let mut best = offset + 1;
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            let next = (mid < total_chars).then_some(mid);
-            if self
-                .wait_result_candidate(
-                    task_id,
-                    status,
-                    detail,
-                    result,
-                    &boundaries,
-                    offset,
-                    mid,
-                    next,
-                )?
-                .is_some()
-            {
-                best = mid;
-                low = mid.saturating_add(1);
-            } else {
-                high = mid.saturating_sub(1);
-            }
-        }
-
-        let next = (best < total_chars).then_some(best);
-        let page = self
-            .wait_result_candidate(
-                task_id,
-                status,
-                detail,
-                result,
-                &boundaries,
-                offset,
-                best,
-                next,
-            )?
-            .ok_or_else(|| "wait result page did not fit".to_string())?;
-        Ok((Some(page), next))
+    fn session(&self, id: AgentSessionId) -> Result<&Session, CoordError> {
+        self.sessions.get(&id).ok_or(CoordError::UnknownSession)
     }
 
-    fn wait_result_candidate(
-        &self,
-        task_id: CoordinationTaskId,
-        status: TaskStatus,
-        detail: Option<&str>,
-        result: &str,
-        boundaries: &[usize],
-        start: usize,
-        end: usize,
-        next_result_offset: Option<usize>,
-    ) -> Result<Option<String>, String> {
-        let slice = result
-            .get(boundaries[start]..boundaries[end])
-            .ok_or_else(|| "result offset split a code point".to_string())?;
-        let response = WireResponse {
-            id: u64::MAX,
-            body: Response::Wait {
-                task: task_id,
-                status,
-                terminal: status.is_terminal(),
-                result: Some(slice.to_string()),
-                detail: detail.map(str::to_string),
-                next_result_offset,
-            },
-        };
-        let encoded = serde_json::to_vec(&response).map_err(|err| err.to_string())?;
-        if encoded.len() <= crate::MAX_LINE_BYTES {
-            Ok(Some(slice.to_string()))
-        } else {
-            Ok(None)
-        }
+    fn session_mut(&mut self, id: AgentSessionId) -> Result<&mut Session, CoordError> {
+        self.sessions.get_mut(&id).ok_or(CoordError::UnknownSession)
     }
 
-    fn session(&self, id: AgentSessionId) -> Result<&Session, String> {
-        self.sessions
-            .get(&id)
-            .ok_or_else(|| "unknown session".into())
+    fn task(&self, id: CoordinationTaskId) -> Result<&Task, CoordError> {
+        self.tasks.get(&id).ok_or(CoordError::UnknownTask)
     }
 
-    fn session_mut(&mut self, id: AgentSessionId) -> Result<&mut Session, String> {
-        self.sessions
-            .get_mut(&id)
-            .ok_or_else(|| "unknown session".into())
+    fn task_mut(&mut self, id: CoordinationTaskId) -> Result<&mut Task, CoordError> {
+        self.tasks.get_mut(&id).ok_or(CoordError::UnknownTask)
     }
 
-    fn task(&self, id: CoordinationTaskId) -> Result<&Task, String> {
-        self.tasks.get(&id).ok_or_else(|| "unknown task".into())
-    }
-
-    fn task_mut(&mut self, id: CoordinationTaskId) -> Result<&mut Task, String> {
-        self.tasks.get_mut(&id).ok_or_else(|| "unknown task".into())
-    }
-
-    fn check_cwd(&self, cwd: &str) -> Result<(), String> {
+    fn check_cwd(&self, cwd: &str) -> Result<(), CoordError> {
         if cwd.trim().is_empty() {
-            return Err("cwd is empty".into());
+            return Err(CoordError::CwdEmpty);
         }
         if cwd.contains('\0') {
-            return Err("cwd contains NUL".into());
+            return Err(CoordError::CwdNul);
         }
         if cwd.chars().count() > self.limits.max_cwd_chars {
-            return Err("cwd exceeds length cap".into());
+            return Err(CoordError::CwdTooLong);
         }
         if !Path::new(cwd).is_absolute() {
-            return Err("cwd must be absolute".into());
+            return Err(CoordError::CwdRelative);
         }
         Ok(())
     }
 
-    fn check_name(&self, name: Option<&str>) -> Result<(), String> {
+    fn check_name(&self, name: Option<&str>) -> Result<(), CoordError> {
         let Some(name) = name else {
             return Ok(());
         };
         if name.trim().is_empty() {
-            return Err("name is empty".into());
+            return Err(CoordError::NameEmpty);
         }
         if name.contains('\0') {
-            return Err("name contains NUL".into());
+            return Err(CoordError::NameNul);
         }
         if name.chars().count() > self.limits.max_name_chars {
-            return Err("name exceeds length cap".into());
+            return Err(CoordError::NameTooLong);
         }
         let mut chars = name.chars();
         let Some(first) = chars.next() else {
-            return Err("name is empty".into());
+            return Err(CoordError::NameEmpty);
         };
-        if !first.is_ascii_alphabetic() {
-            return Err("name must start with a letter".into());
-        }
-        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err("name must be letters, digits, '_' or '-'".into());
+        if !first.is_ascii_alphabetic()
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(CoordError::NameInvalid);
         }
         Ok(())
     }
 
-    fn check_args(&self, args: &[String]) -> Result<(), String> {
+    fn check_args(&self, args: &[String]) -> Result<(), CoordError> {
         if args.len() > self.limits.max_args {
-            return Err(format!("too many args (max {})", self.limits.max_args));
+            return Err(CoordError::TooManyArgs {
+                max: self.limits.max_args,
+            });
         }
         for arg in args {
             if arg.chars().count() > self.limits.max_arg_chars {
-                return Err("arg exceeds length cap".into());
+                return Err(CoordError::ArgTooLong);
             }
             if arg.contains('\0') {
-                return Err("arg contains NUL".into());
+                return Err(CoordError::ArgNul);
             }
         }
         Ok(())
     }
 
-    fn check_prompt(&self, text: &str) -> Result<(), String> {
-        if text.trim().is_empty() {
-            return Err("text is empty".into());
-        }
-        if text.chars().count() > self.limits.max_prompt_chars {
-            return Err(format!(
-                "text exceeds length cap of {} characters",
-                self.limits.max_prompt_chars
-            ));
-        }
-        if text.contains('\0') {
-            return Err("text contains NUL".into());
-        }
-        if text
-            .chars()
-            .any(|c| c.is_control() && c != '\t' && c != '\n' && c != '\r')
-        {
-            return Err("text contains control characters".into());
-        }
-        Ok(())
+    fn check_prompt(&self, text: &str) -> Result<(), CoordError> {
+        self.check_payload("text", text, self.limits.max_prompt_chars, false)
     }
 
     fn check_payload(
         &self,
-        label: &str,
+        label: &'static str,
         text: &str,
         max: usize,
         empty_ok: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordError> {
         if !empty_ok && text.trim().is_empty() {
-            return Err(format!("{label} is empty"));
+            return Err(CoordError::PayloadEmpty { label });
         }
         if text.chars().count() > max {
-            return Err(format!("{label} exceeds length cap of {max} characters"));
+            return Err(CoordError::PayloadTooLong { label, max });
         }
         if text.contains('\0') {
-            return Err(format!("{label} contains NUL"));
+            return Err(CoordError::PayloadNul { label });
         }
         if text
             .chars()
             .any(|c| c.is_control() && c != '\t' && c != '\n' && c != '\r')
         {
-            return Err(format!("{label} contains control characters"));
+            return Err(CoordError::PayloadControl { label });
         }
         Ok(())
     }
 
-    fn ensure_task_capacity(&mut self) -> Result<(), String> {
+    fn ensure_task_capacity(&mut self) -> Result<(), CoordError> {
         self.prune_terminal_tasks();
         if self.tasks.len() >= self.limits.max_tasks {
-            return Err(format!("task limit {} reached", self.limits.max_tasks));
+            return Err(CoordError::TaskLimit {
+                max: self.limits.max_tasks,
+            });
         }
         Ok(())
     }
 
-    fn ensure_effect_capacity(&mut self) -> Result<(), String> {
-        if self.effects.len() >= self.limits.max_effects {
+    fn ensure_effect_capacity(&mut self) -> Result<(), CoordError> {
+        if self.effect_count() >= self.limits.max_effects {
             self.stats.effects_rejected += 1;
-            return Err("effect queue full".into());
+            return Err(CoordError::EffectQueueFull);
         }
         Ok(())
     }
@@ -1372,41 +1332,105 @@ impl Inner {
     }
 
     fn push_effect(&mut self, body: EffectBody) {
+        let session_id = body.session();
         let seq = self.next_effect_seq;
         self.next_effect_seq = self.next_effect_seq.saturating_add(1);
-        self.effects.push_back(Effect { seq, body });
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.mailbox.push_back(Effect { seq, body });
+        }
     }
 
     fn drain_effects_for_session(&mut self, session_id: AgentSessionId) {
-        let before = self.effects.len();
-        self.effects.retain(|e| e.body.session() != session_id);
-        let n = (before - self.effects.len()) as u64;
-        self.stats.effects_drained = self.stats.effects_drained.saturating_add(n);
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            let n = session.mailbox.len() as u64;
+            session.mailbox.clear();
+            self.stats.effects_drained = self.stats.effects_drained.saturating_add(n);
+        }
     }
 
     fn ack_exact(
         &mut self,
+        session: AgentSessionId,
         seq: u64,
         want: impl Fn(&EffectBody) -> bool,
-        want_name: &str,
-    ) -> Result<Effect, String> {
-        let pos = self
-            .effects
-            .iter()
-            .position(|e| e.seq == seq)
-            .ok_or_else(|| "unknown effect".to_string())?;
-        if !want(&self.effects[pos].body) {
-            return Err(format!(
-                "effect {seq} is {}, not {want_name}",
-                self.effects[pos].body.kind_name()
-            ));
+        want_name: &'static str,
+    ) -> Result<Effect, CoordError> {
+        let effect = self
+            .effect_by_seq_in(session, seq)
+            .ok_or(CoordError::UnknownEffect)?;
+        if !want(&effect.body) {
+            return Err(CoordError::EffectKindMismatch {
+                seq,
+                actual: effect.body.kind_name(),
+                expected: want_name,
+            });
         }
-        Ok(self.effects.remove(pos).expect("position is valid"))
+        Ok(self
+            .remove_effect_in(session, seq)
+            .expect("seq was present"))
     }
 
-    fn remove_effect(&mut self, seq: u64) -> Option<Effect> {
-        let pos = self.effects.iter().position(|e| e.seq == seq)?;
-        self.effects.remove(pos)
+    /// Remove `seq` from one session's mailbox. The commit path knows the
+    /// session, so it never scans the other sessions' queues.
+    fn remove_effect_in(&mut self, session: AgentSessionId, seq: u64) -> Option<Effect> {
+        let mailbox = &mut self.sessions.get_mut(&session)?.mailbox;
+        let pos = mailbox.iter().position(|e| e.seq == seq)?;
+        mailbox.remove(pos)
+    }
+
+    fn effect_by_seq_in(&self, session: AgentSessionId, seq: u64) -> Option<&Effect> {
+        self.sessions
+            .get(&session)?
+            .mailbox
+            .iter()
+            .find(|e| e.seq == seq)
+    }
+
+    /// Locate an effect across all sessions. Only [`Registry::try_claim`] uses
+    /// this: it starts from a bare seq and does not yet know the session.
+    fn effect_by_seq(&self, seq: u64) -> Option<&Effect> {
+        self.sessions
+            .values()
+            .find_map(|session| session.mailbox.iter().find(|e| e.seq == seq))
+    }
+
+    fn all_effects(&self) -> Vec<Effect> {
+        let mut effects: Vec<Effect> = self
+            .sessions
+            .values()
+            .flat_map(|session| session.mailbox.iter().cloned())
+            .collect();
+        effects.sort_by_key(|e| e.seq);
+        effects
+    }
+
+    fn mailbox(&self, session: AgentSessionId) -> impl Iterator<Item = &Effect> {
+        self.sessions
+            .get(&session)
+            .into_iter()
+            .flat_map(|s| s.mailbox.iter())
+    }
+
+    fn effect_count(&self) -> usize {
+        self.sessions.values().map(|s| s.mailbox.len()).sum()
+    }
+
+    fn session_is_claimed(&self, session: AgentSessionId) -> bool {
+        self.claimed_seq_of(session).is_some()
+    }
+
+    fn claimed_seq_of(&self, session: AgentSessionId) -> Option<u64> {
+        self.sessions.get(&session).and_then(|s| s.claimed_seq)
+    }
+
+    fn session_for_update(&self, update: &AdapterUpdate) -> Option<AgentSessionId> {
+        match update {
+            AdapterUpdate::TaskRunning { task }
+            | AdapterUpdate::TaskAwaitingHuman { task }
+            | AdapterUpdate::TaskResult { task, .. } => self.tasks.get(task).map(|t| t.session),
+            AdapterUpdate::SessionClosed { session }
+            | AdapterUpdate::ReleaseToCoordinator { session } => Some(*session),
+        }
     }
 
     fn facts_since(&self, cursor: u64) -> FactBatch {
@@ -1415,25 +1439,27 @@ impl Inner {
             Some(min) if cursor + 1 < min => min - cursor - 1,
             _ => 0,
         };
-        let mut facts = Vec::new();
-        let mut bytes = 256;
-        for fact in self.facts.iter().filter(|fact| fact.seq > cursor) {
-            let size = serde_json::to_vec(fact)
-                .map(|line| line.len())
-                .unwrap_or(crate::MAX_LINE_BYTES)
-                + 1;
-            if !facts.is_empty() && bytes + size >= crate::MAX_LINE_BYTES {
-                break;
-            }
-            bytes += size;
-            facts.push(fact.clone());
-        }
+        let facts: Vec<Fact> = self
+            .facts
+            .iter()
+            .filter(|fact| fact.seq > cursor)
+            .cloned()
+            .collect();
         let next_cursor = facts.last().map(|f| f.seq).unwrap_or(cursor);
         FactBatch {
             facts,
             next_cursor,
             missed,
         }
+    }
+}
+
+fn superseded_by_finished_task(body: &EffectBody, task: CoordinationTaskId) -> bool {
+    match body {
+        EffectBody::LaunchRequested { task: t, .. }
+        | EffectBody::PromptRequested { task: t, .. }
+        | EffectBody::InterruptRequested { task: t, .. } => *t == task,
+        _ => false,
     }
 }
 
@@ -1500,15 +1526,37 @@ mod tests {
             reg,
             |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
         );
-        reg.apply(
-            AdapterUpdate::BindPane {
-                seq,
-                session,
-                pane: Uuid::from_u128(pane),
-            },
-            now,
-        )
-        .unwrap();
+        reg.try_claim(seq)
+            .expect("claim")
+            .commit(
+                ClaimOutcome::Delivered {
+                    pane: Some(Uuid::from_u128(pane)),
+                },
+                now,
+            )
+            .expect("commit");
+    }
+
+    fn delivered_ok(reg: &Registry, seq: u64, now: u64) {
+        reg.try_claim(seq)
+            .expect("claim")
+            .commit(ClaimOutcome::Delivered { pane: None }, now)
+            .expect("commit");
+    }
+
+    fn failed_ok(reg: &Registry, seq: u64, now: u64) {
+        reg.try_claim(seq)
+            .expect("claim")
+            .commit(ClaimOutcome::Failed, now)
+            .expect("commit");
+    }
+
+    fn assert_unclaimable(reg: &Registry, seq: u64, want: CoordError) {
+        match reg.try_claim(seq) {
+            Err(err) if err == want => {}
+            Err(err) => panic!("try_claim({seq}) err={err}, want={want}"),
+            Ok(_) => panic!("try_claim({seq}) unexpectedly succeeded"),
+        }
     }
 
     fn settle_launch(reg: &Registry, session: AgentSessionId, task: CoordinationTaskId, now: u64) {
@@ -1885,8 +1933,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::PromptRequested { task: t, .. } if *t == task),
         );
-        reg.apply(AdapterUpdate::PromptDelivered { seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, seq, 3);
         reg.apply(AdapterUpdate::TaskRunning { task }, 3).unwrap();
         reg.apply(AdapterUpdate::TaskAwaitingHuman { task }, 4)
             .unwrap();
@@ -2008,10 +2055,14 @@ mod tests {
         }
         for body in [Request::List, Request::Effects] {
             let reply = reg.handle(req(0, body), 0);
-            assert!(
-                crate::encode_response_line(&reply).unwrap().len() < crate::MAX_LINE_BYTES,
-                "summary/diagnostic page must be transportable at capacity"
-            );
+            let frames = crate::frame::frame_response(reply).unwrap();
+            assert!(!frames.is_empty());
+            for line in &frames {
+                assert!(
+                    line.len() <= crate::MAX_LINE_BYTES,
+                    "server frames must fit the wire cap"
+                );
+            }
         }
     }
 
@@ -2061,10 +2112,7 @@ mod tests {
             Response::PromptAccepted { task } => task,
             other => panic!("{other:?}"),
         };
-        assert!(
-            reg.apply(AdapterUpdate::InterruptDelivered { seq: stale }, 5)
-                .is_err()
-        );
+        assert_unclaimable(&reg, stale, CoordError::UnknownEffect);
         assert!(matches!(
             reg.handle(req(6, Request::Wait { task: second }), 6).body,
             Response::Wait {
@@ -2076,30 +2124,67 @@ mod tests {
     }
 
     #[test]
-    fn idle_interrupt_does_not_survive_acceptance_of_a_new_prompt() {
+    fn idle_interrupt_is_rejected() {
         let reg = Registry::new();
         let (session, _) = ready(&reg);
-        reg.handle(req(1, Request::Interrupt { session }), 1);
-        let interrupt = reg.peek_effects()[0].clone();
-        reg.handle(
-            req(
+        match reg.handle(req(1, Request::Interrupt { session }), 1).body {
+            Response::Error { message } => {
+                assert!(message.contains("nothing in flight"), "{message}")
+            }
+            other => panic!("idle interrupt must be rejected: {other:?}"),
+        }
+        match reg
+            .handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "new work".into(),
+                    },
+                ),
                 2,
-                Request::Prompt {
-                    session,
-                    text: "new work".into(),
-                },
-            ),
-            2,
+            )
+            .body
+        {
+            Response::PromptAccepted { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(reg.peek_effects().len(), 1);
+        assert!(matches!(
+            reg.peek_effects()[0].body,
+            EffectBody::PromptRequested { .. }
+        ));
+    }
+
+    #[test]
+    fn prompt_delivered_marks_the_task_running() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        let task = match reg
+            .handle(
+                req(
+                    1,
+                    Request::Prompt {
+                        session,
+                        text: "work".into(),
+                    },
+                ),
+                1,
+            )
+            .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { task: t, .. } if *t == task),
         );
-        let mut delivered = false;
-        let claim = reg.deliver(&interrupt, |_| {
-            delivered = true;
-        });
-        assert!(claim.is_err());
-        assert!(
-            !delivered,
-            "an idle interrupt must not hit the next assignment"
-        );
+        delivered_ok(&reg, seq, 2);
+        match reg.handle(req(3, Request::Wait { task }), 3).body {
+            Response::Wait { status, .. } => assert_eq!(status, TaskStatus::Running),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -2107,7 +2192,7 @@ mod tests {
         let reg = Registry::with_limits(limits_one());
         let (session, task) = launch(&reg, 0);
         let seq = reg.peek_effects()[0].seq;
-        reg.apply(AdapterUpdate::DeliveryFailed { seq }, 1).unwrap();
+        failed_ok(&reg, seq, 1);
         match reg.handle(req(2, Request::Inspect { session }), 2).body {
             Response::Inspect { session } => assert!(!session.open),
             other => panic!("{other:?}"),
@@ -2164,8 +2249,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::InterruptDelivered { seq: interrupt_seq }, 5)
-            .unwrap();
+        delivered_ok(&reg, interrupt_seq, 5);
         assert!(
             !reg.peek_effects()
                 .iter()
@@ -2225,7 +2309,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::DeliveryFailed { seq }, 3).unwrap();
+        failed_ok(&reg, seq, 3);
         match reg.handle(req(4, Request::Wait { task }), 4).body {
             Response::Wait {
                 status, terminal, ..
@@ -2252,8 +2336,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
-        reg.apply(AdapterUpdate::InterruptDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         let second = match reg
             .handle(
                 req(
@@ -2279,18 +2362,12 @@ mod tests {
             |b| matches!(b, EffectBody::InterruptRequested { session: s, .. } if *s == session),
         );
         assert_ne!(first_seq, second_seq);
-        match reg.apply(AdapterUpdate::InterruptDelivered { seq: first_seq }, 6) {
-            Err(message) => assert!(message.contains("unknown effect"), "{message}"),
-            Ok(()) => panic!("stale seq must not settle the later task"),
-        }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         match reg.handle(req(7, Request::Wait { task: second }), 7).body {
             Response::Wait { status, .. } => assert_eq!(status, TaskStatus::Interrupting),
             other => panic!("{other:?}"),
         }
-        match reg.apply(AdapterUpdate::InterruptDelivered { seq: second_seq }, 8) {
-            Ok(()) => {}
-            Err(err) => panic!("{err}"),
-        }
+        delivered_ok(&reg, second_seq, 8);
         match reg.handle(req(9, Request::Wait { task: second }), 9).body {
             Response::Wait {
                 status, terminal, ..
@@ -2368,7 +2445,7 @@ mod tests {
         let reg = Registry::new();
         let (_session, task) = launch(&reg, 0);
         let seq = reg.peek_effects()[0].seq;
-        reg.apply(AdapterUpdate::DeliveryFailed { seq }, 1).unwrap();
+        failed_ok(&reg, seq, 1);
         match reg.handle(req(2, Request::Wait { task }), 2).body {
             Response::Wait {
                 status, terminal, ..
@@ -2447,24 +2524,11 @@ mod tests {
         let reg = Registry::new();
         let (session, _) = launch(&reg, 0);
         let pane = Uuid::from_u128(3);
-        let seq = effect_seq(
-            &reg,
-            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
-        );
-        reg.apply(AdapterUpdate::BindPane { seq, session, pane }, 1)
-            .unwrap();
-        reg.apply(AdapterUpdate::BindPane { seq, session, pane }, 2)
-            .unwrap();
-        match reg.apply(
-            AdapterUpdate::BindPane {
-                seq,
-                session,
-                pane: Uuid::from_u128(4),
-            },
-            3,
-        ) {
-            Err(message) => assert!(message.contains("already bound")),
-            Ok(()) => panic!("rebind must fail"),
+        bind(&reg, session, 3, 1);
+        assert_unclaimable(&reg, 1, CoordError::UnknownEffect);
+        match reg.handle(req(4, Request::Inspect { session }), 4).body {
+            Response::Inspect { session: snap } => assert_eq!(snap.pane, Some(pane)),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -2631,12 +2695,7 @@ mod tests {
         let reg = Registry::new();
         let (session, _) = launch(&reg, 0);
         let pane = Uuid::from_u128(42);
-        let seq = effect_seq(
-            &reg,
-            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
-        );
-        reg.apply(AdapterUpdate::BindPane { seq, session, pane }, 1)
-            .unwrap();
+        bind(&reg, session, 42, 1);
         match reg.handle(req(2, Request::Inspect { session }), 2).body {
             Response::Inspect { session: snap } => assert_eq!(snap.pane, Some(pane)),
             other => panic!("{other:?}"),
@@ -2687,8 +2746,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::PromptRequested { task: t, .. } if *t == task),
         );
-        reg.apply(AdapterUpdate::PromptDelivered { seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, seq, 3);
         reg.apply(AdapterUpdate::TaskRunning { task }, 3).unwrap();
         reg.apply(AdapterUpdate::TaskAwaitingHuman { task }, 4)
             .unwrap();
@@ -3126,8 +3184,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::PromptRequested { task, .. } if *task == first),
         );
-        reg.apply(AdapterUpdate::PromptDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         reg.apply(AdapterUpdate::TaskRunning { task: first }, 3)
             .unwrap();
         reg.apply(
@@ -3159,10 +3216,7 @@ mod tests {
             |b| matches!(b, EffectBody::PromptRequested { task, .. } if *task == second),
         );
         assert_ne!(first_seq, second_seq);
-        match reg.apply(AdapterUpdate::PromptDelivered { seq: first_seq }, 6) {
-            Err(message) => assert!(message.contains("unknown effect"), "{message}"),
-            Ok(()) => panic!("stale seq must not ack the later prompt"),
-        }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         assert!(reg.peek_effects().iter().any(|e| e.seq == second_seq
             && matches!(e.body, EffectBody::PromptRequested { task, .. } if task == second)));
         match reg.handle(req(7, Request::Wait { task: second }), 7).body {
@@ -3183,8 +3237,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::FocusRequested { session: s } if *s == session),
         );
-        reg.apply(AdapterUpdate::FocusDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         assert!(matches!(
             reg.handle(req(4, Request::Focus { session }), 4).body,
             Response::FocusAccepted { .. }
@@ -3194,10 +3247,7 @@ mod tests {
             |b| matches!(b, EffectBody::FocusRequested { session: s } if *s == session),
         );
         assert_ne!(first_seq, second_seq);
-        match reg.apply(AdapterUpdate::FocusDelivered { seq: first_seq }, 5) {
-            Err(message) => assert!(message.contains("unknown effect"), "{message}"),
-            Ok(()) => panic!("stale seq must not ack the later focus"),
-        }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         assert!(reg.peek_effects().iter().any(|e| e.seq == second_seq
             && matches!(e.body, EffectBody::FocusRequested { session: s } if s == session)));
     }
@@ -3210,12 +3260,16 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
         );
-        match reg.apply(AdapterUpdate::PromptDelivered { seq }, 1) {
-            Err(message) => {
-                assert!(message.contains("not prompt_requested"), "{message}");
+        match reg
+            .try_claim(seq)
+            .expect("claim")
+            .commit(ClaimOutcome::Delivered { pane: None }, 1)
+        {
+            Err(err) => {
+                let message = err.to_string();
                 assert!(message.contains("launch_requested"), "{message}");
             }
-            Ok(()) => panic!("kind mismatch must fail"),
+            Ok(()) => panic!("launch delivered without pane must fail"),
         }
         assert!(
             reg.peek_effects()
@@ -3225,13 +3279,47 @@ mod tests {
     }
 
     #[test]
+    fn commit_kind_mismatch_still_releases_the_lease() {
+        // A failing commit (here `Delivered` without a pane on a launch effect)
+        // fails with EffectKindMismatch, but the lease must still end so the
+        // session does not wedge. Regression: a `committed = true` set before
+        // the ack, or an early-return while holding `claimed_seq`, left every
+        // subsequent claim / mutating request waiting on the condvar forever.
+        let reg = Registry::new();
+        let (session, _) = launch(&reg, 0);
+        let launch_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
+        );
+        match reg
+            .try_claim(launch_seq)
+            .expect("claim launch")
+            .commit(ClaimOutcome::Delivered { pane: None }, 3)
+        {
+            Err(CoordError::EffectKindMismatch { .. }) => {}
+            other => panic!("launch delivered without a pane must mismatch: {other:?}"),
+        }
+        // The failed commit left the effect queued.
+        assert!(
+            reg.peek_effects().iter().any(
+                |e| e.seq == launch_seq && matches!(e.body, EffectBody::LaunchRequested { .. })
+            )
+        );
+        // The lease is released: a second claim returns promptly (not
+        // EffectAlreadyClaimed) and a mutating request does not hang.
+        reg.try_claim(launch_seq)
+            .expect("second claim must succeed after the lease is released");
+        assert!(matches!(
+            reg.handle(req(4, Request::Close { session }), 4).body,
+            Response::CloseAccepted { .. }
+        ));
+    }
+
+    #[test]
     fn unknown_effect_seq_is_an_error() {
         let reg = Registry::new();
         launch(&reg, 0);
-        match reg.apply(AdapterUpdate::FocusDelivered { seq: 99 }, 1) {
-            Err(message) => assert!(message.contains("unknown effect"), "{message}"),
-            Ok(()) => panic!("missing seq must fail"),
-        }
+        assert_unclaimable(&reg, 99, CoordError::UnknownEffect);
         assert_eq!(reg.peek_effects().len(), 1);
     }
 
@@ -3244,28 +3332,50 @@ mod tests {
             &reg,
             |body| matches!(body, EffectBody::LaunchRequested { session, .. } if *session == a),
         );
-        match reg.apply(
-            AdapterUpdate::BindPane {
-                seq: seq_a,
-                session: b,
-                pane: Uuid::from_u128(1),
-            },
-            2,
-        ) {
-            Err(message) => assert!(
-                message.contains("different session") || message.contains("not launch_requested"),
-                "{message}"
-            ),
-            Ok(()) => panic!("foreign launch seq must not bind"),
-        }
+        reg.try_claim(seq_a)
+            .expect("claim")
+            .commit(
+                ClaimOutcome::Delivered {
+                    pane: Some(Uuid::from_u128(1)),
+                },
+                2,
+            )
+            .expect("commit");
         match reg.handle(req(3, Request::Inspect { session: b }), 3).body {
             Response::Inspect { session: snap } => assert!(snap.pane.is_none()),
             other => panic!("{other:?}"),
         }
-        assert!(
-            reg.peek_effects()
-                .iter()
-                .any(|e| e.seq == seq_a && matches!(e.body, EffectBody::LaunchRequested { .. }))
+        match reg.handle(req(4, Request::Inspect { session: a }), 4).body {
+            Response::Inspect { session: snap } => {
+                assert_eq!(snap.pane, Some(Uuid::from_u128(1)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_for_pane_maps_a_bound_pane_to_its_session() {
+        let reg = Registry::new();
+        let (session, _task) = launch(&reg, 0);
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
+        );
+        let pane = Uuid::from_u128(7);
+        reg.try_claim(seq)
+            .expect("claim")
+            .commit(ClaimOutcome::Delivered { pane: Some(pane) }, 1)
+            .expect("commit");
+
+        assert_eq!(
+            reg.session_for_pane(pane),
+            Some(session),
+            "known pane maps to the session"
+        );
+        assert_eq!(
+            reg.session_for_pane(Uuid::from_u128(99)),
+            None,
+            "unknown pane returns None"
         );
     }
 
@@ -3281,8 +3391,7 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::CloseRequested { session: s } if *s == session),
         );
-        reg.apply(AdapterUpdate::CloseDelivered { seq: first_seq }, 3)
-            .unwrap();
+        delivered_ok(&reg, first_seq, 3);
         assert!(matches!(
             reg.handle(req(4, Request::Close { session }), 4).body,
             Response::CloseAccepted { .. }
@@ -3291,10 +3400,301 @@ mod tests {
             &reg,
             |b| matches!(b, EffectBody::CloseRequested { session: s } if *s == session),
         );
-        match reg.apply(AdapterUpdate::CloseDelivered { seq: first_seq }, 5) {
-            Err(message) => assert!(message.contains("unknown effect"), "{message}"),
-            Ok(()) => panic!("stale close seq must not ack a later close"),
-        }
+        assert_unclaimable(&reg, first_seq, CoordError::UnknownEffect);
         assert!(reg.peek_effects().iter().any(|e| e.seq == second_seq));
+    }
+
+    #[test]
+    fn claim_then_drop_restores_mutability() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        assert!(matches!(
+            reg.handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "work".into(),
+                    },
+                ),
+                2,
+            )
+            .body,
+            Response::PromptAccepted { .. }
+        ));
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { session: s, .. } if *s == session),
+        );
+        {
+            let claimed = reg.try_claim(seq).expect("claim");
+            assert_eq!(claimed.seq(), seq);
+            assert!(
+                reg.peek_effects().iter().any(|e| e.seq == seq),
+                "claim must not dequeue"
+            );
+        }
+        let claimed = reg.try_claim(seq).expect("re-claim after drop");
+        drop(claimed);
+        assert!(matches!(
+            reg.handle(req(3, Request::Focus { session }), 3).body,
+            Response::FocusAccepted { .. }
+        ));
+    }
+
+    #[test]
+    fn delivery_requires_claim_not_apply() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        assert!(matches!(
+            reg.handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "work".into(),
+                    },
+                ),
+                2,
+            )
+            .body,
+            Response::PromptAccepted { .. }
+        ));
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { session: s, .. } if *s == session),
+        );
+        assert!(
+            reg.peek_effects()
+                .iter()
+                .any(|e| e.seq == seq && matches!(e.body, EffectBody::PromptRequested { .. }))
+        );
+        delivered_ok(&reg, seq, 3);
+        assert!(!reg.peek_effects().iter().any(|e| e.seq == seq));
+    }
+
+    #[test]
+    fn inspect_succeeds_while_a_claim_is_held() {
+        let reg = Registry::new();
+        let (session, _) = launch(&reg, 0);
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
+        );
+        let claimed = reg.try_claim(seq).expect("claim");
+        match reg.handle(req(2, Request::Inspect { session }), 1).body {
+            Response::Inspect { session: snap } => {
+                assert_eq!(snap.session, session);
+                assert!(snap.open);
+            }
+            other => panic!("{other:?}"),
+        }
+        drop(claimed);
+    }
+
+    #[test]
+    fn same_seq_reclaim_does_not_deadlock() {
+        let reg = Registry::new();
+        let (session, _) = launch(&reg, 0);
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
+        );
+        let claimed = reg.try_claim(seq).expect("claim");
+        assert_unclaimable(&reg, seq, CoordError::EffectAlreadyClaimed);
+        drop(claimed);
+        reg.try_claim(seq).expect("claim after drop");
+    }
+
+    #[test]
+    fn second_try_claim_on_same_session_waits_until_drop() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        assert!(matches!(
+            reg.handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "work".into(),
+                    },
+                ),
+                2,
+            )
+            .body,
+            Response::PromptAccepted { .. }
+        ));
+        assert!(matches!(
+            reg.handle(req(3, Request::Focus { session }), 3).body,
+            Response::FocusAccepted { .. }
+        ));
+        let prompt_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { session: s, .. } if *s == session),
+        );
+        let focus_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::FocusRequested { session: s } if *s == session),
+        );
+        let claimed = reg.try_claim(prompt_seq).expect("claim prompt");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = reg;
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = waiter.try_claim(focus_seq);
+            done_tx.send(result.map(|c| c.seq())).unwrap();
+        });
+        started_rx.recv().unwrap();
+        match done_rx.recv_timeout(std::time::Duration::from_millis(150)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(value) => panic!("second claim must wait on the live lease: {value:?}"),
+            Err(err) => panic!("{err}"),
+        }
+        drop(claimed);
+        let seq = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("waiter should proceed after drop")
+            .expect("focus claim");
+        assert_eq!(seq, focus_seq);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn takeover_drains_queued_prompt_interrupt_close_and_keeps_focus() {
+        let reg = Registry::new();
+        let (session, _) = ready(&reg);
+        let prompt = match reg
+            .handle(
+                req(
+                    2,
+                    Request::Prompt {
+                        session,
+                        text: "queued work".into(),
+                    },
+                ),
+                2,
+            )
+            .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(
+            reg.handle(req(3, Request::Focus { session }), 3).body,
+            Response::FocusAccepted { .. }
+        ));
+        assert!(matches!(
+            reg.handle(req(4, Request::Close { session }), 4).body,
+            Response::CloseAccepted { .. }
+        ));
+        match reg
+            .handle(req(5, Request::HumanTakeover { session }), 5)
+            .body
+        {
+            Response::TakenOver { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        let leftover = reg.peek_effects();
+        assert!(
+            leftover.iter().all(|e| {
+                e.body.session() != session || matches!(e.body, EffectBody::FocusRequested { .. })
+            }),
+            "takeover must not leave coordinator intents: {leftover:?}"
+        );
+        assert!(
+            leftover.iter().any(
+                |e| matches!(e.body, EffectBody::FocusRequested { session: s } if s == session)
+            ),
+            "FocusRequested may remain"
+        );
+        assert!(
+            !leftover.iter().any(|e| matches!(
+                e.body,
+                EffectBody::PromptRequested { .. }
+                    | EffectBody::InterruptRequested { .. }
+                    | EffectBody::CloseRequested { .. }
+            )),
+            "no HumanOwnsSession poison in the mailbox"
+        );
+        match reg.handle(req(6, Request::Wait { task: prompt }), 6).body {
+            Response::Wait {
+                status, terminal, ..
+            } => {
+                assert_eq!(status, TaskStatus::Unknown);
+                assert!(terminal);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let (session2, _) = ready(&reg);
+        let running = match reg
+            .handle(
+                req(
+                    7,
+                    Request::Prompt {
+                        session: session2,
+                        text: "delivered then interrupted".into(),
+                    },
+                ),
+                7,
+            )
+            .body
+        {
+            Response::PromptAccepted { task } => task,
+            other => panic!("{other:?}"),
+        };
+        let prompt_seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::PromptRequested { task, .. } if *task == running),
+        );
+        delivered_ok(&reg, prompt_seq, 8);
+        assert!(matches!(
+            reg.handle(req(9, Request::Interrupt { session: session2 }), 9)
+                .body,
+            Response::InterruptAccepted { .. }
+        ));
+        assert!(matches!(
+            reg.handle(req(10, Request::Close { session: session2 }), 10)
+                .body,
+            Response::CloseAccepted { .. }
+        ));
+        match reg
+            .handle(req(11, Request::HumanTakeover { session: session2 }), 11)
+            .body
+        {
+            Response::TakenOver { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            !reg.peek_effects().iter().any(|e| {
+                e.body.session() == session2
+                    && matches!(
+                        e.body,
+                        EffectBody::InterruptRequested { .. } | EffectBody::CloseRequested { .. }
+                    )
+            }),
+            "interrupt/close must not remain after takeover"
+        );
+        match reg
+            .handle(req(12, Request::Wait { task: running }), 12)
+            .body
+        {
+            Response::Wait {
+                status, terminal, ..
+            } => {
+                assert_eq!(status, TaskStatus::Unknown);
+                assert!(terminal);
+            }
+            other => panic!("{other:?}"),
+        }
+        match reg.handle(req(13, Request::Inspect { session }), 13).body {
+            Response::Inspect { session: snap } => {
+                assert!(snap.open);
+                assert_eq!(snap.writer, Writer::Human);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(reg.stats().effects_drained >= 3);
     }
 }

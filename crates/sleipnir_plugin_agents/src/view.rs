@@ -305,7 +305,6 @@ fn kind_label(kind: agent_coordination::AgentKind) -> &'static str {
 fn task_label(status: agent_coordination::TaskStatus) -> &'static str {
     use agent_coordination::TaskStatus;
     match status {
-        TaskStatus::Accepted => "accepted",
         TaskStatus::Dispatching => "dispatching",
         TaskStatus::Running => "running",
         TaskStatus::AwaitingHuman => "awaiting human",
@@ -706,7 +705,6 @@ mod tests {
     #[test]
     fn managed_section_never_claims_task_success() {
         let sessions: Vec<ManagedSessionRow> = [
-            TaskStatus::Accepted,
             TaskStatus::Dispatching,
             TaskStatus::Running,
             TaskStatus::AwaitingHuman,
@@ -768,7 +766,6 @@ mod tests {
     #[test]
     fn interrupt_is_offered_only_while_the_latest_task_is_in_flight() {
         for status in [
-            TaskStatus::Accepted,
             TaskStatus::Dispatching,
             TaskStatus::Running,
             TaskStatus::AwaitingHuman,

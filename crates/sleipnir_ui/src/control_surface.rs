@@ -478,11 +478,31 @@ async fn wait_until(
     }
 }
 
+/// Handle the three synchronous control-surface verbs (`ls` / `capture` /
+/// `send`). `wait` is served asynchronously by [`wait_until`] and never routed
+/// here.
+///
+/// This is a plain match over ctl's own protocol, not the plugin
+/// [`crate::plugin_host_calls::WorkspaceIo`] trait: ctl has no open / focus /
+/// send-key / close / scroll-to-run request, so implementing all eight verbs
+/// would mean five "not a control-surface request" stubs. The genuinely shared
+/// work — the terminal-pane walk ([`live_terminal_panes`]) and the `PaneInfo`
+/// construction ([`pane_infos`]) — is factored into free functions the plugin
+/// host calls can reuse. `send` keeps ctl's raw-PTY-byte semantics (see
+/// [`send_bytes`]); the plugin `SendText` verb keeps its paste-aware path.
 #[cfg(unix)]
 fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
     match req {
         ControlRequest::Ls => ControlResponse::Ls {
-            panes: list_panes(cx),
+            panes: pane_infos(&live_terminal_panes(cx), cx)
+                .into_iter()
+                .map(|info| PaneSnap {
+                    pane: info.pane,
+                    cwd: info.cwd,
+                    busy: info.busy,
+                    title: info.title,
+                })
+                .collect(),
         },
         ControlRequest::Capture { pane } => match view_for_pane(cx, pane) {
             Some(view) => ControlResponse::Capture {
@@ -494,11 +514,7 @@ fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
         },
         ControlRequest::Send { pane, text, enter } => match view_for_pane(cx, pane) {
             Some(view) => {
-                let mut bytes = text.into_bytes();
-                if enter {
-                    bytes.push(b'\r');
-                }
-                view.update(cx, |v, cx| v.input_bytes(bytes, cx));
+                send_bytes(&view, text, enter, cx);
                 ControlResponse::Send
             }
             None => ControlResponse::Error {
@@ -509,6 +525,44 @@ fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
             message: "wait handled asynchronously".into(),
         },
     }
+}
+
+/// Build a [`plugin_protocol::v2::PaneInfo`] for each terminal pane. Shared by
+/// `sleipnir-ctl ls` and the plugin `ListPanes` verb so the two enumerations
+/// cannot drift. The caller supplies the terminal walk (`live_terminal_panes`
+/// here, the frame's cached `live_panes` in the shell) which already excludes
+/// plugin Panel leaves.
+pub(crate) fn pane_infos(
+    panes: &[(PaneKey, gpui::Entity<TermView>)],
+    cx: &App,
+) -> Vec<plugin_protocol::v2::PaneInfo> {
+    panes
+        .iter()
+        .map(|(pane, view)| plugin_protocol::v2::PaneInfo {
+            pane: *pane,
+            cwd: view
+                .read(cx)
+                .working_directory(cx)
+                .map(|p| p.to_string_lossy().into_owned()),
+            title: Some(view.read(cx).title().to_string()),
+            busy: view.read(cx).looks_busy(cx),
+        })
+        .collect()
+}
+
+/// `sleipnir-ctl send`: write raw bytes straight to the PTY, appending `\r`
+/// when `enter` is set. Multiline text therefore executes line by line and
+/// control bytes pass through verbatim — the automation contract ctl has
+/// always had. This is deliberately *not* the plugin `SendText` path
+/// ([`TermView::insert_text`], bracketed-paste-aware and CSI-stripping):
+/// plugins are untrusted, `sleipnir-ctl` is the local operator.
+#[cfg(unix)]
+fn send_bytes(view: &gpui::Entity<TermView>, text: String, enter: bool, cx: &mut App) {
+    let mut bytes = text.into_bytes();
+    if enter {
+        bytes.push(b'\r');
+    }
+    view.update(cx, |v, cx| v.input_bytes(bytes, cx));
 }
 
 #[cfg(unix)]
@@ -527,22 +581,6 @@ fn wait_status(pane: PaneKey, until: WaitUntil, cx: &mut App) -> Result<bool, St
         (false, false)
     };
     Ok(wait_matches(until, busy, failed, attention))
-}
-
-#[cfg(unix)]
-fn list_panes(cx: &mut App) -> Vec<PaneSnap> {
-    collect_live_panes(cx)
-        .into_iter()
-        .map(|(pane, view)| PaneSnap {
-            pane,
-            cwd: view
-                .read(cx)
-                .working_directory(cx)
-                .map(|p| p.to_string_lossy().into_owned()),
-            busy: view.read(cx).looks_busy(cx),
-            title: Some(view.read(cx).title().to_string()),
-        })
-        .collect()
 }
 
 #[cfg(unix)]
@@ -568,11 +606,6 @@ pub(crate) fn live_terminal_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<Te
         out.extend(panes);
     }
     out
-}
-
-#[cfg(unix)]
-fn collect_live_panes(cx: &mut App) -> Vec<(PaneKey, gpui::Entity<TermView>)> {
-    live_terminal_panes(cx)
 }
 
 #[cfg(all(test, unix))]

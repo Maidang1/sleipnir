@@ -23,7 +23,7 @@ pub(crate) struct FindState {
     /// IME composition range (UTF-16) inside `query`, if composing.
     pub(crate) marked: Option<std::ops::Range<usize>>,
     /// Monotonic generation used to discard stale debounce timers.
-    debounce_gen: u64,
+    pub(crate) debounce_gen: u64,
     /// Monotonic request id used to discard stale asynchronous search results.
     search_gen: u64,
     match_count: usize,
@@ -38,6 +38,14 @@ pub(crate) struct FindState {
 }
 
 impl FindState {
+    /// Reset the pure (non-cx) find state on teardown: clear the IME
+    /// composition range and bump the debounce generation so any pending
+    /// timer fires into a stale generation and is discarded.
+    pub(crate) fn teardown(&mut self) {
+        self.marked = None;
+        self.debounce_gen = self.debounce_gen.wrapping_add(1);
+    }
+
     /// Resolve the raw query into the regex handed to alacritty's search.
     ///
     /// Literal mode escapes regex metacharacters; regex mode passes the query
@@ -64,28 +72,23 @@ impl AppShell {
     }
 
     pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.mode.open_find();
-        // Focus the shell so the find query box's IME input handler activates.
+        self.set_input(crate::ui_mode::InputMode::Find, cx);
         window.focus(&self.focus_handle, cx);
         cx.notify();
-        // Re-run search if query already present.
         if !self.find.query.is_empty() {
             self.run_find(cx);
         }
     }
 
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode.find_open {
-            self.mode.close_find();
-            self.find.marked = None;
-            self.find.debounce_gen = self.find.debounce_gen.wrapping_add(1);
-            self.clear_find_matches(cx);
+        if self.input.is_find() {
+            self.set_input(crate::ui_mode::InputMode::Terminal, cx);
             self.focus_active(window, cx);
             cx.notify();
         }
     }
 
-    fn clear_find_matches(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_find_matches(&mut self, cx: &mut Context<Self>) {
         // Invalidate searches that are still running so they cannot repopulate
         // matches after the query is cleared or the find bar is closed.
         self.find.search_gen = self.find.search_gen.wrapping_add(1);
@@ -102,7 +105,7 @@ impl AppShell {
     /// count and highlights describe the pane actually on screen. Called from
     /// `commit_workspace` (tab switches and pane focus moves).
     pub(crate) fn refresh_find_for_active_pane(&mut self, cx: &mut Context<Self>) {
-        if !self.mode.find_open || self.find.query.is_empty() {
+        if !self.input.is_find() || self.find.query.is_empty() {
             return;
         }
         let Some(view) = self.active_view(cx) else {
@@ -122,7 +125,7 @@ impl AppShell {
                 .timer(std::time::Duration::from_millis(120))
                 .await;
             this.update(cx, |this, cx| {
-                if this.find.debounce_gen == generation && this.mode.find_open {
+                if this.find.debounce_gen == generation && this.input.is_find() {
                     this.run_find(cx);
                 }
             })
@@ -163,7 +166,7 @@ impl AppShell {
                 // Search completion is asynchronous. Only the newest request
                 // for the pane that is still active may update UI state.
                 if this.find.search_gen != generation
-                    || !this.mode.find_open
+                    || !this.input.is_find()
                     || this.active_view(cx).as_ref() != Some(&view)
                 {
                     return;
@@ -204,7 +207,7 @@ impl AppShell {
 
     fn step_find(&mut self, delta: i32, cx: &mut Context<Self>) {
         if self.find.match_count == 0 {
-            if self.mode.find_open && !self.find.query.is_empty() {
+            if self.input.is_find() && !self.find.query.is_empty() {
                 self.run_find(cx);
             }
             return;
@@ -226,7 +229,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.mode.find_open {
+        if !self.input.is_find() {
             return false;
         }
         let key = event.keystroke.key.as_str();
@@ -487,5 +490,27 @@ mod tests {
     fn regex_mode_passes_pattern_through_unescaped() {
         assert_eq!(find(true, false).pattern("a.b*"), "(?i)a.b*");
         assert_eq!(find(true, true).pattern("a.b*"), "(?-i)a.b*");
+    }
+
+    #[test]
+    fn teardown_clears_marked_and_bumps_debounce_gen() {
+        let mut state = FindState {
+            marked: Some(0..3),
+            debounce_gen: 41,
+            ..FindState::default()
+        };
+        state.teardown();
+        assert!(state.marked.is_none(), "marked must be cleared");
+        assert_eq!(state.debounce_gen, 42, "debounce_gen must be bumped by 1");
+    }
+
+    #[test]
+    fn teardown_wraps_debounce_gen_on_overflow() {
+        let mut state = FindState {
+            debounce_gen: u64::MAX,
+            ..FindState::default()
+        };
+        state.teardown();
+        assert_eq!(state.debounce_gen, 0, "debounce_gen must wrap to 0");
     }
 }

@@ -16,7 +16,7 @@ name = "sleipnir-ctl"
 path = "src/bin/sleipnir-ctl.rs"
 
 [dependencies]
-dirs.workspace = true
 serde.workspace = true
+sleipnir_paths.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

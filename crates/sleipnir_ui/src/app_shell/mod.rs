@@ -9,7 +9,7 @@ mod find;
 mod layout;
 mod palette;
 mod panels;
-mod plugin_paint;
+pub(crate) mod plugin_paint;
 mod plugins;
 mod query;
 mod settings;
@@ -17,10 +17,12 @@ mod tabs;
 mod terminal_menu;
 mod update;
 
+pub(crate) use plugins::PluginConsentPending;
+
 use gpui::{
     App, AppContext as _, BorrowAppContext, Bounds, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels,
-    Point, Render, ScrollHandle, SharedString, Styled as _, TitlebarOptions, Window,
+    Render, ScrollHandle, SharedString, Styled as _, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div,
     prelude::FluentBuilder as _, px, size,
 };
@@ -34,7 +36,7 @@ use crate::command_palette::{CommandId, CommandItem, commands as palette_command
 use crate::pane_tree::{CloseOutcome, Direction, PaneId, PaneRect, SplitAxis, SplitPath, neighbor};
 use crate::run_ledger_global::RunLedgerGlobal;
 pub(crate) use crate::tab_convert::Tab;
-use crate::ui_mode::{OverlayKind, PaneFactsState, UiMode};
+use crate::ui_mode::{InputMode, InputOwner, OverlayKind, PaneFactsState, UiMode};
 use crate::{TermView, UpdateModel, UpdateUiState};
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
@@ -205,8 +207,8 @@ impl Tab {
         let mut all = Vec::new();
         self.tree.walk_leaves(&mut all);
         let active = all.iter().find(|(id, _, _)| *id == self.active_pane);
-        if let Some((_, _, crate::LeafContent::Panel { plugin_id })) = active {
-            return plugin_id.clone().into();
+        if let Some((_, _, crate::LeafContent::Panel(view))) = active {
+            return view.plugin_id().to_string().into();
         }
         let mut leaves = Vec::new();
         self.tree.leaves(&mut leaves);
@@ -299,19 +301,6 @@ struct DragState {
     container: Bounds<Pixels>,
 }
 
-/// In-progress plugin-panel camera drag. The host owns the interactive camera:
-/// dragging rotates (yaw/pitch), and the last pointer position is kept so each
-/// move applies a delta. The plugin is not consulted per frame — the host
-/// mutates the stored scene camera and repaints locally, then reports the final
-/// camera as a throttled `camera` action so the legend stays in sync.
-#[derive(Clone)]
-struct PanelDrag {
-    pane_key: PaneKey,
-    owner_instance_id: uuid::Uuid,
-    surface_id: plugin_protocol::v2::BlockId,
-    last: Point<Pixels>,
-}
-
 /// Window root: unified chrome band + active terminal.
 struct SettingsState {
     section: SettingsSection,
@@ -386,22 +375,13 @@ pub struct AppShell {
     content_bounds: Option<Bounds<Pixels>>,
     /// Active divider drag, if any.
     drag: Option<DragState>,
-    /// Active plugin-panel camera drag, if any (host-owned interactive camera).
-    panel_drag: Option<PanelDrag>,
-    /// Last time a `camera` action was pushed to a plugin, ms since epoch. The
-    /// local repaint is immediate; the action is throttled so a drag does not
-    /// flood the plugin with legend redraws.
-    panel_camera_last_ms: u64,
-    /// In-progress inline tab rename, if any.
-    pub(crate) rename: Option<RenameState>,
-    /// Context menu opened for a tab chip.
-    pub(crate) tab_menu: Option<TabMenuState>,
-    pub(crate) terminal_menu: Option<TerminalMenuState>,
     /// Recently closed tabs, oldest first and capped at ten entries.
     pub(crate) closed_tabs: Vec<ClosedTab>,
-    /// Which modal overlay is showing, plus the transient find / quick-select
-    /// modes. Replaces the old one-bool-per-overlay matrix, so illegal
-    /// combinations are unrepresentable.
+    /// Owned keyboard owner. Confirm, consent, menus, rename, find, and
+    /// modal overlays are arms of this enum, so they cannot coexist.
+    pub(crate) input: InputMode,
+    /// Quick-select banner. Independent of [`InputMode`] because it is
+    /// designed to coexist with terminal content.
     pub(crate) mode: UiMode,
     settings: SettingsState,
     palette: PaletteState,
@@ -409,11 +389,6 @@ pub struct AppShell {
     find: find::FindState,
     /// Window-scoped font size override (M12 zoom); not written to settings.
     pub(crate) font_size_override: Option<Pixels>,
-    /// Close-confirm dialog pending (M12).
-    close_confirm: Option<CloseConfirmState>,
-    /// Consent prompt pending. Copied off `plugin_grants::check`; the overlay
-    /// never borrows the grants file. Approve writes a grant; Deny writes nothing.
-    plugin_consent: Option<plugins::PluginConsentPending>,
     /// Tab ids currently flashing for visual bell (M12).
     pub(crate) bell_flash_tabs: std::collections::HashSet<u64>,
     /// Fan-out keystrokes to all panes in the active tab (M13).
@@ -427,17 +402,20 @@ pub struct AppShell {
     diff_gen: u64,
     /// Keep the app-quit subscription alive for the window lifetime.
     _quit_subscription: Option<gpui::Subscription>,
-    /// Last-seen pane facts for plugin events. Polled, never per-frame.
-    plugin_watch: crate::plugin_event_watch::PluginEventWatch,
-    /// Host-owned plugin Panel surfaces (ADR-0017). Keyed by pane_key.
-    plugin_panels: crate::plugin_panel::PanelRegistry,
-    /// Chrome contributions (ADR-0017 status mount).
+    /// Per-window housekeeping timer: ledger focus sync + pane-facts refresh.
+    /// Runs on a fixed interval so these side-effects are decoupled from Render.
+    _housekeeping: gpui::Task<()>,
+    /// Per-window plugin surfaces: chrome contributions and the polled
+    /// pane-fact watch. `PluginRuntime` (supervisor / catalog / pump) stays a
+    /// process `Global`; these two registries are the window-scoped half.
+    /// Panel surfaces are owned by the pane tree (`LeafContent::Panel`).
     plugin_chrome: crate::plugin_chrome::ChromeRegistry,
+    plugin_watch: crate::plugin_event_watch::PluginEventWatch,
 }
 
 /// What the shared confirm dialog is asking about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConfirmKind {
+pub(crate) enum ConfirmKind {
     ClosePane(PaneKey),
     CloseTab(u64),
     #[cfg(target_os = "linux")]
@@ -457,10 +435,10 @@ impl ConfirmKind {
 }
 
 /// Pending confirmation dialog (close pane / tab / window).
-struct CloseConfirmState {
+pub(crate) struct CloseConfirmState {
     /// Human-readable what will happen.
-    message: SharedString,
-    kind: ConfirmKind,
+    pub(crate) message: SharedString,
+    pub(crate) kind: ConfirmKind,
 }
 
 impl Focusable for AppShell {
@@ -470,6 +448,322 @@ impl Focusable for AppShell {
 }
 
 impl EventEmitter<()> for AppShell {}
+
+impl AppShell {
+    /// Replace the keyboard owner, running teardown for the outgoing mode.
+    /// This and the `take_*` / `dismiss_*` methods below are the only writers of
+    /// `self.input`: each runs `teardown_input` for the mode it replaces, so
+    /// Find highlights, IME state, menu selection, and theme query are cleaned
+    /// up no matter which owner is being dropped. Nothing (paint click-away
+    /// included) may assign `self.input` or call `InputMode::dismiss_*` directly.
+    pub(crate) fn set_input(&mut self, next: InputMode, cx: &mut Context<Self>) {
+        let old = self.input.owner();
+        self.input.replace(next);
+        self.teardown_input(old, cx);
+    }
+
+    pub(crate) fn open_overlay(&mut self, kind: OverlayKind, cx: &mut Context<Self>) {
+        if self.input.is_overlay(kind) {
+            return;
+        }
+        self.set_input(InputMode::Overlay(kind), cx);
+    }
+
+    pub(crate) fn toggle_overlay(&mut self, kind: OverlayKind, cx: &mut Context<Self>) -> bool {
+        if self.input.is_overlay(kind) {
+            self.set_input(InputMode::Terminal, cx);
+            false
+        } else {
+            self.set_input(InputMode::Overlay(kind), cx);
+            true
+        }
+    }
+
+    pub(crate) fn close_overlay(&mut self, kind: OverlayKind, cx: &mut Context<Self>) -> bool {
+        if !self.input.is_overlay(kind) {
+            return false;
+        }
+        self.set_input(InputMode::Terminal, cx);
+        true
+    }
+
+    pub(crate) fn dismiss_tab_menu(&mut self, cx: &mut Context<Self>) {
+        if self.input.dismiss_tab_menu() {
+            self.teardown_input(InputOwner::TabMenu, cx);
+        }
+    }
+
+    pub(crate) fn dismiss_terminal_menu(&mut self, cx: &mut Context<Self>) {
+        if self.input.dismiss_terminal_menu() {
+            self.teardown_input(InputOwner::TerminalMenu, cx);
+        }
+    }
+
+    pub(crate) fn dismiss_consent_input(&mut self, cx: &mut Context<Self>) {
+        if self.input.dismiss_consent() {
+            self.teardown_input(InputOwner::Consent, cx);
+        }
+    }
+
+    pub(crate) fn take_confirm_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<CloseConfirmState> {
+        let r = self.input.take_confirm()?;
+        self.teardown_input(InputOwner::Confirm, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_consent_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<PluginConsentPending> {
+        let r = self.input.take_consent()?;
+        self.teardown_input(InputOwner::Consent, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_tab_menu_input(&mut self, cx: &mut Context<Self>) -> Option<TabMenuState> {
+        let r = self.input.take_tab_menu()?;
+        self.teardown_input(InputOwner::TabMenu, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_terminal_menu_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<TerminalMenuState> {
+        let r = self.input.take_terminal_menu()?;
+        self.teardown_input(InputOwner::TerminalMenu, cx);
+        Some(r)
+    }
+
+    pub(crate) fn take_rename_input(&mut self, cx: &mut Context<Self>) -> Option<RenameState> {
+        let r = self.input.take_rename()?;
+        self.teardown_input(InputOwner::Rename, cx);
+        Some(r)
+    }
+
+    fn teardown_input(&mut self, old: InputOwner, cx: &mut Context<Self>) {
+        match old {
+            InputOwner::Find => {
+                self.find.teardown();
+                self.clear_find_matches(cx);
+            }
+            InputOwner::Rename => {}
+            InputOwner::TabMenu | InputOwner::TerminalMenu => {}
+            InputOwner::Overlay(OverlayKind::Settings) => {
+                self.settings.theme_query.clear();
+            }
+            InputOwner::Overlay(OverlayKind::PaneFacts) => {
+                self.discard_pane_facts();
+            }
+            _ => {}
+        }
+    }
+
+    /// Swallow a key during a modal owner unless it carries the platform
+    /// modifier (⌘ on macOS). Global bindings are Cmd-based and fire via
+    /// `on_action`, so letting them through keeps ⌘Q / ⌘W / ⌘, live while a
+    /// dialog, menu, or overlay is open.
+    fn swallow_unless_platform(event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        if !event.keystroke.modifiers.platform {
+            cx.stop_propagation();
+        }
+    }
+
+    fn handle_capture_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.input.owner() {
+            InputOwner::Confirm => match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.confirm_close_cancel(window, cx);
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    self.confirm_close_proceed(window, cx);
+                    cx.stop_propagation();
+                }
+                // Platform-modified keys (⌘Q / ⌘W) still fire via on_action.
+                _ => Self::swallow_unless_platform(event, cx),
+            },
+            InputOwner::Consent => match event.keystroke.key.as_str() {
+                "escape" | "enter" => {
+                    self.deny_plugin_consent(cx);
+                    cx.stop_propagation();
+                }
+                _ => Self::swallow_unless_platform(event, cx),
+            },
+            InputOwner::TabMenu => {
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "escape" => {
+                        self.dismiss_tab_menu(cx);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "down" | "up" if !event.keystroke.modifiers.platform => {
+                        let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
+                        let count = AppShell::TAB_MENU_ITEM_COUNT;
+                        let next = if key == "down" {
+                            (selected + 1) % count
+                        } else {
+                            (selected + count - 1) % count
+                        };
+                        if let Some(menu) = self.input.tab_menu_mut() {
+                            menu.selected = next;
+                        }
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "enter" => {
+                        let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
+                        self.run_tab_menu_item(selected, window, cx);
+                        cx.stop_propagation();
+                    }
+                    _ => Self::swallow_unless_platform(event, cx),
+                }
+            }
+            InputOwner::TerminalMenu => {
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "escape" => {
+                        self.dismiss_terminal_menu(cx);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "down" | "up" if !event.keystroke.modifiers.platform => {
+                        let count = self.terminal_menu_items().len();
+                        let selected = self.input.terminal_menu().map(|m| m.selected).unwrap_or(0);
+                        let next = if key == "down" {
+                            (selected + 1) % count.max(1)
+                        } else {
+                            (selected + count.max(1) - 1) % count.max(1)
+                        };
+                        if let Some(menu) = self.input.terminal_menu_mut() {
+                            menu.selected = next;
+                        }
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "enter" => {
+                        let selected = self.input.terminal_menu().map(|m| m.selected).unwrap_or(0);
+                        if let Some(item) = self.terminal_menu_items().get(selected).copied() {
+                            self.run_terminal_menu_item(item, window, cx);
+                        }
+                        cx.stop_propagation();
+                    }
+                    _ => Self::swallow_unless_platform(event, cx),
+                }
+            }
+            InputOwner::Overlay(OverlayKind::Update) => {
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_update(cx);
+                    cx.stop_propagation();
+                } else {
+                    Self::swallow_unless_platform(event, cx);
+                }
+            }
+            InputOwner::Overlay(OverlayKind::PaneFacts) => {
+                // Old behavior: only Escape is intercepted; every other key
+                // (including plain typing) falls through to the focused terminal.
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_pane_facts(cx);
+                    cx.stop_propagation();
+                }
+            }
+            InputOwner::Overlay(OverlayKind::PluginMonitor) => {
+                // Same as PaneFacts: only Escape is swallowed; the terminal keeps
+                // receiving keys while the monitor is open.
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_plugin_monitor(cx);
+                    cx.stop_propagation();
+                }
+            }
+            InputOwner::Overlay(OverlayKind::Palette) => {
+                if self.palette_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+            InputOwner::Overlay(OverlayKind::History) => {
+                self.history_key_down(event, window, cx);
+                Self::swallow_unless_platform(event, cx);
+            }
+            InputOwner::Find => {
+                if self.find_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+            InputOwner::Overlay(OverlayKind::Settings) => {
+                if self.settings.section == SettingsSection::Theme {
+                    match event.keystroke.key.as_str() {
+                        "up" | "arrowup" | "down" | "arrowdown" | "enter" => {
+                            self.settings_theme_key_down(event.keystroke.key.as_str(), cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "escape" => {
+                            if !self.settings.theme_query.is_empty() {
+                                self.settings.theme_query.clear();
+                                cx.notify();
+                            } else {
+                                self.close_settings(window, cx);
+                            }
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "backspace" => {
+                            self.settings.theme_query.pop();
+                            self.settings.theme_selected = 0;
+                            self.settings.theme_scroll.scroll_to_item(0);
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                        _ => {
+                            if !event.keystroke.modifiers.platform
+                                && let Some(ch) = event.keystroke.key_char.as_ref()
+                                && !ch.is_empty()
+                                && !ch.chars().any(|c| c.is_control())
+                            {
+                                self.settings.theme_query.push_str(ch);
+                                self.settings.theme_selected = 0;
+                                self.settings.theme_scroll.scroll_to_item(0);
+                                cx.notify();
+                            }
+                        }
+                    }
+                }
+                if event.keystroke.key.as_str() == "escape" {
+                    self.close_settings(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // Swallow other keys while the settings panel is open so they
+                // don't reach the terminal underneath. ⌘, (OpenSettings) and the
+                // other global bindings still fire via on_action.
+                Self::swallow_unless_platform(event, cx);
+            }
+            InputOwner::Overlay(OverlayKind::Diff) => {
+                if self.handle_diff_key(event, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                Self::swallow_unless_platform(event, cx);
+            }
+            InputOwner::Rename => {
+                if self.rename_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+            InputOwner::Terminal => {}
+        }
+    }
+}
 
 #[cfg(any(target_os = "linux", test))]
 fn linux_window_open_diagnostic(source: &str) -> String {
@@ -585,26 +879,17 @@ impl AppShell {
             pane_rects: Vec::new(),
             content_bounds: None,
             drag: None,
-            panel_drag: None,
-            panel_camera_last_ms: 0,
-            rename: None,
-            tab_menu: None,
-            terminal_menu: None,
             closed_tabs: Vec::new(),
-            mode: UiMode {
-                overlay: if has_update_outcome {
-                    OverlayKind::Update
-                } else {
-                    OverlayKind::None
-                },
-                ..UiMode::default()
+            input: if has_update_outcome {
+                InputMode::Overlay(OverlayKind::Update)
+            } else {
+                InputMode::Terminal
             },
+            mode: UiMode::default(),
             settings: SettingsState::default(),
             palette: PaletteState::new(palette_items, plugin_commands),
             find: find::FindState::default(),
             font_size_override: None,
-            close_confirm: None,
-            plugin_consent: None,
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
             history: HistoryState::default(),
@@ -612,9 +897,9 @@ impl AppShell {
             diff_gen: 0,
             facts: PaneFactsState::default(),
             _quit_subscription: None,
+            _housekeeping: gpui::Task::ready(()),
+            plugin_chrome: crate::plugin_chrome::ChromeRegistry::default(),
             plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
-            plugin_panels: crate::plugin_panel::PanelRegistry::new(),
-            plugin_chrome: crate::plugin_chrome::ChromeRegistry::new(),
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -640,6 +925,28 @@ impl AppShell {
         // Resident plugins need a live session to receive events. This is
         // where first-run consent is asked; a grant is never implied.
         shell.start_resident_plugins(cx);
+
+        // Per-window housekeeping: ledger focus + pane-facts refresh run on a
+        // fixed 200 ms timer so Render stays paint-only. The task self-terminates
+        // once the window/entity is gone (`update_in` starts failing), so it does
+        // not outlive a closed window.
+        shell._housekeeping = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.sync_ledger_focus(window, cx);
+                        this.refresh_pane_facts_if_stale(cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
         shell
     }
 
@@ -733,33 +1040,6 @@ impl AppShell {
                         this.sync_window_title(window, cx);
                         cx.notify();
                     }
-                    crate::TermViewEvent::RequestNewTab => {
-                        this.add_tab(window, cx);
-                    }
-                    crate::TermViewEvent::RequestNextTab => {
-                        this.next_tab(window, cx);
-                    }
-                    crate::TermViewEvent::RequestPrevTab => {
-                        this.prev_tab(window, cx);
-                    }
-                    crate::TermViewEvent::RequestReloadSettings => {
-                        // Reload clears window font zoom override (plan risk mitigation).
-                        this.font_size_override = None;
-                        this.apply_font_override_to_all_panes(cx);
-                        TerminalSettings::reload(cx);
-                        RunLedgerGlobal::reload_settings_in(cx);
-                        crate::control_surface::reload(cx);
-                        crate::attention_chrome::refresh(cx);
-                        cx.notify();
-                    }
-                    crate::TermViewEvent::RequestCycleTheme => {
-                        let next = TerminalSettings::get_global(cx).theme.next();
-                        TerminalSettings::set_theme(next, cx);
-                        cx.notify();
-                    }
-                    crate::TermViewEvent::RequestOpenSettings => {
-                        this.toggle_settings(window, cx);
-                    }
                     crate::TermViewEvent::Bell => {
                         this.on_term_bell(view, cx);
                     }
@@ -796,17 +1076,15 @@ impl AppShell {
                         }
                         cx.notify();
                     }
-                    crate::TermViewEvent::GutterClicked { line } => {
-                        if let Some(pane) = this.pane_key_for_view(view) {
-                            this.jump_to_gutter(pane, *line, window, cx);
-                        }
-                    }
                     crate::TermViewEvent::ContextMenu { position, link } => {
-                        this.terminal_menu = Some(TerminalMenuState {
-                            position: *position,
-                            link: link.clone(),
-                            selected: 0,
-                        });
+                        this.set_input(
+                            InputMode::TerminalMenu(TerminalMenuState {
+                                position: *position,
+                                link: link.clone(),
+                                selected: 0,
+                            }),
+                            cx,
+                        );
                         cx.notify();
                     }
                     crate::TermViewEvent::UserTyped => {}
@@ -1274,18 +1552,6 @@ impl AppShell {
         if crate::plugin_panel::tab_close_policy(terminals_after)
             == crate::plugin_panel::TabClosePolicy::CloseTab
         {
-            // Last shell is going away. Panels cannot keep the tab alive:
-            // a tab of only plugin UI would look like a workspace with no
-            // PTY (ADR-0001). Close the tab, dropping guest panels.
-            let mut all = Vec::new();
-            tab.tree.walk_leaves(&mut all);
-            let panel_keys: Vec<_> = all
-                .into_iter()
-                .filter(|(_, _, c)| c.is_panel())
-                .map(|(_, k, _)| k)
-                .collect();
-            self.plugin_panels.remove_all(panel_keys);
-            self.plugin_panels.remove(closed_key);
             self.close_tab_at(index, window, cx);
             return;
         }
@@ -1303,7 +1569,6 @@ impl AppShell {
             }
             CloseOutcome::NotFound => {}
             CloseOutcome::Closed => {
-                self.plugin_panels.remove(closed_key);
                 self.apply_pane_closed(closed_key, cx);
                 if was_active {
                     if let Some(tab) = self.tabs.get_mut(index) {
@@ -1326,7 +1591,7 @@ impl AppShell {
     fn close_panel_pane(
         &mut self,
         pane_id: PaneId,
-        pane_key: PaneKey,
+        _pane_key: PaneKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1335,16 +1600,12 @@ impl AppShell {
         };
         match tab.tree.close(pane_id) {
             CloseOutcome::Closed => {
-                self.plugin_panels.remove(pane_key);
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.active_pane = tab.tree.first_leaf_id();
                 }
                 self.commit_workspace(window, cx);
             }
-            // TreeEmpty would mean the panel was the tab's only leaf, which the
-            // insert path forbids; fall back to the tab-close path just in case.
             CloseOutcome::TreeEmpty => {
-                self.plugin_panels.remove(pane_key);
                 self.close_active_tab(window, cx);
             }
             CloseOutcome::NotFound => {}
@@ -1409,7 +1670,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return Err("a close confirmation is already pending".into());
         }
         let found = self
@@ -1431,7 +1692,7 @@ impl AppShell {
 
     /// Gate close on `confirm_close` setting; may open a modal instead of closing.
     fn request_close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return;
         }
         let Some(target) = self.active_pane_key() else {
@@ -1450,10 +1711,13 @@ impl AppShell {
             } else {
                 "Close this pane anyway?".into()
             };
-            self.close_confirm = Some(CloseConfirmState {
-                message: message.into(),
-                kind: ConfirmKind::ClosePane(target),
-            });
+            self.set_input(
+                InputMode::Confirm(CloseConfirmState {
+                    message: message.into(),
+                    kind: ConfirmKind::ClosePane(target),
+                }),
+                cx,
+            );
             cx.notify();
         } else {
             self.close_active_pane(window, cx);
@@ -1462,7 +1726,7 @@ impl AppShell {
 
     #[cfg(target_os = "linux")]
     pub(crate) fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return;
         }
         let policy = TerminalSettings::get_global(cx).confirm_close;
@@ -1472,10 +1736,13 @@ impl AppShell {
             ConfirmClose::Dirty => self.any_pane_is_dirty(cx),
         };
         if needs_confirm {
-            self.close_confirm = Some(CloseConfirmState {
-                message: "A process is still running. Close this window anyway?".into(),
-                kind: ConfirmKind::CloseWindow,
-            });
+            self.set_input(
+                InputMode::Confirm(CloseConfirmState {
+                    message: "A process is still running. Close this window anyway?".into(),
+                    kind: ConfirmKind::CloseWindow,
+                }),
+                cx,
+            );
             cx.notify();
         } else {
             self.finish_window_close(window, cx);
@@ -1498,7 +1765,7 @@ impl AppShell {
     }
 
     fn confirm_close_proceed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = self.close_confirm.take().map(|s| s.kind);
+        let kind = self.take_confirm_input(cx).map(|s| s.kind);
         match kind {
             Some(ConfirmKind::CloseTab(tab_id)) => {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
@@ -1546,7 +1813,7 @@ impl AppShell {
 
     /// Toggle the history overlay, resetting the query when it closes.
     fn toggle_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.mode.toggle(OverlayKind::History) {
+        if !self.toggle_overlay(OverlayKind::History, cx) {
             self.history.query.clear();
             self.history.marked = None;
             self.history.selected = 0;
@@ -1703,35 +1970,6 @@ impl AppShell {
         crate::attention_chrome::refresh(cx);
     }
 
-    fn jump_to_gutter(
-        &mut self,
-        pane: run_ledger::PaneKey,
-        line: i32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let run_id = if cx.has_global::<RunLedgerGlobal>() {
-            let snapshot = cx.global::<RunLedgerGlobal>().snapshot();
-            run_id_for_gutter(&snapshot, pane, line)
-        } else {
-            None
-        };
-        if let Some(id) = run_id {
-            if cx.has_global::<RunLedgerGlobal>() {
-                cx.update_global(|g: &mut RunLedgerGlobal, _| {
-                    g.mark_run_seen(id);
-                });
-            }
-        }
-        self.jump_to_ledger_row(pane, run_id, window, cx);
-        if run_id.is_none() {
-            if let Some(view) = self.view_for_pane(pane) {
-                view.update(cx, |v, cx| v.scroll_to_anchor(line, 0, cx));
-            }
-        }
-        cx.notify();
-    }
-
     fn view_for_pane(&self, pane: run_ledger::PaneKey) -> Option<Entity<TermView>> {
         for tab in &self.tabs {
             let mut out = Vec::new();
@@ -1756,7 +1994,7 @@ impl AppShell {
     }
 
     fn confirm_close_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_confirm = None;
+        let _ = self.take_confirm_input(cx);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -1845,21 +2083,11 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Settings reload clears window-scoped font zoom.
-        self.font_size_override = None;
-        self.apply_font_override_to_all_panes(cx);
-        TerminalSettings::reload(cx);
-        self.refresh_plugin_commands(cx);
-        RunLedgerGlobal::reload_settings_in(cx);
-        crate::control_surface::reload(cx);
-        crate::attention_chrome::refresh(cx);
-        cx.notify();
+        self.reload_settings(cx);
     }
 
     fn on_cycle_theme(&mut self, _: &CycleTheme, _window: &mut Window, cx: &mut Context<Self>) {
-        let next = TerminalSettings::get_global(cx).theme.next();
-        TerminalSettings::set_theme(next, cx);
-        cx.notify();
+        self.cycle_theme(cx);
     }
 
     // ── command palette (M9) ────────────────────────────────────────────────
@@ -1870,7 +2098,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.mode.is(OverlayKind::Palette) {
+        if self.input.is_overlay(OverlayKind::Palette) {
             self.close_palette(window, cx);
         } else {
             self.open_palette(window, cx);
@@ -1878,17 +2106,6 @@ impl AppShell {
     }
 
     // ── find in scrollback (M10) ────────────────────────────────────────────
-}
-
-/// Wrap a camera yaw into `[0, 2π)` so the host-driven camera stays finite over
-/// a long drag; mirrors the plugin's own `wrap_angle`.
-fn wrap_camera_angle(a: f32) -> f32 {
-    let tau = std::f32::consts::TAU;
-    let mut a = a % tau;
-    if a < 0.0 {
-        a += tau;
-    }
-    a
 }
 
 /// Whether a pane of the *active* tab is actually painted, given the tab's
@@ -2023,15 +2240,6 @@ mod tests {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_ledger_focus(window, cx);
-        self.refresh_pane_facts_if_stale(cx);
-        self.poll_plugin_events(cx);
-        self.sync_plugin_surfaces(cx);
-        // Navigating away from the consent overlay is a deny: never grant
-        // because a different surface took the keyboard.
-        if !self.mode.is(OverlayKind::PluginConsent) {
-            self.plugin_consent = None;
-        }
         let palette = TerminalPalette::get_global(cx);
         let window_active = window.is_window_active();
         let tokens = ChromeTokens::from_palette(&palette, window_active);
@@ -2058,212 +2266,15 @@ impl Render for AppShell {
             // Intercept keys during overlays / rename before the focused terminal
             // sees them (capture phase runs top-down).
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if this.close_confirm.is_some() {
-                    match event.keystroke.key.as_str() {
-                        "escape" => {
-                            this.confirm_close_cancel(window, cx);
-                            cx.stop_propagation();
-                        }
-                        "enter" => {
-                            this.confirm_close_proceed(window, cx);
-                            cx.stop_propagation();
-                        }
-                        _ => {
-                            if !event.keystroke.modifiers.platform {
-                                cx.stop_propagation();
-                            }
-                        }
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::PluginConsent) {
-                    // Enter must not grant — Approve is an explicit click only.
-                    match event.keystroke.key.as_str() {
-                        "escape" | "enter" => {
-                            this.deny_plugin_consent(cx);
-                            cx.stop_propagation();
-                        }
-                        _ => {
-                            if !event.keystroke.modifiers.platform {
-                                cx.stop_propagation();
-                            }
-                        }
-                    }
-                    return;
-                }
-                if this.tab_menu.is_some() || this.terminal_menu.is_some() {
-                    let key = event.keystroke.key.as_str();
-                    match key {
-                        "escape" => {
-                            this.tab_menu = None;
-                            this.terminal_menu = None;
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                        "down" | "up" if !event.keystroke.modifiers.platform => {
-                            let count = if this.tab_menu.is_some() {
-                                AppShell::TAB_MENU_ITEM_COUNT
-                            } else {
-                                this.terminal_menu_items().len()
-                            };
-                            let selected = this
-                                .tab_menu
-                                .as_ref()
-                                .map(|m| m.selected)
-                                .or_else(|| this.terminal_menu.as_ref().map(|m| m.selected))
-                                .unwrap_or(0);
-                            let next = if key == "down" {
-                                (selected + 1) % count.max(1)
-                            } else {
-                                (selected + count.max(1) - 1) % count.max(1)
-                            };
-                            if let Some(menu) = this.tab_menu.as_mut() {
-                                menu.selected = next;
-                            } else if let Some(menu) = this.terminal_menu.as_mut() {
-                                menu.selected = next;
-                            }
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                        "enter" => {
-                            let selected = this
-                                .tab_menu
-                                .as_ref()
-                                .map(|m| m.selected)
-                                .or_else(|| this.terminal_menu.as_ref().map(|m| m.selected))
-                                .unwrap_or(0);
-                            if this.tab_menu.is_some() {
-                                this.run_tab_menu_item(selected, window, cx);
-                            } else if let Some(item) =
-                                this.terminal_menu_items().get(selected).copied()
-                            {
-                                this.run_terminal_menu_item(item, window, cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        _ => {
-                            if !event.keystroke.modifiers.platform {
-                                cx.stop_propagation();
-                            }
-                        }
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::Update) {
-                    if event.keystroke.key.as_str() == "escape" {
-                        this.close_update(cx);
-                        cx.stop_propagation();
-                    }
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::PaneFacts) && event.keystroke.key.as_str() == "escape"
-                {
-                    this.close_pane_facts(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.mode.is(OverlayKind::PluginMonitor)
-                    && event.keystroke.key.as_str() == "escape"
-                {
-                    this.close_plugin_monitor(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.mode.is(OverlayKind::Palette) {
-                    if this.palette_key_down(event, window, cx) {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::History) {
-                    this.history_key_down(event, window, cx);
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.find_open {
-                    if this.find_key_down(event, window, cx) {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::Settings) {
-                    // Type-to-filter the theme picker when that section is
-                    // active; escape clears the filter before closing.
-                    if this.settings.section == SettingsSection::Theme {
-                        match event.keystroke.key.as_str() {
-                            "up" | "arrowup" | "down" | "arrowdown" | "enter" => {
-                                this.settings_theme_key_down(event.keystroke.key.as_str(), cx);
-                                cx.stop_propagation();
-                                return;
-                            }
-                            "escape" => {
-                                if !this.settings.theme_query.is_empty() {
-                                    this.settings.theme_query.clear();
-                                    cx.notify();
-                                } else {
-                                    this.close_settings(window, cx);
-                                }
-                                cx.stop_propagation();
-                                return;
-                            }
-                            "backspace" => {
-                                this.settings.theme_query.pop();
-                                this.settings.theme_selected = 0;
-                                this.settings.theme_scroll.scroll_to_item(0);
-                                cx.notify();
-                                cx.stop_propagation();
-                                return;
-                            }
-                            _ => {
-                                if !event.keystroke.modifiers.platform
-                                    && let Some(ch) = event.keystroke.key_char.as_ref()
-                                    && !ch.is_empty()
-                                    && !ch.chars().any(|c| c.is_control())
-                                {
-                                    this.settings.theme_query.push_str(ch);
-                                    this.settings.theme_selected = 0;
-                                    this.settings.theme_scroll.scroll_to_item(0);
-                                    cx.notify();
-                                }
-                            }
-                        }
-                    }
-                    if event.keystroke.key.as_str() == "escape" {
-                        this.close_settings(window, cx);
-                        cx.stop_propagation();
-                    }
-                    // Swallow other keys while the settings panel is open
-                    // so they don't reach the terminal underneath.
-                    // ⌘, (OpenSettings) still fires via on_action.
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.mode.is(OverlayKind::Diff) {
-                    if this.handle_diff_key(event, window, cx) {
-                        cx.stop_propagation();
-                        return;
-                    }
-                    if !event.keystroke.modifiers.platform {
-                        cx.stop_propagation();
-                    }
-                    return;
-                }
-                if this.rename_key_down(event, window, cx) {
-                    cx.stop_propagation();
-                }
+                this.handle_capture_key(event, window, cx);
             }))
             // Clicking anywhere else (terminal, another tab) commits the
             // in-progress rename.
             .capture_any_mouse_down(cx.listener(
                 |this, event: &gpui::MouseDownEvent, window, cx| {
-                    if this.rename.is_some() && event.button == MouseButton::Left {
+                    if matches!(this.input, InputMode::Rename(_))
+                        && event.button == MouseButton::Left
+                    {
                         this.commit_rename(window, cx);
                     }
                 },
@@ -2344,7 +2355,7 @@ impl Render for AppShell {
                     .flex()
                     .flex_col()
                     .child(chrome_band)
-                    .when(self.mode.find_open, |el| {
+                    .when(self.input.is_find(), |el| {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
                     .child({
@@ -2417,62 +2428,40 @@ impl Render for AppShell {
                         ),
                 )
             })
-            .when(self.tab_menu.is_some(), |el| {
+            .when(self.input.tab_menu().is_some(), |el| {
                 el.child(self.render_tab_menu(&tokens, window, cx))
             })
-            .when(self.terminal_menu.is_some(), |el| {
+            .when(self.input.terminal_menu().is_some(), |el| {
                 el.child(self.render_terminal_menu(&tokens, window, cx))
             })
-            .when(self.mode.is(OverlayKind::Settings), |el| {
+            .when(self.input.is_overlay(OverlayKind::Settings), |el| {
                 el.child(self.render_settings_overlay(&tokens, window, cx))
             })
-            .when(self.mode.is(OverlayKind::Update), |el| {
+            .when(self.input.is_overlay(OverlayKind::Update), |el| {
                 el.child(self.render_update_overlay(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::Palette), |el| {
+            .when(self.input.is_overlay(OverlayKind::Palette), |el| {
                 el.child(self.render_command_palette(&tokens, cx))
             })
-            .when(self.close_confirm.is_some(), |el| {
+            .when(self.input.confirm().is_some(), |el| {
                 el.child(self.render_close_confirm(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::PaneFacts), |el| {
+            .when(self.input.is_overlay(OverlayKind::PaneFacts), |el| {
                 el.child(self.render_pane_facts(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::PluginMonitor), |el| {
+            .when(self.input.is_overlay(OverlayKind::PluginMonitor), |el| {
                 el.child(self.render_plugin_monitor(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::PluginConsent), |el| {
+            .when(self.input.consent().is_some(), |el| {
                 el.child(self.render_plugin_consent(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::History), |el| {
+            .when(self.input.is_overlay(OverlayKind::History), |el| {
                 el.child(self.render_history_search(&tokens, cx))
             })
-            .when(self.mode.is(OverlayKind::Diff), |el| {
+            .when(self.input.is_overlay(OverlayKind::Diff), |el| {
                 el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
             })
     }
-}
-
-fn run_id_for_gutter(
-    snapshot: &[run_ledger::Run],
-    pane: PaneKey,
-    line: i32,
-) -> Option<run_ledger::RunId> {
-    if let Some(run) = snapshot
-        .iter()
-        .rev()
-        .find(|run| run.pane == pane && run.anchor.is_some_and(|anchor| anchor.line == line))
-    {
-        return Some(run.id);
-    }
-    snapshot
-        .iter()
-        .rev()
-        .filter(|run| run.pane == pane)
-        .filter_map(|run| run.anchor.map(|anchor| (run.id, anchor.line)))
-        .filter(|(_, start)| *start <= line)
-        .max_by_key(|(_, start)| *start)
-        .map(|(id, _)| id)
 }
 
 #[cfg(test)]
@@ -2480,10 +2469,25 @@ mod workspace_regression_tests {
     use super::{ConfirmKind, PaneKey, Tab};
     use crate::pane_tree::{CloseOutcome, PaneNode, SplitAxis};
 
+    fn demo_surface() -> crate::plugin_panel::PanelSurface {
+        crate::plugin_panel::PanelSurface {
+            plugin_id: "test".into(),
+            owner_instance_id: uuid::Uuid::nil(),
+            pane_key: PaneKey::new_v4(),
+            surface_id: uuid::Uuid::new_v4(),
+            tree: plugin_protocol::v2::Widget::Text {
+                s: "test".into(),
+                fg: plugin_protocol::v2::Tone::Fg,
+                bold: false,
+            },
+            stale: false,
+        }
+    }
+
     fn tab(id: u64, pane_id: u64, key: PaneKey) -> Tab {
         Tab {
             id,
-            tree: PaneNode::panel_leaf(pane_id, key, "test"),
+            tree: PaneNode::panel_leaf(pane_id, key, demo_surface()),
             active_pane: pane_id,
             custom_title: None,
             zoomed_pane: None,
@@ -2499,7 +2503,7 @@ mod workspace_regression_tests {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
             first: Box::new(tabs[0].tree.clone()),
-            second: Box::new(PaneNode::panel_leaf(20, second, "test")),
+            second: Box::new(PaneNode::panel_leaf(20, second, demo_surface())),
         };
         let pending = ConfirmKind::ClosePane(first);
         // A second request changes focus while the first dialog is pending.
@@ -2533,7 +2537,7 @@ mod workspace_regression_tests {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
             first: Box::new(tab.tree),
-            second: Box::new(PaneNode::panel_leaf(20, PaneKey::new_v4(), "test")),
+            second: Box::new(PaneNode::panel_leaf(20, PaneKey::new_v4(), demo_surface())),
         };
         tab.active_pane = 20;
         tab.reconcile_pane_focus();
@@ -2559,48 +2563,5 @@ mod workspace_regression_tests {
         assert_eq!(pending.pane_target(&tabs), None);
         assert_eq!(ConfirmKind::CloseTab(1).pane_target(&tabs), None);
         assert_eq!(tabs[0].active_pane, 10);
-    }
-}
-
-#[cfg(test)]
-mod gutter_jump_tests {
-    use super::run_id_for_gutter;
-    use run_ledger::{Anchor, LaunchId, Ledger, PaneKey, RunEvent};
-
-    #[test]
-    fn prefers_exact_start_line_then_nearest_preceding() {
-        let pane = PaneKey::new_v4();
-        let mut ledger = Ledger::new(LaunchId::new_v4());
-        ledger.set_redact(false);
-        ledger.apply(RunEvent::started_at(
-            pane,
-            "first",
-            None,
-            0,
-            false,
-            Some(Anchor {
-                line: 10,
-                column: 0,
-            }),
-        ));
-        ledger.apply(RunEvent::finished(pane, Some(0), 5));
-        ledger.apply(RunEvent::started_at(
-            pane,
-            "second",
-            None,
-            10,
-            false,
-            Some(Anchor {
-                line: 20,
-                column: 0,
-            }),
-        ));
-        let snap = ledger.snapshot();
-        let first = snap.iter().find(|r| r.command == "first").unwrap().id;
-        let second = snap.iter().find(|r| r.command == "second").unwrap().id;
-        assert_eq!(run_id_for_gutter(&snap, pane, 10), Some(first));
-        assert_eq!(run_id_for_gutter(&snap, pane, 20), Some(second));
-        assert_eq!(run_id_for_gutter(&snap, pane, 24), Some(second));
-        assert_eq!(run_id_for_gutter(&snap, pane, 15), Some(first));
     }
 }

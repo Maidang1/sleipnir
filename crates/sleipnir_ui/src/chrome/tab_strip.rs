@@ -63,8 +63,8 @@ impl AppShell {
                 hovered == Some(tab.id),
                 drop_target == Some(tab.id),
                 self.bell_flash_tabs.contains(&tab.id),
-                self.rename
-                    .as_ref()
+                self.input
+                    .rename()
                     .filter(|state| state.tab_id == tab.id)
                     .map(|state| state.buffer.clone()),
                 plugin_badges,
@@ -202,11 +202,14 @@ pub(crate) fn render_tab_chip(
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                this.tab_menu = Some(TabMenuState {
-                    tab_id,
-                    position: event.position,
-                    selected: 0,
-                });
+                this.set_input(
+                    crate::ui_mode::InputMode::TabMenu(TabMenuState {
+                        tab_id,
+                        position: event.position,
+                        selected: 0,
+                    }),
+                    cx,
+                );
                 cx.notify();
             }),
         )
@@ -218,7 +221,7 @@ pub(crate) fn render_tab_chip(
             }),
         )
         .on_click(cx.listener(move |this, _, window, cx| {
-            if this.rename.as_ref().is_some_and(|s| s.tab_id == tab_id) {
+            if this.input.rename().is_some_and(|s| s.tab_id == tab_id) {
                 return;
             }
             this.activate(ix, window, cx);
@@ -342,7 +345,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<AppShell>,
     ) {
-        let Some(state) = self.tab_menu else {
+        let Some(state) = self.take_tab_menu_input(cx) else {
             return;
         };
         let cwd = self
@@ -350,7 +353,6 @@ impl AppShell {
             .iter()
             .find(|t| t.id == state.tab_id)
             .and_then(|t| t.workspace_cwd(cx));
-        self.tab_menu = None;
         match item {
             0 => self.begin_rename(state.tab_id, cx),
             1 => self.add_tab_at(cwd, window, cx),
@@ -399,7 +401,10 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<AppShell>,
     ) -> impl IntoElement {
-        let state = self.tab_menu.expect("tab menu state checked by caller");
+        let state = *self
+            .input
+            .tab_menu()
+            .expect("tab menu state checked by caller");
         const ITEMS: [&str; AppShell::TAB_MENU_ITEM_COUNT] = [
             "Rename Tab",
             "Duplicate Tab",
@@ -421,7 +426,9 @@ impl AppShell {
             .min((viewport.height - menu_h).max(px(0.0)));
 
         let close_menu = |this: &mut AppShell, cx: &mut Context<AppShell>| {
-            this.tab_menu = None;
+            // Route click-away through the AppShell method so it runs teardown,
+            // not `InputMode::dismiss_tab_menu` directly.
+            this.dismiss_tab_menu(cx);
             cx.notify();
         };
 

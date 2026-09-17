@@ -4,7 +4,7 @@ use crate::ledger::{Retention, apply_retention};
 use crate::run::{LaunchId, Run, RunId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -62,24 +62,9 @@ pub fn save_runs(
     current_launch: LaunchId,
     retention: Retention,
 ) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(atomic_write::sibling_path(path, ".lock"))?;
-    lock.lock()?;
-    let result = save_runs_locked(path, runs, current_launch, retention);
-    match (result, lock.unlock()) {
-        (Ok(()), Err(err)) => Err(err),
-        (result, _) => result,
-    }
+    atomic_write::with_file_lock(path, || {
+        save_runs_locked(path, runs, current_launch, retention)
+    })
 }
 
 fn save_runs_locked(

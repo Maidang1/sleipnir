@@ -20,6 +20,7 @@
 /// correlation ids, event push, widget rendering and plugin-initiated host
 /// calls. The resident supervisor and the SDK's `v2` module speak this
 /// dialect.
+pub mod geometry;
 pub mod redact;
 pub mod v2;
 

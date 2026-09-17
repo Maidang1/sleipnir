@@ -177,582 +177,275 @@ fn hex(c: u32) -> Hsla {
 /// Resolve a theme name to a concrete palette. `Auto` picks a dark/light pair
 /// from the supplied system `appearance`.
 pub fn palette_for_theme(name: ThemeName, appearance: Appearance) -> TerminalPalette {
-    match name {
+    // Auto resolves against the system appearance. Custom palettes are
+    // resolved by `resolve_palette` before this; the Mocha fallback keeps the
+    // function total and gives a sane palette if misused.
+    let resolved = match name {
         ThemeName::Auto => match appearance {
-            Appearance::Dark => mocha(),
-            Appearance::Light => latte(),
+            Appearance::Dark => ThemeName::Mocha,
+            Appearance::Light => ThemeName::Latte,
         },
-        ThemeName::Mocha => mocha(),
-        ThemeName::Macchiato => macchiato(),
-        ThemeName::Frappe => frappe(),
-        ThemeName::Latte => latte(),
-        ThemeName::TokyoNight => tokyo_night(),
-        ThemeName::Nord => nord(),
-        ThemeName::GruvboxDark => gruvbox_dark(),
-        ThemeName::SolarizedLight => solarized_light(),
-        ThemeName::GithubDark => github_dark(),
-        ThemeName::GithubLight => github_light(),
-        ThemeName::Dracula => dracula(),
-        ThemeName::OneDark => one_dark(),
-        ThemeName::NocturneViolet => nocturne_violet(),
-        ThemeName::MonokaiPro => monokai_pro(),
-        // Custom palettes are resolved by `resolve_palette` before this; the
-        // fallback keeps the match total and gives a sane palette if misused.
-        ThemeName::Custom => mocha(),
+        ThemeName::Custom => ThemeName::Mocha,
+        concrete => concrete,
+    };
+    spec_for(resolved).palette()
+}
+
+/// One built-in theme as plain data: hex colors for the fixed palette slots.
+/// `ansi` holds normal 0–7 then bright 8–15; `dim` is the subdued set.
+struct ThemeSpec {
+    name: ThemeName,
+    background: u32,
+    foreground: u32,
+    bright_foreground: u32,
+    cursor: u32,
+    selection: u32,
+    ansi: [u32; 16],
+    dim: [u32; 8],
+}
+
+impl ThemeSpec {
+    fn palette(&self) -> TerminalPalette {
+        TerminalPalette {
+            name: self.name,
+            background: hex(self.background),
+            foreground: hex(self.foreground),
+            bright_foreground: hex(self.bright_foreground),
+            cursor: hex(self.cursor),
+            selection: hex(self.selection),
+            ansi: self.ansi.map(hex),
+            dim: self.dim.map(hex),
+        }
     }
 }
 
-fn mocha() -> TerminalPalette {
-    TerminalPalette {
+// Keep Mocha first: it is the fallback for unknown names and the base palette
+// that partial `CustomPalette` definitions borrow from.
+const THEME_SPECS: &[ThemeSpec] = &[
+    ThemeSpec {
         name: ThemeName::Mocha,
-        background: hex(0x1e1e2e),
-        foreground: hex(0xcdd6f4),
-        bright_foreground: hex(0xcdd6f4),
-        cursor: hex(0xf5e0dc),
-        selection: hex(0x585b70),
+        background: 0x1e1e2e,
+        foreground: 0xcdd6f4,
+        bright_foreground: 0xcdd6f4,
+        cursor: 0xf5e0dc,
+        selection: 0x585b70,
         ansi: [
-            hex(0x45475a),
-            hex(0xf38ba8),
-            hex(0xa6e3a1),
-            hex(0xf9e2af),
-            hex(0x89b4fa),
-            hex(0xf5c2e7),
-            hex(0x94e2d5),
-            hex(0xbac2de),
-            hex(0x585b70),
-            hex(0xf38ba8),
-            hex(0xa6e3a1),
-            hex(0xf9e2af),
-            hex(0x89b4fa),
-            hex(0xf5c2e7),
-            hex(0x94e2d5),
-            hex(0xa6adc8),
+            0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de,
+            0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xa6adc8,
         ],
         dim: [
-            hex(0x45475a),
-            hex(0xf38ba8),
-            hex(0xa6e3a1),
-            hex(0xf9e2af),
-            hex(0x89b4fa),
-            hex(0xf5c2e7),
-            hex(0x94e2d5),
-            hex(0xbac2de),
+            0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de,
         ],
-    }
-}
-
-fn macchiato() -> TerminalPalette {
-    TerminalPalette {
+    },
+    ThemeSpec {
         name: ThemeName::Macchiato,
-        background: hex(0x24273a),
-        foreground: hex(0xcad3f5),
-        bright_foreground: hex(0xcad3f5),
-        cursor: hex(0xf4dbd6),
-        selection: hex(0x5b6078),
+        background: 0x24273a,
+        foreground: 0xcad3f5,
+        bright_foreground: 0xcad3f5,
+        cursor: 0xf4dbd6,
+        selection: 0x5b6078,
         ansi: [
-            hex(0x494d64),
-            hex(0xed8796),
-            hex(0xa6da95),
-            hex(0xeed49f),
-            hex(0x8aadf4),
-            hex(0xf5bde6),
-            hex(0x8bd5ca),
-            hex(0xb8c0e0),
-            hex(0x5b6078),
-            hex(0xed8796),
-            hex(0xa6da95),
-            hex(0xeed49f),
-            hex(0x8aadf4),
-            hex(0xf5bde6),
-            hex(0x8bd5ca),
-            hex(0xa5adcb),
+            0x494d64, 0xed8796, 0xa6da95, 0xeed49f, 0x8aadf4, 0xf5bde6, 0x8bd5ca, 0xb8c0e0,
+            0x5b6078, 0xed8796, 0xa6da95, 0xeed49f, 0x8aadf4, 0xf5bde6, 0x8bd5ca, 0xa5adcb,
         ],
         dim: [
-            hex(0x494d64),
-            hex(0xed8796),
-            hex(0xa6da95),
-            hex(0xeed49f),
-            hex(0x8aadf4),
-            hex(0xf5bde6),
-            hex(0x8bd5ca),
-            hex(0xb8c0e0),
+            0x494d64, 0xed8796, 0xa6da95, 0xeed49f, 0x8aadf4, 0xf5bde6, 0x8bd5ca, 0xb8c0e0,
         ],
-    }
-}
-
-fn frappe() -> TerminalPalette {
-    TerminalPalette {
+    },
+    ThemeSpec {
         name: ThemeName::Frappe,
-        background: hex(0x303446),
-        foreground: hex(0xc6d0f5),
-        bright_foreground: hex(0xc6d0f5),
-        cursor: hex(0xf2d5cf),
-        selection: hex(0x626880),
+        background: 0x303446,
+        foreground: 0xc6d0f5,
+        bright_foreground: 0xc6d0f5,
+        cursor: 0xf2d5cf,
+        selection: 0x626880,
         ansi: [
-            hex(0x51576d),
-            hex(0xe78284),
-            hex(0xa6d189),
-            hex(0xe5c890),
-            hex(0x8caaee),
-            hex(0xf4b8e4),
-            hex(0x81c8be),
-            hex(0xb5bfe2),
-            hex(0x626880),
-            hex(0xe78284),
-            hex(0xa6d189),
-            hex(0xe5c890),
-            hex(0x8caaee),
-            hex(0xf4b8e4),
-            hex(0x81c8be),
-            hex(0xa5adce),
+            0x51576d, 0xe78284, 0xa6d189, 0xe5c890, 0x8caaee, 0xf4b8e4, 0x81c8be, 0xb5bfe2,
+            0x626880, 0xe78284, 0xa6d189, 0xe5c890, 0x8caaee, 0xf4b8e4, 0x81c8be, 0xa5adce,
         ],
         dim: [
-            hex(0x51576d),
-            hex(0xe78284),
-            hex(0xa6d189),
-            hex(0xe5c890),
-            hex(0x8caaee),
-            hex(0xf4b8e4),
-            hex(0x81c8be),
-            hex(0xb5bfe2),
+            0x51576d, 0xe78284, 0xa6d189, 0xe5c890, 0x8caaee, 0xf4b8e4, 0x81c8be, 0xb5bfe2,
         ],
-    }
-}
-
-fn latte() -> TerminalPalette {
-    TerminalPalette {
+    },
+    ThemeSpec {
         name: ThemeName::Latte,
-        background: hex(0xeff1f5),
-        foreground: hex(0x4c4f69),
-        bright_foreground: hex(0x4c4f69),
-        cursor: hex(0xdc8a78),
-        selection: hex(0xacb0be),
+        background: 0xeff1f5,
+        foreground: 0x4c4f69,
+        bright_foreground: 0x4c4f69,
+        cursor: 0xdc8a78,
+        selection: 0xacb0be,
         ansi: [
-            hex(0x5c5f77),
-            hex(0xd20f39),
-            hex(0x40a02b),
-            hex(0xdf8e1d),
-            hex(0x1e66f5),
-            hex(0xea76cb),
-            hex(0x179299),
-            hex(0xacb0be),
-            hex(0x6c6f85),
-            hex(0xd20f39),
-            hex(0x40a02b),
-            hex(0xdf8e1d),
-            hex(0x1e66f5),
-            hex(0xea76cb),
-            hex(0x179299),
-            hex(0xbcc0cc),
+            0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be,
+            0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
         ],
         dim: [
-            hex(0x5c5f77),
-            hex(0xd20f39),
-            hex(0x40a02b),
-            hex(0xdf8e1d),
-            hex(0x1e66f5),
-            hex(0xea76cb),
-            hex(0x179299),
-            hex(0xacb0be),
+            0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be,
         ],
-    }
-}
-
-fn tokyo_night() -> TerminalPalette {
-    TerminalPalette {
+    },
+    ThemeSpec {
         name: ThemeName::TokyoNight,
-        background: hex(0x1a1b26),
-        foreground: hex(0xc0caf5),
-        bright_foreground: hex(0xc0caf5),
-        cursor: hex(0xc0caf5),
-        selection: hex(0x33467c),
+        background: 0x1a1b26,
+        foreground: 0xc0caf5,
+        bright_foreground: 0xc0caf5,
+        cursor: 0xc0caf5,
+        selection: 0x33467c,
         ansi: [
-            hex(0x15161e),
-            hex(0xf7768e),
-            hex(0x9ece6a),
-            hex(0xe0af68),
-            hex(0x7aa2f7),
-            hex(0xbb9af7),
-            hex(0x7dcfff),
-            hex(0xa9b1d6),
-            hex(0x414868),
-            hex(0xf7768e),
-            hex(0x9ece6a),
-            hex(0xe0af68),
-            hex(0x7aa2f7),
-            hex(0xbb9af7),
-            hex(0x7dcfff),
-            hex(0xc0caf5),
+            0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6,
+            0x414868, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5,
         ],
         dim: [
-            hex(0x15161e),
-            hex(0xf7768e),
-            hex(0x9ece6a),
-            hex(0xe0af68),
-            hex(0x7aa2f7),
-            hex(0xbb9af7),
-            hex(0x7dcfff),
-            hex(0xa9b1d6),
+            0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6,
         ],
-    }
-}
-
-fn nord() -> TerminalPalette {
-    TerminalPalette {
+    },
+    ThemeSpec {
         name: ThemeName::Nord,
-        background: hex(0x2e3440),
-        foreground: hex(0xd8dee9),
-        bright_foreground: hex(0xeceff4),
-        cursor: hex(0xd8dee9),
-        selection: hex(0x434c5e),
+        background: 0x2e3440,
+        foreground: 0xd8dee9,
+        bright_foreground: 0xeceff4,
+        cursor: 0xd8dee9,
+        selection: 0x434c5e,
         ansi: [
-            hex(0x3b4252),
-            hex(0xbf616a),
-            hex(0xa3be8c),
-            hex(0xebcb8b),
-            hex(0x81a1c1),
-            hex(0xb48ead),
-            hex(0x88c0d0),
-            hex(0xe5e9f0),
-            hex(0x4c566a),
-            hex(0xbf616a),
-            hex(0xa3be8c),
-            hex(0xebcb8b),
-            hex(0x81a1c1),
-            hex(0xb48ead),
-            hex(0x8fbcbb),
-            hex(0xeceff4),
+            0x3b4252, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x88c0d0, 0xe5e9f0,
+            0x4c566a, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x8fbcbb, 0xeceff4,
         ],
         dim: [
-            hex(0x3b4252),
-            hex(0xbf616a),
-            hex(0xa3be8c),
-            hex(0xebcb8b),
-            hex(0x81a1c1),
-            hex(0xb48ead),
-            hex(0x88c0d0),
-            hex(0xe5e9f0),
+            0x3b4252, 0xbf616a, 0xa3be8c, 0xebcb8b, 0x81a1c1, 0xb48ead, 0x88c0d0, 0xe5e9f0,
         ],
-    }
-}
-
-fn gruvbox_dark() -> TerminalPalette {
-    TerminalPalette {
+    },
+    ThemeSpec {
         name: ThemeName::GruvboxDark,
-        background: hex(0x282828),
-        foreground: hex(0xebdbb2),
-        bright_foreground: hex(0xfbf1c7),
-        cursor: hex(0xebdbb2),
-        selection: hex(0x504945),
+        background: 0x282828,
+        foreground: 0xebdbb2,
+        bright_foreground: 0xfbf1c7,
+        cursor: 0xebdbb2,
+        selection: 0x504945,
         ansi: [
-            hex(0x282828),
-            hex(0xcc241d),
-            hex(0x98971a),
-            hex(0xd79921),
-            hex(0x458588),
-            hex(0xb16286),
-            hex(0x689d6a),
-            hex(0xa89984),
-            hex(0x928374),
-            hex(0xfb4934),
-            hex(0xb8bb26),
-            hex(0xfabd2f),
-            hex(0x83a598),
-            hex(0xd3869b),
-            hex(0x8ec07c),
-            hex(0xebdbb2),
+            0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
+            0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
         ],
         dim: [
-            hex(0x282828),
-            hex(0xcc241d),
-            hex(0x98971a),
-            hex(0xd79921),
-            hex(0x458588),
-            hex(0xb16286),
-            hex(0x689d6a),
-            hex(0xa89984),
+            0x282828, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
         ],
-    }
-}
-
-fn solarized_light() -> TerminalPalette {
-    TerminalPalette {
+    },
+    ThemeSpec {
         name: ThemeName::SolarizedLight,
-        background: hex(0xfdf6e3),
-        foreground: hex(0x657b83),
-        bright_foreground: hex(0x586e75),
-        cursor: hex(0x657b83),
-        selection: hex(0xeee8d5),
+        background: 0xfdf6e3,
+        foreground: 0x657b83,
+        bright_foreground: 0x586e75,
+        cursor: 0x657b83,
+        selection: 0xeee8d5,
         ansi: [
-            hex(0x073642),
-            hex(0xdc322f),
-            hex(0x859900),
-            hex(0xb58900),
-            hex(0x268bd2),
-            hex(0xd33682),
-            hex(0x2aa198),
-            hex(0xeee8d5),
-            hex(0x002b36),
-            hex(0xcb4b16),
-            hex(0x586e75),
-            hex(0x657b83),
-            hex(0x839496),
-            hex(0x6c71c4),
-            hex(0x93a1a1),
-            hex(0xfdf6e3),
+            0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
+            0x002b36, 0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
         ],
         dim: [
-            hex(0x073642),
-            hex(0xdc322f),
-            hex(0x859900),
-            hex(0xb58900),
-            hex(0x268bd2),
-            hex(0xd33682),
-            hex(0x2aa198),
-            hex(0xeee8d5),
+            0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5,
         ],
-    }
-}
-
-/// Primer GitHub Dark — matches github.com dark default / github-vscode-theme.
-fn github_dark() -> TerminalPalette {
-    TerminalPalette {
+    },
+    // Primer GitHub Dark — matches github.com dark default / github-vscode-theme.
+    ThemeSpec {
         name: ThemeName::GithubDark,
-        background: hex(0x0d1117),
-        foreground: hex(0xe6edf3),
-        bright_foreground: hex(0xffffff),
-        cursor: hex(0xe6edf3),
-        selection: hex(0x264f78),
+        background: 0x0d1117,
+        foreground: 0xe6edf3,
+        bright_foreground: 0xffffff,
+        cursor: 0xe6edf3,
+        selection: 0x264f78,
         ansi: [
-            hex(0x484f58), // black
-            hex(0xff7b72), // red
-            hex(0x3fb950), // green
-            hex(0xd29922), // yellow
-            hex(0x58a6ff), // blue
-            hex(0xbc8cff), // magenta
-            hex(0x39c5cf), // cyan
-            hex(0xb1bac4), // white
-            hex(0x6e7681), // bright black
-            hex(0xffa198), // bright red
-            hex(0x56d364), // bright green
-            hex(0xe3b341), // bright yellow
-            hex(0x79c0ff), // bright blue
-            hex(0xd2a8ff), // bright magenta
-            hex(0x56d4dd), // bright cyan
-            hex(0xffffff), // bright white
+            0x484f58, 0xff7b72, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xb1bac4,
+            0x6e7681, 0xffa198, 0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xffffff,
         ],
         dim: [
-            hex(0x484f58),
-            hex(0xff7b72),
-            hex(0x3fb950),
-            hex(0xd29922),
-            hex(0x58a6ff),
-            hex(0xbc8cff),
-            hex(0x39c5cf),
-            hex(0xb1bac4),
+            0x484f58, 0xff7b72, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff, 0x39c5cf, 0xb1bac4,
         ],
-    }
-}
-
-/// Primer GitHub Light — matches github.com light default / github-vscode-theme.
-fn github_light() -> TerminalPalette {
-    TerminalPalette {
+    },
+    // Primer GitHub Light — matches github.com light default / github-vscode-theme.
+    ThemeSpec {
         name: ThemeName::GithubLight,
-        background: hex(0xffffff),
-        foreground: hex(0x1f2328),
-        bright_foreground: hex(0x1f2328),
-        cursor: hex(0x1f2328),
-        selection: hex(0xb6e3ff),
+        background: 0xffffff,
+        foreground: 0x1f2328,
+        bright_foreground: 0x1f2328,
+        cursor: 0x1f2328,
+        selection: 0xb6e3ff,
         ansi: [
-            hex(0x24292f), // black
-            hex(0xcf222e), // red
-            hex(0x116329), // green
-            hex(0x4d2d00), // yellow
-            hex(0x0969da), // blue
-            hex(0x8250df), // magenta
-            hex(0x1b7c83), // cyan
-            hex(0x6e7781), // white
-            hex(0x57606a), // bright black
-            hex(0xa40e26), // bright red
-            hex(0x1a7f37), // bright green
-            hex(0x633c01), // bright yellow
-            hex(0x218bff), // bright blue
-            hex(0xa475f9), // bright magenta
-            hex(0x3192aa), // bright cyan
-            hex(0x8c959f), // bright white
+            0x24292f, 0xcf222e, 0x116329, 0x4d2d00, 0x0969da, 0x8250df, 0x1b7c83, 0x6e7781,
+            0x57606a, 0xa40e26, 0x1a7f37, 0x633c01, 0x218bff, 0xa475f9, 0x3192aa, 0x8c959f,
         ],
         dim: [
-            hex(0x24292f),
-            hex(0xcf222e),
-            hex(0x116329),
-            hex(0x4d2d00),
-            hex(0x0969da),
-            hex(0x8250df),
-            hex(0x1b7c83),
-            hex(0x6e7781),
+            0x24292f, 0xcf222e, 0x116329, 0x4d2d00, 0x0969da, 0x8250df, 0x1b7c83, 0x6e7781,
         ],
-    }
-}
-
-/// Dracula — the popular dark theme (canvas `#282a36`).
-fn dracula() -> TerminalPalette {
-    TerminalPalette {
+    },
+    // Dracula — the popular dark theme (canvas `#282a36`).
+    ThemeSpec {
         name: ThemeName::Dracula,
-        background: hex(0x282a36),
-        foreground: hex(0xf8f8f2),
-        bright_foreground: hex(0xffffff),
-        cursor: hex(0xf8f8f2),
-        selection: hex(0x44475a),
+        background: 0x282a36,
+        foreground: 0xf8f8f2,
+        bright_foreground: 0xffffff,
+        cursor: 0xf8f8f2,
+        selection: 0x44475a,
         ansi: [
-            hex(0x21222c), // black
-            hex(0xff5555), // red
-            hex(0x50fa7b), // green
-            hex(0xf1fa8c), // yellow
-            hex(0xbd93f9), // blue
-            hex(0xff79c6), // magenta
-            hex(0x8be9fd), // cyan
-            hex(0xf8f8f2), // white
-            hex(0x6272a4), // bright black
-            hex(0xff6e6e), // bright red
-            hex(0x69ff94), // bright green
-            hex(0xffffa5), // bright yellow
-            hex(0xd6acff), // bright blue
-            hex(0xff92df), // bright magenta
-            hex(0xa4ffff), // bright cyan
-            hex(0xffffff), // bright white
+            0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2,
+            0x6272a4, 0xff6e6e, 0x69ff94, 0xffffa5, 0xd6acff, 0xff92df, 0xa4ffff, 0xffffff,
         ],
         dim: [
-            hex(0x21222c),
-            hex(0xff5555),
-            hex(0x50fa7b),
-            hex(0xf1fa8c),
-            hex(0xbd93f9),
-            hex(0xff79c6),
-            hex(0x8be9fd),
-            hex(0xf8f8f2),
+            0x21222c, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd, 0xf8f8f2,
         ],
-    }
-}
-
-/// Atom One Dark (canvas `#282c34`).
-fn one_dark() -> TerminalPalette {
-    TerminalPalette {
+    },
+    // Atom One Dark (canvas `#282c34`).
+    ThemeSpec {
         name: ThemeName::OneDark,
-        background: hex(0x282c34),
-        foreground: hex(0xabb2bf),
-        bright_foreground: hex(0xffffff),
-        cursor: hex(0x528bff),
-        selection: hex(0x3e4451),
+        background: 0x282c34,
+        foreground: 0xabb2bf,
+        bright_foreground: 0xffffff,
+        cursor: 0x528bff,
+        selection: 0x3e4451,
         ansi: [
-            hex(0x282c34), // black
-            hex(0xe06c75), // red
-            hex(0x98c379), // green
-            hex(0xe5c07b), // yellow
-            hex(0x61afef), // blue
-            hex(0xc678dd), // magenta
-            hex(0x56b6c2), // cyan
-            hex(0xabb2bf), // white
-            hex(0x5c6370), // bright black
-            hex(0xe06c75), // bright red
-            hex(0x98c379), // bright green
-            hex(0xe5c07b), // bright yellow
-            hex(0x61afef), // bright blue
-            hex(0xc678dd), // bright magenta
-            hex(0x56b6c2), // bright cyan
-            hex(0xffffff), // bright white
+            0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf,
+            0x5c6370, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
         ],
         dim: [
-            hex(0x282c34),
-            hex(0xe06c75),
-            hex(0x98c379),
-            hex(0xe5c07b),
-            hex(0x61afef),
-            hex(0xc678dd),
-            hex(0x56b6c2),
-            hex(0xabb2bf),
+            0x282c34, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf,
         ],
-    }
-}
-
-/// Nocturne Violet — a purple-forward dark theme (canvas `#151020`).
-fn nocturne_violet() -> TerminalPalette {
-    TerminalPalette {
+    },
+    // Nocturne Violet — a purple-forward dark theme (canvas `#151020`).
+    ThemeSpec {
         name: ThemeName::NocturneViolet,
-        background: hex(0x151020),
-        foreground: hex(0xd9d2e8),
-        bright_foreground: hex(0xf4f0fb),
-        cursor: hex(0xb98df7),
-        selection: hex(0x3b2d5e),
+        background: 0x151020,
+        foreground: 0xd9d2e8,
+        bright_foreground: 0xf4f0fb,
+        cursor: 0xb98df7,
+        selection: 0x3b2d5e,
         ansi: [
-            hex(0x221832), // black
-            hex(0xe06c92), // red
-            hex(0xa0cfa8), // green
-            hex(0xe0b76e), // yellow
-            hex(0x93a4f5), // blue
-            hex(0xcf9bf0), // magenta
-            hex(0x8ad4cc), // cyan
-            hex(0xcdc4e0), // white
-            hex(0x75649a), // bright black
-            hex(0xf58bab), // bright red
-            hex(0xb2e3ba), // bright green
-            hex(0xf0ce8e), // bright yellow
-            hex(0xaab8f9), // bright blue
-            hex(0xdcb6f7), // bright magenta
-            hex(0xa2e8df), // bright cyan
-            hex(0xf4f0fb), // bright white
+            0x221832, 0xe06c92, 0xa0cfa8, 0xe0b76e, 0x93a4f5, 0xcf9bf0, 0x8ad4cc, 0xcdc4e0,
+            0x75649a, 0xf58bab, 0xb2e3ba, 0xf0ce8e, 0xaab8f9, 0xdcb6f7, 0xa2e8df, 0xf4f0fb,
         ],
         dim: [
-            hex(0x221832),
-            hex(0xe06c92),
-            hex(0xa0cfa8),
-            hex(0xe0b76e),
-            hex(0x93a4f5),
-            hex(0xcf9bf0),
-            hex(0x8ad4cc),
-            hex(0xcdc4e0),
+            0x221832, 0xe06c92, 0xa0cfa8, 0xe0b76e, 0x93a4f5, 0xcf9bf0, 0x8ad4cc, 0xcdc4e0,
         ],
-    }
-}
-
-/// Monokai Pro — the official terminal palette from the VS Code extension
-/// (canvas `#2d2a2e`; note the signature orange occupies the blue slot).
-fn monokai_pro() -> TerminalPalette {
-    TerminalPalette {
+    },
+    // Monokai Pro — the official terminal palette from the VS Code extension
+    // (canvas `#2d2a2e`; note the signature orange occupies the blue slot).
+    ThemeSpec {
         name: ThemeName::MonokaiPro,
-        background: hex(0x2d2a2e),
-        foreground: hex(0xfcfcfa),
-        bright_foreground: hex(0xfcfcfa),
-        cursor: hex(0xfcfcfa),
-        selection: hex(0x4c494c),
+        background: 0x2d2a2e,
+        foreground: 0xfcfcfa,
+        bright_foreground: 0xfcfcfa,
+        cursor: 0xfcfcfa,
+        selection: 0x4c494c,
         ansi: [
-            hex(0x403e41), // black
-            hex(0xff6188), // red
-            hex(0xa9dc76), // green
-            hex(0xffd866), // yellow
-            hex(0xfc9867), // blue (orange in Monokai Pro)
-            hex(0xab9df2), // magenta
-            hex(0x78dce8), // cyan
-            hex(0xfcfcfa), // white
-            hex(0x727072), // bright black
-            hex(0xff6188), // bright red
-            hex(0xa9dc76), // bright green
-            hex(0xffd866), // bright yellow
-            hex(0xfc9867), // bright blue
-            hex(0xab9df2), // bright magenta
-            hex(0x78dce8), // bright cyan
-            hex(0xfcfcfa), // bright white
+            0x403e41, 0xff6188, 0xa9dc76, 0xffd866, 0xfc9867, 0xab9df2, 0x78dce8, 0xfcfcfa,
+            0x727072, 0xff6188, 0xa9dc76, 0xffd866, 0xfc9867, 0xab9df2, 0x78dce8, 0xfcfcfa,
         ],
         dim: [
-            hex(0x403e41),
-            hex(0xff6188),
-            hex(0xa9dc76),
-            hex(0xffd866),
-            hex(0xfc9867),
-            hex(0xab9df2),
-            hex(0x78dce8),
-            hex(0xfcfcfa),
+            0x403e41, 0xff6188, 0xa9dc76, 0xffd866, 0xfc9867, 0xab9df2, 0x78dce8, 0xfcfcfa,
         ],
-    }
+    },
+];
+
+fn spec_for(name: ThemeName) -> &'static ThemeSpec {
+    THEME_SPECS
+        .iter()
+        .find(|spec| spec.name == name)
+        .unwrap_or(&THEME_SPECS[0])
 }
 
 /// Convert an 8-bit ANSI color index to HSLA (alacritty-compatible indices).
@@ -843,7 +536,7 @@ pub struct CustomPalette {
 impl CustomPalette {
     /// Resolve into a full palette, borrowing Mocha for any missing color.
     pub fn to_palette(&self) -> TerminalPalette {
-        let base = mocha();
+        let base = spec_for(ThemeName::Mocha).palette();
         let background = self
             .background
             .as_deref()
@@ -897,6 +590,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn theme_spec_table_covers_every_builtin() {
+        for name in ThemeName::ALL {
+            if matches!(name, ThemeName::Auto) {
+                continue;
+            }
+            assert!(
+                THEME_SPECS.iter().any(|spec| spec.name == *name),
+                "missing ThemeSpec for {name:?}"
+            );
+        }
+        // Mocha stays first: spec_for falls back to index 0.
+        assert_eq!(THEME_SPECS[0].name, ThemeName::Mocha);
+    }
+
+    #[test]
     fn parse_hex_accepts_hash_rgb_and_bare() {
         assert_eq!(parse_hex_color("#ff0000").map(|c| c.to_rgb().r), Some(1.0));
         assert_eq!(parse_hex_color("00ff00").map(|c| c.to_rgb().g), Some(1.0));
@@ -939,7 +647,10 @@ mod tests {
             p.ansi[2].to_rgb(),
             parse_hex_color("#0000ff").unwrap().to_rgb()
         );
-        assert_eq!(p.ansi[3].to_rgb(), mocha().ansi[3].to_rgb());
+        assert_eq!(
+            p.ansi[3].to_rgb(),
+            spec_for(ThemeName::Mocha).palette().ansi[3].to_rgb()
+        );
         assert_eq!(p.dim[0].to_rgb(), p.ansi[0].to_rgb());
     }
 }

@@ -79,7 +79,7 @@ impl AppShell {
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let open = self.mode.is(crate::ui_mode::OverlayKind::Settings);
+        let open = self.input.is_overlay(crate::ui_mode::OverlayKind::Settings);
         div()
             .id("titlebar-settings")
             .flex()

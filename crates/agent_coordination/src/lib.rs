@@ -10,12 +10,15 @@
 //! `FailedDelivery`.
 
 pub mod client;
+pub mod error;
+pub mod frame;
 pub mod line;
 pub mod protocol;
 pub mod registry;
 pub mod server;
 
 pub use client::{ClientError, call};
+pub use error::CoordError;
 pub use line::MAX_LINE_BYTES;
 pub use protocol::{
     AdapterUpdate, AgentKind, AgentSessionId, CoordinationTaskId, Effect, EffectBody, Event, Fact,
@@ -24,5 +27,5 @@ pub use protocol::{
     encode_effect_line, encode_event_line, encode_fact_line, encode_request_line,
     encode_response_line,
 };
-pub use registry::{Limits, Registry};
+pub use registry::{ClaimOutcome, ClaimedEffect, Limits, Registry};
 pub use server::{CLIENT_READ_TIMEOUT, MAX_CLIENTS, Server, ServerError, default_socket_path};

@@ -40,12 +40,11 @@ impl AppShell {
     }
 
     pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode.toggle(OverlayKind::Settings) {
+        if self.toggle_overlay(OverlayKind::Settings, cx) {
             // Always land on Theme when reopening; future sections can restore.
             self.settings.section = SettingsSection::Theme;
             self.reset_theme_selection(cx);
         } else {
-            self.settings.theme_query.clear();
             self.focus_active(window, cx);
         }
         cx.notify();
@@ -55,15 +54,14 @@ impl AppShell {
     /// closes it, because picking "Settings" from the palette should always land
     /// there.
     pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
-        self.mode.open(OverlayKind::Settings);
+        self.open_overlay(OverlayKind::Settings, cx);
         self.settings.section = SettingsSection::Theme;
         self.reset_theme_selection(cx);
         cx.notify();
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode.close(OverlayKind::Settings) {
-            self.settings.theme_query.clear();
+        if self.close_overlay(OverlayKind::Settings, cx) {
             self.focus_active(window, cx);
             cx.notify();
         }

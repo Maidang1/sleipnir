@@ -17,7 +17,7 @@ use crate::ui_mode::OverlayKind;
 
 impl AppShell {
     pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.mode.open(OverlayKind::Palette);
+        self.open_overlay(OverlayKind::Palette, cx);
         self.palette.query.clear();
         self.palette.marked = None;
         self.palette.selected = 0;
@@ -28,7 +28,7 @@ impl AppShell {
     }
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode.close(OverlayKind::Palette) {
+        if self.close_overlay(OverlayKind::Palette, cx) {
             self.palette.query.clear();
             self.palette.marked = None;
             self.palette.selected = 0;
@@ -61,7 +61,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.mode.is(OverlayKind::Palette) {
+        if !self.input.is_overlay(OverlayKind::Palette) {
             return false;
         }
         let key = event.keystroke.key.as_str();

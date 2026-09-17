@@ -1946,7 +1946,7 @@ fn declared_capabilities_include_resident_from_lifecycle() {
             title: "Run".into(),
             description: String::new(),
             keywords: vec![],
-            permissions: BTreeSet::from([crate::Permission::ReadCwd]),
+            permissions: BTreeSet::from([plugin_protocol::v2::Capability::ReadCwd]),
             timeout_secs: None,
         }],
     };
@@ -1971,9 +1971,9 @@ fn declared_capabilities_include_plugin_level_v2_permissions() {
         binary: "x".into(),
         args: vec![],
         permissions: BTreeSet::from([
-            crate::Permission::SubscribeEvents,
-            crate::Permission::RenderBlock,
-            crate::Permission::ReadCwd,
+            plugin_protocol::v2::Capability::SubscribeEvents,
+            plugin_protocol::v2::Capability::RenderBlock,
+            plugin_protocol::v2::Capability::ReadCwd,
         ]),
         commands: vec![],
     };
@@ -2251,6 +2251,36 @@ fn secret_bearing_command_does_not_reach_the_plugin_verbatim() {
         !command.contains("supersecret"),
         "plugins must never see the raw command line: {command}"
     );
+    env.sup.shutdown("demo");
+    let _ = plugin.join();
+}
+
+#[test]
+fn resident_stores_one_arc_not_two() {
+    let env = Env::new();
+    let plugin = env.spawn_plugin(handshake_and_echo);
+    let session = env.sup.connect(&spec()).unwrap();
+    let instance_id = session.instance_id();
+
+    // The session Arc held by the caller plus one in the instance map = 2.
+    // Before the one-map refactor, two maps each held an Arc (caller + live +
+    // active = 3). This pins the single-map invariant.
+    assert_eq!(
+        Arc::strong_count(&session),
+        2,
+        "resident session must appear in exactly one map, not two"
+    );
+
+    let snaps = env.sup.snapshots();
+    assert_eq!(
+        snaps
+            .iter()
+            .filter(|s| s.instance_id == instance_id)
+            .count(),
+        1,
+        "instance must appear exactly once in snapshots"
+    );
+
     env.sup.shutdown("demo");
     let _ = plugin.join();
 }

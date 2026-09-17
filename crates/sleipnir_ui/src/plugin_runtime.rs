@@ -8,7 +8,7 @@ use plugin_host::resident::{
     SupervisorConfig, SystemClock,
 };
 use plugin_host::{
-    LoadedPlugin, LoadedPluginCommand, Permission, PluginCatalog, PluginLifecycle, PluginSource,
+    LoadedPlugin, LoadedPluginCommand, PluginCatalog, PluginLifecycle, PluginSource,
 };
 use plugin_protocol::v2::{Capability, HostEvent, InvokeContext, Output};
 use sleipnir_settings::TerminalSettings;
@@ -199,19 +199,19 @@ pub fn build_context(
     let view = view.read(cx);
     InvokeContext {
         cwd: permissions
-            .contains(&Permission::ReadCwd)
+            .contains(&Capability::ReadCwd)
             .then(|| view.working_directory(cx))
             .flatten()
             .map(|path| path.to_string_lossy().into_owned()),
         title: permissions
-            .contains(&Permission::ReadTitle)
+            .contains(&Capability::ReadTitle)
             .then(|| view.title().to_string()),
         selection: permissions
-            .contains(&Permission::ReadSelection)
+            .contains(&Capability::ReadSelection)
             .then(|| view.selection_text(cx))
             .flatten(),
         visible_screen: permissions
-            .contains(&Permission::ReadVisibleScreen)
+            .contains(&Capability::ReadVisibleScreen)
             .then(|| view.visible_screen_text(cx)),
     }
 }
@@ -243,13 +243,7 @@ pub fn apply_output(
 /// Capabilities this command is asking for. `Resident` is implied by the
 /// manifest lifecycle.
 pub fn requested_capabilities(plugin: &LoadedPluginCommand) -> Vec<Capability> {
-    let mut caps: Vec<_> = plugin
-        .command
-        .permissions
-        .iter()
-        .copied()
-        .map(Permission::to_v2)
-        .collect();
+    let mut caps: Vec<_> = plugin.command.permissions.iter().copied().collect();
     if plugin.lifecycle == PluginLifecycle::Resident && !caps.contains(&Capability::Resident) {
         caps.push(Capability::Resident);
     }

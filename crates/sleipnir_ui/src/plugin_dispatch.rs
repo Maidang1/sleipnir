@@ -67,14 +67,37 @@ impl PluginDispatcher {
         let live = supervisor.live_instances();
         let changed = self.live != live;
         self.live = live;
-        if inbound.is_empty() && !changed {
-            return;
-        }
         let windows: Vec<_> = cx
             .windows()
             .into_iter()
             .filter_map(|handle| handle.downcast::<AppShell>())
             .collect();
+
+        // Nothing new to deliver and no live-set delta: routing is a no-op.
+        if !inbound.is_empty() || changed {
+            self.route(inbound, changed, &windows, cx);
+        }
+
+        // The watch is walked every tick regardless of inbound traffic so quiet
+        // residents keep receiving polled cwd / agent / focus / port
+        // `HostEvent`s. `PluginEventWatch` self-throttles once called; the bug
+        // this guards against is *not calling* it on a quiet tick.
+        for handle in &windows {
+            let _ = handle.update(cx, |shell, _, cx| {
+                shell.poll_plugin_events(cx);
+            });
+        }
+    }
+
+    /// Drain inbound into per-window destinations and sync surfaces on a live-set
+    /// change. Kept separate from the event watch so a quiet tick still polls.
+    fn route(
+        &mut self,
+        inbound: Vec<plugin_host::resident::InboundEnvelope>,
+        changed: bool,
+        windows: &[gpui::WindowHandle<AppShell>],
+        cx: &mut App,
+    ) {
         let active = cx
             .active_window()
             .and_then(|handle| handle.downcast::<AppShell>());

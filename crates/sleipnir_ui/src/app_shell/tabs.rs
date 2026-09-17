@@ -13,7 +13,7 @@ use super::{
 };
 use crate::TermView;
 use crate::chrome::active_after_close;
-use crate::pane_tree::{PaneId, PaneKey, PaneNode};
+use crate::pane_tree::{PaneId, PaneNode};
 use crate::tab_convert::{extract_pane, merge_tab};
 
 const CLOSED_TAB_HISTORY_LIMIT: usize = 10;
@@ -34,13 +34,6 @@ fn next_detached_pane_id(tree: &PaneNode) -> PaneId {
         .max()
         .unwrap_or(0)
         .saturating_add(1)
-}
-
-fn transferred_panel_surfaces(
-    panels: &crate::plugin_panel::PanelRegistry,
-    pane_keys: impl IntoIterator<Item = PaneKey>,
-) -> Vec<crate::plugin_panel::PanelSurface> {
-    panels.clone_surfaces(pane_keys)
 }
 
 fn can_extract_terminal_pane(tab: &Tab, pane_id: PaneId) -> bool {
@@ -84,7 +77,10 @@ impl AppShell {
             return;
         };
         let buffer = tab.path_label(cx).to_string();
-        self.rename = Some(RenameState { tab_id, buffer });
+        self.set_input(
+            crate::ui_mode::InputMode::Rename(RenameState { tab_id, buffer }),
+            cx,
+        );
         cx.notify();
     }
 
@@ -92,7 +88,7 @@ impl AppShell {
     /// the custom title so the tab falls back to the pane title (side) or cwd
     /// path (top).
     pub(super) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = self.rename.take() {
+        if let Some(state) = self.take_rename_input(cx) {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == state.tab_id) {
                 let trimmed = state.buffer.trim();
                 tab.custom_title = if trimmed.is_empty() {
@@ -108,7 +104,7 @@ impl AppShell {
 
     /// Abandon the in-progress rename without changing the tab title.
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        if self.rename.take().is_some() {
+        if self.take_rename_input(cx).is_some() {
             cx.notify();
         }
     }
@@ -121,7 +117,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.rename.is_none() {
+        if self.input.rename().is_none() {
             return false;
         }
         let key = event.keystroke.key.as_str();
@@ -135,7 +131,7 @@ impl AppShell {
                 true
             }
             "backspace" => {
-                if let Some(state) = self.rename.as_mut() {
+                if let Some(state) = self.input.rename_mut() {
                     state.buffer.pop();
                     cx.notify();
                 }
@@ -145,7 +141,7 @@ impl AppShell {
                 // Append any typed printable character to the buffer.
                 if let Some(ch) = event.keystroke.key_char.as_ref() {
                     if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                        if let Some(state) = self.rename.as_mut() {
+                        if let Some(state) = self.input.rename_mut() {
                             state.buffer.push_str(ch);
                             cx.notify();
                         }
@@ -164,7 +160,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.close_confirm.is_some() {
+        if self.input.confirm().is_some() {
             return;
         }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
@@ -185,10 +181,14 @@ impl AppShell {
         if needs_confirm {
             let name =
                 first_busy.and_then(|view| view.read(cx).foreground_process_command_name(cx));
-            self.close_confirm = Some(CloseConfirmState {
-                message: crate::chrome::close_copy::close_confirm_message(name.as_deref()).into(),
-                kind: ConfirmKind::CloseTab(tab_id),
-            });
+            self.set_input(
+                crate::ui_mode::InputMode::Confirm(CloseConfirmState {
+                    message: crate::chrome::close_copy::close_confirm_message(name.as_deref())
+                        .into(),
+                    kind: ConfirmKind::CloseTab(tab_id),
+                }),
+                cx,
+            );
             cx.notify();
         } else {
             self.close_tab_at(index, window, cx);
@@ -212,13 +212,14 @@ impl AppShell {
             },
         );
         // Drop any inline rename targeting the tab being removed.
-        if let Some(state) = self.rename.as_ref() {
-            if self.tabs[index].id == state.tab_id {
-                self.rename = None;
-            }
+        if self
+            .input
+            .rename()
+            .is_some_and(|state| self.tabs[index].id == state.tab_id)
+        {
+            let _ = self.take_rename_input(cx);
         }
         let closed_keys = self.tabs[index].tree.all_pane_keys();
-        self.plugin_panels.remove_all(closed_keys.iter().copied());
         for pane in closed_keys {
             self.apply_pane_closed(pane, cx);
         }
@@ -315,20 +316,17 @@ impl AppShell {
             return;
         };
         let tab = self.tabs[idx].clone();
-        let panel_surfaces =
-            transferred_panel_surfaces(&self.plugin_panels, tab.tree.all_pane_keys());
         let options = terminal_window_options(cx);
         match cx.open_window(options, move |window, cx| {
-            let tab = tab.clone();
             cx.new(|cx| {
                 let mut shell = AppShell::new(window, cx);
-                shell.adopt_tab_with_panels(tab, panel_surfaces, window, cx);
+                shell.adopt_tab(tab, window, cx);
                 shell
             })
         }) {
             Ok(_) => {
                 let removed = self.tabs.remove(idx);
-                self.plugin_panels.remove_all(removed.tree.all_pane_keys());
+                let _ = removed;
                 self.active = new_active;
                 self.commit_workspace(window, cx);
             }
@@ -398,14 +396,7 @@ impl AppShell {
         self.commit_workspace(window, cx);
     }
 
-    fn adopt_tab_with_panels(
-        &mut self,
-        tab: Tab,
-        panel_surfaces: Vec<crate::plugin_panel::PanelSurface>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Drop the placeholder tab `new` created (its shell exits).
+    fn adopt_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.clear();
         let mut tab = tab;
         let mut leaves = Vec::new();
@@ -415,7 +406,6 @@ impl AppShell {
         self.next_id = adopted.next_id;
         self.next_pane_id = adopted.next_pane_id;
         let views: Vec<Entity<TermView>> = leaves.into_iter().map(|(_, v)| v.clone()).collect();
-        self.plugin_panels.insert_surfaces(panel_surfaces);
         self.tabs.push(tab);
         self.active = 0;
         for view in &views {
@@ -458,9 +448,9 @@ impl AppShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane_tree::{LeafContent, SplitAxis};
+    use crate::pane_tree::{LeafContent, PaneKey, SplitAxis};
     use crate::plugin_panel::PanelSurface;
-    use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData, Tone, Widget};
+    use plugin_protocol::v2::{Tone, Widget};
     use uuid::Uuid;
 
     fn closed_tab(index: usize) -> ClosedTab {
@@ -487,11 +477,26 @@ mod tests {
         );
     }
 
+    fn demo_surface(pane_key: Uuid) -> PanelSurface {
+        PanelSurface {
+            plugin_id: "demo".into(),
+            owner_instance_id: Uuid::nil(),
+            pane_key,
+            surface_id: Uuid::nil(),
+            tree: Widget::Text {
+                s: "test".into(),
+                fg: Tone::Fg,
+                bold: false,
+            },
+            stale: false,
+        }
+    }
+
     fn panel_tab(id: u64, panes: &[(PaneId, PaneKey)]) -> Tab {
         let tree = panes
             .iter()
             .copied()
-            .map(|(pane_id, key)| PaneNode::panel_leaf(pane_id, key, "demo"))
+            .map(|(pane_id, key)| PaneNode::panel_leaf(pane_id, key, demo_surface(key)))
             .reduce(|first, second| PaneNode::Split {
                 axis: SplitAxis::Horizontal,
                 ratio: 0.5,
@@ -522,63 +527,17 @@ mod tests {
     }
 
     #[test]
-    fn transferred_panel_surfaces_keep_surface_tree_and_scene() {
+    fn transferred_panel_surfaces_are_tree_owned() {
         let first = Uuid::from_u128(1);
         let second = Uuid::from_u128(2);
-        let mut panels = crate::plugin_panel::PanelRegistry::new();
-        panels.insert_surfaces([
-            PanelSurface {
-                plugin_id: "demo".into(),
-                owner_instance_id: Uuid::from_u128(101),
-                pane_key: first,
-                surface_id: Uuid::from_u128(11),
-                tree: Widget::Text {
-                    s: "alpha".into(),
-                    fg: Tone::Fg,
-                    bold: false,
-                },
-                stale: false,
-                scene: Some(SceneData {
-                    cols: 1,
-                    rows: 1,
-                    floor: [1, 2, 3],
-                    camera: SceneCamera {
-                        yaw: 0.1,
-                        pitch: 0.2,
-                        zoom: 0.3,
-                    },
-                    bars: vec![SceneBar {
-                        gx: 0,
-                        gz: 1,
-                        height: 2.0,
-                        color: [3, 4, 5],
-                        selected: true,
-                    }],
-                }),
-            },
-            PanelSurface {
-                plugin_id: "demo".into(),
-                owner_instance_id: Uuid::from_u128(102),
-                pane_key: second,
-                surface_id: Uuid::from_u128(12),
-                tree: Widget::Text {
-                    s: "beta".into(),
-                    fg: Tone::Fg,
-                    bold: false,
-                },
-                stale: true,
-                scene: None,
-            },
-        ]);
-
-        let moved = transferred_panel_surfaces(&panels, [second, first]);
-        assert_eq!(moved.len(), 2);
-        assert_eq!(moved[0].pane_key, second);
-        assert_eq!(moved[0].surface_id, Uuid::from_u128(12));
-        assert_eq!(moved[1].pane_key, first);
-        assert_eq!(moved[1].surface_id, Uuid::from_u128(11));
-        assert!(matches!(moved[1].tree, Widget::Text { .. }));
-        assert!(moved[1].scene.is_some());
+        // With tree-owned surfaces, tab detach moves the leaf wholesale.
+        // The old test verified clone_panel_surfaces; now we verify the
+        // surfaces live in the tree.
+        let tab = panel_tab(99, &[(10, first), (20, second)]);
+        let mut all = Vec::new();
+        tab.tree.walk_leaves(&mut all);
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|(_, _, c)| c.is_panel()));
     }
 
     #[test]
@@ -589,15 +548,23 @@ mod tests {
         let mixed = PaneNode::Split {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
-            first: Box::new(PaneNode::panel_leaf(10, Uuid::from_u128(1), "demo")),
-            second: Box::new(PaneNode::panel_leaf(20, Uuid::from_u128(2), "demo")),
+            first: Box::new(PaneNode::panel_leaf(
+                10,
+                Uuid::from_u128(1),
+                demo_surface(Uuid::from_u128(1)),
+            )),
+            second: Box::new(PaneNode::panel_leaf(
+                20,
+                Uuid::from_u128(2),
+                demo_surface(Uuid::from_u128(2)),
+            )),
         };
         let mut leaves = Vec::new();
         mixed.walk_leaves(&mut leaves);
         assert!(
             leaves
                 .iter()
-                .all(|(_, _, content)| matches!(content, LeafContent::Panel { .. }))
+                .all(|(_, _, content)| matches!(content, LeafContent::Panel(_)))
         );
     }
 }

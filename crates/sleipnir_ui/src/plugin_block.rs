@@ -11,9 +11,8 @@
 //! Pure decision logic. No gpui. Paint and hit-testing consume the cached
 //! [`Layout`]; they do not re-measure on the hot path.
 
-use plugin_protocol::v2::{BlockId, RunId, Widget};
-use row_geometry::{Anchor, Block};
-use run_ledger::Anchor as LedgerAnchor;
+use plugin_protocol::v2::{Anchor, BlockId, RunId, Widget};
+use row_geometry::Block;
 use sleipnir_widget::{Layout, layout};
 use std::collections::BTreeMap;
 
@@ -80,18 +79,14 @@ impl BlockRegistry {
         run_id: RunId,
         tree: Widget,
         granted: bool,
-        ledger_anchor: Option<LedgerAnchor>,
+        ledger_anchor: Option<Anchor>,
         existing_id: Option<BlockId>,
     ) -> ApplyBlock {
         if !granted {
             return ApplyBlock::DeniedGrant;
         }
-        let Some(la) = ledger_anchor else {
+        let Some(anchor) = ledger_anchor else {
             return ApplyBlock::DeniedAnchor;
-        };
-        let anchor = Anchor {
-            line: la.line,
-            column: la.column,
         };
         if let Some(id) = existing_id {
             if let Some(existing) = self.surfaces.get_mut(&id) {
@@ -191,8 +186,6 @@ impl StaleRegistry for BlockRegistry {
     }
 }
 
-pub use crate::plugin_panel::action_at;
-
 /// Widget text that must never appear in a copied selection (ADR-0018
 /// decision 5). Selection is a grid-coordinate concept; the grid has no
 /// widget cells.
@@ -226,6 +219,7 @@ fn widget_text_fragments(tree: &Widget) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin_panel::action_at;
     use plugin_protocol::v2::Tone;
     use sleipnir_widget::LaidOutKind;
     use std::collections::BTreeSet;
@@ -250,8 +244,8 @@ mod tests {
         RunId::from_u128(n)
     }
 
-    fn anchor(line: i32) -> LedgerAnchor {
-        LedgerAnchor { line, column: 0 }
+    fn anchor(line: i32) -> Anchor {
+        Anchor { line, column: 0 }
     }
 
     #[test]

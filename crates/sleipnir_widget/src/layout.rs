@@ -16,6 +16,12 @@ use crate::cells::{
 use crate::geom::{CellPos, CellRect};
 use plugin_protocol::v2::{MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Tone, TreeStats, Widget};
 
+pub struct ChromeLabel<'a> {
+    pub label: String,
+    pub tone: Tone,
+    pub action: Option<(&'a str, Option<&'a str>)>,
+}
+
 /// A laid-out widget surface: the plugin tree plus the renderer-owned
 /// attribution band beneath it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +121,81 @@ pub enum LaidOutKind {
         plugin_id: String,
         label: String,
     },
+}
+
+impl LaidOutKind {
+    pub fn compact_width(&self) -> u32 {
+        use crate::cells::{CHIP_PAD, cell_cols};
+        match self {
+            LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => {
+                cell_cols(text) + 2 * CHIP_PAD
+            }
+            LaidOutKind::Text { lines, .. } => lines.first().map_or(0, |line| cell_cols(line)),
+            LaidOutKind::Code { lines } => lines.first().map_or(0, |line| cell_cols(&line.text)),
+            LaidOutKind::Spark { levels } => levels.len() as u32,
+            LaidOutKind::Bar { width, .. } => *width,
+            LaidOutKind::Sep => 1,
+            LaidOutKind::Truncated => 1,
+            LaidOutKind::Unknown => 1,
+            LaidOutKind::Attribution { label, .. } => cell_cols(label),
+            LaidOutKind::Col | LaidOutKind::Row => 0,
+        }
+        .max(1)
+    }
+
+    pub fn chrome_label(&self) -> Option<ChromeLabel<'_>> {
+        match self {
+            LaidOutKind::Btn { text, action, arg } => Some(ChromeLabel {
+                label: text.clone(),
+                tone: Tone::Fg,
+                action: Some((action, arg.as_deref())),
+            }),
+            LaidOutKind::Badge { text, tone } => Some(ChromeLabel {
+                label: text.clone(),
+                tone: *tone,
+                action: None,
+            }),
+            LaidOutKind::Text { lines, tone, .. } => Some(ChromeLabel {
+                label: lines.first().cloned().unwrap_or_default(),
+                tone: *tone,
+                action: None,
+            }),
+            LaidOutKind::Code { lines } => Some(ChromeLabel {
+                label: lines
+                    .first()
+                    .map(|line| line.text.clone())
+                    .unwrap_or_default(),
+                tone: Tone::Dim,
+                action: None,
+            }),
+            LaidOutKind::Spark { levels } => Some(ChromeLabel {
+                label: crate::cells::spark_glyphs(levels),
+                tone: Tone::Accent,
+                action: None,
+            }),
+            LaidOutKind::Bar { filled, width } => Some(ChromeLabel {
+                label: format!("{}%", filled * 100 / width.max(&1)),
+                tone: Tone::Dim,
+                action: None,
+            }),
+            LaidOutKind::Sep => Some(ChromeLabel {
+                label: "|".into(),
+                tone: Tone::Dim,
+                action: None,
+            }),
+            LaidOutKind::Truncated => Some(ChromeLabel {
+                label: "…".into(),
+                tone: Tone::Dim,
+                action: None,
+            }),
+            LaidOutKind::Unknown => Some(ChromeLabel {
+                label: "[?]".into(),
+                tone: Tone::Dim,
+                action: None,
+            }),
+            LaidOutKind::Col | LaidOutKind::Row | LaidOutKind::Attribution { .. } => None,
+        }
+    }
 }
 
 /// One display line of a `code` node. Lines are never wrapped: overflow is

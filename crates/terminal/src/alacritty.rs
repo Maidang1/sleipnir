@@ -807,7 +807,6 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> 
         cursor: Cursor::from_alacritty(content.cursor),
         cursor_char: term.grid()[content.cursor.point].c,
         terminal_bounds: last_content.terminal_bounds,
-        last_hovered_word: last_content.last_hovered_word.clone(),
         scrolled_to_top: content.display_offset == term.history_size(),
         scrolled_to_bottom: content.display_offset == 0,
         bottom_row_occupied,

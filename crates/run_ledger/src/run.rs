@@ -6,17 +6,9 @@ use uuid::Uuid;
 
 // Single-sourced from the wire protocol so the ledger, the host, and every
 // plugin speak the same id types (they are plain `Uuid` aliases).
-pub use plugin_protocol::v2::{PaneKey, RunId};
+pub use plugin_protocol::v2::{Anchor, PaneKey, RunId};
 /// Identifies one process launch; jumping is only valid within the current one.
 pub type LaunchId = Uuid;
-
-/// Scrollback position of a Run. Process-local — never written to `runs.json`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Anchor {
-    /// Absolute line (`cursor.line + history_size` when the OSC 133 C fired).
-    pub line: i32,
-    pub column: usize,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

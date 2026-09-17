@@ -593,8 +593,8 @@ impl AppShell {
     ) -> gpui::AnyElement {
         match content {
             LeafContent::Terminal(view) => view.clone().into_any_element(),
-            LeafContent::Panel { .. } => {
-                self.render_plugin_panel(pane_id, pane_key, tokens, window, cx)
+            LeafContent::Panel(surface) => {
+                self.render_plugin_panel(pane_id, pane_key, surface, tokens, window, cx)
             }
         }
     }

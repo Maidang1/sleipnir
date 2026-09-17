@@ -137,10 +137,6 @@ pub struct ChromeRegistry {
 }
 
 impl ChromeRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Elm-style whole-tree replacement for one plugin's chrome.
     pub fn apply_status(
         &mut self,
@@ -291,7 +287,7 @@ impl ChromeRegistry {
                     LaidOutKind::Code { lines } => lines.truncate(1),
                     _ => {}
                 }
-                let item_width = compact_width(&kind);
+                let item_width = kind.compact_width();
                 let next_width = width + u32::from(!items.is_empty()) + item_width;
                 if next_width > u32::from(cols) {
                     break 'plugins;
@@ -327,21 +323,6 @@ impl ChromeRegistry {
     pub fn status_computes(&self) -> u32 {
         self.status_cache.as_ref().map(|c| c.computes).unwrap_or(0)
     }
-}
-
-fn compact_width(kind: &LaidOutKind) -> u32 {
-    use sleipnir_widget::{CHIP_PAD, cell_cols};
-    match kind {
-        LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => {
-            cell_cols(text) + 2 * CHIP_PAD
-        }
-        LaidOutKind::Text { lines, .. } => lines.first().map_or(0, |line| cell_cols(line)),
-        LaidOutKind::Code { lines } => lines.first().map_or(0, |line| cell_cols(&line.text)),
-        LaidOutKind::Spark { levels } => levels.len() as u32,
-        LaidOutKind::Bar { width, .. } => *width,
-        _ => 1,
-    }
-    .max(1)
 }
 
 /// Display title that cannot be mistaken for a built-in. The plugin id is
@@ -479,7 +460,7 @@ mod tests {
 
     #[test]
     fn status_denied_without_grant() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         assert_eq!(
             reg.apply_status("demo", owner(1), text("hi"), false, None),
             ApplyChrome::DeniedGrant
@@ -489,7 +470,7 @@ mod tests {
 
     #[test]
     fn badge_and_palette_denied_without_render_status() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         let tree = Widget::Col {
             gap: 0,
             children: vec![badge("ok", Tone::Ok), btn("Go", "go")],
@@ -506,13 +487,13 @@ mod tests {
     fn plugin_badge_is_not_a_ledger_failed_badge() {
         // The wash is the ledger's own Failed bool; a plugin badge is only an
         // extra attributed label and can never set or suppress it.
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status("demo", owner(1), badge("ok", Tone::Ok), true, Some(key(1)));
         let badges = reg.badges_for_tab(&[key(1)], true);
         assert_eq!(badges.len(), 1);
         assert_eq!(badges[0].text, "ok");
         // Plugin Err tone is not a ledger Failed badge type.
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status("demo", owner(1), badge("no", Tone::Err), true, Some(key(1)));
         let badges = reg.badges_for_tab(&[key(1)], true);
         assert_ne!(
@@ -523,7 +504,7 @@ mod tests {
 
     #[test]
     fn palette_entries_are_attributed_and_not_builtin_ids() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status(
             "demo",
             owner(1),
@@ -543,7 +524,7 @@ mod tests {
 
     #[test]
     fn badge_text_cap_truncates_with_marker() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         let long: String = std::iter::repeat_n('x', MAX_BADGE_CHARS + 10).collect();
         reg.apply_status(
             "demo",
@@ -560,7 +541,7 @@ mod tests {
 
     #[test]
     fn extra_badges_beyond_one_are_dropped_and_accounted() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status(
             "demo",
             owner(1),
@@ -580,7 +561,7 @@ mod tests {
 
     #[test]
     fn palette_caps_drop_extras_and_account() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         let children: Vec<Widget> = (0..MAX_PALETTE_PER_PLUGIN + 3)
             .map(|i| btn(&format!("e{i}"), "act"))
             .collect();
@@ -598,7 +579,7 @@ mod tests {
 
     #[test]
     fn palette_total_cap_across_plugins() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         for i in 0..6 {
             let children: Vec<Widget> = (0..MAX_PALETTE_PER_PLUGIN)
                 .map(|j| btn(&format!("{i}-{j}"), "a"))
@@ -618,7 +599,7 @@ mod tests {
 
     #[test]
     fn agents_titlebar_status_is_one_compact_row() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status(
             "agents",
             owner(1),
@@ -642,7 +623,7 @@ mod tests {
 
     #[test]
     fn multiline_status_keeps_only_first_row_and_preserves_provenance() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status(
             "external",
             owner(1),
@@ -667,7 +648,7 @@ mod tests {
 
     #[test]
     fn compact_status_buttons_keep_their_exact_owner_surface_and_argument() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         for n in 1..=2 {
             reg.apply_status(
                 "demo",
@@ -695,7 +676,7 @@ mod tests {
 
     #[test]
     fn status_width_cap_and_layout_cache() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         let long: String = std::iter::repeat_n('x', MAX_STATUS_COLS as usize + 20).collect();
         reg.apply_status("demo", owner(1), text(&long), true, None);
         assert!(
@@ -726,14 +707,14 @@ mod tests {
 
     #[test]
     fn multi_plugin_order_is_plugin_id() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status("zeta", owner(2), btn("Z", "z"), true, None);
         reg.apply_status("alpha", owner(1), btn("A", "a"), true, None);
         let entries = reg.palette_entries();
         assert_eq!(entries[0].plugin_id, "alpha");
         assert_eq!(entries[1].plugin_id, "zeta");
         let badges_tree = {
-            let mut r = ChromeRegistry::new();
+            let mut r = ChromeRegistry::default();
             r.apply_status("zeta", owner(2), badge("z", Tone::Fg), true, Some(key(1)));
             r.apply_status("alpha", owner(1), badge("a", Tone::Fg), true, Some(key(1)));
             r.badges_for_tab(&[key(1)], true)
@@ -744,7 +725,7 @@ mod tests {
 
     #[test]
     fn dead_plugin_contributions_are_removed() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status(
             "demo",
             owner(10),
@@ -769,7 +750,7 @@ mod tests {
     fn running_indicator_is_not_a_registry_field() {
         // The host draws the indicator. A plugin cannot apply_status a
         // hide flag because none exists.
-        let reg = ChromeRegistry::new();
+        let reg = ChromeRegistry::default();
         let _ = reg;
         assert_eq!(
             crate::plugin_monitor_panel::running_indicator_label(0),
@@ -779,7 +760,7 @@ mod tests {
 
     #[test]
     fn global_badge_only_on_active_tab() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status("demo", owner(1), badge("hi", Tone::Accent), true, None);
         assert!(reg.badges_for_tab(&[key(1)], false).is_empty());
         assert_eq!(reg.badges_for_tab(&[key(1)], true).len(), 1);
@@ -787,7 +768,7 @@ mod tests {
 
     #[test]
     fn same_plugin_id_keeps_entries_separate_by_owner_instance() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status("demo", owner(1), btn("first", "a"), true, None);
         reg.apply_status("demo", owner(2), btn("second", "b"), true, None);
         let entries = reg.palette_entries();
@@ -803,7 +784,7 @@ mod tests {
 
     #[test]
     fn sync_live_drops_dead_owner_even_when_same_plugin_id_is_still_live() {
-        let mut reg = ChromeRegistry::new();
+        let mut reg = ChromeRegistry::default();
         reg.apply_status("demo", owner(1), btn("first", "a"), true, None);
         reg.apply_status("demo", owner(2), btn("second", "b"), true, None);
         reg.sync_live(&BTreeSet::from([owner(2)]));

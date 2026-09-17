@@ -133,9 +133,9 @@ dependencies = [
 name = "agent_coordination"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "serde",
  "serde_json",
+ "sleipnir_paths",
  "uuid",
 ]
 
@@ -545,6 +545,9 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "atomic_write"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "atspi"
@@ -4595,11 +4598,11 @@ name = "plugin_grants"
 version = "0.1.0"
 dependencies = [
  "atomic_write",
- "dirs",
  "plugin_protocol",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sleipnir_paths",
  "tempfile",
 ]
 
@@ -4607,13 +4610,12 @@ dependencies = [
 name = "plugin_host"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "libc",
  "log",
  "plugin_protocol",
- "schemars",
  "serde",
  "serde_json",
+ "sleipnir_paths",
  "tempfile",
  "uuid",
  "windows 0.61.3",
@@ -5925,10 +5927,17 @@ dependencies = [
 name = "sleipnir_ctl"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "serde",
  "serde_json",
+ "sleipnir_paths",
  "uuid",
+]
+
+[[package]]
+name = "sleipnir_paths"
+version = "0.1.0"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]
@@ -5946,9 +5955,9 @@ dependencies = [
 name = "sleipnir_plugin_runledger"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "run_ledger",
  "sleipnir-plugin",
+ "sleipnir_paths",
  "tempfile",
  "uuid",
 ]
@@ -5966,6 +5975,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sleipnir_paths",
  "tempfile",
 ]
 
@@ -6978,6 +6988,7 @@ name = "updater"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "atomic_write",
  "dirs",
  "ed25519-dalek",
  "libc",

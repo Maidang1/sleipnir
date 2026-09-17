@@ -235,7 +235,7 @@ pub fn capability_label(cap: Capability) -> &'static str {
         Capability::HostCallReadScreen => "can read any pane's screen",
         Capability::HostCallListPanes => "can list open panes",
         Capability::HostCallOpenPane => "can open a new pane",
-        Capability::HostCallDrawScene => "can draw a 3D scene in a panel",
+
         Capability::HostCallScrollToRun => "can jump a pane back to a command's output",
         Capability::HostCallFocusPane => "can switch which terminal pane is focused",
         Capability::HostCallSendText => {
@@ -492,7 +492,6 @@ mod tests {
             Capability::HostCallReadScreen,
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
-            Capability::HostCallDrawScene,
             Capability::HostCallScrollToRun,
             Capability::HostCallFocusPane,
             Capability::HostCallSendText,

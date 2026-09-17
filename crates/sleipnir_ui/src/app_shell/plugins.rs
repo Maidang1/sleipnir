@@ -1,18 +1,16 @@
 //! Plugin orchestration for the shell (ADR-0015/0016/0017/0018): event
-//! polling, render/call application, consent gating, resident lifecycle, and
-//! panel camera drag.
+//! polling, render/call application, consent gating, and resident lifecycle.
 //!
 //! This is a child module of `app_shell` so it can drive `AppShell` internals
 //! while they stay private to the shell, matching `command_dispatch.rs` and
 //! `panels.rs`.
 
 use super::*;
-use crate::plugin_surface::StaleRegistry;
 use plugin_protocol::v2::HostCallResult;
 
 /// Enough to finish a launch after the user approves. The dialog itself
 /// renders [`crate::plugin_monitor_panel::ConsentPrompt`] only.
-pub(super) struct PluginConsentPending {
+pub(crate) struct PluginConsentPending {
     pub(super) prompt: crate::plugin_monitor_panel::ConsentPrompt,
     kind: PluginConsentKind,
     hash: plugin_grants::BinaryHash,
@@ -42,22 +40,8 @@ fn resolve_cwd(raw: &str) -> Option<PathBuf> {
     }
 }
 
-fn apply_draw_scene_call(
-    plugin_panels: &mut crate::plugin_panel::PanelRegistry,
-    plugin_id: &str,
-    instance_id: uuid::Uuid,
-    pane: PaneKey,
-    scene: plugin_protocol::v2::SceneData,
-) -> HostCallResult {
-    if plugin_panels.set_scene(pane, plugin_id, instance_id, scene) {
-        HostCallResult::SceneOk
-    } else {
-        crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
-    }
-}
-
 impl AppShell {
-    pub(super) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
         if !self
             .plugin_watch
@@ -168,11 +152,15 @@ impl AppShell {
             .filter(|snap| snap.state == ConnectionState::Live)
             .map(|snap| snap.instance_id)
             .collect();
-        self.plugin_panels.mark_missing_stale(&live);
+        // Walk all panel leaves and mark those whose owner is gone stale.
+        for tab in &mut self.tabs {
+            tab.tree.for_each_panel_mut(&mut |surface| {
+                if !live.contains(&surface.owner_instance_id) {
+                    surface.stale = true;
+                }
+            });
+        }
         self.mark_missing_blocks_stale(&live, cx);
-        // Chrome is the exception: transient decoration is dropped, not
-        // dimmed, so a dead plugin cannot leave a badge misreporting live
-        // state (see `plugin_surface`).
         if self.plugin_chrome.sync_live(&live) {
             self.rebuild_palette_items();
         }
@@ -186,47 +174,58 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::plugin_panel::ApplyPanel;
+        use crate::plugin_panel::{ApplyPanel, PanelSurface, decide_panel_render};
         use plugin_protocol::v2::Capability;
-        // Same source as the event bus: Hello.granted, not "the plugin asked".
         let granted =
             crate::plugin_runtime::has_grant_for_instance(instance_id, Capability::RenderPanel, cx);
-        let mut terminals = std::collections::BTreeSet::new();
-        for tab in &self.tabs {
-            let mut out = Vec::new();
-            tab.tree.leaves_with_keys(&mut out);
-            for (key, _) in out {
-                terminals.insert(key);
-            }
-        }
-        match self.plugin_panels.apply_render(
-            plugin_id,
-            instance_id,
-            pane,
-            tree,
-            granted,
-            &terminals,
-        ) {
-            ApplyPanel::Create { pane_key } => {
-                if !self.insert_panel_leaf(pane_key, plugin_id, window, cx) {
-                    self.plugin_panels.remove(pane_key);
-                }
-            }
-            ApplyPanel::Replace { .. } => cx.notify(),
+        let (terminals, _panels) = self.terminal_and_panel_keys();
+        let is_terminal = terminals.contains(&pane);
+        // Borrow the existing surface (if any) from the tree — no clone.
+        let existing = self.tabs.iter().find_map(|tab| tab.tree.find_panel(pane));
+        let decision = decide_panel_render(existing, plugin_id, instance_id, is_terminal, granted);
+        let surface_id = match decision {
+            ApplyPanel::Create { surface_id } | ApplyPanel::Replace { surface_id } => surface_id,
             ApplyPanel::DeniedGrant => {
                 log::warn!("plugin {plugin_id} RenderPanel denied (no grant)");
+                return;
             }
             ApplyPanel::DeniedTerminal => {
                 log::warn!("plugin {plugin_id} tried to draw into a terminal pane");
+                return;
             }
             ApplyPanel::DeniedOccupied => {
                 log::warn!("plugin {plugin_id} tried to take another plugin's panel");
+                return;
             }
             ApplyPanel::DeniedOwnerInstance => {
                 log::warn!(
                     "plugin {plugin_id} instance {instance_id} tried to take a live panel owned by another instance"
                 );
+                return;
             }
+        };
+        let surface = PanelSurface {
+            plugin_id: plugin_id.to_string(),
+            owner_instance_id: instance_id,
+            pane_key: pane,
+            surface_id,
+            tree,
+            stale: false,
+        };
+        match decision {
+            ApplyPanel::Replace { .. } => {
+                for tab in &mut self.tabs {
+                    if tab.tree.find_panel(pane).is_some() {
+                        tab.tree.update_panel_surface(pane, surface);
+                        break;
+                    }
+                }
+                cx.notify();
+            }
+            ApplyPanel::Create { .. } => {
+                self.insert_panel_leaf(pane, surface, window, cx);
+            }
+            _ => unreachable!("denials returned above"),
         }
     }
     pub(super) fn apply_block_render(
@@ -338,29 +337,26 @@ impl AppShell {
     pub(super) fn insert_panel_leaf(
         &mut self,
         pane_key: PaneKey,
-        plugin_id: &str,
+        surface: crate::plugin_panel::PanelSurface,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(tab) = self.tabs.get(self.active) else {
-            return false;
-        };
-        let target = tab.active_pane;
         let new_id = self.next_pane_id;
-        self.next_pane_id += 1;
-        let content = crate::LeafContent::Panel {
-            plugin_id: plugin_id.to_string(),
-        };
+        let content = crate::LeafContent::Panel(surface);
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return false;
         };
+        let target = tab.active_pane;
         if !tab
             .tree
             .split_content(target, SplitAxis::Horizontal, new_id, pane_key, content)
         {
             return false;
         }
-        tab.active_pane = new_id;
+        self.next_pane_id += 1;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.active_pane = new_id;
+        }
         self.commit_workspace(window, cx);
         true
     }
@@ -374,11 +370,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::plugin_host_calls::{
-            CallPlan, cap_screen, error_result, filter_listed_panes, read_screen_access,
-            send_key_ready, send_text_result,
-        };
-        use plugin_protocol::v2::PaneInfo;
+        use crate::plugin_host_calls::CallPlan;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -390,284 +382,26 @@ impl AppShell {
             now_ms,
             cx,
         );
+        // Notify is a host side effect, not a workspace verb, so it never goes
+        // through `WorkspaceIo`. Everything else is one plan → execute → reply.
         let result = match plan {
-            CallPlan::Reply(result) => result,
             CallPlan::Notify { title, body } => {
                 crate::notify_message(&title, &body);
                 HostCallResult::Ok
             }
-            CallPlan::ListPanes => {
-                let mut terminals = std::collections::BTreeSet::new();
-                let mut infos = Vec::new();
-                for (pane, view) in live_panes {
-                    terminals.insert(*pane);
-                    infos.push(PaneInfo {
-                        pane: *pane,
-                        cwd: view
-                            .read(cx)
-                            .working_directory(cx)
-                            .map(|p| p.to_string_lossy().into_owned()),
-                        title: Some(view.read(cx).title().to_string()),
-                        busy: view.read(cx).looks_busy(cx),
-                    });
-                }
-                HostCallResult::Panes {
-                    panes: filter_listed_panes(infos, &terminals),
-                }
-            }
-            CallPlan::ReadScreen { pane } => {
-                let mut terminals = std::collections::BTreeSet::new();
-                for (key, _) in live_panes {
-                    terminals.insert(*key);
-                }
-                let (_, panels) = self.terminal_and_panel_keys();
-                match read_screen_access(pane, &terminals, &panels) {
-                    Err(message) => error_result(message),
-                    Ok(()) => match live_panes.iter().find(|(key, _)| *key == pane) {
-                        Some((_, view)) => HostCallResult::Screen {
-                            text: cap_screen(view.read(cx).visible_screen_text(cx)),
-                        },
-                        None => error_result(format!("pane {pane} not found")),
-                    },
-                }
-            }
-            CallPlan::OpenPane { cwd, command } => self.execute_open_pane(cwd, command, window, cx),
-            CallPlan::DrawScene { pane, scene } => {
-                // A fresh scene from the plugin is authoritative, including its
-                // camera: the host adopts it so the plugin's own controls (spin,
-                // rescan, cd) keep the view in sync. Host-driven camera moves go
-                // the other way and never resend the scene (see the camera
-                // action path), so this cannot fight an in-progress drag.
-                let result = apply_draw_scene_call(
-                    &mut self.plugin_panels,
-                    plugin_id,
-                    instance_id,
-                    pane,
-                    scene,
-                );
-                if matches!(result, HostCallResult::SceneOk) {
-                    window.refresh();
-                }
-                result
-            }
-            CallPlan::ScrollToRun { run_id } => {
-                let pane = if cx.has_global::<RunLedgerGlobal>() {
-                    cx.global::<RunLedgerGlobal>()
-                        .snapshot()
-                        .into_iter()
-                        .find(|run| run.id == run_id)
-                        .map(|run| run.pane)
-                } else {
-                    None
+            plan => {
+                let mut io = ShellWorkspaceIo {
+                    shell: self,
+                    live_panes,
+                    window,
+                    cx,
                 };
-                match pane {
-                    // Same semantics as the ledger-panel row jump: an inferred
-                    // run has no anchor, so the pane is only focused.
-                    Some(pane) => {
-                        self.jump_to_ledger_row(pane, Some(run_id), window, cx);
-                        HostCallResult::Ok
-                    }
-                    None => error_result(format!("run {run_id} not found")),
-                }
-            }
-            CallPlan::FocusPane { pane } => {
-                let (terminals, panels) = self.terminal_and_panel_keys();
-                match read_screen_access(pane, &terminals, &panels) {
-                    Err(message) => error_result(message),
-                    Ok(()) => {
-                        self.jump_to_ledger_row(pane, None, window, cx);
-                        HostCallResult::Ok
-                    }
-                }
-            }
-            CallPlan::SendText { pane, text, enter } => {
-                match self.terminal_view_for_call(pane, live_panes) {
-                    Err(message) => error_result(message),
-                    Ok(view) => {
-                        let delivered =
-                            view.update(cx, |view, cx| view.insert_text(&text, enter, cx));
-                        send_text_result(delivered)
-                    }
-                }
-            }
-            CallPlan::SendKey { pane, key } => {
-                match self.terminal_view_for_call(pane, live_panes) {
-                    Err(message) => error_result(message),
-                    Ok(view) => {
-                        let has_terminal = view.read(cx).terminal_entity().is_some();
-                        let vi_mode = view.read(cx).vi_mode_enabled(cx);
-                        match send_key_ready(has_terminal, vi_mode) {
-                            Err(message) => error_result(message),
-                            Ok(()) => {
-                                let delivered = view.update(cx, |view, cx| {
-                                    view.send_named_keystroke(key.keystroke_str(), cx)
-                                });
-                                if delivered {
-                                    HostCallResult::Ok
-                                } else {
-                                    error_result(format!(
-                                        "key {} was not delivered",
-                                        key.keystroke_str()
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            CallPlan::RequestClosePane { pane } => {
-                let (terminals, panels) = self.terminal_and_panel_keys();
-                match read_screen_access(pane, &terminals, &panels) {
-                    Err(message) => error_result(message),
-                    Ok(()) => match self.request_close_terminal_pane(pane, window, cx) {
-                        Ok(()) => HostCallResult::Ok,
-                        Err(message) => error_result(message),
-                    },
-                }
+                plan.execute(&mut io)
             }
         };
         if !crate::plugin_runtime::reply_host_call_to_instance(instance_id, id, result, cx) {
             log::debug!("plugin {plugin_id} Call {id} reply dropped (session gone)");
         }
-    }
-    /// Rotate a plugin panel's camera from a drag delta. The host owns the
-    /// camera: it mutates the stored scene and repaints immediately (no plugin
-    /// round-trip, so the motion is smooth), then reports the new camera to the
-    /// plugin as a throttled `camera` action so the legend stays in sync.
-    pub(super) fn drag_panel_camera(
-        &mut self,
-        pane_key: PaneKey,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(drag) = self.panel_drag.as_ref() else {
-            return;
-        };
-        if drag.pane_key != pane_key {
-            return;
-        }
-        let dx = f32::from(position.x) - f32::from(drag.last.x);
-        let dy = f32::from(position.y) - f32::from(drag.last.y);
-        if dx == 0.0 && dy == 0.0 {
-            return;
-        }
-        // Pixels-to-radians: a full panel width is roughly a half turn.
-        const YAW_PER_PX: f32 = 0.01;
-        const PITCH_PER_PX: f32 = 0.01;
-        let Some(scene) = self.plugin_panels.scene(pane_key) else {
-            return;
-        };
-        let mut camera = scene.camera;
-        camera.yaw = wrap_camera_angle(camera.yaw + dx * YAW_PER_PX);
-        camera.pitch = (camera.pitch - dy * PITCH_PER_PX).clamp(0.05, 1.35);
-        self.plugin_panels.set_scene_camera(pane_key, camera);
-        if let Some(drag) = self.panel_drag.as_mut() {
-            drag.last = position;
-        }
-        cx.notify();
-        self.push_panel_camera(pane_key, false, cx);
-    }
-    /// Zoom a plugin panel's camera from a scroll-wheel delta.
-    pub(super) fn zoom_panel_camera(
-        &mut self,
-        pane_key: PaneKey,
-        ev: &gpui::ScrollWheelEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(scene) = self.plugin_panels.scene(pane_key) else {
-            return;
-        };
-        // A line of wheel travel is one zoom step; pixel deltas are scaled down.
-        let dy = match ev.delta {
-            gpui::ScrollDelta::Lines(p) => p.y,
-            gpui::ScrollDelta::Pixels(p) => f32::from(p.y) / 40.0,
-        };
-        if dy == 0.0 {
-            return;
-        }
-        let mut camera = scene.camera;
-        let factor = 1.0 + dy * 0.1;
-        camera.zoom = (camera.zoom * factor).clamp(0.5, 2.5);
-        self.plugin_panels.set_scene_camera(pane_key, camera);
-        cx.notify();
-        self.push_panel_camera(pane_key, false, cx);
-    }
-    /// End a camera drag and push the final camera unthrottled, so the plugin's
-    /// legend settles on the exact resting view.
-    pub(super) fn end_panel_camera_drag(&mut self, pane_key: PaneKey, cx: &mut Context<Self>) {
-        let is_ours = self
-            .panel_drag
-            .as_ref()
-            .is_some_and(|d| d.pane_key == pane_key);
-        if !is_ours {
-            return;
-        }
-        self.push_panel_camera(pane_key, true, cx);
-        self.panel_drag = None;
-    }
-    /// Report a panel's current camera to its plugin as a `camera` action.
-    ///
-    /// Throttled unless `force`: the local repaint already happened, so this only
-    /// keeps the plugin-owned legend in sync. Per the no-loopback rule the plugin
-    /// answers `camera` by resending chrome only, never the scene, so this cannot
-    /// bounce back and fight the drag.
-    pub(super) fn push_panel_camera(
-        &mut self,
-        pane_key: PaneKey,
-        force: bool,
-        cx: &mut Context<Self>,
-    ) {
-        const THROTTLE_MS: u64 = 40;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        if !force && now.saturating_sub(self.panel_camera_last_ms) < THROTTLE_MS {
-            return;
-        }
-        let Some((owner_instance_id, surface_id)) = self
-            .panel_drag
-            .as_ref()
-            .filter(|d| d.pane_key == pane_key)
-            .map(|d| (d.owner_instance_id, d.surface_id))
-            .or_else(|| {
-                // Wheel zoom has no active drag; look the surface up directly.
-                self.plugin_panels
-                    .get(pane_key)
-                    .map(|s| (s.owner_instance_id, s.surface_id))
-            })
-        else {
-            return;
-        };
-        let Some(scene) = self.plugin_panels.scene(pane_key) else {
-            return;
-        };
-        let camera = scene.camera;
-        // Typed payload: the same serde `SceneCamera` the scene itself carries,
-        // not a stringly key=value encoding.
-        let arg = serde_json::to_string(&camera).unwrap_or_default();
-        self.panel_camera_last_ms = now;
-        crate::plugin_runtime::push_action(
-            owner_instance_id,
-            surface_id,
-            "camera".to_string(),
-            Some(arg),
-            cx,
-        );
-    }
-    fn terminal_view_for_call(
-        &self,
-        pane: PaneKey,
-        live_panes: &[(PaneKey, Entity<TermView>)],
-    ) -> Result<Entity<TermView>, String> {
-        let (terminals, panels) = self.terminal_and_panel_keys();
-        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
-        live_panes
-            .iter()
-            .find(|(key, _)| *key == pane)
-            .map(|(_, view)| view.clone())
-            .or_else(|| self.view_for_pane(pane))
-            .ok_or_else(|| format!("pane {pane} not found"))
     }
     pub(crate) fn terminal_and_panel_keys(
         &self,
@@ -759,24 +493,22 @@ impl AppShell {
         self.dispatch_command(CommandId::TogglePluginMonitor, window, cx);
     }
     pub(super) fn toggle_plugin_monitor(&mut self, cx: &mut Context<Self>) {
-        self.mode.toggle(OverlayKind::PluginMonitor);
+        self.toggle_overlay(OverlayKind::PluginMonitor, cx);
         cx.notify();
     }
     pub(super) fn close_plugin_monitor(&mut self, cx: &mut Context<Self>) {
-        self.mode.close(OverlayKind::PluginMonitor);
+        self.close_overlay(OverlayKind::PluginMonitor, cx);
         cx.notify();
     }
     pub(super) fn deny_plugin_consent(&mut self, cx: &mut Context<Self>) {
         // Deny writes nothing: a dismissed prompt must not become a grant.
-        self.plugin_consent = None;
-        self.mode.close(OverlayKind::PluginConsent);
+        self.dismiss_consent_input(cx);
         cx.notify();
     }
     pub(super) fn approve_plugin_consent(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.plugin_consent.take() else {
+        let Some(pending) = self.take_consent_input(cx) else {
             return;
         };
-        self.mode.close(OverlayKind::PluginConsent);
         if !crate::plugin_runtime::is_current(&pending.supervisor, cx) {
             cx.notify();
             return;
@@ -868,22 +600,24 @@ impl AppShell {
                     .map(|r| r.granted.iter().copied().collect())
                     .unwrap_or_default();
                 let tier = record.map(|r| r.tier).unwrap_or(plugin_grants::Tier::Local);
-                self.plugin_consent = Some(PluginConsentPending {
-                    supervisor: crate::plugin_runtime::supervisor(cx)
-                        .expect("plugin runtime initialized"),
-                    prompt: crate::plugin_monitor_panel::consent_prompt(
-                        plugin_id,
-                        plugin_name,
-                        tier,
-                        reason,
-                        &missing,
-                        &previously,
-                    ),
-                    kind,
-                    hash,
-                    request,
-                });
-                self.mode.open(OverlayKind::PluginConsent);
+                self.set_input(
+                    crate::ui_mode::InputMode::Consent(PluginConsentPending {
+                        supervisor: crate::plugin_runtime::supervisor(cx)
+                            .expect("plugin runtime initialized"),
+                        prompt: crate::plugin_monitor_panel::consent_prompt(
+                            plugin_id,
+                            plugin_name,
+                            tier,
+                            reason,
+                            &missing,
+                            &previously,
+                        ),
+                        kind,
+                        hash,
+                        request,
+                    }),
+                    cx,
+                );
                 cx.notify();
                 false
             }
@@ -946,7 +680,7 @@ impl AppShell {
     /// Handshake every resident. Built-ins use their compiled capability set;
     /// external first-run / binary-change / new-cap gaps need explicit consent.
     pub(super) fn start_resident_plugins(&mut self, cx: &mut Context<Self>) {
-        if self.plugin_consent.is_some() {
+        if self.input.consent().is_some() {
             return;
         }
         for plugin in crate::plugin_runtime::PluginRuntime::plugins(cx) {
@@ -1027,6 +761,121 @@ impl AppShell {
     }
 }
 
+/// [`WorkspaceIo`] backed by the live shell. Borrows the shell plus the frame's
+/// `window`/`cx` so `CallPlan::execute` runs the same verbs the control surface
+/// does. `live_panes` is the shared terminal walk (`live_terminal_panes`) so a
+/// host call and `sleipnir-ctl ls` cannot drift into two enumerations.
+struct ShellWorkspaceIo<'a, 'b> {
+    shell: &'a mut AppShell,
+    live_panes: &'a [(PaneKey, Entity<TermView>)],
+    window: &'a mut Window,
+    cx: &'a mut Context<'b, AppShell>,
+}
+
+impl ShellWorkspaceIo<'_, '_> {
+    /// Resolve a terminal pane, denying panels and missing panes with the same
+    /// rules as the control surface. Prefers the shared `live_panes` walk.
+    fn terminal_view(&self, pane: PaneKey) -> Result<Entity<TermView>, String> {
+        let (terminals, panels) = self.shell.terminal_and_panel_keys();
+        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
+        self.live_panes
+            .iter()
+            .find(|(key, _)| *key == pane)
+            .map(|(_, view)| view.clone())
+            .or_else(|| self.shell.view_for_pane(pane))
+            .ok_or_else(|| format!("pane {pane} not found"))
+    }
+}
+
+impl crate::plugin_host_calls::WorkspaceIo for ShellWorkspaceIo<'_, '_> {
+    fn list_terminal_panes(&mut self) -> Vec<plugin_protocol::v2::PaneInfo> {
+        // `live_panes` already excludes plugin Panel leaves, so no second
+        // identity filter is needed. Shares PaneInfo construction with ctl.
+        crate::control_surface::pane_infos(self.live_panes, self.cx)
+    }
+
+    fn read_screen(&mut self, pane: PaneKey) -> Result<String, String> {
+        let view = self.terminal_view(pane)?;
+        Ok(view.read(self.cx).visible_screen_text(self.cx))
+    }
+
+    fn open_pane(
+        &mut self,
+        cwd: Option<String>,
+        command: Option<crate::plugin_host_calls::OpenCommand>,
+    ) -> HostCallResult {
+        self.shell
+            .execute_open_pane(cwd, command, self.window, self.cx)
+    }
+
+    fn scroll_to_run(&mut self, run_id: plugin_protocol::v2::RunId) -> Result<(), String> {
+        let pane = if self.cx.has_global::<RunLedgerGlobal>() {
+            self.cx
+                .global::<RunLedgerGlobal>()
+                .snapshot()
+                .into_iter()
+                .find(|run| run.id == run_id)
+                .map(|run| run.pane)
+        } else {
+            None
+        };
+        match pane {
+            // Same semantics as the ledger-panel row jump: an inferred run has
+            // no anchor, so the pane is only focused.
+            Some(pane) => {
+                self.shell
+                    .jump_to_ledger_row(pane, Some(run_id), self.window, self.cx);
+                Ok(())
+            }
+            None => Err(format!("run {run_id} not found")),
+        }
+    }
+
+    fn focus_pane(&mut self, pane: PaneKey) -> Result<(), String> {
+        let (terminals, panels) = self.shell.terminal_and_panel_keys();
+        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
+        self.shell
+            .jump_to_ledger_row(pane, None, self.window, self.cx);
+        Ok(())
+    }
+
+    fn send_text(&mut self, pane: PaneKey, text: String, enter: bool) -> Result<(), String> {
+        let view = self.terminal_view(pane)?;
+        let delivered = view.update(self.cx, |view, cx| view.insert_text(&text, enter, cx));
+        if delivered {
+            Ok(())
+        } else {
+            Err(crate::plugin_host_calls::SEND_TEXT_NO_TERMINAL.into())
+        }
+    }
+
+    fn send_key(
+        &mut self,
+        pane: PaneKey,
+        key: crate::plugin_host_calls::LogicalKey,
+    ) -> Result<(), String> {
+        let view = self.terminal_view(pane)?;
+        let has_terminal = view.read(self.cx).terminal_entity().is_some();
+        let vi_mode = view.read(self.cx).vi_mode_enabled(self.cx);
+        crate::plugin_host_calls::send_key_ready(has_terminal, vi_mode)?;
+        let delivered = view.update(self.cx, |view, cx| {
+            view.send_named_keystroke(key.keystroke_str(), cx)
+        });
+        if delivered {
+            Ok(())
+        } else {
+            Err(format!("key {} was not delivered", key.keystroke_str()))
+        }
+    }
+
+    fn request_close_pane(&mut self, pane: PaneKey) -> Result<(), String> {
+        let (terminals, panels) = self.shell.terminal_and_panel_keys();
+        crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
+        self.shell
+            .request_close_terminal_pane(pane, self.window, self.cx)
+    }
+}
+
 pub(super) fn run_event_to_host(
     event: &RunEvent,
     snapshot: &[run_ledger::Run],
@@ -1066,37 +915,6 @@ pub(super) fn run_event_to_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_panel::PanelSurface;
-    use plugin_protocol::v2::{SceneBar, SceneCamera, SceneData, Tone, Widget};
-    use uuid::Uuid;
-
-    fn text(s: &str) -> Widget {
-        Widget::Text {
-            s: s.into(),
-            fg: Tone::Fg,
-            bold: false,
-        }
-    }
-
-    fn scene(yaw: f32) -> SceneData {
-        SceneData {
-            cols: 1,
-            rows: 1,
-            floor: [1, 2, 3],
-            camera: SceneCamera {
-                yaw,
-                pitch: 0.2,
-                zoom: 1.0,
-            },
-            bars: vec![SceneBar {
-                gx: 0,
-                gz: 0,
-                height: 1.0,
-                color: [9, 8, 7],
-                selected: false,
-            }],
-        }
-    }
 
     #[test]
     fn run_started_host_event_uses_ledger_redacted_command() {
@@ -1146,61 +964,5 @@ mod tests {
         let event = run_ledger::RunEvent::PaneClosed { pane, at_ms: 10 };
         let host = run_event_to_host(&event, &ledger.snapshot()).expect("mapped");
         assert_eq!(host, plugin_protocol::v2::HostEvent::PaneClosed { pane });
-    }
-
-    #[test]
-    fn draw_scene_rejects_same_plugin_different_live_owner() {
-        let pane = PaneKey::from_u128(11);
-        let old_owner = Uuid::from_u128(1);
-        let new_owner = Uuid::from_u128(2);
-        let old_surface_id = Uuid::from_u128(101);
-        let mut panels = crate::plugin_panel::PanelRegistry::new();
-        panels.insert_surface(PanelSurface {
-            plugin_id: "demo".into(),
-            owner_instance_id: old_owner,
-            pane_key: pane,
-            surface_id: old_surface_id,
-            tree: text("one"),
-            stale: false,
-            scene: Some(scene(0.1)),
-        });
-
-        let result = apply_draw_scene_call(&mut panels, "demo", new_owner, pane, scene(0.9));
-        assert_eq!(
-            result,
-            crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
-        );
-        let surface = panels.get(pane).expect("surface remains");
-        assert_eq!(surface.owner_instance_id, old_owner);
-        assert_eq!(surface.surface_id, old_surface_id);
-        assert_eq!(surface.scene.as_ref().map(|s| s.camera.yaw), Some(0.1));
-    }
-
-    #[test]
-    fn draw_scene_rejects_stale_surface_until_reclaimed_by_render() {
-        let pane = PaneKey::from_u128(12);
-        let old_owner = Uuid::from_u128(3);
-        let new_owner = Uuid::from_u128(4);
-        let old_surface_id = Uuid::from_u128(102);
-        let mut panels = crate::plugin_panel::PanelRegistry::new();
-        panels.insert_surface(PanelSurface {
-            plugin_id: "demo".into(),
-            owner_instance_id: old_owner,
-            pane_key: pane,
-            surface_id: old_surface_id,
-            tree: text("stale"),
-            stale: true,
-            scene: Some(scene(0.2)),
-        });
-
-        let result = apply_draw_scene_call(&mut panels, "demo", new_owner, pane, scene(0.8));
-        assert_eq!(
-            result,
-            crate::plugin_host_calls::error_result("pane not found or not owned by this plugin")
-        );
-        let surface = panels.get(pane).expect("surface remains");
-        assert_eq!(surface.owner_instance_id, old_owner);
-        assert_eq!(surface.surface_id, old_surface_id);
-        assert_eq!(surface.scene.as_ref().map(|s| s.camera.yaw), Some(0.2));
     }
 }

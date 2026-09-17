@@ -5,8 +5,8 @@
 //! the display-line geometry helpers (`row_map`) that route every y
 //! coordinate through `row_geometry`.
 //!
-//! No GPUI rendering lives here; the crate stops at terminal state and
-//! events. `sleipnir_ui` owns painting.
+//! The crate accepts GPUI input events (`Mouse*Event`, `Window`) for pointer
+//! session tracking; `sleipnir_ui` owns painting and element layout.
 
 mod mappings;
 mod row_map;
@@ -22,8 +22,8 @@ pub mod terminal_settings;
 
 pub use osc_notify::{OscNotify, scan_osc_notify};
 pub use osc133::{
-    GutterKind, GutterMark, Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
-    gutter_marks_from_markers, rebase_markers_after_history_shrink,
+    Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,
+    rebase_markers_after_history_shrink,
 };
 pub(crate) use row_map::PointerMap;
 pub use row_map::{hit_display, viewport_top_abs, y_for_display};
@@ -184,10 +184,18 @@ enum SelectionType {
     Lines,
 }
 
-/// A selection gesture must start on this terminal, not an overlay above it.
-struct MouseSelection {
-    origin: GpuiPoint<Pixels>,
-    dragging: bool,
+/// Host vs app pointer ownership for one gesture. Entering [`Self::AppMouse`]
+/// clears host hover, so a mouse-mode app cannot keep a link tooltip.
+enum PointerSession {
+    Idle,
+    AppMouse {
+        last: Option<(Point, SelectionSide)>,
+    },
+    PendingLink(HyperlinkMatch),
+    Selecting {
+        origin: GpuiPoint<Pixels>,
+        dragging: bool,
+    },
 }
 
 impl Selection {
@@ -398,7 +406,6 @@ pub struct Content {
     pub cursor: Cursor,
     pub cursor_char: char,
     pub terminal_bounds: TerminalBounds,
-    pub last_hovered_word: Option<HoveredWord>,
     pub scrolled_to_top: bool,
     pub scrolled_to_bottom: bool,
     pub bottom_row_occupied: bool,
@@ -425,7 +432,6 @@ impl Default for Content {
             },
             cursor_char: Default::default(),
             terminal_bounds: Default::default(),
-            last_hovered_word: None,
             scrolled_to_top: false,
             scrolled_to_bottom: false,
             bottom_row_occupied: false,
@@ -502,14 +508,14 @@ const DEBUG_TERMINAL_HEIGHT: Pixels = px(30.);
 const DEBUG_CELL_WIDTH: Pixels = px(5.);
 const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 
-/// Inserts Zed-specific environment variables for terminal sessions.
+/// Inserts Sleipnir-specific environment variables for terminal sessions.
 /// Used by both local terminals and remote terminals (via SSH).
-pub fn insert_zed_terminal_env(
+pub fn insert_sleipnir_terminal_env(
     env: &mut HashMap<String, String>,
     version: &impl std::fmt::Display,
 ) {
-    env.insert("ZED_TERM".to_string(), "true".to_string());
-    env.insert("TERM_PROGRAM".to_string(), "zed".to_string());
+    env.insert("SLEIPNIR_TERM".to_string(), "true".to_string());
+    env.insert("TERM_PROGRAM".to_string(), "sleipnir".to_string());
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
@@ -524,7 +530,6 @@ pub enum Event {
     Wakeup,
     BlinkChanged(bool),
     SelectionsChanged,
-    NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
     /// Selection text was written to the system clipboard (⌘C or copy-on-select).
     CopiedToClipboard,
@@ -541,10 +546,6 @@ pub enum Event {
     /// The current command finished. `exit_code` is `None` when unknown.
     RunFinished {
         exit_code: Option<i32>,
-    },
-    /// Overlay triangle on a command start/end line was clicked.
-    GutterClicked {
-        line: i32,
     },
 }
 
@@ -815,7 +816,7 @@ impl TerminalBuilder {
                     .or_insert_with(|| "en_US.UTF-8".to_string());
             }
 
-            insert_zed_terminal_env(&mut env, &version);
+            insert_sleipnir_terminal_env(&mut env, &version);
 
             #[derive(Default)]
             struct ShellParams {
@@ -942,7 +943,7 @@ impl TerminalBuilder {
         // as soon as the `on_app_quit` futures resolve. Perform the same
         // escalation in a quit observer, whose future keeps the app alive for
         // the grace period, so that processes ignoring SIGHUP/SIGTERM don't
-        // outlive Zed (#47412). The subscription can't be stored on `Terminal`
+        // outlive Sleipnir (#47412). The subscription can't be stored on `Terminal`
         // (`Subscription` is not `Send`, and `TerminalBuilder` is built on a
         // background thread), so its lifetime is tied to the entity's release
         // instead.
@@ -1043,7 +1044,7 @@ struct ViewportState {
     /// Block heights and the mapping both paint and hit-testing use.
     geometry: RowGeometry,
     /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) rebases
-    /// gutter markers and block anchors.
+    /// OSC-133 markers and block anchors.
     last_history_size: usize,
 }
 
@@ -1059,33 +1060,78 @@ impl ViewportState {
 }
 
 struct InteractionState {
-    /// Used for mouse-mode cell change detection.
-    last_mouse: Option<(Point, SelectionSide)>,
-    mouse_selection: Option<MouseSelection>,
+    session: PointerSession,
     selection_head: Option<Point>,
     next_link_id: usize,
     hyperlink_regex_searches: RegexSearches,
     vi_mode_enabled: bool,
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
-    mouse_down_hyperlink: Option<HyperlinkMatch>,
+    hovered: Option<HoveredWord>,
     keyboard_input_sent: bool,
 }
 
 impl InteractionState {
     fn new(hyperlink_regex_searches: RegexSearches) -> Self {
         Self {
-            last_mouse: None,
-            mouse_selection: None,
+            session: PointerSession::Idle,
             selection_head: None,
             next_link_id: 0,
             hyperlink_regex_searches,
             vi_mode_enabled: false,
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
-            mouse_down_hyperlink: None,
+            hovered: None,
             keyboard_input_sent: false,
         }
+    }
+
+    fn clear_hover(&mut self) {
+        self.hovered = None;
+    }
+
+    fn enter_app_mouse(&mut self, last: Option<(Point, SelectionSide)>) {
+        self.session = PointerSession::AppMouse { last };
+        self.clear_hover();
+    }
+
+    fn selecting_drag(&self) -> bool {
+        matches!(
+            self.session,
+            PointerSession::Selecting { dragging: true, .. }
+        )
+    }
+
+    fn next_link_id(&mut self) -> usize {
+        let res = self.next_link_id;
+        self.next_link_id = self.next_link_id.wrapping_add(1);
+        res
+    }
+
+    fn update_hover(
+        &mut self,
+        prev_word: Option<HoveredWord>,
+        word_match: Range,
+        word: String,
+    ) -> bool {
+        if let Some(prev_word) = prev_word
+            && prev_word.word == word
+            && prev_word.word_match == word_match
+        {
+            self.hovered = Some(HoveredWord {
+                word,
+                word_match,
+                id: prev_word.id,
+            });
+            return false;
+        }
+        let id = self.next_link_id();
+        self.hovered = Some(HoveredWord {
+            word,
+            word_match,
+            id,
+        });
+        true
     }
 }
 
@@ -1119,6 +1165,51 @@ impl SemanticsState {
             started_at: Instant::now(),
             cwd_timeline: CwdTimeline::new(initial_cwd),
         }
+    }
+
+    fn mono_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    fn prompt_marker_lines(&self) -> Vec<i32> {
+        self.prompt_markers
+            .iter()
+            .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
+            .filter_map(|m| m.line)
+            .collect()
+    }
+
+    fn publish_rebase(&mut self, removed: i32) {
+        if removed <= 0 {
+            return;
+        }
+        match self.pending_block_anchor_changes.as_mut_slice() {
+            [BlockAnchorChange::Invalidate] => {}
+            [BlockAnchorChange::Rebase(total)] => {
+                *total = total.saturating_add(removed);
+            }
+            [] => self
+                .pending_block_anchor_changes
+                .push(BlockAnchorChange::Rebase(removed)),
+            _ => unreachable!("block anchor change queue is producer-canonicalized"),
+        }
+    }
+
+    fn publish_invalidate(&mut self) {
+        self.pending_block_anchor_changes.clear();
+        self.pending_block_anchor_changes
+            .push(BlockAnchorChange::Invalidate);
+    }
+
+    fn cwd_at_line(
+        &self,
+        line: i32,
+        history_size: usize,
+        history_limit: usize,
+        current: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        self.cwd_timeline
+            .cwd_at_line(line, history_size, history_limit, current)
     }
 }
 
@@ -1217,11 +1308,10 @@ impl Terminal {
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
-                if let Some(out) = self
-                    .semantics
-                    .run_tracker
-                    .on_marker(Osc133Kind::CommandFinished { status: None }, self.mono_ms())
-                {
+                if let Some(out) = self.semantics.run_tracker.on_marker(
+                    Osc133Kind::CommandFinished { status: None },
+                    self.semantics.mono_ms(),
+                ) {
                     self.emit_tracker_out(out, cx);
                 }
                 self.register_task_finished(Some(exit_status), cx);
@@ -1358,8 +1448,7 @@ impl Terminal {
                         self.process_hyperlink(hyperlink, *open, history_size, cx);
                     }
                     None => {
-                        self.last_content.last_hovered_word = None;
-                        cx.emit(Event::NewNavigationTarget(None));
+                        self.interaction.clear_hover();
                     }
                 }
             }
@@ -1384,7 +1473,7 @@ impl Terminal {
             is_url,
             range,
         } = hyperlink;
-        let prev_hovered_word = self.last_content.last_hovered_word.take();
+        let prev_hovered_word = self.interaction.hovered.take();
         let match_line = range.start().line;
 
         let target = self.hyperlink_target(&maybe_url_or_path, is_url, match_line, history_size);
@@ -1392,7 +1481,7 @@ impl Terminal {
         if open {
             cx.emit(Event::Open(target));
         } else {
-            self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, target, cx);
+            self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, cx);
         }
     }
 
@@ -1438,6 +1527,15 @@ impl Terminal {
         Some(self.hyperlink_target(&hyperlink.text, hyperlink.is_url, line, history_size))
     }
 
+    fn osc8_at(&self, position: GpuiPoint<Pixels>) -> bool {
+        let index = self.pointer_map().content_index(position);
+        self.last_content
+            .cells
+            .get(index)
+            .and_then(|cell| cell.hyperlink())
+            .is_some()
+    }
+
     fn find_hyperlink_at_point(&mut self, point: Point) -> Option<HyperlinkMatch> {
         let term_lock = self.term.lock();
         find_from_terminal_point(
@@ -1453,38 +1551,20 @@ impl Terminal {
         prev_word: Option<HoveredWord>,
         word_match: Range,
         word: String,
-        navigation_target: MaybeNavigationTarget,
         cx: &mut Context<Self>,
     ) {
-        if let Some(prev_word) = prev_word
-            && prev_word.word == word
-            && prev_word.word_match == word_match
-        {
-            self.last_content.last_hovered_word = Some(HoveredWord {
-                word,
-                word_match,
-                id: prev_word.id,
-            });
-            return;
+        if self.interaction.update_hover(prev_word, word_match, word) {
+            cx.notify()
         }
-
-        self.last_content.last_hovered_word = Some(HoveredWord {
-            word,
-            word_match,
-            id: self.next_link_id(),
-        });
-        cx.emit(Event::NewNavigationTarget(Some(navigation_target)));
-        cx.notify()
-    }
-
-    fn next_link_id(&mut self) -> usize {
-        let res = self.interaction.next_link_id;
-        self.interaction.next_link_id = self.interaction.next_link_id.wrapping_add(1);
-        res
     }
 
     pub fn last_content(&self) -> &Content {
         &self.last_content
+    }
+
+    /// Host hover overlay. `None` while a mouse-mode app owns the pointer.
+    pub fn hovered_word(&self) -> Option<&HoveredWord> {
+        self.interaction.hovered.as_ref()
     }
 
     /// Mapping paint and hit-testing share. The grid's `display_offset` is
@@ -1586,7 +1666,7 @@ impl Terminal {
             let drain = self.semantics.prompt_markers.len() - 500;
             self.semantics.prompt_markers.drain(0..drain);
         }
-        let at_ms = self.mono_ms();
+        let at_ms = self.semantics.mono_ms();
         match kind {
             Osc133Kind::CommandExecuted => {
                 let command = self.read_command_between_start_and_cursor();
@@ -1603,10 +1683,6 @@ impl Terminal {
             self.semantics.last_busy = false;
             self.semantics.busy_since = None;
         }
-    }
-
-    fn mono_ms(&self) -> u64 {
-        self.semantics.started_at.elapsed().as_millis() as u64
     }
 
     fn emit_tracker_out(&mut self, out: TrackerOut, cx: &mut Context<Self>) {
@@ -1657,18 +1733,6 @@ impl Terminal {
         self.last_content.mode.contains(Modes::ALT_SCREEN)
     }
 
-    /// Command start/end triangles are disabled: they only mark command
-    /// boundaries and are not needed by hunk jumps or the Run Ledger, so
-    /// returning nothing keeps the gutter clear. The marker log is still kept
-    /// up to date for prompt jump / click-to-move / command extraction.
-    pub fn gutter_overlay(&self) -> Vec<GutterMark> {
-        Vec::new()
-    }
-
-    pub fn emit_gutter_click(&mut self, line: i32, cx: &mut Context<Self>) {
-        cx.emit(Event::GutterClicked { line });
-    }
-
     /// Grid text from the most recent OSC 133 B (command start) to the cursor.
     fn read_command_between_start_and_cursor(&self) -> Option<String> {
         let start = self
@@ -1694,12 +1758,7 @@ impl Terminal {
 
     /// Scrollback lines that mark prompt starts (for jump navigation).
     pub fn prompt_marker_lines(&self) -> Vec<i32> {
-        self.semantics
-            .prompt_markers
-            .iter()
-            .filter(|m| matches!(m.kind, Osc133Kind::PromptStart))
-            .filter_map(|m| m.line)
-            .collect()
+        self.semantics.prompt_marker_lines()
     }
 
     /// Option/Alt-click: CSI left/right to the clicked cell when it is inside
@@ -1746,32 +1805,29 @@ impl Terminal {
         }
         let current = {
             let term = self.term.lock_unfair();
-            // Top of viewport in absolute scrollback coords.
-            let offset = term.grid().display_offset() as i32;
+            let offset = term.grid().display_offset();
             let history = term.history_size() as i32;
-            history - offset
+            viewport_top_abs(history, offset)
         };
         let target = if delta < 0 {
             lines.iter().rev().find(|&&l| l < current).copied()
         } else {
             lines.iter().find(|&&l| l > current).copied()
         };
-        let Some(target_line) = target else {
+        let Some(target_abs) = target else {
             return false;
         };
-        // Scroll so target is near the top of the viewport.
         let term = self.term.lock_unfair();
         let history = term.history_size() as i32;
         drop(term);
-        let target_offset = (history - target_line).max(0) as usize;
+        let target_offset = (history - target_abs).max(0) as usize;
         let mut term = self.term.lock();
         let now = term.grid().display_offset() as i32;
         let delta_lines = target_offset as i32 - now;
         if delta_lines != 0 {
             scroll_display(&mut term, Scroll::Delta(delta_lines));
         }
-        // Flush so a Block at the prompt lands against the viewport edge.
-        self.viewport.position.jump_to_anchor(target_line);
+        self.viewport.position.jump_to_anchor(target_abs);
         true
     }
 
@@ -1787,7 +1843,7 @@ impl Terminal {
     ) -> Option<Duration> {
         let busy = self.looks_busy();
         let now = Instant::now();
-        let at_ms = self.mono_ms();
+        let at_ms = self.semantics.mono_ms();
         match (self.semantics.last_busy, busy) {
             (false, true) => {
                 self.semantics.last_busy = true;
@@ -2165,7 +2221,7 @@ impl Terminal {
         if removed > 0 {
             rebase_markers_after_history_shrink(&mut self.semantics.prompt_markers, removed);
             self.viewport.geometry.rebase_after_history_shrink(removed);
-            self.publish_rebase(removed);
+            self.semantics.publish_rebase(removed);
         }
         self.viewport.last_history_size = history_size;
         let screen_lines = terminal.screen_lines();
@@ -2185,6 +2241,13 @@ impl Terminal {
         let alt_transitioned = (!prev_alt && alt) || (prev_alt && !alt);
         if alt_transitioned {
             self.invalidate_terminal_anchors();
+        }
+        let mouse = self.last_content.mode.intersects(Modes::MOUSE_MODE);
+        if alt_transitioned || mouse {
+            // Grid coordinates and OSC 8 spans from the previous screen are
+            // meaningless after an alt-screen swap. While a mouse-mode app
+            // owns the pointer, host hover is cleared rather than filtered.
+            self.interaction.clear_hover();
         }
         let capped_churn_without_delta = removed == 0
             && capped_history
@@ -2215,19 +2278,14 @@ impl Terminal {
     }
 
     fn mouse_changed(&mut self, point: Point, side: SelectionSide) -> bool {
-        match self.interaction.last_mouse {
-            Some((old_point, old_side)) => {
-                if old_point == point && old_side == side {
-                    false
-                } else {
-                    self.interaction.last_mouse = Some((point, side));
-                    true
-                }
-            }
-            None => {
-                self.interaction.last_mouse = Some((point, side));
-                true
-            }
+        let PointerSession::AppMouse { last } = &mut self.interaction.session else {
+            return true;
+        };
+        if *last == Some((point, side)) {
+            false
+        } else {
+            *last = Some((point, side));
+            true
         }
     }
 
@@ -2238,15 +2296,12 @@ impl Terminal {
     pub fn mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if self.mouse_mode(e.modifiers.shift) {
-            // A ctrl/cmd press on a link suppressed its button-press report in
-            // `mouse_down`. Since the app never saw the press, we must swallow
-            // the whole gesture rather than forward later motion/release
-            // reports, which would be a press-less (malformed) sequence.
-            // `mouse_up` resolves it: release on the same link opens it,
-            // otherwise the gesture is dropped.
-            if self.interaction.mouse_down_hyperlink.is_none() {
+            if !matches!(self.interaction.session, PointerSession::PendingLink(_)) {
+                match self.interaction.session {
+                    PointerSession::AppMouse { .. } => {}
+                    _ => self.interaction.enter_app_mouse(None),
+                }
                 let (point, side) = self.pointer_map().grid_point_and_side(position);
-
                 if self.mouse_changed(point, side) {
                     let bytes = mouse_moved_report(
                         point,
@@ -2254,7 +2309,6 @@ impl Terminal {
                         e.modifiers,
                         self.last_content.mode,
                     );
-
                     if let Some(bytes) = bytes {
                         self.write_to_pty(bytes);
                     }
@@ -2264,34 +2318,24 @@ impl Terminal {
             if e.dragging() {
                 self.update_mouse_selection(e);
             }
-            self.schedule_find_hyperlink(e.modifiers, e.position);
+            self.schedule_find_hyperlink(e.position);
         }
         cx.notify();
     }
 
-    fn schedule_find_hyperlink(&mut self, modifiers: Modifiers, position: GpuiPoint<Pixels>) {
-        // Hover detection runs without a modifier so users can discover that
-        // links exist; opening still honors click semantics. The modifier is
-        // kept in the signature because callers pass event state through.
-        let _ = modifiers;
-        if self
-            .interaction
-            .mouse_selection
-            .as_ref()
-            .is_some_and(|selection| selection.dragging)
+    fn schedule_find_hyperlink(&mut self, position: GpuiPoint<Pixels>) {
+        if self.interaction.selecting_drag()
             || !self.last_content.terminal_bounds.bounds.contains(&position)
         {
-            self.last_content.last_hovered_word = None;
+            self.interaction.clear_hover();
             return;
         }
 
-        // Throttle hyperlink searches to avoid excessive processing
         let now = Instant::now();
         if self
             .interaction
             .last_hyperlink_search_position
             .map_or(true, |last_pos| {
-                // Only search if mouse moved significantly or enough time passed
                 let distance_moved = ((position.x - last_pos.x).abs()
                     + (position.y - last_pos.y).abs())
                     > FIND_HYPERLINK_THROTTLE_PX;
@@ -2312,15 +2356,13 @@ impl Terminal {
     }
 
     fn update_mouse_selection(&mut self, e: &MouseMoveEvent) {
-        let Some(selection) = self.interaction.mouse_selection.as_mut() else {
+        let PointerSession::Selecting { origin, dragging } = &mut self.interaction.session else {
             return;
         };
-        if !selection.dragging
-            && (e.position - selection.origin).magnitude() <= SELECTION_DRAG_THRESHOLD
-        {
+        if !*dragging && (e.position - *origin).magnitude() <= SELECTION_DRAG_THRESHOLD {
             return;
         }
-        selection.dragging = true;
+        *dragging = true;
         let bounds = self.last_content.terminal_bounds.bounds;
         self.events
             .push_back(InternalEvent::UpdateSelection(e.position - bounds.origin));
@@ -2349,8 +2391,7 @@ impl Terminal {
         let point = self.pointer_map().grid_point(position);
 
         if e.button == MouseButton::Left {
-            self.interaction.mouse_selection = None;
-            self.interaction.mouse_down_hyperlink = None;
+            self.interaction.session = PointerSession::Idle;
         }
 
         // Only Alt+click moves the shell cursor. A plain click anchors a
@@ -2373,14 +2414,14 @@ impl Terminal {
             && (TerminalSettings::get_global(cx).open_links_in_mouse_mode
                 || !self.mouse_mode(e.modifiers.shift))
         {
-            self.interaction.mouse_down_hyperlink = self.find_hyperlink_at_point(point);
-
-            if self.interaction.mouse_down_hyperlink.is_some() {
+            if let Some(link) = self.find_hyperlink_at_point(point) {
+                self.interaction.session = PointerSession::PendingLink(link);
                 return;
             }
         }
 
         if self.mouse_mode(e.modifiers.shift) {
+            self.interaction.enter_app_mouse(None);
             let bytes =
                 mouse_button_report(point, e.button, e.modifiers, true, self.last_content.mode);
 
@@ -2389,10 +2430,10 @@ impl Terminal {
             }
         } else if e.button == MouseButton::Left && e.click_count > 0 {
             let (point, side) = self.pointer_map().grid_point_and_side(position);
-            self.interaction.mouse_selection = Some(MouseSelection {
+            self.interaction.session = PointerSession::Selecting {
                 origin: e.position,
                 dragging: false,
-            });
+            };
             if e.click_count == 1 && e.modifiers.shift && self.last_content.selection.is_some() {
                 self.events
                     .push_back(InternalEvent::UpdateSelection(position));
@@ -2416,75 +2457,80 @@ impl Terminal {
     }
 
     pub fn mouse_up(&mut self, e: &MouseUpEvent, cx: &Context<Self>) {
-        self.mouse_up_with_settings(e, TerminalSettings::get_global(cx), cx);
+        self.mouse_up_with_settings(e, TerminalSettings::get_global(cx));
     }
 
-    fn mouse_up_with_settings(
-        &mut self,
-        e: &MouseUpEvent,
-        settings: &TerminalSettings,
-        cx: &Context<Self>,
-    ) {
-        let dragged = if e.button == MouseButton::Left {
-            self.interaction
-                .mouse_selection
-                .take()
-                .is_some_and(|selection| selection.dragging)
-        } else {
-            false
+    fn mouse_up_with_settings(&mut self, e: &MouseUpEvent, settings: &TerminalSettings) {
+        // Take the gesture in a single step; the tail below owns the final state.
+        let session = std::mem::replace(&mut self.interaction.session, PointerSession::Idle);
+        let dragged = matches!(session, PointerSession::Selecting { dragging: true, .. });
+        let pending_link = match session {
+            PointerSession::PendingLink(link) => Some(link),
+            _ => None,
         };
+        let mouse_mode = self.mouse_mode(e.modifiers.shift);
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        if let Some(mouse_down_hyperlink) = self.interaction.mouse_down_hyperlink.take() {
-            let point = self.pointer_map().grid_point(position);
 
+        let mut link_opened = false;
+        if let Some(mouse_down_hyperlink) = pending_link {
+            let point = self.pointer_map().grid_point(position);
             if self
                 .find_hyperlink_at_point(point)
                 .is_some_and(|mouse_up_hyperlink| mouse_up_hyperlink == mouse_down_hyperlink)
             {
                 self.events
                     .push_back(InternalEvent::ProcessHyperlink(mouse_down_hyperlink, true));
-                self.interaction.last_mouse = None;
-                return;
-            }
-
-            if self.mouse_mode(e.modifiers.shift) {
-                self.interaction.last_mouse = None;
+                link_opened = true;
+            } else if mouse_mode {
+                // A cmd/ctrl-press that landed on a link inside a mouse-mode app
+                // was deliberately not reported (the app never saw the press). If
+                // the release did not resolve the same link, swallow the whole
+                // gesture rather than forward a release for a press the app never
+                // received — that would be a press-less (malformed) sequence.
+                self.interaction.session = PointerSession::AppMouse { last: None };
                 return;
             }
         }
 
-        if self.mouse_mode(e.modifiers.shift) {
-            let point = self.pointer_map().grid_point(position);
+        if !link_opened {
+            if mouse_mode {
+                let point = self.pointer_map().grid_point(position);
 
-            let bytes =
-                mouse_button_report(point, e.button, e.modifiers, false, self.last_content.mode);
+                let bytes = mouse_button_report(
+                    point,
+                    e.button,
+                    e.modifiers,
+                    false,
+                    self.last_content.mode,
+                );
 
-            if let Some(bytes) = bytes {
-                self.write_to_pty(bytes);
-            }
-        } else {
-            if e.button == MouseButton::Left && settings.copy_on_select {
-                self.copy(Some(true));
-            }
+                if let Some(bytes) = bytes {
+                    self.write_to_pty(bytes);
+                }
+            } else {
+                if e.button == MouseButton::Left && settings.copy_on_select {
+                    self.copy(Some(true));
+                }
 
-            //Hyperlinks
-            if e.button == MouseButton::Left && !dragged && e.click_count == 1 {
-                let mouse_cell_index = self.pointer_map().content_index(position);
-                if let Some(link) = self
-                    .last_content
-                    .cells
-                    .get(mouse_cell_index)
-                    .and_then(|cell| cell.hyperlink())
+                // Only search on an explicit open request (secondary modifier or an
+                // OSC8 cell). Hover underline is maintained by mouse-move, so a plain
+                // click must not run the hyperlink regex or set hover state.
+                if e.button == MouseButton::Left
+                    && !dragged
+                    && e.click_count == 1
+                    && (e.modifiers.secondary() || self.osc8_at(position))
                 {
-                    cx.open_url(link.uri());
-                } else if e.modifiers.secondary() {
                     self.events
                         .push_back(InternalEvent::FindHyperlink(position, true));
                 }
             }
         }
 
-        self.interaction.last_mouse = None;
+        if mouse_mode {
+            self.interaction.enter_app_mouse(None);
+        } else {
+            self.interaction.session = PointerSession::Idle;
+        }
     }
 
     ///Scroll the terminal
@@ -2521,7 +2567,10 @@ impl Terminal {
     }
 
     fn refresh_hovered_word(&mut self, window: &Window) {
-        self.schedule_find_hyperlink(window.modifiers(), window.mouse_position());
+        if self.mouse_mode(window.modifiers().shift) {
+            return;
+        }
+        self.schedule_find_hyperlink(window.mouse_position());
     }
 
     fn determine_scroll_lines(
@@ -2604,7 +2653,7 @@ impl Terminal {
     /// that's running inside the terminal.
     ///
     /// This does *not* return the working directory of the shell that runs on the
-    /// remote host, in case Zed is connected to a remote host.
+    /// remote host, in case Sleipnir is connected to a remote host.
     fn client_side_working_directory(&self) -> Option<PathBuf> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info
@@ -2629,40 +2678,15 @@ impl Terminal {
         self.semantics.cwd_timeline.reset(self.working_directory());
     }
 
-    fn publish_rebase(&mut self, removed: i32) {
-        if removed <= 0 {
-            return;
-        }
-
-        match self.semantics.pending_block_anchor_changes.as_mut_slice() {
-            [BlockAnchorChange::Invalidate] => {}
-            [BlockAnchorChange::Rebase(total)] => {
-                *total = total.saturating_add(removed);
-            }
-            [] => self
-                .semantics
-                .pending_block_anchor_changes
-                .push(BlockAnchorChange::Rebase(removed)),
-            _ => unreachable!("block anchor change queue is producer-canonicalized"),
-        }
-    }
-
-    fn publish_invalidate(&mut self) {
-        self.semantics.pending_block_anchor_changes.clear();
-        self.semantics
-            .pending_block_anchor_changes
-            .push(BlockAnchorChange::Invalidate);
-    }
-
     fn invalidate_terminal_anchors(&mut self) {
         self.reset_cwd_history();
         self.semantics.prompt_markers.clear();
         self.viewport.geometry.invalidate_anchors();
-        self.publish_invalidate();
+        self.semantics.publish_invalidate();
     }
 
     fn cwd_at_line(&self, line: i32, history_size: usize) -> Option<PathBuf> {
-        self.semantics.cwd_timeline.cwd_at_line(
+        self.semantics.cwd_at_line(
             line,
             history_size,
             self.term_config.scrolling_history,
@@ -2898,9 +2922,9 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockAnchorChange, Content, InteractionState, InternalEvent, PtyEvent, SemanticsState,
-        Terminal, TerminalBounds, TerminalType, ViewportState, accumulate_uniform_wheel,
-        normalize_terminal_bounds, terminal_looks_busy,
+        BlockAnchorChange, Content, HoveredWord, InteractionState, InternalEvent, Point,
+        PointerSession, PtyEvent, Range, SemanticsState, Terminal, TerminalBounds, TerminalType,
+        ViewportState, accumulate_uniform_wheel, normalize_terminal_bounds, terminal_looks_busy,
     };
     use crate::{
         Osc133Kind,
@@ -3017,9 +3041,9 @@ mod tests {
     #[test]
     fn publish_rebase_combines_deltas_before_consume() {
         let mut terminal = test_terminal();
-        terminal.publish_rebase(2);
-        terminal.publish_rebase(1);
-        terminal.publish_rebase(i32::MAX);
+        terminal.semantics.publish_rebase(2);
+        terminal.semantics.publish_rebase(1);
+        terminal.semantics.publish_rebase(i32::MAX);
 
         assert_eq!(
             terminal.take_block_anchor_changes(),
@@ -3031,12 +3055,12 @@ mod tests {
     #[test]
     fn publish_invalidate_subsumes_older_and_future_rebases_until_consume() {
         let mut terminal = test_terminal();
-        terminal.publish_rebase(2);
-        terminal.publish_rebase(1);
-        terminal.publish_invalidate();
-        terminal.publish_rebase(9);
-        terminal.publish_invalidate();
-        terminal.publish_rebase(4);
+        terminal.semantics.publish_rebase(2);
+        terminal.semantics.publish_rebase(1);
+        terminal.semantics.publish_invalidate();
+        terminal.semantics.publish_rebase(9);
+        terminal.semantics.publish_invalidate();
+        terminal.semantics.publish_rebase(4);
 
         assert_eq!(
             terminal.semantics.pending_block_anchor_changes,
@@ -3199,7 +3223,6 @@ mod tests {
                         copy_on_select: true,
                         ..Default::default()
                     },
-                    cx,
                 );
                 terminal.sync(window, cx);
                 assert_eq!(
@@ -3366,7 +3389,7 @@ mod tests {
                     position: movement.position,
                     click_count: 1,
                     ..Default::default()
-                }, &super::TerminalSettings::default(), cx);
+                }, &super::TerminalSettings::default());
                 terminal.events.clear();
                 terminal.mouse_move(&movement, cx);
                 assert!(terminal.events.iter().all(|event| !matches!(event, InternalEvent::UpdateSelection(_) | InternalEvent::Scroll(_))));
@@ -3403,7 +3426,7 @@ mod tests {
                     cx,
                 );
                 assert_eq!(terminal.take_pty_write_log(), vec![b"\x1b[D".repeat(3)]);
-                assert!(terminal.interaction.mouse_selection.is_none());
+                assert!(matches!(terminal.interaction.session, PointerSession::Idle));
                 assert!(terminal.events.is_empty());
             });
         });
@@ -3448,7 +3471,6 @@ mod tests {
                                     ..Default::default()
                                 },
                                 &settings,
-                                cx,
                             );
                             terminal.sync(window, cx);
                             let expected = if copy_on_select
@@ -3515,7 +3537,6 @@ mod tests {
                             copy_on_select: true,
                             ..Default::default()
                         },
-                        cx,
                     );
                     assert_eq!(
                         terminal.take_pty_write_log(),
@@ -3553,16 +3574,88 @@ mod tests {
                 terminal.mouse_down(&gpui::MouseDownEvent {
                     button: gpui::MouseButton::Left, position, modifiers, click_count: 1, ..Default::default()
                 }, cx);
-                assert!(terminal.interaction.mouse_down_hyperlink.is_some());
+                assert!(matches!(
+                    terminal.interaction.session,
+                    PointerSession::PendingLink(_)
+                ));
                 terminal.last_content.mode = super::Modes::ALT_SCREEN | super::Modes::SGR_MOUSE | super::Modes::MOUSE_DRAG;
                 terminal.mouse_move(&gpui::MouseMoveEvent {
                     position, modifiers, pressed_button: Some(gpui::MouseButton::Left),
                 }, cx);
                 terminal.mouse_up_with_settings(&gpui::MouseUpEvent {
                     button: gpui::MouseButton::Left, position, modifiers, click_count: 1,
-                }, &super::TerminalSettings::default(), cx);
+                }, &super::TerminalSettings::default());
                 assert!(terminal.take_pty_write_log().is_empty());
                 assert!(matches!(terminal.events.back(), Some(InternalEvent::ProcessHyperlink(link, true)) if link.text == "https://example.com"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn cmd_click_link_miss_in_mouse_mode_swallows_release(cx: &mut TestAppContext) {
+        // A cmd/ctrl-press that landed on a link inside a mouse-mode app is not
+        // reported (PendingLink). If the release lands off the link, the whole
+        // gesture must be swallowed — forwarding a release for a press the app
+        // never saw would be a press-less (malformed) mouse report.
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|_, cx| {
+            super::TerminalSettings::init(cx);
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                {
+                    let mut term = terminal.term.lock_unfair();
+                    for character in "https://example.com".chars() {
+                        term.input(character);
+                    }
+                }
+                let modifiers = gpui::Modifiers {
+                    platform: true,
+                    control: true,
+                    ..Default::default()
+                };
+                let down_pos = gpui::point(px(12.0), px(2.0));
+                terminal.mouse_down(
+                    &gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: down_pos,
+                        modifiers,
+                        click_count: 1,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert!(matches!(
+                    terminal.interaction.session,
+                    PointerSession::PendingLink(_)
+                ));
+                terminal.last_content.mode =
+                    super::Modes::ALT_SCREEN | super::Modes::SGR_MOUSE | super::Modes::MOUSE_DRAG;
+                // Release on a blank row where no link resolves.
+                let up_pos = gpui::point(px(12.0), px(200.0));
+                terminal.mouse_up_with_settings(
+                    &gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position: up_pos,
+                        modifiers,
+                        click_count: 1,
+                    },
+                    &super::TerminalSettings::default(),
+                );
+                assert!(
+                    terminal.take_pty_write_log().is_empty(),
+                    "a link-miss release in mouse mode must not send a press-less release report"
+                );
+                assert!(
+                    !terminal
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, InternalEvent::ProcessHyperlink(..))),
+                    "the link did not resolve, so no ProcessHyperlink must be queued"
+                );
+                assert!(matches!(
+                    terminal.interaction.session,
+                    PointerSession::AppMouse { .. }
+                ));
             });
         });
     }
@@ -3629,6 +3722,82 @@ mod tests {
                 assert_eq!(
                     terminal.take_block_anchor_changes(),
                     vec![BlockAnchorChange::Invalidate]
+                );
+            });
+        });
+    }
+
+    fn stale_hovered_word(url: &str) -> HoveredWord {
+        HoveredWord {
+            word: url.to_string(),
+            word_match: Range::new(Point::new(0, 0), Point::new(0, url.len())),
+            id: 1,
+        }
+    }
+
+    #[gpui::test]
+    async fn mouse_mode_motion_clears_stale_hyperlink_hover(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| test_terminal());
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+                terminal.interaction.hovered = Some(stale_hovered_word(
+                    "https://code.byted.org/obric/coze-loop/merge_requests/new",
+                ));
+                terminal.last_content.mode =
+                    super::Modes::ALT_SCREEN | super::Modes::SGR_MOUSE | super::Modes::MOUSE_DRAG;
+                terminal.mouse_move(
+                    &gpui::MouseMoveEvent {
+                        position: gpui::point(px(40.0), px(12.0)),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert!(
+                    terminal.hovered_word().is_none(),
+                    "mouse-mode TUIs must not keep a host link tooltip from the previous screen"
+                );
+                assert!(
+                    terminal.interaction.hovered.is_none(),
+                    "mouse-mode must clear host hover, not hide it behind a getter"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn entering_alt_screen_clears_stale_hyperlink_hover(cx: &mut TestAppContext) {
+        let (_root, visual) = cx.add_window_view(|_, _| TestRoot);
+        let mut terminal = test_terminal();
+        terminal.interaction.hovered = Some(stale_hovered_word(
+            "https://code.byted.org/obric/coze-loop/merge_requests/new",
+        ));
+        terminal.last_content.mode = super::Modes::empty();
+        {
+            let term = terminal.term.clone();
+            let mut term = term.lock_unfair();
+            term.set_private_mode(alacritty_terminal::vte::ansi::PrivateMode::Named(
+                alacritty_terminal::vte::ansi::NamedPrivateMode::SwapScreenAndSetRestoreCursor,
+            ));
+        }
+
+        visual.update(|window, cx| {
+            let entity = cx.new(|_| terminal);
+            entity.update(cx, |terminal, cx| {
+                terminal.sync(window, cx);
+            });
+            entity.update(cx, |terminal, _| {
+                assert!(
+                    terminal
+                        .last_content
+                        .mode
+                        .contains(super::Modes::ALT_SCREEN),
+                    "fixture must actually enter the alternate screen"
+                );
+                assert!(
+                    terminal.hovered_word().is_none(),
+                    "alt-screen entry must drop hover from the primary screen"
                 );
             });
         });
