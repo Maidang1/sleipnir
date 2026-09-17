@@ -405,10 +405,12 @@ pub struct AppShell {
     /// Per-window housekeeping timer: ledger focus sync + pane-facts refresh.
     /// Runs on a fixed interval so these side-effects are decoupled from Render.
     _housekeeping: gpui::Task<()>,
-    /// Per-window plugin surfaces: panel registry, chrome contributions, and
-    /// the polled pane-fact watch. `PluginRuntime` (supervisor / catalog /
-    /// pump) stays a process `Global`; this is the window-scoped half.
-    plugin: crate::plugin_window::PluginHost,
+    /// Per-window plugin surfaces: chrome contributions and the polled
+    /// pane-fact watch. `PluginRuntime` (supervisor / catalog / pump) stays a
+    /// process `Global`; these two registries are the window-scoped half.
+    /// Panel surfaces are owned by the pane tree (`LeafContent::Panel`).
+    plugin_chrome: crate::plugin_chrome::ChromeRegistry,
+    plugin_watch: crate::plugin_event_watch::PluginEventWatch,
 }
 
 /// What the shared confirm dialog is asking about.
@@ -503,13 +505,19 @@ impl AppShell {
         }
     }
 
-    pub(crate) fn take_confirm_input(&mut self, cx: &mut Context<Self>) -> Option<CloseConfirmState> {
+    pub(crate) fn take_confirm_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<CloseConfirmState> {
         let r = self.input.take_confirm()?;
         self.teardown_input(InputOwner::Confirm, cx);
         Some(r)
     }
 
-    pub(crate) fn take_consent_input(&mut self, cx: &mut Context<Self>) -> Option<PluginConsentPending> {
+    pub(crate) fn take_consent_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<PluginConsentPending> {
         let r = self.input.take_consent()?;
         self.teardown_input(InputOwner::Consent, cx);
         Some(r)
@@ -554,6 +562,16 @@ impl AppShell {
         }
     }
 
+    /// Swallow a key during a modal owner unless it carries the platform
+    /// modifier (⌘ on macOS). Global bindings are Cmd-based and fire via
+    /// `on_action`, so letting them through keeps ⌘Q / ⌘W / ⌘, live while a
+    /// dialog, menu, or overlay is open.
+    fn swallow_unless_platform(event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        if !event.keystroke.modifiers.platform {
+            cx.stop_propagation();
+        }
+    }
+
     fn handle_capture_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -570,14 +588,15 @@ impl AppShell {
                     self.confirm_close_proceed(window, cx);
                     cx.stop_propagation();
                 }
-                _ => cx.stop_propagation(),
+                // Platform-modified keys (⌘Q / ⌘W) still fire via on_action.
+                _ => Self::swallow_unless_platform(event, cx),
             },
             InputOwner::Consent => match event.keystroke.key.as_str() {
                 "escape" | "enter" => {
                     self.deny_plugin_consent(cx);
                     cx.stop_propagation();
                 }
-                _ => cx.stop_propagation(),
+                _ => Self::swallow_unless_platform(event, cx),
             },
             InputOwner::TabMenu => {
                 let key = event.keystroke.key.as_str();
@@ -585,6 +604,7 @@ impl AppShell {
                     "escape" => {
                         self.dismiss_tab_menu(cx);
                         cx.notify();
+                        cx.stop_propagation();
                     }
                     "down" | "up" if !event.keystroke.modifiers.platform => {
                         let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
@@ -598,14 +618,15 @@ impl AppShell {
                             menu.selected = next;
                         }
                         cx.notify();
+                        cx.stop_propagation();
                     }
                     "enter" => {
                         let selected = self.input.tab_menu().map(|m| m.selected).unwrap_or(0);
                         self.run_tab_menu_item(selected, window, cx);
+                        cx.stop_propagation();
                     }
-                    _ => {}
+                    _ => Self::swallow_unless_platform(event, cx),
                 }
-                cx.stop_propagation();
             }
             InputOwner::TerminalMenu => {
                 let key = event.keystroke.key.as_str();
@@ -613,6 +634,7 @@ impl AppShell {
                     "escape" => {
                         self.dismiss_terminal_menu(cx);
                         cx.notify();
+                        cx.stop_propagation();
                     }
                     "down" | "up" if !event.keystroke.modifiers.platform => {
                         let count = self.terminal_menu_items().len();
@@ -626,34 +648,41 @@ impl AppShell {
                             menu.selected = next;
                         }
                         cx.notify();
+                        cx.stop_propagation();
                     }
                     "enter" => {
                         let selected = self.input.terminal_menu().map(|m| m.selected).unwrap_or(0);
                         if let Some(item) = self.terminal_menu_items().get(selected).copied() {
                             self.run_terminal_menu_item(item, window, cx);
                         }
+                        cx.stop_propagation();
                     }
-                    _ => {}
+                    _ => Self::swallow_unless_platform(event, cx),
                 }
-                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::Update) => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_update(cx);
+                    cx.stop_propagation();
+                } else {
+                    Self::swallow_unless_platform(event, cx);
                 }
-                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::PaneFacts) => {
+                // Old behavior: only Escape is intercepted; every other key
+                // (including plain typing) falls through to the focused terminal.
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_pane_facts(cx);
+                    cx.stop_propagation();
                 }
-                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::PluginMonitor) => {
+                // Same as PaneFacts: only Escape is swallowed; the terminal keeps
+                // receiving keys while the monitor is open.
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_plugin_monitor(cx);
+                    cx.stop_propagation();
                 }
-                cx.stop_propagation();
             }
             InputOwner::Overlay(OverlayKind::Palette) => {
                 if self.palette_key_down(event, window, cx) {
@@ -662,7 +691,7 @@ impl AppShell {
             }
             InputOwner::Overlay(OverlayKind::History) => {
                 self.history_key_down(event, window, cx);
-                cx.stop_propagation();
+                Self::swallow_unless_platform(event, cx);
             }
             InputOwner::Find => {
                 if self.find_key_down(event, window, cx) {
@@ -711,15 +740,20 @@ impl AppShell {
                 }
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_settings(window, cx);
+                    cx.stop_propagation();
+                    return;
                 }
-                cx.stop_propagation();
+                // Swallow other keys while the settings panel is open so they
+                // don't reach the terminal underneath. ⌘, (OpenSettings) and the
+                // other global bindings still fire via on_action.
+                Self::swallow_unless_platform(event, cx);
             }
             InputOwner::Overlay(OverlayKind::Diff) => {
                 if self.handle_diff_key(event, window, cx) {
                     cx.stop_propagation();
                     return;
                 }
-                cx.stop_propagation();
+                Self::swallow_unless_platform(event, cx);
             }
             InputOwner::Rename => {
                 if self.rename_key_down(event, window, cx) {
@@ -864,7 +898,8 @@ impl AppShell {
             facts: PaneFactsState::default(),
             _quit_subscription: None,
             _housekeeping: gpui::Task::ready(()),
-            plugin: crate::plugin_window::PluginHost::new(),
+            plugin_chrome: crate::plugin_chrome::ChromeRegistry::default(),
+            plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
         };
         // Seed the current system appearance and follow future changes so the
         // `Auto` theme tracks light/dark (ADR-0002).
@@ -892,17 +927,23 @@ impl AppShell {
         shell.start_resident_plugins(cx);
 
         // Per-window housekeeping: ledger focus + pane-facts refresh run on a
-        // fixed 200 ms timer so Render stays paint-only.
+        // fixed 200 ms timer so Render stays paint-only. The task self-terminates
+        // once the window/entity is gone (`update_in` starts failing), so it does
+        // not outlive a closed window.
         shell._housekeeping = cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(200))
                     .await;
-                this.update_in(cx, |this, window, cx| {
-                    this.sync_ledger_focus(window, cx);
-                    this.refresh_pane_facts_if_stale(cx);
-                })
-                .ok();
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.sync_ledger_focus(window, cx);
+                        this.refresh_pane_facts_if_stale(cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         });
 
@@ -1207,7 +1248,7 @@ impl AppShell {
         tab_panes: &[crate::pane_tree::PaneKey],
         tab_is_active: bool,
     ) -> Vec<crate::plugin_chrome::PluginTabBadge> {
-        self.plugin.chrome_badges_for_tab(tab_panes, tab_is_active)
+        self.plugin_chrome.badges_for_tab(tab_panes, tab_is_active)
     }
 
     fn rebuild_palette_items(&mut self) {
@@ -1220,7 +1261,7 @@ impl AppShell {
         self.palette
             .items
             .extend(crate::command_palette::contribution_items(
-                self.plugin.chrome_palette_entries(),
+                self.plugin_chrome.palette_entries(),
             ));
     }
 
@@ -1670,10 +1711,13 @@ impl AppShell {
             } else {
                 "Close this pane anyway?".into()
             };
-            self.set_input(InputMode::Confirm(CloseConfirmState {
-                message: message.into(),
-                kind: ConfirmKind::ClosePane(target),
-            }), cx);
+            self.set_input(
+                InputMode::Confirm(CloseConfirmState {
+                    message: message.into(),
+                    kind: ConfirmKind::ClosePane(target),
+                }),
+                cx,
+            );
             cx.notify();
         } else {
             self.close_active_pane(window, cx);
@@ -1692,10 +1736,13 @@ impl AppShell {
             ConfirmClose::Dirty => self.any_pane_is_dirty(cx),
         };
         if needs_confirm {
-            self.set_input(InputMode::Confirm(CloseConfirmState {
-                message: "A process is still running. Close this window anyway?".into(),
-                kind: ConfirmKind::CloseWindow,
-            }), cx);
+            self.set_input(
+                InputMode::Confirm(CloseConfirmState {
+                    message: "A process is still running. Close this window anyway?".into(),
+                    kind: ConfirmKind::CloseWindow,
+                }),
+                cx,
+            );
             cx.notify();
         } else {
             self.finish_window_close(window, cx);
@@ -2189,7 +2236,6 @@ mod tests {
         assert_eq!(ids.next_id, 2);
         assert_eq!(ids.next_pane_id, 2);
     }
-
 }
 
 impl Render for AppShell {

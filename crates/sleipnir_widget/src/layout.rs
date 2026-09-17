@@ -124,30 +124,6 @@ pub enum LaidOutKind {
 }
 
 impl LaidOutKind {
-    pub fn text_content(&self) -> Option<String> {
-        match self {
-            LaidOutKind::Text { lines, .. } => Some(lines.join("\n")),
-            LaidOutKind::Code { lines } => Some(
-                lines
-                    .iter()
-                    .map(|l| l.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => Some(text.clone()),
-            LaidOutKind::Attribution { label, .. } => Some(label.clone()),
-            LaidOutKind::Unknown => Some("[?]".into()),
-            LaidOutKind::Truncated => Some("… truncated".into()),
-            LaidOutKind::Spark { levels } => Some(crate::cells::spark_glyphs(levels)),
-            LaidOutKind::Sep | LaidOutKind::Bar { .. } => None,
-            LaidOutKind::Col | LaidOutKind::Row => None,
-        }
-    }
-
-    pub fn is_bold(&self) -> bool {
-        matches!(self, LaidOutKind::Text { bold: true, .. })
-    }
-
     pub fn compact_width(&self) -> u32 {
         use crate::cells::{CHIP_PAD, cell_cols};
         match self {
@@ -217,9 +193,7 @@ impl LaidOutKind {
                 tone: Tone::Dim,
                 action: None,
             }),
-            LaidOutKind::Col
-            | LaidOutKind::Row
-            | LaidOutKind::Attribution { .. } => None,
+            LaidOutKind::Col | LaidOutKind::Row | LaidOutKind::Attribution { .. } => None,
         }
     }
 }

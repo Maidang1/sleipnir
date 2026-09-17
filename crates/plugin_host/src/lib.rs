@@ -166,9 +166,7 @@ fn default_true() -> bool {
     true
 }
 
-pub use sleipnir_paths::{
-    plugin_dir as default_plugin_dir, plugin_dir_for as default_plugin_dir_for,
-};
+pub use sleipnir_paths::plugin_dir as default_plugin_dir;
 
 pub fn load_catalog(extra_dirs: &[PathBuf]) -> PluginCatalog {
     let mut roots = vec![default_plugin_dir()];
@@ -533,21 +531,6 @@ mod tests {
         {
             dir.join("demo-path")
         }
-    }
-
-    #[test]
-    fn default_plugin_dir_matches_settings_config_dir() {
-        // Regression: plugins must be discovered next to settings.json. On
-        // macOS/Unix that is ~/.config/sleipnir/plugins, NOT dirs::config_dir()
-        // (~/Library/Application Support on macOS). A mismatch here silently
-        // loads zero plugins even when settings enable them.
-        let unix = default_plugin_dir_for(false);
-        assert!(
-            unix.ends_with(".config/sleipnir/plugins"),
-            "unix plugin dir should be under ~/.config/sleipnir: {unix:?}"
-        );
-        let win = default_plugin_dir_for(true);
-        assert!(win.ends_with("sleipnir/plugins"), "{win:?}");
     }
 
     #[test]

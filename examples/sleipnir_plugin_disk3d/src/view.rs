@@ -106,34 +106,44 @@ fn wrap_angle(a: f32) -> f32 {
     a
 }
 
-/// Build the raster scene: one cuboid per entry on a
-/// square-ish grid, plus a floor tick under each.
+/// Normalised bar height for `bytes` against the largest entry, in `0..=1`.
+/// The [`MIN_BAR_SHARE`] floor keeps a tiny directory visible as a plinth next
+/// to a dominant one instead of collapsing to zero height.
+fn bar_share(bytes: u64, largest: u64) -> f32 {
+    let share = bytes as f32 / largest.max(1) as f32;
+    share.max(MIN_BAR_SHARE).clamp(0.0, 1.0)
+}
+
+/// Build the raster scene: one cuboid per entry on a square-ish grid, plus a
+/// floor tick under each.
 ///
-/// This is a thin adapter over [`build_scene_data`]: grid layout, height
-/// normalisation and selected colouring live there, so the two render paths
-/// can never disagree about the model. Here the normalised heights are scaled
-/// back to world units and the grid is centred on the origin so auto-fit
-/// framing stays stable as the entry count changes.
+/// Entries are laid out on a near-square grid (`grid_cols` per row), heights are
+/// normalised shares of the largest entry scaled to world units, and the grid
+/// is centred on the origin so auto-fit framing stays stable as the entry count
+/// changes.
 pub fn build_scene(view: &View) -> Scene {
     let mut scene = Scene::new();
-    let data = build_scene_data(view);
-    if data.bars.is_empty() {
+    let entries = &view.scan.entries;
+    if entries.is_empty() {
         return scene;
     }
+    let cols = grid_cols(entries.len());
+    let rows = entries.len().div_ceil(cols);
+    let largest = view.scan.largest_bytes().max(1);
     let light = default_light();
-    let x0 = -((data.cols as f32 - 1.0) * BAR_PITCH) * 0.5;
-    let z0 = -((data.rows as f32 - 1.0) * BAR_PITCH) * 0.5;
-    for bar in &data.bars {
-        let x = x0 + bar.gx as f32 * BAR_PITCH;
-        let z = z0 + bar.gz as f32 * BAR_PITCH;
+    let x0 = -((cols as f32 - 1.0) * BAR_PITCH) * 0.5;
+    let z0 = -((rows as f32 - 1.0) * BAR_PITCH) * 0.5;
+    for (i, entry) in entries.iter().enumerate() {
+        let x = x0 + (i % cols) as f32 * BAR_PITCH;
+        let z = z0 + (i / cols) as f32 * BAR_PITCH;
         scene.floor_tick(x, z);
         scene.bar(
             x,
             z,
             BAR_HALF,
-            bar.height * MAX_BAR_HEIGHT,
+            bar_share(entry.bytes, largest) * MAX_BAR_HEIGHT,
             light,
-            bar.selected,
+            i == view.selected,
         );
     }
     scene
@@ -143,50 +153,6 @@ pub fn build_scene(view: &View) -> Scene {
 /// compact from every angle instead of a long wall.
 pub fn grid_cols(n: usize) -> usize {
     (n as f64).sqrt().ceil().max(1.0) as usize
-}
-
-#[derive(Debug)]
-struct ChartBar {
-    gx: u32,
-    gz: u32,
-    height: f32,
-    selected: bool,
-}
-
-struct ChartData {
-    cols: u32,
-    rows: u32,
-    bars: Vec<ChartBar>,
-}
-
-/// Grid layout and normalised bar heights shared by the raster.
-pub fn build_scene_data(view: &View) -> ChartData {
-    let entries = &view.scan.entries;
-    let cols = if entries.is_empty() {
-        0
-    } else {
-        grid_cols(entries.len()) as u32
-    };
-    let rows = if entries.is_empty() {
-        0
-    } else {
-        entries.len().div_ceil(cols.max(1) as usize) as u32
-    };
-    let largest = view.scan.largest_bytes().max(1);
-    let bars = entries
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let share = entry.bytes as f32 / largest as f32;
-            ChartBar {
-                gx: (i as u32) % cols.max(1),
-                gz: (i as u32) / cols.max(1),
-                height: share.max(MIN_BAR_SHARE).clamp(0.0, 1.0),
-                selected: i == view.selected,
-            }
-        })
-        .collect();
-    ChartData { cols, rows, bars }
 }
 
 /// Rows available to the raster on a surface of `rows` total.
@@ -631,39 +597,43 @@ mod tests {
     }
 
     #[test]
-    fn scene_data_is_normalised_and_grid_bounded() {
+    fn bar_shares_are_normalised_to_the_largest_entry() {
         let view = sample_view();
-        let scene = build_scene_data(&view);
-        assert!(scene.cols >= 1 && scene.rows >= 1);
-        assert_eq!(scene.bars.len(), 4);
-        // The tallest entry is a full-height (1.0) bar; all heights are shares.
-        assert!((scene.bars[0].height - 1.0).abs() < 1e-4);
-        for bar in &scene.bars {
-            assert!((0.0..=1.0).contains(&bar.height), "height {bar:?}");
-            assert!(bar.gx < scene.cols, "gx out of grid: {bar:?}");
-            assert!(bar.gz < scene.rows, "gz out of grid: {bar:?}");
+        let largest = view.scan.largest_bytes();
+        assert_eq!(largest, 900_000_000);
+        // The tallest entry is a full-height (1.0) bar; the rest are shares in
+        // (0, 1], each floored at MIN_BAR_SHARE so it stays visible.
+        assert!((bar_share(largest, largest) - 1.0).abs() < 1e-4);
+        for entry in &view.scan.entries {
+            let h = bar_share(entry.bytes, largest);
+            assert!((0.0..=1.0).contains(&h), "share {h} out of range");
+            assert!(
+                h >= MIN_BAR_SHARE - 1e-6,
+                "share {h} below the plinth floor"
+            );
         }
-        assert!(scene.bars[0].selected);
-        assert!(scene.bars.iter().skip(1).all(|b| !b.selected));
     }
 
     #[test]
-    fn empty_scene_data_has_no_bars_and_no_grid() {
-        let scene = build_scene_data(&View::new(scan_of(vec![])));
-        assert_eq!(scene.cols, 0);
-        assert_eq!(scene.rows, 0);
-        assert!(scene.bars.is_empty());
+    fn an_empty_scan_builds_an_empty_scene() {
+        let scene = build_scene(&View::new(scan_of(vec![])));
+        assert!(scene.is_empty());
     }
 
     #[test]
-    fn a_dominated_directory_keeps_small_bars_visible_in_the_scene() {
+    fn a_dominated_directory_keeps_small_bars_above_the_plinth_floor() {
         let view = View::new(scan_of(vec![
             entry("target", 6_000_000_000, true),
             entry("crates", 1_700_000, true),
             entry("README.md", 2_390, false),
         ]));
-        let scene = build_scene_data(&view);
+        let largest = view.scan.largest_bytes();
         // Even the smallest bar keeps the visible plinth, never zero height.
-        assert!(scene.bars.iter().all(|b| b.height >= MIN_BAR_SHARE - 1e-6));
+        assert!(
+            view.scan
+                .entries
+                .iter()
+                .all(|e| bar_share(e.bytes, largest) >= MIN_BAR_SHARE - 1e-6)
+        );
     }
 }

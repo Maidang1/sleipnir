@@ -46,26 +46,15 @@ pub enum Direction {
 #[derive(Clone)]
 pub enum LeafContent {
     Terminal(Entity<TermView>),
-    Panel(PanelView),
+    Panel(PanelSurface),
 }
 
-/// Tree-owned panel surface. The entity is the surface: close is drop, tab
-/// detach moves the leaf (and its `PanelView`) wholesale. No parallel registry.
-#[derive(Clone, Debug)]
-pub struct PanelView {
-    pub surface: crate::plugin_panel::PanelSurface,
-}
+use crate::plugin_panel::PanelSurface;
 
-impl PanelView {
-    pub fn new(surface: crate::plugin_panel::PanelSurface) -> Self {
-        Self { surface }
-    }
-
-    pub fn plugin_id(&self) -> &str {
-        &self.surface.plugin_id
-    }
-}
-
+/// A tree-owned panel is just its [`PanelSurface`]: close is drop, tab detach
+/// moves the leaf (and its surface) wholesale. No parallel registry, and no
+/// wrapper newtype — the surface *is* the leaf content.
+///
 impl LeafContent {
     pub fn as_terminal(&self) -> Option<&Entity<TermView>> {
         match self {
@@ -82,16 +71,16 @@ impl LeafContent {
         matches!(self, Self::Panel(_))
     }
 
-    pub fn as_panel(&self) -> Option<&PanelView> {
+    pub fn as_panel(&self) -> Option<&PanelSurface> {
         match self {
-            Self::Panel(view) => Some(view),
+            Self::Panel(surface) => Some(surface),
             Self::Terminal(_) => None,
         }
     }
 
-    pub fn as_panel_mut(&mut self) -> Option<&mut PanelView> {
+    pub fn as_panel_mut(&mut self) -> Option<&mut PanelSurface> {
         match self {
-            Self::Panel(view) => Some(view),
+            Self::Panel(surface) => Some(surface),
             Self::Terminal(_) => None,
         }
     }
@@ -131,11 +120,15 @@ impl PaneNode {
         }
     }
 
-    pub fn panel_leaf(id: PaneId, pane_key: PaneKey, surface: crate::plugin_panel::PanelSurface) -> Self {
+    pub fn panel_leaf(
+        id: PaneId,
+        pane_key: PaneKey,
+        surface: crate::plugin_panel::PanelSurface,
+    ) -> Self {
         PaneNode::Leaf {
             id,
             pane_key,
-            content: LeafContent::Panel(PanelView::new(surface)),
+            content: LeafContent::Panel(surface),
         }
     }
 
@@ -209,9 +202,9 @@ impl PaneNode {
         match self {
             PaneNode::Leaf {
                 id: leaf,
-                content: LeafContent::Panel(view),
+                content: LeafContent::Panel(surface),
                 ..
-            } if *leaf == id => Some(view.plugin_id()),
+            } if *leaf == id => Some(surface.plugin_id.as_str()),
             PaneNode::Split { first, second, .. } => {
                 first.plugin_id_for(id).or_else(|| second.plugin_id_for(id))
             }
@@ -475,39 +468,68 @@ impl PaneNode {
         matches!(self, PaneNode::Leaf { id, .. } if *id == target)
     }
 
-    /// Replace the surface on a panel leaf identified by `pane_key`.
-    pub fn update_panel_surface(&mut self, pane_key: PaneKey, surface: crate::plugin_panel::PanelSurface) {
+    /// Borrow the panel surface on the leaf keyed by `pane_key`, if any. Pane
+    /// keys are unique, so at most one leaf matches — no clone, one walk.
+    pub fn find_panel(&self, pane_key: PaneKey) -> Option<&PanelSurface> {
         match self {
             PaneNode::Leaf {
                 pane_key: k,
-                content: LeafContent::Panel(view),
+                content: LeafContent::Panel(surface),
                 ..
-            } if *k == pane_key => {
-                view.surface = surface;
-            }
-            PaneNode::Split { first, second, .. } => {
-                first.update_panel_surface(pane_key, surface.clone());
-                second.update_panel_surface(pane_key, surface);
-            }
+            } if *k == pane_key => Some(surface),
+            PaneNode::Split { first, second, .. } => first
+                .find_panel(pane_key)
+                .or_else(|| second.find_panel(pane_key)),
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
+    /// Mutable sibling of [`find_panel`].
+    pub fn find_panel_mut(&mut self, pane_key: PaneKey) -> Option<&mut PanelSurface> {
+        match self {
+            PaneNode::Leaf {
+                pane_key: k,
+                content: LeafContent::Panel(surface),
+                ..
+            } if *k == pane_key => Some(surface),
+            PaneNode::Split { first, second, .. } => first
+                .find_panel_mut(pane_key)
+                .or_else(|| second.find_panel_mut(pane_key)),
+            PaneNode::Leaf { .. } => None,
+        }
+    }
+
+    /// Run `f` on every panel surface in this subtree, mutably, in tree order.
+    /// One recursive walk, no temporary key vector.
+    pub fn for_each_panel_mut(&mut self, f: &mut impl FnMut(&mut PanelSurface)) {
+        match self {
+            PaneNode::Leaf {
+                content: LeafContent::Panel(surface),
+                ..
+            } => f(surface),
             PaneNode::Leaf { .. } => {}
+            PaneNode::Split { first, second, .. } => {
+                first.for_each_panel_mut(f);
+                second.for_each_panel_mut(f);
+            }
+        }
+    }
+
+    /// Replace the surface on a panel leaf identified by `pane_key`.
+    pub fn update_panel_surface(
+        &mut self,
+        pane_key: PaneKey,
+        surface: crate::plugin_panel::PanelSurface,
+    ) {
+        if let Some(existing) = self.find_panel_mut(pane_key) {
+            *existing = surface;
         }
     }
 
     /// Mark a panel leaf's surface as stale.
     pub fn mark_panel_stale(&mut self, pane_key: PaneKey) {
-        match self {
-            PaneNode::Leaf {
-                pane_key: k,
-                content: LeafContent::Panel(view),
-                ..
-            } if *k == pane_key => {
-                view.surface.stale = true;
-            }
-            PaneNode::Split { first, second, .. } => {
-                first.mark_panel_stale(pane_key);
-                second.mark_panel_stale(pane_key);
-            }
-            PaneNode::Leaf { .. } => {}
+        if let Some(surface) = self.find_panel_mut(pane_key) {
+            surface.stale = true;
         }
     }
 
@@ -692,8 +714,16 @@ mod tests {
         let tree = PaneNode::Split {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
-            first: Box::new(PaneNode::panel_leaf(1, Uuid::from_u128(1), demo_surface(Uuid::from_u128(1)))),
-            second: Box::new(PaneNode::panel_leaf(2, Uuid::from_u128(2), demo_surface(Uuid::from_u128(2)))),
+            first: Box::new(PaneNode::panel_leaf(
+                1,
+                Uuid::from_u128(1),
+                demo_surface(Uuid::from_u128(1)),
+            )),
+            second: Box::new(PaneNode::panel_leaf(
+                2,
+                Uuid::from_u128(2),
+                demo_surface(Uuid::from_u128(2)),
+            )),
         };
         let mut leaves = Vec::new();
         tree.leaves(&mut leaves);
@@ -711,13 +741,14 @@ mod tests {
 
     #[test]
     fn split_and_close_with_a_panel_do_not_panic() {
-        let mut tree = PaneNode::panel_leaf(1, Uuid::from_u128(1), demo_surface(Uuid::from_u128(1)));
+        let mut tree =
+            PaneNode::panel_leaf(1, Uuid::from_u128(1), demo_surface(Uuid::from_u128(1)));
         assert!(tree.split_content(
             1,
             SplitAxis::Horizontal,
             2,
             Uuid::from_u128(2),
-            LeafContent::Panel(PanelView::new(demo_surface(Uuid::from_u128(2)))),
+            LeafContent::Panel(demo_surface(Uuid::from_u128(2))),
         ));
         assert_eq!(tree.leaf_count(), 2);
         assert_eq!(tree.close(2), CloseOutcome::Closed);

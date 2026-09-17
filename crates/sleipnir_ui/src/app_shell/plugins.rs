@@ -44,8 +44,8 @@ impl AppShell {
     pub(crate) fn poll_plugin_events(&mut self, cx: &mut Context<Self>) {
         use crate::plugin_event_watch::PaneUiFacts;
         if !self
-            .plugin
-            .watch_due(std::time::Instant::now(), std::time::Duration::from_secs(1))
+            .plugin_watch
+            .due(std::time::Instant::now(), std::time::Duration::from_secs(1))
         {
             return;
         }
@@ -75,17 +75,17 @@ impl AppShell {
                 facts.push(PaneUiFacts { pane, cwd, agent });
             }
         }
-        for ev in self.plugin.watch_ingest_ui(focus, &facts) {
+        for ev in self.plugin_watch.ingest_ui(focus, &facts) {
             crate::plugin_runtime::broadcast_event(ev, cx);
         }
         // The built-in Agents observer does not subscribe to port events.
         if !TerminalSettings::get_global(cx).plugins.enabled {
             return;
         }
-        if self.plugin.watch_ports_inflight() {
+        if self.plugin_watch.ports_inflight {
             return;
         }
-        self.plugin.set_watch_ports_inflight(true);
+        self.plugin_watch.ports_inflight = true;
         cx.spawn(async move |this, cx| {
             // One machine-level scan per poll: the process and listen tables are
             // the same for every pane, so capture them once off-thread and derive
@@ -101,9 +101,9 @@ impl AppShell {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.plugin.set_watch_ports_inflight(false);
+                this.plugin_watch.ports_inflight = false;
                 for (pane, ports) in found {
-                    for ev in this.plugin.watch_ingest_ports(pane, &ports) {
+                    for ev in this.plugin_watch.ingest_ports(pane, &ports) {
                         crate::plugin_runtime::broadcast_event(ev, cx);
                     }
                 }
@@ -152,26 +152,16 @@ impl AppShell {
             .filter(|snap| snap.state == ConnectionState::Live)
             .map(|snap| snap.instance_id)
             .collect();
-        // Walk all panel leaves and mark stale.
+        // Walk all panel leaves and mark those whose owner is gone stale.
         for tab in &mut self.tabs {
-            let mut panel_keys = Vec::new();
-            {
-                let mut all = Vec::new();
-                tab.tree.walk_leaves(&mut all);
-                for (_, k, c) in all {
-                    if let crate::LeafContent::Panel(view) = c {
-                        if !live.contains(&view.surface.owner_instance_id) {
-                            panel_keys.push(k);
-                        }
-                    }
+            tab.tree.for_each_panel_mut(&mut |surface| {
+                if !live.contains(&surface.owner_instance_id) {
+                    surface.stale = true;
                 }
-            }
-            for key in panel_keys {
-                tab.tree.mark_panel_stale(key);
-            }
+            });
         }
         self.mark_missing_blocks_stale(&live, cx);
-        if self.plugin.sync_chrome_live(&live) {
+        if self.plugin_chrome.sync_live(&live) {
             self.rebuild_palette_items();
         }
     }
@@ -184,88 +174,58 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::plugin_panel::PanelSurface;
+        use crate::plugin_panel::{ApplyPanel, PanelSurface, decide_panel_render};
         use plugin_protocol::v2::Capability;
         let granted =
             crate::plugin_runtime::has_grant_for_instance(instance_id, Capability::RenderPanel, cx);
-        if !granted {
-            log::warn!("plugin {plugin_id} RenderPanel denied (no grant)");
-            return;
-        }
-        let mut terminals = std::collections::BTreeSet::new();
-        for tab in &self.tabs {
-            let mut out = Vec::new();
-            tab.tree.leaves_with_keys(&mut out);
-            for (key, _) in out {
-                terminals.insert(key);
+        let (terminals, _panels) = self.terminal_and_panel_keys();
+        let is_terminal = terminals.contains(&pane);
+        // Borrow the existing surface (if any) from the tree — no clone.
+        let existing = self.tabs.iter().find_map(|tab| tab.tree.find_panel(pane));
+        let decision = decide_panel_render(existing, plugin_id, instance_id, is_terminal, granted);
+        let surface_id = match decision {
+            ApplyPanel::Create { surface_id } | ApplyPanel::Replace { surface_id } => surface_id,
+            ApplyPanel::DeniedGrant => {
+                log::warn!("plugin {plugin_id} RenderPanel denied (no grant)");
+                return;
             }
-        }
-        if terminals.contains(&pane) {
-            log::warn!("plugin {plugin_id} tried to draw into a terminal pane");
-            return;
-        }
-        // Check existing panel leaf for this pane_key.
-        let existing = self.tabs.iter().flat_map(|tab| {
-            let mut all = Vec::new();
-            tab.tree.walk_leaves(&mut all);
-            all.into_iter()
-                .filter(|(_, k, _)| *k == pane)
-                .map(|(_, _, c)| c.clone())
-                .collect::<Vec<_>>()
-        }).next();
-        match existing {
-            Some(crate::LeafContent::Panel(ref view)) => {
-                if view.surface.plugin_id != plugin_id {
-                    log::warn!("plugin {plugin_id} tried to take another plugin's panel");
-                    return;
-                }
-                if view.surface.owner_instance_id != instance_id && !view.surface.stale {
-                    log::warn!(
-                        "plugin {plugin_id} instance {instance_id} tried to take a live panel owned by another instance"
-                    );
-                    return;
-                }
-                // Replace: update the surface in-place on the leaf.
-                let new_surface_id = if view.surface.owner_instance_id != instance_id {
-                    uuid::Uuid::new_v4()
-                } else {
-                    view.surface.surface_id
-                };
-                let updated = PanelSurface {
-                    plugin_id: plugin_id.to_string(),
-                    owner_instance_id: instance_id,
-                    pane_key: pane,
-                    surface_id: new_surface_id,
-                    tree,
-                    stale: false,
-                };
+            ApplyPanel::DeniedTerminal => {
+                log::warn!("plugin {plugin_id} tried to draw into a terminal pane");
+                return;
+            }
+            ApplyPanel::DeniedOccupied => {
+                log::warn!("plugin {plugin_id} tried to take another plugin's panel");
+                return;
+            }
+            ApplyPanel::DeniedOwnerInstance => {
+                log::warn!(
+                    "plugin {plugin_id} instance {instance_id} tried to take a live panel owned by another instance"
+                );
+                return;
+            }
+        };
+        let surface = PanelSurface {
+            plugin_id: plugin_id.to_string(),
+            owner_instance_id: instance_id,
+            pane_key: pane,
+            surface_id,
+            tree,
+            stale: false,
+        };
+        match decision {
+            ApplyPanel::Replace { .. } => {
                 for tab in &mut self.tabs {
-                    let mut all = Vec::new();
-                    tab.tree.walk_leaves(&mut all);
-                    if all.iter().any(|(_, k, _)| *k == pane) {
-                        tab.tree.update_panel_surface(pane, updated);
+                    if tab.tree.find_panel(pane).is_some() {
+                        tab.tree.update_panel_surface(pane, surface);
                         break;
                     }
                 }
                 cx.notify();
             }
-            Some(crate::LeafContent::Terminal(_)) => {
-                log::warn!("plugin {plugin_id} tried to draw into a terminal pane");
+            ApplyPanel::Create { .. } => {
+                self.insert_panel_leaf(pane, surface, window, cx);
             }
-            None => {
-                // Create: insert a new panel leaf.
-                let surface = PanelSurface {
-                    plugin_id: plugin_id.to_string(),
-                    owner_instance_id: instance_id,
-                    pane_key: pane,
-                    surface_id: uuid::Uuid::new_v4(),
-                    tree,
-                    stale: false,
-                };
-                if !self.insert_panel_leaf(pane, surface, window, cx) {
-                    // Failed insert: entity is not in the tree, nothing to clean up.
-                }
-            }
+            _ => unreachable!("denials returned above"),
         }
     }
     pub(super) fn apply_block_render(
@@ -362,8 +322,8 @@ impl AppShell {
         );
         let hint = self.active_pane_key();
         match self
-            .plugin
-            .apply_chrome_status(plugin_id, instance_id, tree, granted, hint)
+            .plugin_chrome
+            .apply_status(plugin_id, instance_id, tree, granted, hint)
         {
             ApplyChrome::Applied => {
                 self.rebuild_palette_items();
@@ -381,23 +341,22 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(tab) = self.tabs.get(self.active) else {
-            return false;
-        };
-        let target = tab.active_pane;
         let new_id = self.next_pane_id;
-        self.next_pane_id += 1;
-        let content = crate::LeafContent::Panel(crate::pane_tree::PanelView::new(surface));
+        let content = crate::LeafContent::Panel(surface);
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return false;
         };
+        let target = tab.active_pane;
         if !tab
             .tree
             .split_content(target, SplitAxis::Horizontal, new_id, pane_key, content)
         {
             return false;
         }
-        tab.active_pane = new_id;
+        self.next_pane_id += 1;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.active_pane = new_id;
+        }
         self.commit_workspace(window, cx);
         true
     }
@@ -514,7 +473,7 @@ impl AppShell {
         self.start_resident_plugins(cx);
     }
     pub(super) fn run_plugin_contribution(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.plugin.chrome_palette_entries().get(index).cloned() else {
+        let Some(entry) = self.plugin_chrome.palette_entries().get(index).cloned() else {
             return;
         };
         crate::plugin_runtime::push_action(
@@ -641,21 +600,24 @@ impl AppShell {
                     .map(|r| r.granted.iter().copied().collect())
                     .unwrap_or_default();
                 let tier = record.map(|r| r.tier).unwrap_or(plugin_grants::Tier::Local);
-                self.set_input(crate::ui_mode::InputMode::Consent(PluginConsentPending {
-                    supervisor: crate::plugin_runtime::supervisor(cx)
-                        .expect("plugin runtime initialized"),
-                    prompt: crate::plugin_monitor_panel::consent_prompt(
-                        plugin_id,
-                        plugin_name,
-                        tier,
-                        reason,
-                        &missing,
-                        &previously,
-                    ),
-                    kind,
-                    hash,
-                    request,
-                }), cx);
+                self.set_input(
+                    crate::ui_mode::InputMode::Consent(PluginConsentPending {
+                        supervisor: crate::plugin_runtime::supervisor(cx)
+                            .expect("plugin runtime initialized"),
+                        prompt: crate::plugin_monitor_panel::consent_prompt(
+                            plugin_id,
+                            plugin_name,
+                            tier,
+                            reason,
+                            &missing,
+                            &previously,
+                        ),
+                        kind,
+                        hash,
+                        request,
+                    }),
+                    cx,
+                );
                 cx.notify();
                 false
             }
@@ -827,21 +789,9 @@ impl ShellWorkspaceIo<'_, '_> {
 
 impl crate::plugin_host_calls::WorkspaceIo for ShellWorkspaceIo<'_, '_> {
     fn list_terminal_panes(&mut self) -> Vec<plugin_protocol::v2::PaneInfo> {
-        use plugin_protocol::v2::PaneInfo;
         // `live_panes` already excludes plugin Panel leaves, so no second
-        // identity filter is needed.
-        self.live_panes
-            .iter()
-            .map(|(pane, view)| PaneInfo {
-                pane: *pane,
-                cwd: view
-                    .read(self.cx)
-                    .working_directory(self.cx)
-                    .map(|p| p.to_string_lossy().into_owned()),
-                title: Some(view.read(self.cx).title().to_string()),
-                busy: view.read(self.cx).looks_busy(self.cx),
-            })
-            .collect()
+        // identity filter is needed. Shares PaneInfo construction with ctl.
+        crate::control_surface::pane_infos(self.live_panes, self.cx)
     }
 
     fn read_screen(&mut self, pane: PaneKey) -> Result<String, String> {
@@ -884,7 +834,8 @@ impl crate::plugin_host_calls::WorkspaceIo for ShellWorkspaceIo<'_, '_> {
     fn focus_pane(&mut self, pane: PaneKey) -> Result<(), String> {
         let (terminals, panels) = self.shell.terminal_and_panel_keys();
         crate::plugin_host_calls::read_screen_access(pane, &terminals, &panels)?;
-        self.shell.jump_to_ledger_row(pane, None, self.window, self.cx);
+        self.shell
+            .jump_to_ledger_row(pane, None, self.window, self.cx);
         Ok(())
     }
 
@@ -907,8 +858,9 @@ impl crate::plugin_host_calls::WorkspaceIo for ShellWorkspaceIo<'_, '_> {
         let has_terminal = view.read(self.cx).terminal_entity().is_some();
         let vi_mode = view.read(self.cx).vi_mode_enabled(self.cx);
         crate::plugin_host_calls::send_key_ready(has_terminal, vi_mode)?;
-        let delivered =
-            view.update(self.cx, |view, cx| view.send_named_keystroke(key.keystroke_str(), cx));
+        let delivered = view.update(self.cx, |view, cx| {
+            view.send_named_keystroke(key.keystroke_str(), cx)
+        });
         if delivered {
             Ok(())
         } else {

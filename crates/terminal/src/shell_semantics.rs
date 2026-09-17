@@ -307,7 +307,7 @@ pub fn apply_inject_to_shell(
 /// content scrolls; click/cursor points from the mouse layer are grid lines.
 /// This is the single bridge between the two coordinate spaces.
 pub fn absolute_to_grid_line(absolute_line: i32, history_size: i32) -> i32 {
-    crate::osc133::AbsLine(absolute_line).to_grid(history_size)
+    absolute_line - history_size
 }
 
 /// Inputs for Option/Alt-click cursor movement inside the current prompt.

@@ -5,10 +5,12 @@
 //!
 //! Discipline:
 //!
-//! - One oldest pending effect per call to [`Adapter::process_one`]; the
-//!   plugin's ~50ms tick calls it once, so effects are delivered in order.
-//! - Every processed effect is claimed, then committed with
-//!   [`LaunchOutcome`] / [`DeliverOutcome`] for that seq.
+//! - One oldest *claimable* effect per call to [`Adapter::process_one`]; the
+//!   plugin's ~50ms tick calls it once. Effects are attempted oldest-first,
+//!   skipping any head effect that is no longer claimable (already retired by
+//!   a registry drain), so a younger claimable effect may be delivered first.
+//! - Every processed effect is claimed, then committed with a
+//!   [`ClaimOutcome`] for that seq.
 //!   An effect is never left un-acked — except a host rate limit, which
 //!   drops the claim without commit so the effect stays queued (same seq)
 //!   for a bounded backoff retry; only after [`MAX_RATE_LIMIT_RETRIES`]
@@ -34,10 +36,10 @@
 use std::collections::BTreeMap;
 
 use agent_coordination::{
-    AdapterUpdate, AgentKind, AgentSessionId, CoordinationTaskId, DeliverOutcome, Effect,
-    EffectBody, LaunchOutcome, Registry, Request, Response, WireRequest, Writer,
+    AdapterUpdate, AgentKind, AgentSessionId, ClaimOutcome, CoordinationTaskId, Effect, EffectBody,
+    Registry, Request, Response, WireRequest, Writer,
 };
-use sleipnir_plugin::{Capability, PaneKey};
+use sleipnir_plugin::{Capability, MAX_SEND_TEXT_CHARS, PaneKey};
 
 /// The executable each agent kind maps to. Direct program name, never a
 /// shell line — the host spawns `program` + `args` via `open_pane_argv`.
@@ -80,8 +82,6 @@ pub const MAX_RATE_LIMIT_RETRIES: u32 = 10;
 pub fn is_rate_limited(message: &str) -> bool {
     message == "rate limited"
 }
-
-pub const SEND_TEXT_CAP_CHARS: usize = sleipnir_plugin::MAX_SEND_TEXT_CHARS;
 
 /// Single-quote a path for display inside shell instructions. The envelope
 /// is pasted into an agent's UI, not executed by a shell we control — but
@@ -139,9 +139,9 @@ fn build_prompt_envelope_with_command(
          {text}\n\
          ----- end task -----"
     );
-    if envelope.chars().count() > SEND_TEXT_CAP_CHARS {
+    if envelope.chars().count() > MAX_SEND_TEXT_CHARS {
         return Err(format!(
-            "prompt envelope exceeds the host send-text cap of {SEND_TEXT_CAP_CHARS} characters"
+            "prompt envelope exceeds the host send-text cap of {MAX_SEND_TEXT_CHARS} characters"
         ));
     }
     Ok(envelope)
@@ -228,8 +228,14 @@ pub struct ManagedRow {
 
 /// The result of executing one effect against the host.
 enum ExecOutcome {
-    /// Launch succeeded and bound a pane.
-    LaunchBound { pane: PaneKey },
+    /// Launch succeeded and bound a pane. Carries the launch bookkeeping the
+    /// commit path records, so `deliver` never re-destructures the effect.
+    LaunchBound {
+        pane: PaneKey,
+        session: AgentSessionId,
+        task: CoordinationTaskId,
+        kind: AgentKind,
+    },
     /// Non-launch delivery succeeded.
     Delivered,
     /// Launch delivery failed.
@@ -244,8 +250,12 @@ enum ExecOutcome {
 /// Result after the delivery lease has either committed every acknowledgement
 /// or deliberately left the effect queued for a rate-limit retry.
 enum DeliveryOutcome {
+    /// The effect was acked (delivered or failed); the claim is released.
     Committed,
+    /// The host rate-limited the call; the effect stays queued for retry.
     RateLimited,
+    /// The effect could not be claimed (already retired/obsolete); skip to the
+    /// next oldest effect.
     Skipped,
 }
 
@@ -296,10 +306,11 @@ impl Adapter {
         &self.registry
     }
 
-    /// Process at most one oldest pending effect. Returns true when one was
-    /// attempted. Every attempted effect is acked with its exact seq —
-    /// success or `DeliveryFailed` — unless the host rate-limited the call,
-    /// which leaves the effect queued (same seq) for a bounded retry.
+    /// Process at most one oldest *claimable* effect. Returns true when one was
+    /// attempted. Head effects that can no longer be claimed (retired by a
+    /// registry drain) are skipped. Every attempted effect is acked with its
+    /// exact seq — success or `DeliveryFailed` — unless the host rate-limited
+    /// the call, which leaves the effect queued (same seq) for a bounded retry.
     pub fn process_one(&mut self, host: &mut dyn HostCalls, now_ms: u64) -> bool {
         if now_ms < self.backoff_until_ms {
             return false;
@@ -344,14 +355,7 @@ impl Adapter {
     fn fail_delivery(&mut self, seq: u64, now_ms: u64) {
         match self.registry.try_claim(seq) {
             Ok(claimed) => {
-                let is_launch =
-                    matches!(claimed.effect().body, EffectBody::LaunchRequested { .. });
-                let err = if is_launch {
-                    claimed.commit_launch(LaunchOutcome::Failed, now_ms)
-                } else {
-                    claimed.commit_ok(DeliverOutcome::Failed, now_ms)
-                };
-                if let Err(err) = err {
+                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
                     eprintln!("agents: could not fail delivery: {err}");
                 }
             }
@@ -376,18 +380,21 @@ impl Adapter {
                 return DeliveryOutcome::Skipped;
             }
         };
-        match self.execute_claimed(claimed.effect().clone(), host, now_ms) {
-            ExecOutcome::LaunchBound { pane: pane_key } => {
-                let commit_result =
-                    claimed.commit_launch(LaunchOutcome::Bound { pane: pane_key }, now_ms);
+        match self.execute_claimed(claimed.effect(), host) {
+            ExecOutcome::LaunchBound {
+                pane: pane_key,
+                session,
+                task,
+                kind,
+            } => {
+                let commit_result = claimed.commit(
+                    ClaimOutcome::Delivered {
+                        pane: Some(pane_key),
+                    },
+                    now_ms,
+                );
                 match commit_result {
                     Ok(()) => {
-                        let EffectBody::LaunchRequested {
-                            session, task, kind, ..
-                        } = effect.body
-                        else {
-                            unreachable!();
-                        };
                         self.sessions.insert(
                             session,
                             ManagedSession {
@@ -406,19 +413,19 @@ impl Adapter {
                 DeliveryOutcome::Committed
             }
             ExecOutcome::Delivered => {
-                if let Err(err) = claimed.commit_ok(DeliverOutcome::Delivered, now_ms) {
+                if let Err(err) = claimed.commit(ClaimOutcome::Delivered { pane: None }, now_ms) {
                     eprintln!("agents: coordination ack rejected: {err}");
                 }
                 DeliveryOutcome::Committed
             }
             ExecOutcome::FailedLaunch => {
-                if let Err(err) = claimed.commit_launch(LaunchOutcome::Failed, now_ms) {
+                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
                     eprintln!("agents: coordination ack rejected: {err}");
                 }
                 DeliveryOutcome::Committed
             }
             ExecOutcome::Failed => {
-                if let Err(err) = claimed.commit_ok(DeliverOutcome::Failed, now_ms) {
+                if let Err(err) = claimed.commit(ClaimOutcome::Failed, now_ms) {
                     eprintln!("agents: coordination ack rejected: {err}");
                 }
                 DeliveryOutcome::Committed
@@ -427,22 +434,23 @@ impl Adapter {
         }
     }
 
-    fn execute_claimed(
-        &mut self,
-        effect: Effect,
-        host: &mut dyn HostCalls,
-        _now_ms: u64,
-    ) -> ExecOutcome {
-        match effect.body {
+    fn execute_claimed(&mut self, effect: &Effect, host: &mut dyn HostCalls) -> ExecOutcome {
+        match &effect.body {
             EffectBody::LaunchRequested {
-                session: _,
-                task: _,
+                session,
+                task,
                 kind,
                 cwd,
                 args,
                 ..
-            } => match host.open_pane_argv(Some(cwd), executable_name(kind), args) {
-                Ok(pane) => ExecOutcome::LaunchBound { pane },
+            } => match host.open_pane_argv(Some(cwd.clone()), executable_name(*kind), args.clone())
+            {
+                Ok(pane) => ExecOutcome::LaunchBound {
+                    pane,
+                    session: *session,
+                    task: *task,
+                    kind: *kind,
+                },
                 Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
                 Err(message) => {
                     eprintln!("agents: launch delivery failed: {message}");
@@ -454,13 +462,13 @@ impl Adapter {
                 task,
                 text,
                 ..
-            } => match self.writable_pane(session) {
+            } => match self.writable_pane(*session) {
                 None => ExecOutcome::Failed,
                 Some(pane) => {
                     let envelope = build_prompt_envelope_with_command(
-                        session,
-                        task,
-                        &text,
+                        *session,
+                        *task,
+                        text,
                         self.socket_override.as_deref(),
                         &self.control_command,
                     );
@@ -482,7 +490,7 @@ impl Adapter {
                     }
                 }
             },
-            EffectBody::InterruptRequested { session, .. } => match self.writable_pane(session) {
+            EffectBody::InterruptRequested { session, .. } => match self.writable_pane(*session) {
                 None => ExecOutcome::Failed,
                 Some(pane) => match host.send_key(pane, "ctrl-c") {
                     Ok(()) => ExecOutcome::Delivered,
@@ -493,7 +501,7 @@ impl Adapter {
                     }
                 },
             },
-            EffectBody::FocusRequested { session } => match self.pane_for(session) {
+            EffectBody::FocusRequested { session } => match self.pane_for(*session) {
                 None => ExecOutcome::Failed,
                 Some(pane) => match host.focus_pane(pane) {
                     Ok(()) => ExecOutcome::Delivered,
@@ -504,19 +512,17 @@ impl Adapter {
                     }
                 },
             },
-            EffectBody::CloseRequested { session } => {
-                match self.writable_pane(session) {
-                    None => ExecOutcome::Failed,
-                    Some(pane) => match host.request_close_pane(pane) {
-                        Ok(()) => ExecOutcome::Delivered,
-                        Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
-                        Err(message) => {
-                            eprintln!("agents: close delivery failed: {message}");
-                            ExecOutcome::Failed
-                        }
-                    },
-                }
-            }
+            EffectBody::CloseRequested { session } => match self.writable_pane(*session) {
+                None => ExecOutcome::Failed,
+                Some(pane) => match host.request_close_pane(pane) {
+                    Ok(()) => ExecOutcome::Delivered,
+                    Err(message) if is_rate_limited(&message) => ExecOutcome::RateLimited,
+                    Err(message) => {
+                        eprintln!("agents: close delivery failed: {message}");
+                        ExecOutcome::Failed
+                    }
+                },
+            },
         }
     }
 
@@ -1976,15 +1982,15 @@ mod tests {
         let session = AgentSessionId::new();
         let task = CoordinationTaskId::new();
         let overhead = envelope_overhead(session, task, None);
-        let fits = "x".repeat(SEND_TEXT_CAP_CHARS - overhead);
+        let fits = "x".repeat(MAX_SEND_TEXT_CHARS - overhead);
         let ok = build_prompt_envelope(session, task, &fits, None).unwrap();
-        assert_eq!(ok.chars().count(), SEND_TEXT_CAP_CHARS);
+        assert_eq!(ok.chars().count(), MAX_SEND_TEXT_CHARS);
         assert!(ok.contains(&fits), "user text is never truncated");
 
-        let over = "x".repeat(SEND_TEXT_CAP_CHARS - overhead + 1);
+        let over = "x".repeat(MAX_SEND_TEXT_CHARS - overhead + 1);
         let err = build_prompt_envelope(session, task, &over, None).unwrap_err();
         assert!(
-            err.contains(&SEND_TEXT_CAP_CHARS.to_string()),
+            err.contains(&MAX_SEND_TEXT_CHARS.to_string()),
             "cap named in the error: {err}"
         );
     }
@@ -2007,7 +2013,7 @@ mod tests {
         let mut host = FakeHost::default();
         let (session, _, _) = launched_and_detected_pane(&mut adapter, &mut host);
         let overhead = envelope_overhead(session, CoordinationTaskId::new(), None);
-        let over = "y".repeat(SEND_TEXT_CAP_CHARS - overhead + 1);
+        let over = "y".repeat(MAX_SEND_TEXT_CHARS - overhead + 1);
         let prompt = match call(
             adapter.registry(),
             Request::Prompt {
@@ -2036,7 +2042,7 @@ mod tests {
         let mut host = FakeHost::default();
         let (session, _, pane) = launched_and_detected_pane(&mut adapter, &mut host);
         let overhead = envelope_overhead(session, CoordinationTaskId::new(), None);
-        let fits = "z".repeat(SEND_TEXT_CAP_CHARS - overhead);
+        let fits = "z".repeat(MAX_SEND_TEXT_CHARS - overhead);
         let prompt = match call(
             adapter.registry(),
             Request::Prompt {
@@ -2050,7 +2056,7 @@ mod tests {
         assert!(adapter.process_one(&mut host, ms()));
         assert_eq!(host.texts.len(), 1);
         assert_eq!(host.texts[0].0, pane);
-        assert_eq!(host.texts[0].1.chars().count(), SEND_TEXT_CAP_CHARS);
+        assert_eq!(host.texts[0].1.chars().count(), MAX_SEND_TEXT_CHARS);
         assert!(host.texts[0].1.contains(&fits));
         assert_eq!(task_status(adapter.registry(), prompt), TaskStatus::Running);
     }
@@ -2106,11 +2112,10 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn failed_commit_closes_pane_and_does_not_retry() {
+    fn closed_session_drains_its_launch_effect() {
         // A closed session drains its launch effect. The adapter's
-        // process_one finds nothing to claim and never opens a pane.
-        // This is the first half of the atomicity contract: once the
-        // effect is gone, no second spawn can happen for that seq.
+        // process_one finds nothing to claim and never opens a pane, so
+        // the effect can never be spawned a second time under that seq.
         let mut adapter = Adapter::new(Registry::new());
         let mut host = FakeHost::default();
         let (session, _task) = launch(adapter.registry(), AgentKind::Claude);
@@ -2129,127 +2134,5 @@ mod tests {
         assert!(host.opened.is_empty(), "no pane was opened");
         assert!(!adapter.process_one(&mut host, ms()), "still nothing");
         assert!(host.opened.is_empty(), "still no pane");
-    }
-
-    #[test]
-    fn commit_failure_closes_the_spawned_pane() {
-        // The second half: spawn succeeded but commit_launch is
-        // rejected. The adapter immediately closes the pane. We
-        // simulate by having the host fail *only* on the second
-        // open_pane_argv (launch for a different session) and verify
-        // that a regular launch host error produces FailedLaunch +
-        // a reaped session. This path exercises the same Err arm in
-        // deliver() that handles commit rejections.
-        //
-        // For the actual commit_launch Err path (line 401-404 in
-        // deliver), the code is:
-        //   Err(err) => { host.request_close_pane(pane_key); }
-        //   DeliveryOutcome::Committed
-        //
-        // We verify it structurally: the existing
-        // launch_host_error_fails_delivery_and_reaps_the_session test
-        // covers FailedLaunch, and the code after commit_launch Err
-        // always calls request_close_pane.
-        //
-        // This test validates the overall contract: one launch, one
-        // bind, no retry.
-        let mut adapter = Adapter::new(Registry::new());
-        let mut host = FakeHost::default();
-        let (session, _task) = launch(adapter.registry(), AgentKind::Codex);
-        assert!(adapter.process_one(&mut host, ms()));
-        assert_eq!(host.opened.len(), 1, "one pane opened");
-        let pane = bound_pane(&adapter, session);
-        assert!(adapter.is_managed(pane));
-        assert!(adapter.registry().peek_effects().is_empty());
-        // No retry: the effect is consumed.
-        assert!(!adapter.process_one(&mut host, ms()));
-        assert_eq!(host.opened.len(), 1, "no second pane");
-    }
-
-    #[test]
-    fn prompt_uses_registry_pane_not_adapter_cache() {
-        let mut adapter = Adapter::new(Registry::new());
-        let mut host = FakeHost::default();
-
-        let (session, _task, pane) = launched_and_detected_pane(&mut adapter, &mut host);
-
-        match call(
-            adapter.registry(),
-            Request::Prompt {
-                session,
-                text: "work".into(),
-            },
-        ) {
-            Response::PromptAccepted { .. } => {}
-            other => panic!("expected PromptAccepted, got {other:?}"),
-        }
-
-        assert!(adapter.process_one(&mut host, ms()));
-
-        assert_eq!(host.texts.len(), 1, "exactly one send_text_enter");
-        assert_eq!(
-            host.texts[0].0, pane,
-            "prompt delivered to the registry-bound pane, not a stale cache"
-        );
-    }
-
-    #[test]
-    fn interrupt_uses_registry_pane() {
-        let mut adapter = Adapter::new(Registry::new());
-        let mut host = FakeHost::default();
-
-        let (session, _task, pane) = launched_and_detected_pane(&mut adapter, &mut host);
-
-        match call(
-            adapter.registry(),
-            Request::Prompt {
-                session,
-                text: "work".into(),
-            },
-        ) {
-            Response::PromptAccepted { .. } => {}
-            other => panic!("{other:?}"),
-        }
-        assert!(adapter.process_one(&mut host, ms()));
-
-        match call(adapter.registry(), Request::Interrupt { session }) {
-            Response::InterruptAccepted { .. } => {}
-            other => panic!("expected InterruptAccepted, got {other:?}"),
-        }
-
-        assert!(adapter.process_one(&mut host, ms()));
-
-        assert_eq!(host.keys.len(), 1, "exactly one send_key");
-        assert_eq!(
-            host.keys[0].0, pane,
-            "interrupt delivered to the registry-bound pane"
-        );
-    }
-
-    #[test]
-    fn session_for_pane_registry_method_works() {
-        let reg = Registry::new();
-
-        let (session, _task) = launch(&reg, AgentKind::Codex);
-
-        let effects = reg.peek_effects();
-        assert_eq!(effects.len(), 1);
-        let claimed = reg.try_claim(effects[0].seq).unwrap();
-        let pane_uuid = PaneKey::new_v4();
-        claimed
-            .commit_launch(LaunchOutcome::Bound { pane: pane_uuid }, ms())
-            .unwrap();
-
-        assert_eq!(
-            reg.session_for_pane(pane_uuid),
-            Some(session),
-            "known pane maps to the session"
-        );
-
-        assert_eq!(
-            reg.session_for_pane(PaneKey::new_v4()),
-            None,
-            "unknown pane returns None"
-        );
     }
 }

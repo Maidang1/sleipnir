@@ -1055,7 +1055,6 @@ fn paint_terminal_cursor(
     }
 }
 
-
 /// A subtle white overlay, independent of the terminal's ANSI accent colors.
 fn selection_background() -> gpui::Hsla {
     gpui::Hsla::white().opacity(0.10)
@@ -1127,6 +1126,34 @@ struct TerminalInputHandler {
 mod tests {
     use super::*;
     use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
+
+    /// Text a Block would paint for a laid-out widget kind. Lives here (not on
+    /// `LaidOutKind`) because these projections have no production caller — only
+    /// the block-parity tests below assert on them.
+    fn text_content(kind: &sleipnir_widget::LaidOutKind) -> Option<String> {
+        use sleipnir_widget::LaidOutKind;
+        match kind {
+            LaidOutKind::Text { lines, .. } => Some(lines.join("\n")),
+            LaidOutKind::Code { lines } => Some(
+                lines
+                    .iter()
+                    .map(|l| l.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            LaidOutKind::Badge { text, .. } | LaidOutKind::Btn { text, .. } => Some(text.clone()),
+            LaidOutKind::Attribution { label, .. } => Some(label.clone()),
+            LaidOutKind::Unknown => Some("[?]".into()),
+            LaidOutKind::Truncated => Some("… truncated".into()),
+            LaidOutKind::Spark { levels } => Some(sleipnir_widget::spark_glyphs(levels)),
+            LaidOutKind::Sep | LaidOutKind::Bar { .. } => None,
+            LaidOutKind::Col | LaidOutKind::Row => None,
+        }
+    }
+
+    fn is_bold(kind: &sleipnir_widget::LaidOutKind) -> bool {
+        matches!(kind, sleipnir_widget::LaidOutKind::Text { bold: true, .. })
+    }
 
     #[test]
     fn wide_cell_backgrounds_do_not_overlap() {
@@ -1288,7 +1315,7 @@ mod tests {
         ];
 
         for kind in visible {
-            let text = kind.text_content();
+            let text = text_content(&kind);
             assert!(
                 text.is_some_and(|t| !t.is_empty()),
                 "{kind:?} renders as nothing in a Block; \
@@ -1299,7 +1326,7 @@ mod tests {
         // Containers and the two quad-painted kinds legitimately produce no
         // text; they are drawn as geometry or not at all.
         for kind in [LaidOutKind::Col, LaidOutKind::Row] {
-            assert!(kind.text_content().is_none(), "{kind:?} is a container");
+            assert!(text_content(&kind).is_none(), "{kind:?} is a container");
         }
     }
 
@@ -1311,7 +1338,7 @@ mod tests {
         let kind = LaidOutKind::Spark {
             levels: vec![0, 4, 8],
         };
-        let text = kind.text_content().expect("spark renders");
+        let text = text_content(&kind).expect("spark renders");
         assert_eq!(text, " ▄█");
         assert_eq!(text.chars().count(), 3, "one glyph per reserved cell");
     }
@@ -1332,14 +1359,13 @@ mod tests {
             tone: Tone::Fg,
             bold: false,
         };
-        assert!(bold.is_bold(), "bold text must paint bold");
-        assert!(!plain.is_bold(), "plain text must not paint bold");
+        assert!(is_bold(&bold), "bold text must paint bold");
+        assert!(!is_bold(&plain), "plain text must not paint bold");
         assert!(
-            !LaidOutKind::Badge {
+            !is_bold(&LaidOutKind::Badge {
                 text: "x".into(),
                 tone: Tone::Ok,
-            }
-            .is_bold(),
+            }),
             "only Text carries bold in the schema"
         );
     }
@@ -1348,16 +1374,15 @@ mod tests {
     fn block_text_for_joins_multiline_text_and_code_with_newlines() {
         use sleipnir_widget::{CodeLine, LaidOutKind, Tone};
 
-        let text = LaidOutKind::Text {
+        let text = text_content(&LaidOutKind::Text {
             lines: vec!["alpha".into(), "beta".into()],
             tone: Tone::Fg,
             bold: false,
-        }
-        .text_content()
+        })
         .expect("text renders");
         assert_eq!(text, "alpha\nbeta");
 
-        let code = LaidOutKind::Code {
+        let code = text_content(&LaidOutKind::Code {
             lines: vec![
                 CodeLine {
                     text: "let x = 1;".into(),
@@ -1368,8 +1393,7 @@ mod tests {
                     truncated: false,
                 },
             ],
-        }
-        .text_content()
+        })
         .expect("code renders");
         assert_eq!(code, "let x = 1;\nx += 1;");
     }

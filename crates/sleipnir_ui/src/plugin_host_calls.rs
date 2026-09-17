@@ -148,7 +148,6 @@ fn ok_or_error(result: Result<(), String>) -> HostCallResult {
     }
 }
 
-
 /// What the UI should do for one `Call`. Always ends in a reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallPlan {
@@ -220,7 +219,6 @@ impl CallPlan {
         }
     }
 }
-
 
 /// Per-plugin sliding-window limiter. Drops are counted so the Monitor can
 /// show a resident plugin that is hammering Notify / OpenPane.
@@ -1243,7 +1241,9 @@ mod tests {
             other => panic!("expected Screen, got {other:?}"),
         }
         match (CallPlan::ReadScreen { pane: key(2) }).execute(&mut io) {
-            HostCallResult::Error { message } => assert!(message.contains("not found"), "{message}"),
+            HostCallResult::Error { message } => {
+                assert!(message.contains("not found"), "{message}")
+            }
             other => panic!("missing pane must be an Error, got {other:?}"),
         }
     }
@@ -1277,7 +1277,9 @@ mod tests {
             enter: false,
         };
         match missing.execute(&mut io) {
-            HostCallResult::Error { message } => assert!(message.contains("not found"), "{message}"),
+            HostCallResult::Error { message } => {
+                assert!(message.contains("not found"), "{message}")
+            }
             other => panic!("missing pane must deny, got {other:?}"),
         }
         // The denied call left no side effect.
@@ -1358,4 +1360,3 @@ mod tests {
         }
     }
 }
-

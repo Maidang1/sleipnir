@@ -237,8 +237,11 @@ impl Supervisor {
     /// Drain every live connection's inbound queue. Order is plugin-id sorted
     /// so a UI poll is deterministic.
     pub fn drain_all_inbound(&self) -> Vec<InboundEnvelope> {
-        let mut sessions: Vec<Arc<Session>> =
-            mutex_lock(&self.inner).instances.values().cloned().collect();
+        let mut sessions: Vec<Arc<Session>> = mutex_lock(&self.inner)
+            .instances
+            .values()
+            .cloned()
+            .collect();
         sessions.sort_by(|a, b| {
             a.plugin_id
                 .cmp(&b.plugin_id)
@@ -342,7 +345,11 @@ impl Supervisor {
         let idle_ms = self.config.idle.as_millis() as u64;
         let stable_ms = self.config.stable_after.as_millis() as u64;
 
-        let ids: Vec<String> = mutex_lock(&self.inner).resident_index.keys().cloned().collect();
+        let ids: Vec<String> = mutex_lock(&self.inner)
+            .resident_index
+            .keys()
+            .cloned()
+            .collect();
         for id in ids {
             let plug_lock = self.plugin_lock(&id);
             let _guard = mutex_lock(&plug_lock);

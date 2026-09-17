@@ -58,15 +58,10 @@ pub type BlockId = Uuid;
 pub type RunId = Uuid;
 pub type PaneKey = Uuid;
 
-/// Scrollback position of a Run or Block. Process-local — never persisted:
-/// a restored anchor would claim a scrollback line that no longer means
-/// anything (ADR-0018 lifecycle).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Anchor {
-    /// Absolute line (`cursor.line + history_size` when the Run was recorded).
-    pub line: i32,
-    pub column: usize,
-}
+/// Scrollback position of a Run or Block. Defined in [`crate::geometry`]
+/// (process-local, never on the wire); re-exported here for consumers that
+/// historically imported it from `v2`.
+pub use crate::geometry::Anchor;
 
 /// True when the host can speak to a plugin claiming `plugin`. The accepted
 /// range is anchored on the dialects actually implemented

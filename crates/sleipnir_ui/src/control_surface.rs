@@ -478,14 +478,23 @@ async fn wait_until(
     }
 }
 
+/// Handle the three synchronous control-surface verbs (`ls` / `capture` /
+/// `send`). `wait` is served asynchronously by [`wait_until`] and never routed
+/// here.
+///
+/// This is a plain match over ctl's own protocol, not the plugin
+/// [`crate::plugin_host_calls::WorkspaceIo`] trait: ctl has no open / focus /
+/// send-key / close / scroll-to-run request, so implementing all eight verbs
+/// would mean five "not a control-surface request" stubs. The genuinely shared
+/// work — the terminal-pane walk ([`live_terminal_panes`]) and the `PaneInfo`
+/// construction ([`pane_infos`]) — is factored into free functions the plugin
+/// host calls can reuse. `send` keeps ctl's raw-PTY-byte semantics (see
+/// [`send_bytes`]); the plugin `SendText` verb keeps its paste-aware path.
 #[cfg(unix)]
 fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
-    use crate::plugin_host_calls::WorkspaceIo;
-    let mut io = AppWorkspaceIo { cx };
     match req {
         ControlRequest::Ls => ControlResponse::Ls {
-            panes: io
-                .list_terminal_panes()
+            panes: pane_infos(&live_terminal_panes(cx), cx)
                 .into_iter()
                 .map(|info| PaneSnap {
                     pane: info.pane,
@@ -495,13 +504,22 @@ fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
                 })
                 .collect(),
         },
-        ControlRequest::Capture { pane } => match io.read_screen(pane) {
-            Ok(text) => ControlResponse::Capture { text },
-            Err(message) => ControlResponse::Error { message },
+        ControlRequest::Capture { pane } => match view_for_pane(cx, pane) {
+            Some(view) => ControlResponse::Capture {
+                text: view.read(cx).visible_screen_text(cx),
+            },
+            None => ControlResponse::Error {
+                message: format!("pane {pane} not found"),
+            },
         },
-        ControlRequest::Send { pane, text, enter } => match io.send_text(pane, text, enter) {
-            Ok(()) => ControlResponse::Send,
-            Err(message) => ControlResponse::Error { message },
+        ControlRequest::Send { pane, text, enter } => match view_for_pane(cx, pane) {
+            Some(view) => {
+                send_bytes(&view, text, enter, cx);
+                ControlResponse::Send
+            }
+            None => ControlResponse::Error {
+                message: format!("pane {pane} not found"),
+            },
         },
         ControlRequest::Wait { .. } => ControlResponse::Error {
             message: "wait handled asynchronously".into(),
@@ -509,90 +527,43 @@ fn dispatch(req: ControlRequest, cx: &mut App) -> ControlResponse {
     }
 }
 
-/// [`WorkspaceIo`] over every live window, for `sleipnir-ctl`. The same trait
-/// the plugin host calls execute against, so `ls` / `capture` / `send` share
-/// the pane walk and `insert_text` write with the plugin verbs instead of a
-/// parallel copy. `ls` and `capture` keep the full (uncapped) text ctl expects;
-/// the plugin `ReadScreen` cap lives in [`crate::plugin_host_calls::CallPlan`].
-///
-/// The window-owning verbs (open / focus / send-key / close / scroll-to-run)
-/// are never planned by the control surface — its protocol has no such request
-/// — so they report they are unavailable here rather than reaching for a
-/// `Window` the socket thread does not have.
-#[cfg(unix)]
-struct AppWorkspaceIo<'a> {
-    cx: &'a mut App,
+/// Build a [`plugin_protocol::v2::PaneInfo`] for each terminal pane. Shared by
+/// `sleipnir-ctl ls` and the plugin `ListPanes` verb so the two enumerations
+/// cannot drift. The caller supplies the terminal walk (`live_terminal_panes`
+/// here, the frame's cached `live_panes` in the shell) which already excludes
+/// plugin Panel leaves.
+pub(crate) fn pane_infos(
+    panes: &[(PaneKey, gpui::Entity<TermView>)],
+    cx: &App,
+) -> Vec<plugin_protocol::v2::PaneInfo> {
+    panes
+        .iter()
+        .map(|(pane, view)| plugin_protocol::v2::PaneInfo {
+            pane: *pane,
+            cwd: view
+                .read(cx)
+                .working_directory(cx)
+                .map(|p| p.to_string_lossy().into_owned()),
+            title: Some(view.read(cx).title().to_string()),
+            busy: view.read(cx).looks_busy(cx),
+        })
+        .collect()
 }
 
+/// `sleipnir-ctl send`: write raw bytes straight to the PTY, appending `\r`
+/// when `enter` is set. Multiline text therefore executes line by line and
+/// control bytes pass through verbatim — the automation contract ctl has
+/// always had. This is deliberately *not* the plugin `SendText` path
+/// ([`TermView::insert_text`], bracketed-paste-aware and CSI-stripping):
+/// plugins are untrusted, `sleipnir-ctl` is the local operator.
 #[cfg(unix)]
-impl crate::plugin_host_calls::WorkspaceIo for AppWorkspaceIo<'_> {
-    fn list_terminal_panes(&mut self) -> Vec<plugin_protocol::v2::PaneInfo> {
-        live_terminal_panes(self.cx)
-            .into_iter()
-            .map(|(pane, view)| plugin_protocol::v2::PaneInfo {
-                pane,
-                cwd: view
-                    .read(self.cx)
-                    .working_directory(self.cx)
-                    .map(|p| p.to_string_lossy().into_owned()),
-                title: Some(view.read(self.cx).title().to_string()),
-                busy: view.read(self.cx).looks_busy(self.cx),
-            })
-            .collect()
+fn send_bytes(view: &gpui::Entity<TermView>, text: String, enter: bool, cx: &mut App) {
+    let mut bytes = text.into_bytes();
+    if enter {
+        bytes.push(b'\r');
     }
-
-    fn read_screen(&mut self, pane: PaneKey) -> Result<String, String> {
-        match view_for_pane(self.cx, pane) {
-            Some(view) => Ok(view.read(self.cx).visible_screen_text(self.cx)),
-            None => Err(format!("pane {pane} not found")),
-        }
-    }
-
-    fn open_pane(
-        &mut self,
-        _cwd: Option<String>,
-        _command: Option<crate::plugin_host_calls::OpenCommand>,
-    ) -> plugin_protocol::v2::HostCallResult {
-        plugin_protocol::v2::HostCallResult::Error {
-            message: "open_pane is not a control-surface request".into(),
-        }
-    }
-
-    fn scroll_to_run(&mut self, _run_id: plugin_protocol::v2::RunId) -> Result<(), String> {
-        Err("scroll_to_run is not a control-surface request".into())
-    }
-
-    fn focus_pane(&mut self, _pane: PaneKey) -> Result<(), String> {
-        Err("focus_pane is not a control-surface request".into())
-    }
-
-    fn send_text(&mut self, pane: PaneKey, text: String, enter: bool) -> Result<(), String> {
-        match view_for_pane(self.cx, pane) {
-            Some(view) => {
-                let delivered = view.update(self.cx, |v, cx| v.insert_text(&text, enter, cx));
-                if delivered {
-                    Ok(())
-                } else {
-                    Err(format!("pane {pane} is not ready"))
-                }
-            }
-            None => Err(format!("pane {pane} not found")),
-        }
-    }
-
-    fn send_key(
-        &mut self,
-        _pane: PaneKey,
-        _key: crate::plugin_host_calls::LogicalKey,
-    ) -> Result<(), String> {
-        Err("send_key is not a control-surface request".into())
-    }
-
-    fn request_close_pane(&mut self, _pane: PaneKey) -> Result<(), String> {
-        Err("request_close_pane is not a control-surface request".into())
-    }
+    view.update(cx, |v, cx| v.input_bytes(bytes, cx));
 }
-
 
 #[cfg(unix)]
 fn wait_status(pane: PaneKey, until: WaitUntil, cx: &mut App) -> Result<bool, String> {

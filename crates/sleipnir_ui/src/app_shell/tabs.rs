@@ -13,7 +13,7 @@ use super::{
 };
 use crate::TermView;
 use crate::chrome::active_after_close;
-use crate::pane_tree::{PaneId, PaneKey, PaneNode};
+use crate::pane_tree::{PaneId, PaneNode};
 use crate::tab_convert::{extract_pane, merge_tab};
 
 const CLOSED_TAB_HISTORY_LIMIT: usize = 10;
@@ -77,7 +77,10 @@ impl AppShell {
             return;
         };
         let buffer = tab.path_label(cx).to_string();
-        self.set_input(crate::ui_mode::InputMode::Rename(RenameState { tab_id, buffer }), cx);
+        self.set_input(
+            crate::ui_mode::InputMode::Rename(RenameState { tab_id, buffer }),
+            cx,
+        );
         cx.notify();
     }
 
@@ -178,10 +181,14 @@ impl AppShell {
         if needs_confirm {
             let name =
                 first_busy.and_then(|view| view.read(cx).foreground_process_command_name(cx));
-            self.set_input(crate::ui_mode::InputMode::Confirm(CloseConfirmState {
-                message: crate::chrome::close_copy::close_confirm_message(name.as_deref()).into(),
-                kind: ConfirmKind::CloseTab(tab_id),
-            }), cx);
+            self.set_input(
+                crate::ui_mode::InputMode::Confirm(CloseConfirmState {
+                    message: crate::chrome::close_copy::close_confirm_message(name.as_deref())
+                        .into(),
+                    kind: ConfirmKind::CloseTab(tab_id),
+                }),
+                cx,
+            );
             cx.notify();
         } else {
             self.close_tab_at(index, window, cx);
@@ -390,12 +397,7 @@ impl AppShell {
         self.commit_workspace(window, cx);
     }
 
-    fn adopt_tab(
-        &mut self,
-        tab: Tab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn adopt_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.clear();
         let mut tab = tab;
         let mut leaves = Vec::new();
@@ -447,7 +449,7 @@ impl AppShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane_tree::{LeafContent, SplitAxis};
+    use crate::pane_tree::{LeafContent, PaneKey, SplitAxis};
     use crate::plugin_panel::PanelSurface;
     use plugin_protocol::v2::{Tone, Widget};
     use uuid::Uuid;
@@ -547,8 +549,16 @@ mod tests {
         let mixed = PaneNode::Split {
             axis: SplitAxis::Horizontal,
             ratio: 0.5,
-            first: Box::new(PaneNode::panel_leaf(10, Uuid::from_u128(1), demo_surface(Uuid::from_u128(1)))),
-            second: Box::new(PaneNode::panel_leaf(20, Uuid::from_u128(2), demo_surface(Uuid::from_u128(2)))),
+            first: Box::new(PaneNode::panel_leaf(
+                10,
+                Uuid::from_u128(1),
+                demo_surface(Uuid::from_u128(1)),
+            )),
+            second: Box::new(PaneNode::panel_leaf(
+                20,
+                Uuid::from_u128(2),
+                demo_surface(Uuid::from_u128(2)),
+            )),
         };
         let mut leaves = Vec::new();
         mixed.walk_leaves(&mut leaves);

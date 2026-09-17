@@ -17,10 +17,23 @@ use crate::plugin_panel::{action_at, cell_from_pixels, cols_from_pixels, layout_
 use sleipnir_widget::Tone;
 
 impl AppShell {
+    /// Borrow the panel surface mounted on `pane_key`, across all tabs. Pane
+    /// keys are unique, so this is the one canonical lookup the tree-owned
+    /// design needs — no walk-collect-clone.
+    pub(super) fn panel_view(
+        &self,
+        pane_key: PaneKey,
+    ) -> Option<&crate::plugin_panel::PanelSurface> {
+        self.tabs
+            .iter()
+            .find_map(|tab| tab.tree.find_panel(pane_key))
+    }
+
     pub(super) fn render_plugin_panel(
         &self,
         pane_id: PaneId,
         pane_key: PaneKey,
+        surface: &crate::plugin_panel::PanelSurface,
         tokens: &ChromeTokens,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -35,27 +48,6 @@ impl AppShell {
             .or_else(|| self.content_bounds.map(|b| f32::from(b.size.width)))
             .unwrap_or(80.0);
         let cols = cols_from_pixels(pixel_width, cell_w);
-        // Read the surface from the tree leaf, not a parallel registry.
-        let panel_view = self.tabs.iter().flat_map(|tab| {
-            let mut all = Vec::new();
-            tab.tree.walk_leaves(&mut all);
-            all.into_iter()
-                .filter_map(|(_, k, c)| {
-                    if k == pane_key {
-                        c.as_panel().cloned()
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        }).next();
-        let Some(panel) = panel_view else {
-            return div()
-                .size_full()
-                .bg(tokens.surface)
-                .into_any_element();
-        };
-        let surface = &panel.surface;
         let laid = layout_surface(surface, cols);
         let stale = surface.stale;
         let owner_instance_id = surface.owner_instance_id;
@@ -133,22 +125,13 @@ impl AppShell {
                 let local_x = f32::from(ev.position.x) - f32::from(origin.x);
                 let local_y = f32::from(ev.position.y) - f32::from(origin.y);
                 let pos = cell_from_pixels(local_x, local_y, cell_w_click, line_h_click);
-                // Re-read surface from the tree for the click handler.
-                let panel = this.tabs.iter().flat_map(|tab| {
-                    let mut all = Vec::new();
-                    tab.tree.walk_leaves(&mut all);
-                    all.into_iter()
-                        .filter_map(|(_, k, c)| {
-                            if k == pane_key { c.as_panel().cloned() } else { None }
-                        })
-                        .collect::<Vec<_>>()
-                }).next();
-                if let Some(panel) = panel {
-                    if panel.surface.stale {
+                // Re-borrow the surface from the tree for the click handler.
+                if let Some(surface) = this.panel_view(pane_key) {
+                    if surface.stale {
                         cx.notify();
                         return;
                     }
-                    let laid = layout_surface(&panel.surface, cols);
+                    let laid = layout_surface(surface, cols);
                     if let Some(hit) = action_at(&laid, pos.col, pos.row) {
                         crate::plugin_runtime::push_action(
                             owner_instance_id,
@@ -171,7 +154,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         use crate::plugin_chrome::MAX_STATUS_COLS;
-        if self.plugin.chrome_is_empty() {
+        if self.plugin_chrome.is_empty() {
             return div().into_any_element();
         }
         let builtins: std::collections::BTreeSet<_> =
@@ -180,7 +163,7 @@ impl AppShell {
                 .filter(|plugin| plugin.source == plugin_host::PluginSource::BuiltInAgents)
                 .map(|plugin| plugin.manifest.id)
                 .collect();
-        let Some(status) = self.plugin.chrome_status_layout(MAX_STATUS_COLS) else {
+        let Some(status) = self.plugin_chrome.status_layout(MAX_STATUS_COLS) else {
             return div().into_any_element();
         };
         if status.height == 0 || status.width == 0 {

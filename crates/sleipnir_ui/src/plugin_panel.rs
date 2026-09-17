@@ -38,6 +38,79 @@ impl Surface for PanelSurface {
     }
 }
 
+impl PanelSurface {
+    /// The plugin that owns this surface. Kept so callers holding a leaf's
+    /// surface read an id the same way the old panel wrapper offered.
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+}
+
+/// Outcome of deciding a `Render { target: Panel }`. Pure policy: the shell
+/// gathers the existing leaf (by reference), calls [`decide_panel_render`], and
+/// executes the verdict. The deny matrix lives here, not in the GPUI shell, so
+/// it stays unit-testable (mirrors `ApplyChrome` / `ApplyBlock`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApplyPanel {
+    /// No existing leaf: insert a new panel leaf with `surface_id`.
+    Create { surface_id: Uuid },
+    /// A leaf exists for this pane: replace its surface in place. `surface_id`
+    /// is the id to write — the same one when the owning instance is unchanged,
+    /// a freshly minted one when a new instance reclaims a stale surface.
+    Replace { surface_id: Uuid },
+    /// No `RenderPanel` grant. The tree is discarded.
+    DeniedGrant,
+    /// `pane` is a live terminal. Rendering into it would steal the PTY.
+    DeniedTerminal,
+    /// Another plugin already owns this pane_key.
+    DeniedOccupied,
+    /// The same plugin id already has a live panel here, but from a different
+    /// instance. Only a stale surface may be reclaimed by a new instance.
+    DeniedOwnerInstance,
+}
+
+/// Decide how a whole-tree `Render { target: Panel }` should be applied.
+///
+/// Pure decision logic — no gpui, no pane tree. `existing` is the surface
+/// already mounted on `pane` (if any), borrowed from the leaf. `granted` is the
+/// live session's `RenderPanel` bit; `is_terminal` is true when `pane` is a PTY
+/// leaf. The caller executes the returned verdict, minting `surface_id` into a
+/// [`PanelSurface`] for Create/Replace.
+pub fn decide_panel_render(
+    existing: Option<&PanelSurface>,
+    plugin_id: &str,
+    instance_id: Uuid,
+    is_terminal: bool,
+    granted: bool,
+) -> ApplyPanel {
+    if !granted {
+        return ApplyPanel::DeniedGrant;
+    }
+    if is_terminal {
+        return ApplyPanel::DeniedTerminal;
+    }
+    match existing {
+        Some(existing) if existing.plugin_id != plugin_id => ApplyPanel::DeniedOccupied,
+        Some(existing) if existing.owner_instance_id != instance_id && !existing.stale => {
+            ApplyPanel::DeniedOwnerInstance
+        }
+        Some(existing) => {
+            // Stale reclaim by a new instance mints a fresh surface id so old
+            // action routing cannot land on the new owner; same instance keeps
+            // its id.
+            let surface_id = if existing.owner_instance_id != instance_id {
+                Uuid::new_v4()
+            } else {
+                existing.surface_id
+            };
+            ApplyPanel::Replace { surface_id }
+        }
+        None => ApplyPanel::Create {
+            surface_id: Uuid::new_v4(),
+        },
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PanelAction {
     pub action: String,
@@ -137,6 +210,195 @@ mod tests {
 
     fn key(n: u128) -> PaneKey {
         Uuid::from_u128(n)
+    }
+
+    /// Apply a `decide_panel_render` verdict to an in-memory surface slot,
+    /// mirroring what the shell does to the tree leaf. Returns the verdict so a
+    /// test can assert on it. Denials leave the slot untouched.
+    fn apply(
+        slot: &mut Option<PanelSurface>,
+        plugin_id: &str,
+        instance_id: Uuid,
+        pane: PaneKey,
+        tree: Widget,
+        is_terminal: bool,
+        granted: bool,
+    ) -> ApplyPanel {
+        let out = decide_panel_render(slot.as_ref(), plugin_id, instance_id, is_terminal, granted);
+        match out {
+            ApplyPanel::Create { surface_id } | ApplyPanel::Replace { surface_id } => {
+                *slot = Some(PanelSurface {
+                    plugin_id: plugin_id.to_string(),
+                    owner_instance_id: instance_id,
+                    pane_key: pane,
+                    surface_id,
+                    tree,
+                    stale: false,
+                });
+            }
+            ApplyPanel::DeniedGrant
+            | ApplyPanel::DeniedTerminal
+            | ApplyPanel::DeniedOccupied
+            | ApplyPanel::DeniedOwnerInstance => {}
+        }
+        out
+    }
+
+    #[test]
+    fn render_panel_grant_is_required() {
+        let mut slot = None;
+        let out = apply(
+            &mut slot,
+            "demo",
+            Uuid::nil(),
+            key(1),
+            text("hi"),
+            false,
+            false,
+        );
+        assert_eq!(out, ApplyPanel::DeniedGrant);
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn render_will_not_steal_a_terminal_pane() {
+        let mut slot = None;
+        let out = apply(
+            &mut slot,
+            "demo",
+            Uuid::nil(),
+            key(7),
+            text("hi"),
+            true,
+            true,
+        );
+        assert_eq!(out, ApplyPanel::DeniedTerminal);
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn whole_tree_replacement_overwrites_and_clears_stale() {
+        let mut slot = None;
+        assert!(matches!(
+            apply(
+                &mut slot,
+                "demo",
+                Uuid::from_u128(1),
+                key(1),
+                text("one"),
+                false,
+                true
+            ),
+            ApplyPanel::Create { .. }
+        ));
+        let original_surface_id = slot.as_ref().unwrap().surface_id;
+        // Owner instance dies -> the sync pass marks it stale.
+        slot.as_mut().unwrap().stale = true;
+        let out = apply(
+            &mut slot,
+            "demo",
+            Uuid::from_u128(2),
+            key(1),
+            text("two"),
+            false,
+            true,
+        );
+        let surface = slot.as_ref().unwrap();
+        assert_eq!(
+            out,
+            ApplyPanel::Replace {
+                surface_id: surface.surface_id
+            }
+        );
+        assert!(!surface.stale);
+        assert_eq!(surface.owner_instance_id, Uuid::from_u128(2));
+        assert_eq!(surface.tree, text("two"));
+        assert_ne!(
+            surface.surface_id, original_surface_id,
+            "stale reclaim must mint a fresh surface id"
+        );
+    }
+
+    #[test]
+    fn another_plugin_cannot_occupy_an_existing_panel() {
+        let mut slot = None;
+        apply(&mut slot, "a", Uuid::nil(), key(1), text("a"), false, true);
+        let out = apply(&mut slot, "b", Uuid::nil(), key(1), text("b"), false, true);
+        assert_eq!(out, ApplyPanel::DeniedOccupied);
+        assert_eq!(slot.as_ref().unwrap().plugin_id, "a");
+    }
+
+    #[test]
+    fn same_plugin_live_different_instance_cannot_take_panel() {
+        let mut slot = None;
+        apply(
+            &mut slot,
+            "demo",
+            Uuid::from_u128(1),
+            key(1),
+            text("one"),
+            false,
+            true,
+        );
+        let original = slot.clone();
+        let out = apply(
+            &mut slot,
+            "demo",
+            Uuid::from_u128(2),
+            key(1),
+            text("two"),
+            false,
+            true,
+        );
+        assert_eq!(out, ApplyPanel::DeniedOwnerInstance);
+        assert_eq!(slot, original);
+    }
+
+    #[test]
+    fn same_instance_keeps_its_surface_id_on_replace() {
+        let mut slot = None;
+        apply(
+            &mut slot,
+            "demo",
+            Uuid::from_u128(1),
+            key(1),
+            text("one"),
+            false,
+            true,
+        );
+        let id = slot.as_ref().unwrap().surface_id;
+        let out = apply(
+            &mut slot,
+            "demo",
+            Uuid::from_u128(1),
+            key(1),
+            text("two"),
+            false,
+            true,
+        );
+        assert_eq!(out, ApplyPanel::Replace { surface_id: id });
+        assert_eq!(slot.as_ref().unwrap().tree, text("two"));
+    }
+
+    #[test]
+    fn death_marks_stale_without_dropping_the_tree() {
+        // The pure decision does not itself mark stale; the sync pass does. This
+        // pins that a marked-stale surface still holds its tree and remains
+        // reclaimable (see whole_tree_replacement_overwrites_and_clears_stale).
+        let mut slot = None;
+        apply(
+            &mut slot,
+            "demo",
+            Uuid::from_u128(10),
+            key(1),
+            text("keep"),
+            false,
+            true,
+        );
+        slot.as_mut().unwrap().stale = true;
+        let surface = slot.as_ref().unwrap();
+        assert!(surface.stale);
+        assert_eq!(surface.tree, text("keep"));
     }
 
     #[test]

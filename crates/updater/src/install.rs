@@ -686,17 +686,7 @@ pub fn write_health_marker(
     };
     let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
     let path = transaction_path.parent().unwrap().join("health-ready.json");
-    atomic_write::save_atomic_with(
-        &path,
-        &bytes,
-        atomic_write::SaveOptions {
-            #[cfg(unix)]
-            mode: 0o600,
-            #[cfg(unix)]
-            parent_mode: None,
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    atomic_write::save_atomic(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 

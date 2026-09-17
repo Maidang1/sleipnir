@@ -80,6 +80,24 @@ pub(crate) enum InputOwner {
     Overlay(OverlayKind),
 }
 
+/// Generate a `take_*` accessor: if `self` is `$variant`, replace it with
+/// `Terminal` and return the owned payload, else `None`. The `matches!` guard
+/// makes the `mem::replace` arm total, so the fallback is `unreachable!`.
+macro_rules! take_variant {
+    ($name:ident, $variant:ident, $payload:ty) => {
+        pub fn $name(&mut self) -> Option<$payload> {
+            if matches!(self, Self::$variant(_)) {
+                match std::mem::replace(self, Self::Terminal) {
+                    Self::$variant(state) => Some(state),
+                    _ => unreachable!(),
+                }
+            } else {
+                None
+            }
+        }
+    };
+}
+
 impl InputMode {
     pub fn owner(&self) -> InputOwner {
         match self {
@@ -109,16 +127,7 @@ impl InputMode {
         }
     }
 
-    pub fn take_confirm(&mut self) -> Option<CloseConfirmState> {
-        if matches!(self, Self::Confirm(_)) {
-            match std::mem::replace(self, Self::Terminal) {
-                Self::Confirm(state) => Some(state),
-                _ => unreachable!(),
-            }
-        } else {
-            None
-        }
-    }
+    take_variant!(take_confirm, Confirm, CloseConfirmState);
 
     pub fn consent(&self) -> Option<&PluginConsentPending> {
         match self {
@@ -127,16 +136,7 @@ impl InputMode {
         }
     }
 
-    pub fn take_consent(&mut self) -> Option<PluginConsentPending> {
-        if matches!(self, Self::Consent(_)) {
-            match std::mem::replace(self, Self::Terminal) {
-                Self::Consent(pending) => Some(pending),
-                _ => unreachable!(),
-            }
-        } else {
-            None
-        }
-    }
+    take_variant!(take_consent, Consent, PluginConsentPending);
 
     pub fn dismiss_consent(&mut self) -> bool {
         if matches!(self, Self::Consent(_)) {
@@ -161,16 +161,7 @@ impl InputMode {
         }
     }
 
-    pub fn take_tab_menu(&mut self) -> Option<TabMenuState> {
-        if matches!(self, Self::TabMenu(_)) {
-            match std::mem::replace(self, Self::Terminal) {
-                Self::TabMenu(state) => Some(state),
-                _ => unreachable!(),
-            }
-        } else {
-            None
-        }
-    }
+    take_variant!(take_tab_menu, TabMenu, TabMenuState);
 
     pub fn dismiss_tab_menu(&mut self) -> bool {
         if matches!(self, Self::TabMenu(_)) {
@@ -195,16 +186,7 @@ impl InputMode {
         }
     }
 
-    pub fn take_terminal_menu(&mut self) -> Option<TerminalMenuState> {
-        if matches!(self, Self::TerminalMenu(_)) {
-            match std::mem::replace(self, Self::Terminal) {
-                Self::TerminalMenu(state) => Some(state),
-                _ => unreachable!(),
-            }
-        } else {
-            None
-        }
-    }
+    take_variant!(take_terminal_menu, TerminalMenu, TerminalMenuState);
 
     pub fn dismiss_terminal_menu(&mut self) -> bool {
         if matches!(self, Self::TerminalMenu(_)) {
@@ -229,16 +211,7 @@ impl InputMode {
         }
     }
 
-    pub fn take_rename(&mut self) -> Option<RenameState> {
-        if matches!(self, Self::Rename(_)) {
-            match std::mem::replace(self, Self::Terminal) {
-                Self::Rename(state) => Some(state),
-                _ => unreachable!(),
-            }
-        } else {
-            None
-        }
-    }
+    take_variant!(take_rename, Rename, RenameState);
 
     /// Replace the current owner, returning the old mode for teardown.
     pub fn replace(&mut self, next: InputMode) -> InputMode {

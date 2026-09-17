@@ -32,43 +32,23 @@ pub fn config_dir_for(windows: bool) -> PathBuf {
 }
 
 pub fn config_path() -> PathBuf {
-    config_path_for(cfg!(windows))
-}
-
-pub fn config_path_for(windows: bool) -> PathBuf {
-    config_dir_for(windows).join(SETTINGS_FILE)
+    config_dir().join(SETTINGS_FILE)
 }
 
 pub fn plugin_dir() -> PathBuf {
-    plugin_dir_for(cfg!(windows))
-}
-
-pub fn plugin_dir_for(windows: bool) -> PathBuf {
-    config_dir_for(windows).join(PLUGINS_DIR)
+    config_dir().join(PLUGINS_DIR)
 }
 
 pub fn grants_path() -> PathBuf {
-    grants_path_for(cfg!(windows))
-}
-
-pub fn grants_path_for(windows: bool) -> PathBuf {
-    config_dir_for(windows).join(GRANTS_FILE)
+    config_dir().join(GRANTS_FILE)
 }
 
 pub fn control_socket_path() -> PathBuf {
-    control_socket_path_for(cfg!(windows))
-}
-
-pub fn control_socket_path_for(windows: bool) -> PathBuf {
-    config_dir_for(windows).join(CONTROL_SOCKET_FILE)
+    config_dir().join(CONTROL_SOCKET_FILE)
 }
 
 pub fn agent_control_socket_path() -> PathBuf {
-    agent_control_socket_path_for(cfg!(windows))
-}
-
-pub fn agent_control_socket_path_for(windows: bool) -> PathBuf {
-    config_dir_for(windows).join(AGENT_CONTROL_SOCKET_FILE)
+    config_dir().join(AGENT_CONTROL_SOCKET_FILE)
 }
 
 #[cfg(test)]
@@ -94,20 +74,15 @@ mod tests {
     }
 
     #[test]
-    fn derived_paths_share_one_config_dir() {
-        for windows in [false, true] {
-            let dir = config_dir_for(windows);
-            assert_eq!(config_path_for(windows), dir.join(SETTINGS_FILE));
-            assert_eq!(plugin_dir_for(windows), dir.join(PLUGINS_DIR));
-            assert_eq!(grants_path_for(windows), dir.join(GRANTS_FILE));
-            assert_eq!(
-                control_socket_path_for(windows),
-                dir.join(CONTROL_SOCKET_FILE)
-            );
-            assert_eq!(
-                agent_control_socket_path_for(windows),
-                dir.join(AGENT_CONTROL_SOCKET_FILE)
-            );
-        }
+    fn host_paths_hang_off_config_dir() {
+        let dir = config_dir();
+        assert_eq!(config_path(), dir.join(SETTINGS_FILE));
+        assert_eq!(plugin_dir(), dir.join(PLUGINS_DIR));
+        assert_eq!(grants_path(), dir.join(GRANTS_FILE));
+        assert_eq!(control_socket_path(), dir.join(CONTROL_SOCKET_FILE));
+        assert_eq!(
+            agent_control_socket_path(),
+            dir.join(AGENT_CONTROL_SOCKET_FILE)
+        );
     }
 }

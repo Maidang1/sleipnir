@@ -172,10 +172,12 @@ fn install_hook_file(target: &AgentHookTarget) -> Result<(), String> {
     #[cfg(not(unix))]
     let opts = atomic_write::SaveOptions::default();
 
-    atomic_write::with_file_lock(&path, || {
-        atomic_write::save_atomic_with(&path, script.as_bytes(), opts)
-    })
-    .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    // The write is deterministic (the payload is a pure function of the
+    // embedded hook version) and save_atomic_with already publishes via
+    // tmp + rename, so no file lock is needed — a lock would only leave a
+    // stray sibling `.lock` in the user's agent hooks directory.
+    atomic_write::save_atomic_with(&path, script.as_bytes(), opts)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
 
     Ok(())
 }

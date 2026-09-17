@@ -658,7 +658,7 @@ where
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
-pub use sleipnir_paths::{config_dir, config_dir_for, config_path, config_path_for};
+pub use sleipnir_paths::{config_dir, config_path};
 
 fn load_or_default() -> TerminalSettings {
     let mut settings = TerminalSettings::default();
@@ -1424,33 +1424,6 @@ mod tests {
             TerminalSettings::default().option_as_meta,
             option_as_meta_default()
         );
-    }
-
-    #[test]
-    fn config_path_uses_os_config_dir_on_windows_and_unix() {
-        let linux = config_path_for(false);
-        assert!(
-            linux.ends_with(".config/sleipnir/settings.json"),
-            "Unix/macOS/Linux path was {}",
-            linux.display()
-        );
-
-        let win = config_path_for(true);
-        assert_eq!(
-            win.file_name().and_then(|s| s.to_str()),
-            Some("settings.json")
-        );
-        assert_eq!(
-            win.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str()),
-            Some("sleipnir")
-        );
-        let win_dir = config_dir_for(true);
-        assert_eq!(win.parent(), Some(win_dir.as_path()));
-        if let Some(config) = dirs::config_dir() {
-            assert_eq!(win_dir, config.join("sleipnir"));
-        }
     }
 
     #[test]

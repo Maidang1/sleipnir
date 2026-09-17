@@ -177,13 +177,9 @@ impl LedgerState {
     }
 }
 
-pub use sleipnir_paths::{
-    config_dir as default_config_dir, config_dir_for as default_config_dir_for,
-};
-
 /// The default ledger file for this user.
 pub fn default_runs_file() -> PathBuf {
-    default_runs_path(&default_config_dir())
+    default_runs_path(&sleipnir_paths::config_dir())
 }
 
 #[cfg(test)]
@@ -467,14 +463,5 @@ mod tests {
         let mut state = state_in(dir.path());
         state.apply_finished(RunId::new_v4(), Some(1), 100);
         assert_eq!(state.ledger.runs().count(), 0);
-    }
-
-    #[test]
-    fn config_dir_mirrors_plugin_host_layout() {
-        let unix = default_config_dir_for(false);
-        assert!(unix.ends_with(".config/sleipnir"), "unix: {unix:?}");
-        let win = default_config_dir_for(true);
-        assert!(win.ends_with("sleipnir"), "windows: {win:?}");
-        assert!(!win.ends_with("plugins"));
     }
 }

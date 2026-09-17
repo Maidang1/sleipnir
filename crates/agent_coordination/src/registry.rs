@@ -130,16 +130,7 @@ impl Registry {
     }
 
     pub fn handle(&self, req: WireRequest, now_ms: u64) -> WireResponse {
-        let mut inner = self.lock();
-        loop {
-            if let Some(session) = mutating_session(&inner, &req.body) {
-                if inner.session_is_claimed(session) {
-                    inner = self.cv.wait(inner).unwrap_or_else(|p| p.into_inner());
-                    continue;
-                }
-            }
-            break;
-        }
+        let mut inner = self.lock_when_unclaimed(|inner| mutating_session(inner, &req.body));
         let body = match inner.handle(req.body, now_ms) {
             Ok(body) => body,
             Err(err) => Response::Error {
@@ -150,19 +141,30 @@ impl Registry {
     }
 
     /// Apply an adapter/host update. Delivery acks go through
-    /// [`ClaimedEffect::commit_launch`] or [`ClaimedEffect::commit_ok`].
+    /// [`ClaimedEffect::commit`].
     pub fn apply(&self, update: AdapterUpdate, now_ms: u64) -> Result<(), CoordError> {
+        let mut inner = self.lock_when_unclaimed(|inner| inner.session_for_update(&update));
+        inner.apply(update, now_ms)
+    }
+
+    /// Acquire the registry lock, waiting on the condvar while the session that
+    /// `session_of` resolves for the pending work is under a live claim. The
+    /// session is re-resolved after each wakeup because a claim may retire the
+    /// task the work names. Requests with no mutating session take the lock
+    /// immediately.
+    fn lock_when_unclaimed(
+        &self,
+        session_of: impl Fn(&Inner) -> Option<AgentSessionId>,
+    ) -> std::sync::MutexGuard<'_, Inner> {
         let mut inner = self.lock();
         loop {
-            if let Some(session) = inner.session_for_update(&update) {
-                if inner.session_is_claimed(session) {
+            match session_of(&inner) {
+                Some(session) if inner.session_is_claimed(session) => {
                     inner = self.cv.wait(inner).unwrap_or_else(|p| p.into_inner());
-                    continue;
                 }
+                _ => return inner,
             }
-            break;
         }
-        inner.apply(update, now_ms)
     }
 
     /// Claim a queued effect for delivery. Records `(session, seq)` until
@@ -210,7 +212,7 @@ impl Registry {
         &self,
         session: AgentSessionId,
         effect: &Effect,
-        outcome: CommitOp,
+        outcome: ClaimOutcome,
         now_ms: u64,
     ) -> Result<(), CoordError> {
         let seq = effect.seq;
@@ -219,39 +221,34 @@ impl Registry {
             return Err(CoordError::EffectNotClaimed);
         }
         match outcome {
-            CommitOp::Failed => inner.delivery_failed(seq, now_ms),
-            CommitOp::LaunchBound { pane } => match &effect.body {
-                EffectBody::LaunchRequested { session: s, .. } => inner.bind_pane(seq, *s, pane),
-                _ => Err(CoordError::EffectKindMismatch {
-                    seq,
-                    actual: effect.body.kind_name(),
-                    expected: "launch_requested",
-                }),
-            },
-            CommitOp::Delivered => match &effect.body {
-                EffectBody::PromptRequested { .. } => inner.prompt_delivered(seq),
-                EffectBody::InterruptRequested { .. } => inner.interrupt_delivered(seq),
-                EffectBody::FocusRequested { .. } => {
-                    inner.ack_exact(
+            ClaimOutcome::Failed => inner.delivery_failed(session, seq, now_ms),
+            ClaimOutcome::Delivered { pane } => match &effect.body {
+                EffectBody::LaunchRequested { .. } => {
+                    let pane = pane.ok_or(CoordError::EffectKindMismatch {
+                        seq,
+                        actual: "launch_requested",
+                        expected: "launch delivery must bind a pane",
+                    })?;
+                    inner.bind_pane(session, seq, pane)
+                }
+                EffectBody::PromptRequested { .. } => inner.prompt_delivered(session, seq),
+                EffectBody::InterruptRequested { .. } => inner.interrupt_delivered(session, seq),
+                EffectBody::FocusRequested { .. } => inner
+                    .ack_exact(
+                        session,
                         seq,
                         |b| matches!(b, EffectBody::FocusRequested { .. }),
                         "focus_requested",
-                    )?;
-                    Ok(())
-                }
-                EffectBody::CloseRequested { .. } => {
-                    inner.ack_exact(
+                    )
+                    .map(|_| ()),
+                EffectBody::CloseRequested { .. } => inner
+                    .ack_exact(
+                        session,
                         seq,
                         |b| matches!(b, EffectBody::CloseRequested { .. }),
                         "close_requested",
-                    )?;
-                    Ok(())
-                }
-                EffectBody::LaunchRequested { .. } => Err(CoordError::EffectKindMismatch {
-                    seq,
-                    actual: "launch_requested",
-                    expected: "non-launch effect",
-                }),
+                    )
+                    .map(|_| ()),
             },
         }
     }
@@ -313,24 +310,22 @@ impl Registry {
     }
 }
 
-/// Typed delivery outcome for a claimed launch effect.
+/// The delivery outcome the adapter commits for a claimed effect. `Delivered`
+/// acks the effect (a `LaunchRequested` must carry the bound `pane`; every
+/// other kind ignores it); `Failed` records `DeliveryFailed { seq }`. The kind
+/// dispatch lives in [`Registry::commit_claimed_direct`], which already matches
+/// the claimed body, so callers never re-derive the effect kind to report an
+/// outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LaunchOutcome {
-    Bound { pane: Uuid },
+pub enum ClaimOutcome {
+    Delivered { pane: Option<Uuid> },
     Failed,
 }
 
-/// Typed delivery outcome for non-launch effects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DeliverOutcome {
-    Delivered,
-    Failed,
-}
-
-/// A seq-typed delivery lease. [`Self::commit_launch`] / [`Self::commit_ok`]
-/// ack the effect; **drop is the only releaser** of the per-session claim, so a
-/// failed ack still ends the lease and wakes any waiter. On a successful ack the
-/// effect is removed from the mailbox; on failure it stays queued.
+/// A seq-typed delivery lease. [`Self::commit`] acks the effect; **drop is the
+/// only releaser** of the per-session claim, so a failed ack still ends the
+/// lease and wakes any waiter. On a successful ack the effect is removed from
+/// the mailbox; on failure it stays queued.
 ///
 /// Must not call [`Registry::handle`] for a mutating request or
 /// [`Registry::try_claim`] on this session from the same thread: those wait
@@ -352,18 +347,13 @@ impl ClaimedEffect {
         self.effect.seq
     }
 
-    /// Ack a `LaunchRequested` effect with its bound pane. The claim is released
-    /// on drop regardless of whether the ack succeeded.
-    pub fn commit_launch(self, outcome: LaunchOutcome, now_ms: u64) -> Result<(), CoordError> {
-        self.registry
-            .commit_claimed_direct(self.session, &self.effect, outcome.into(), now_ms)
-    }
-
-    /// Ack a non-launch effect (prompt/interrupt/focus/close). The claim is
+    /// Ack the claimed effect with its delivery outcome. A `LaunchRequested`
+    /// commit must supply `ClaimOutcome::Delivered { pane: Some(_) }`; the
+    /// pane requirement is enforced against the claimed body. The claim is
     /// released on drop regardless of whether the ack succeeded.
-    pub fn commit_ok(self, outcome: DeliverOutcome, now_ms: u64) -> Result<(), CoordError> {
+    pub fn commit(self, outcome: ClaimOutcome, now_ms: u64) -> Result<(), CoordError> {
         self.registry
-            .commit_claimed_direct(self.session, &self.effect, outcome.into(), now_ms)
+            .commit_claimed_direct(self.session, &self.effect, outcome, now_ms)
     }
 }
 
@@ -387,30 +377,6 @@ fn mutating_session(inner: &Inner, req: &Request) -> Option<AgentSessionId> {
         | Request::ReportAwaitingHuman { task, .. }
         | Request::ReportResult { task, .. } => inner.tasks.get(task).map(|task| task.session),
         _ => None,
-    }
-}
-
-enum CommitOp {
-    LaunchBound { pane: Uuid },
-    Delivered,
-    Failed,
-}
-
-impl From<LaunchOutcome> for CommitOp {
-    fn from(o: LaunchOutcome) -> Self {
-        match o {
-            LaunchOutcome::Bound { pane } => CommitOp::LaunchBound { pane },
-            LaunchOutcome::Failed => CommitOp::Failed,
-        }
-    }
-}
-
-impl From<DeliverOutcome> for CommitOp {
-    fn from(o: DeliverOutcome) -> Self {
-        match o {
-            DeliverOutcome::Delivered => CommitOp::Delivered,
-            DeliverOutcome::Failed => CommitOp::Failed,
-        }
     }
 }
 
@@ -691,9 +657,8 @@ impl Inner {
             })
             .ok_or(CoordError::NothingInFlight)?;
         self.ensure_effect_capacity()?;
-        self.task_mut(task)?.status = TaskStatus::Interrupting;
+        self.set_status(task, TaskStatus::Interrupting)?;
         self.push_fact(Event::TaskInterrupting { task });
-        self.drop_prompt_requested_for(task);
         self.push_effect(EffectBody::InterruptRequested {
             session: session_id,
             task,
@@ -826,8 +791,8 @@ impl Inner {
 
     fn bind_pane(
         &mut self,
-        seq: u64,
         session_id: AgentSessionId,
+        seq: u64,
         pane: Uuid,
     ) -> Result<(), CoordError> {
         let (open, existing) = {
@@ -841,11 +806,11 @@ impl Inner {
             Some(bound) if bound == pane => {
                 // Same pane is idempotent. Ack the launch effect if `seq` still
                 // names it; an already-acked seq is not an error.
-                match self.effect_by_seq(seq) {
+                match self.effect_by_seq_in(session_id, seq) {
                     None => Ok(()),
                     Some(effect) => match &effect.body {
-                        EffectBody::LaunchRequested { session, .. } if *session == session_id => {
-                            self.remove_effect(seq);
+                        EffectBody::LaunchRequested { .. } => {
+                            self.remove_effect_in(session_id, seq);
                             Ok(())
                         }
                         other => Err(CoordError::EffectKindMismatch {
@@ -858,12 +823,11 @@ impl Inner {
             }
             Some(_) => Err(CoordError::PaneAlreadyBound),
             None => {
-                let effect = self.effect_by_seq(seq).ok_or(CoordError::UnknownEffect)?;
+                let effect = self
+                    .effect_by_seq_in(session_id, seq)
+                    .ok_or(CoordError::UnknownEffect)?;
                 match &effect.body {
-                    EffectBody::LaunchRequested { session, .. } if *session == session_id => {}
-                    EffectBody::LaunchRequested { .. } => {
-                        return Err(CoordError::EffectWrongSession);
-                    }
+                    EffectBody::LaunchRequested { .. } => {}
                     other => {
                         return Err(CoordError::EffectKindMismatch {
                             seq,
@@ -872,15 +836,16 @@ impl Inner {
                         });
                     }
                 }
-                self.remove_effect(seq);
+                self.remove_effect_in(session_id, seq);
                 self.session_mut(session_id)?.pane = Some(pane);
                 Ok(())
             }
         }
     }
 
-    fn interrupt_delivered(&mut self, seq: u64) -> Result<(), CoordError> {
+    fn interrupt_delivered(&mut self, session: AgentSessionId, seq: u64) -> Result<(), CoordError> {
         let effect = self.ack_exact(
+            session,
             seq,
             |b| matches!(b, EffectBody::InterruptRequested { .. }),
             "interrupt_requested",
@@ -894,8 +859,10 @@ impl Inner {
         Ok(())
     }
 
-    fn prompt_delivered(&mut self, seq: u64) -> Result<(), CoordError> {
-        let effect = self.effect_by_seq(seq).ok_or(CoordError::UnknownEffect)?;
+    fn prompt_delivered(&mut self, session: AgentSessionId, seq: u64) -> Result<(), CoordError> {
+        let effect = self
+            .effect_by_seq_in(session, seq)
+            .ok_or(CoordError::UnknownEffect)?;
         let task = match &effect.body {
             EffectBody::PromptRequested { task, .. } => *task,
             other => {
@@ -910,24 +877,34 @@ impl Inner {
             return Err(CoordError::TaskNotInFlight);
         }
         let dispatching = self.task(task)?.status == TaskStatus::Dispatching;
-        self.remove_effect(seq);
+        self.remove_effect_in(session, seq);
         if dispatching {
-            self.task_mut(task)?.status = TaskStatus::Running;
+            self.set_status(task, TaskStatus::Running)?;
             self.push_fact(Event::TaskRunning { task });
         }
         Ok(())
     }
 
+    /// Write a task's non-terminal status. This is the single chokepoint for a
+    /// task *leaving* `Dispatching`: the moment it does, its queued
+    /// `PromptRequested` can no longer be delivered (a prompt is only claimable
+    /// while `Dispatching`), so it is retired here rather than at each caller.
+    /// [`validate_effect`]'s `PromptNotDispatchable` gate is the matching lazy
+    /// guard; terminal transitions go through [`finish_task`] instead.
+    fn set_status(&mut self, task: CoordinationTaskId, next: TaskStatus) -> Result<(), CoordError> {
+        let prev = self.task(task)?.status;
+        self.task_mut(task)?.status = next;
+        if prev == TaskStatus::Dispatching && next != TaskStatus::Dispatching {
+            self.drop_prompt_requested_for(task);
+        }
+        Ok(())
+    }
+
     fn task_running(&mut self, task_id: CoordinationTaskId) -> Result<(), CoordError> {
-        let t = self.task_mut(task_id)?;
-        match t.status {
+        match self.task(task_id)?.status {
             TaskStatus::Dispatching | TaskStatus::AwaitingHuman | TaskStatus::Interrupting => {
-                let from_dispatching = t.status == TaskStatus::Dispatching;
-                t.status = TaskStatus::Running;
+                self.set_status(task_id, TaskStatus::Running)?;
                 self.push_fact(Event::TaskRunning { task: task_id });
-                if from_dispatching {
-                    self.drop_prompt_requested_for(task_id);
-                }
                 Ok(())
             }
             TaskStatus::Running => Ok(()),
@@ -948,25 +925,27 @@ impl Inner {
                 Some(s)
             }
         };
-        let t = self.task_mut(task_id)?;
-        if !t.status.is_in_flight() {
+        if !self.task(task_id)?.status.is_in_flight() {
             return Err(CoordError::TaskNotInFlight);
         }
-        let from_dispatching = t.status == TaskStatus::Dispatching;
-        t.status = TaskStatus::AwaitingHuman;
-        t.detail = detail.clone();
+        self.set_status(task_id, TaskStatus::AwaitingHuman)?;
+        self.task_mut(task_id)?.detail = detail.clone();
         self.push_fact(Event::TaskAwaitingHuman {
             task: task_id,
             detail,
         });
-        if from_dispatching {
-            self.drop_prompt_requested_for(task_id);
-        }
         Ok(())
     }
 
-    fn delivery_failed(&mut self, seq: u64, now_ms: u64) -> Result<(), CoordError> {
-        let effect = self.remove_effect(seq).ok_or(CoordError::UnknownEffect)?;
+    fn delivery_failed(
+        &mut self,
+        session: AgentSessionId,
+        seq: u64,
+        now_ms: u64,
+    ) -> Result<(), CoordError> {
+        let effect = self
+            .remove_effect_in(session, seq)
+            .ok_or(CoordError::UnknownEffect)?;
         match effect.body {
             EffectBody::LaunchRequested { task, session, .. } => {
                 self.finish_task(task, TaskStatus::FailedDelivery)?;
@@ -1371,11 +1350,14 @@ impl Inner {
 
     fn ack_exact(
         &mut self,
+        session: AgentSessionId,
         seq: u64,
         want: impl Fn(&EffectBody) -> bool,
         want_name: &'static str,
     ) -> Result<Effect, CoordError> {
-        let effect = self.effect_by_seq(seq).ok_or(CoordError::UnknownEffect)?;
+        let effect = self
+            .effect_by_seq_in(session, seq)
+            .ok_or(CoordError::UnknownEffect)?;
         if !want(&effect.body) {
             return Err(CoordError::EffectKindMismatch {
                 seq,
@@ -1383,18 +1365,29 @@ impl Inner {
                 expected: want_name,
             });
         }
-        Ok(self.remove_effect(seq).expect("seq was present"))
+        Ok(self
+            .remove_effect_in(session, seq)
+            .expect("seq was present"))
     }
 
-    fn remove_effect(&mut self, seq: u64) -> Option<Effect> {
-        for session in self.sessions.values_mut() {
-            if let Some(pos) = session.mailbox.iter().position(|e| e.seq == seq) {
-                return session.mailbox.remove(pos);
-            }
-        }
-        None
+    /// Remove `seq` from one session's mailbox. The commit path knows the
+    /// session, so it never scans the other sessions' queues.
+    fn remove_effect_in(&mut self, session: AgentSessionId, seq: u64) -> Option<Effect> {
+        let mailbox = &mut self.sessions.get_mut(&session)?.mailbox;
+        let pos = mailbox.iter().position(|e| e.seq == seq)?;
+        mailbox.remove(pos)
     }
 
+    fn effect_by_seq_in(&self, session: AgentSessionId, seq: u64) -> Option<&Effect> {
+        self.sessions
+            .get(&session)?
+            .mailbox
+            .iter()
+            .find(|e| e.seq == seq)
+    }
+
+    /// Locate an effect across all sessions. Only [`Registry::try_claim`] uses
+    /// this: it starts from a bare seq and does not yet know the session.
     fn effect_by_seq(&self, seq: u64) -> Option<&Effect> {
         self.sessions
             .values()
@@ -1535,21 +1528,26 @@ mod tests {
         );
         reg.try_claim(seq)
             .expect("claim")
-            .commit_launch(LaunchOutcome::Bound { pane: Uuid::from_u128(pane) }, now)
+            .commit(
+                ClaimOutcome::Delivered {
+                    pane: Some(Uuid::from_u128(pane)),
+                },
+                now,
+            )
             .expect("commit");
     }
 
     fn delivered_ok(reg: &Registry, seq: u64, now: u64) {
         reg.try_claim(seq)
             .expect("claim")
-            .commit_ok(DeliverOutcome::Delivered, now)
+            .commit(ClaimOutcome::Delivered { pane: None }, now)
             .expect("commit");
     }
 
     fn failed_ok(reg: &Registry, seq: u64, now: u64) {
         reg.try_claim(seq)
             .expect("claim")
-            .commit_ok(DeliverOutcome::Failed, now)
+            .commit(ClaimOutcome::Failed, now)
             .expect("commit");
     }
 
@@ -3265,7 +3263,7 @@ mod tests {
         match reg
             .try_claim(seq)
             .expect("claim")
-            .commit_ok(DeliverOutcome::Delivered, 1)
+            .commit(ClaimOutcome::Delivered { pane: None }, 1)
         {
             Err(err) => {
                 let message = err.to_string();
@@ -3282,43 +3280,38 @@ mod tests {
 
     #[test]
     fn commit_kind_mismatch_still_releases_the_lease() {
-        // A wrong-kind commit (here `commit_launch` on a non-launch effect)
+        // A failing commit (here `Delivered` without a pane on a launch effect)
         // fails with EffectKindMismatch, but the lease must still end so the
         // session does not wedge. Regression: a `committed = true` set before
         // the ack, or an early-return while holding `claimed_seq`, left every
         // subsequent claim / mutating request waiting on the condvar forever.
         let reg = Registry::new();
-        let (session, _) = ready(&reg);
-        assert!(matches!(
-            reg.handle(req(2, Request::Focus { session }), 2).body,
-            Response::FocusAccepted { .. }
-        ));
-        let focus_seq = effect_seq(
+        let (session, _) = launch(&reg, 0);
+        let launch_seq = effect_seq(
             &reg,
-            |b| matches!(b, EffectBody::FocusRequested { session: s } if *s == session),
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
         );
-        match reg.try_claim(focus_seq).expect("claim focus").commit_launch(
-            LaunchOutcome::Bound {
-                pane: Uuid::from_u128(9),
-            },
-            3,
-        ) {
+        match reg
+            .try_claim(launch_seq)
+            .expect("claim launch")
+            .commit(ClaimOutcome::Delivered { pane: None }, 3)
+        {
             Err(CoordError::EffectKindMismatch { .. }) => {}
-            other => panic!("commit_launch on a focus effect must mismatch: {other:?}"),
+            other => panic!("launch delivered without a pane must mismatch: {other:?}"),
         }
         // The failed commit left the effect queued.
         assert!(
-            reg.peek_effects()
-                .iter()
-                .any(|e| e.seq == focus_seq && matches!(e.body, EffectBody::FocusRequested { .. }))
+            reg.peek_effects().iter().any(
+                |e| e.seq == launch_seq && matches!(e.body, EffectBody::LaunchRequested { .. })
+            )
         );
         // The lease is released: a second claim returns promptly (not
         // EffectAlreadyClaimed) and a mutating request does not hang.
-        reg.try_claim(focus_seq)
+        reg.try_claim(launch_seq)
             .expect("second claim must succeed after the lease is released");
         assert!(matches!(
-            reg.handle(req(4, Request::Focus { session }), 4).body,
-            Response::FocusAccepted { .. }
+            reg.handle(req(4, Request::Close { session }), 4).body,
+            Response::CloseAccepted { .. }
         ));
     }
 
@@ -3341,9 +3334,9 @@ mod tests {
         );
         reg.try_claim(seq_a)
             .expect("claim")
-            .commit_launch(
-                LaunchOutcome::Bound {
-                    pane: Uuid::from_u128(1),
+            .commit(
+                ClaimOutcome::Delivered {
+                    pane: Some(Uuid::from_u128(1)),
                 },
                 2,
             )
@@ -3358,6 +3351,32 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn session_for_pane_maps_a_bound_pane_to_its_session() {
+        let reg = Registry::new();
+        let (session, _task) = launch(&reg, 0);
+        let seq = effect_seq(
+            &reg,
+            |b| matches!(b, EffectBody::LaunchRequested { session: s, .. } if *s == session),
+        );
+        let pane = Uuid::from_u128(7);
+        reg.try_claim(seq)
+            .expect("claim")
+            .commit(ClaimOutcome::Delivered { pane: Some(pane) }, 1)
+            .expect("commit");
+
+        assert_eq!(
+            reg.session_for_pane(pane),
+            Some(session),
+            "known pane maps to the session"
+        );
+        assert_eq!(
+            reg.session_for_pane(Uuid::from_u128(99)),
+            None,
+            "unknown pane returns None"
+        );
     }
 
     #[test]
@@ -3451,11 +3470,7 @@ mod tests {
                 .any(|e| e.seq == seq && matches!(e.body, EffectBody::PromptRequested { .. }))
         );
         delivered_ok(&reg, seq, 3);
-        assert!(
-            !reg.peek_effects()
-                .iter()
-                .any(|e| e.seq == seq)
-        );
+        assert!(!reg.peek_effects().iter().any(|e| e.seq == seq));
     }
 
     #[test]

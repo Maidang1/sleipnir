@@ -186,8 +186,6 @@ impl StaleRegistry for BlockRegistry {
     }
 }
 
-pub use crate::plugin_panel::action_at;
-
 /// Widget text that must never appear in a copied selection (ADR-0018
 /// decision 5). Selection is a grid-coordinate concept; the grid has no
 /// widget cells.
@@ -221,6 +219,7 @@ fn widget_text_fragments(tree: &Widget) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin_panel::action_at;
     use plugin_protocol::v2::Tone;
     use sleipnir_widget::LaidOutKind;
     use std::collections::BTreeSet;

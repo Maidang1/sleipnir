@@ -37,24 +37,45 @@ pub fn frame_response(resp: WireResponse) -> Result<Vec<String>, String> {
     }
 }
 
+/// The position of one page within a `pack_pages` run, so callers can compute
+/// per-page fields (e.g. a `next_cursor` only the last page zeroes, a `missed`
+/// only the first page carries).
+struct PageCtx {
+    /// Index one past the last item on this page.
+    end: usize,
+    /// True when this is the first page.
+    is_first: bool,
+    /// True when this is the last page (no more items follow).
+    is_last: bool,
+}
+
 fn pack_pages<T: Clone, F>(
     items: &[T],
     make_response: F,
     item_err: &str,
 ) -> Result<Vec<String>, String>
 where
-    F: Fn(&[T], bool, usize) -> WireResponse,
+    F: Fn(&[T], &PageCtx) -> WireResponse,
 {
     if items.is_empty() {
-        return Ok(vec![encode_response_line(&make_response(&[], false, 0))?]);
+        let ctx = PageCtx {
+            end: 0,
+            is_first: true,
+            is_last: true,
+        };
+        return Ok(vec![encode_response_line(&make_response(&[], &ctx))?]);
     }
     let mut frames = Vec::new();
     let mut start = 0;
     while start < items.len() {
         let mut best: Option<(usize, String)> = None;
         for end in start + 1..=items.len() {
-            let has_more = end < items.len();
-            let resp = make_response(&items[start..end], has_more, end);
+            let ctx = PageCtx {
+                end,
+                is_first: start == 0,
+                is_last: end == items.len(),
+            };
+            let resp = make_response(&items[start..end], &ctx);
             let line = encode_response_line(&resp)?;
             if line.len() <= MAX_LINE_BYTES {
                 best = Some((end, line));
@@ -74,11 +95,11 @@ where
 fn frame_agents(id: u64, agents: Vec<SessionSnapshot>) -> Result<Vec<String>, String> {
     pack_pages(
         &agents,
-        |slice, has_more, end| WireResponse {
+        |slice, ctx| WireResponse {
             id,
             body: Response::Agents {
                 agents: slice.to_vec(),
-                next_offset: has_more.then_some(end),
+                next_offset: (!ctx.is_last).then_some(ctx.end),
             },
         },
         "session snapshot exceeds line length cap",
@@ -89,10 +110,10 @@ fn frame_inspect(id: u64, session: SessionSnapshot) -> Result<Vec<String>, Strin
     let tasks = session.tasks.clone();
     pack_pages(
         &tasks,
-        |slice, has_more, end| {
+        |slice, ctx| {
             let snap = SessionSnapshot {
                 tasks: slice.to_vec(),
-                next_task_offset: has_more.then_some(end),
+                next_task_offset: (!ctx.is_last).then_some(ctx.end),
                 ..session.clone()
             };
             WireResponse {
@@ -107,11 +128,11 @@ fn frame_inspect(id: u64, session: SessionSnapshot) -> Result<Vec<String>, Strin
 fn frame_effects(id: u64, effects: Vec<Effect>) -> Result<Vec<String>, String> {
     pack_pages(
         &effects,
-        |slice, has_more, _end| WireResponse {
+        |slice, ctx| WireResponse {
             id,
             body: Response::Effects {
                 effects: slice.to_vec(),
-                next_cursor: has_more.then(|| slice.last().unwrap().seq),
+                next_cursor: (!ctx.is_last).then(|| slice.last().unwrap().seq),
             },
         },
         "effect exceeds line length cap",
@@ -124,49 +145,27 @@ fn frame_facts(
     next_cursor: u64,
     missed: u64,
 ) -> Result<Vec<String>, String> {
-    if facts.is_empty() {
-        return Ok(vec![encode_response_line(&WireResponse {
+    pack_pages(
+        &facts,
+        |slice, ctx| WireResponse {
             id,
             body: Response::Facts {
-                facts: vec![],
-                next_cursor,
-                missed,
-                more: false,
-            },
-        })?]);
-    }
-    let mut frames = Vec::new();
-    let mut start = 0;
-    while start < facts.len() {
-        let mut best: Option<(usize, String)> = None;
-        for end in start + 1..=facts.len() {
-            let last = end == facts.len();
-            let line = encode_response_line(&WireResponse {
-                id,
-                body: Response::Facts {
-                    facts: facts[start..end].to_vec(),
-                    next_cursor: if last {
-                        next_cursor
-                    } else {
-                        facts[end - 1].seq
-                    },
-                    missed: if start == 0 { missed } else { 0 },
-                    more: !last,
+                facts: slice.to_vec(),
+                // The client resumes from the last seq of a non-final page and
+                // from the registry's cursor on the final page.
+                next_cursor: if ctx.is_last {
+                    next_cursor
+                } else {
+                    slice.last().unwrap().seq
                 },
-            })?;
-            if line.len() <= MAX_LINE_BYTES {
-                best = Some((end, line));
-            } else {
-                break;
-            }
-        }
-        let Some((end, line)) = best else {
-            return Err("fact exceeds line length cap".into());
-        };
-        frames.push(line);
-        start = end;
-    }
-    Ok(frames)
+                // `missed` describes the gap at the start of the batch, so only
+                // the first page carries it.
+                missed: if ctx.is_first { missed } else { 0 },
+                more: !ctx.is_last,
+            },
+        },
+        "fact exceeds line length cap",
+    )
 }
 
 fn frame_wait(

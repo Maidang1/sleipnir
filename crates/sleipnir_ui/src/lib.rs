@@ -21,7 +21,6 @@ mod plugin_monitor_panel;
 mod plugin_panel;
 mod plugin_runtime;
 mod plugin_surface;
-mod plugin_window;
 mod run_ledger_global;
 mod starfield;
 mod tab_convert;
@@ -51,8 +50,8 @@ pub use keymap::{
     font_zoom_key_bindings, last_window_close_quits, tmux_preset_bindings,
 };
 pub use pane_tree::{
-    Branch, CloseOutcome, Direction, LeafContent, MIN_RATIO, PaneId, PaneNode, PaneRect, PanelView,
-    SplitAxis, SplitPath, neighbor,
+    Branch, CloseOutcome, Direction, LeafContent, MIN_RATIO, PaneId, PaneNode, PaneRect, SplitAxis,
+    SplitPath, neighbor,
 };
 pub use run_ledger_global::RunLedgerGlobal;
 pub use term_element::TermElement;
@@ -700,13 +699,7 @@ impl TermView {
         if surface.stale {
             return true;
         }
-        crate::plugin_runtime::push_action(
-            surface.owner_instance_id,
-            id,
-            hit.action,
-            hit.arg,
-            cx,
-        );
+        crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
         true
     }
 
@@ -1110,17 +1103,13 @@ impl Render for TermView {
                         let rows = dims.num_lines() as i32;
                         let cell_w = f32::from(dims.cell_width);
                         let line_h = f32::from(dims.line_height);
-                        let top_abs =
-                            terminal::viewport_top_abs(history, display_offset);
+                        let top_abs = terminal::viewport_top_abs(history, display_offset);
                         let sub = terminal.read(cx).viewport_sub();
-                        let tokens = chrome::ChromeTokens::from_palette(
-                            &palette,
-                            window.is_window_active(),
-                        );
+                        let tokens =
+                            chrome::ChromeTokens::from_palette(&palette, window.is_window_active());
                         let width = f32::from(dims.bounds.size.width);
                         let (font_family, font_size) = {
-                            let settings =
-                                sleipnir_settings::TerminalSettings::get_global(cx);
+                            let settings = sleipnir_settings::TerminalSettings::get_global(cx);
                             (
                                 settings.font_family.clone().unwrap_or_else(|| {
                                     sleipnir_settings::default_font_family().into()
@@ -1133,12 +1122,11 @@ impl Render for TermView {
                         };
 
                         for (idx, surface) in self.blocks.iter().enumerate() {
-                            let display_line =
-                                terminal::absolute_to_display_line(
-                                    surface.anchor.line,
-                                    history,
-                                    display_offset,
-                                );
+                            let display_line = terminal::absolute_to_display_line(
+                                surface.anchor.line,
+                                history,
+                                display_offset,
+                            );
                             // One extra row of overscan at each edge so a
                             // sub-row remainder does not clip a partial Block.
                             if display_line < -1 || display_line > rows {
@@ -1147,27 +1135,16 @@ impl Render for TermView {
                             let Some(ref laid) = surface.laid else {
                                 continue;
                             };
-                            let y = terminal::y_for_display(
-                                &geom,
-                                display_line,
-                                top_abs,
-                                sub,
-                            );
-                            let h = geom.height_of(
-                                top_abs.saturating_add(display_line),
-                            );
+                            let y = terminal::y_for_display(&geom, display_line, top_abs, sub);
+                            let h = geom.height_of(top_abs.saturating_add(display_line));
                             if !h.is_finite() || h <= 0.0 {
                                 continue;
                             }
 
                             let bg = if frozen {
-                                palette
-                                    .background
-                                    .blend(gpui::Hsla::black().opacity(0.12))
+                                palette.background.blend(gpui::Hsla::black().opacity(0.12))
                             } else if surface.stale {
-                                palette
-                                    .background
-                                    .blend(gpui::Hsla::black().opacity(0.2))
+                                palette.background.blend(gpui::Hsla::black().opacity(0.2))
                             } else {
                                 palette.background
                             };
@@ -1184,10 +1161,9 @@ impl Render for TermView {
                                 .text_size(font_size);
 
                             if !frozen {
-                                block_el =
-                                    crate::app_shell::plugin_paint::paint_laid_out(
-                                        block_el, laid, &tokens, cell_w, line_h,
-                                    );
+                                block_el = crate::app_shell::plugin_paint::paint_laid_out(
+                                    block_el, laid, &tokens, cell_w, line_h,
+                                );
                             }
 
                             body = body.child(block_el);
@@ -1387,12 +1363,12 @@ fn is_clipboard_shortcut(keystroke: &Keystroke) -> bool {
 /// Open web URLs, and path-like targets when `path_links` is enabled (M12).
 pub(crate) fn open_navigation_target(target: &MaybeNavigationTarget, cx: &App) {
     match target {
-        MaybeNavigationTarget::Url(url) if is_web_url(url) => {
+        MaybeNavigationTarget::Url(url) => {
+            // OSC8 links carry an explicit URI the emitter chose; open any scheme
+            // (mailto:, vscode://, obsidian://, …), not only web URLs. file:// is
+            // resolved to a path by hyperlink_target before it reaches here.
             log::info!("opening url: {url}");
             cx.open_url(url);
-        }
-        MaybeNavigationTarget::Url(url) => {
-            log::debug!("ignoring non-web url: {url}");
         }
         MaybeNavigationTarget::PathLike(path) => {
             if !TerminalSettings::get_global(cx).path_links {
@@ -1595,14 +1571,6 @@ fn looks_like_method_call(s: &str) -> bool {
     s.contains("()") || (s.contains('.') && s.contains('(') && s.ends_with(')'))
 }
 
-fn is_web_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("ftp://")
-}
-
 /// Monotonic counter for unique temp file names (avoids clock-regression issues).
 static PASTE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1777,16 +1745,6 @@ mod tests {
         let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")];
         assert_eq!(format_external_paths(&paths), " /tmp/a '/tmp/b c' ");
         assert_eq!(format_external_paths(&[]), "");
-    }
-
-    #[test]
-    fn is_web_url_accepts_common_schemes() {
-        assert!(is_web_url("https://example.com"));
-        assert!(is_web_url("HTTP://example.com"));
-        assert!(is_web_url("mailto:a@b.com"));
-        assert!(is_web_url("ftp://files.example"));
-        assert!(!is_web_url("file:///tmp/x"));
-        assert!(!is_web_url("not-a-url"));
     }
 
     #[test]

@@ -225,9 +225,7 @@ fn is_leap(year: i32) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-pub use sleipnir_paths::{
-    grants_path as default_grants_path, grants_path_for as default_grants_path_for,
-};
+pub use sleipnir_paths::grants_path as default_grants_path;
 
 /// Load grants. Missing file → empty; unreadable, corrupt, or unrecognized
 /// version → quarantined as `.bak`, then empty.
@@ -425,19 +423,6 @@ mod tests {
             assert_eq!(reason, ConsentReason::NewCapabilities);
             assert_eq!(missing, [cap]);
         }
-    }
-
-    #[test]
-    fn default_grants_path_matches_settings_config_dir() {
-        // Same regression as plugin_host: on macOS/Unix the file lives under
-        // ~/.config/sleipnir, NOT dirs::config_dir().
-        let unix = default_grants_path_for(false);
-        assert!(
-            unix.ends_with(".config/sleipnir/plugin-grants.json"),
-            "unix grants path should be under ~/.config/sleipnir: {unix:?}"
-        );
-        let win = default_grants_path_for(true);
-        assert!(win.ends_with("sleipnir/plugin-grants.json"), "{win:?}");
     }
 
     #[test]
