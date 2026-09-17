@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.6
+
+### Fixes
+- The host link-hover tooltip and underline no longer linger over full-screen mouse-mode apps (vim-style TUIs); hover state is cleared on alt-screen swaps and while an app owns the pointer.
+
+### Changes
+- Extract terminal/shell state handling and improve reliability and maintainability across the terminal, UI, plugin host, and settings crates; expand the plugin documentation.
+
 ## 0.6.5
 
 ### Changes
