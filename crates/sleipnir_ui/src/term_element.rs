@@ -2,11 +2,11 @@
 
 use crate::cursor_blink_alpha;
 use gpui::{
-    App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
-    GlobalElementId, InputHandler, InteractiveElement, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ScrollWheelEvent,
-    StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle, UTF16Selection,
-    UnderlineStyle, Window, fill, point, px, relative, size,
+    App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FileDropEvent,
+    FocusHandle, GlobalElementId, InputHandler, InteractiveElement, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint,
+    ScrollWheelEvent, StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle,
+    UTF16Selection, UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use itertools::Itertools;
 use row_geometry::RowGeometry;
@@ -698,6 +698,13 @@ impl TermElement {
             self.interactivity.on_mouse_up(button, {
                 let terminal = terminal.clone();
                 move |e: &MouseUpEvent, _window, cx| {
+                    // An OS file drop ends as a synthetic left MouseUp; the
+                    // pane's `on_drop::<ExternalPaths>` owns that gesture, so
+                    // the terminal must not treat it as a click (in mouse mode
+                    // it would be a press-less release report).
+                    if cx.has_active_drag() {
+                        return;
+                    }
                     terminal.update(cx, |terminal, cx| {
                         terminal.mouse_up(e, cx);
                         cx.notify();
@@ -714,6 +721,12 @@ impl TermElement {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
+                // Drags (tab reorder, pane grip, OS file drop) dispatch moves
+                // with a pressed left button; they are not selection gestures
+                // and must not leak motion reports into mouse-mode apps.
+                if cx.has_active_drag() {
+                    return;
+                }
                 let is_focused = focus.is_focused(window);
                 if e.pressed_button.is_none() && !is_focused {
                     return;
@@ -721,6 +734,26 @@ impl TermElement {
                 terminal.update(cx, |terminal, cx| {
                     terminal.mouse_move(e, cx);
                 });
+            }
+        });
+
+        // OS file drag left the window (Exited) or the session ended without a
+        // drop on this pane: clear the hover highlight that the pane's
+        // `on_drag_move::<ExternalPaths>` set. GPUI dispatches these as mouse
+        // events, so they arrive here rather than on the drop listener.
+        window.on_mouse_event({
+            move |e: &FileDropEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                if matches!(e, FileDropEvent::Exited | FileDropEvent::Ended)
+                    && view.read(cx).file_drop_hover
+                {
+                    view.update(cx, |this, cx| {
+                        this.file_drop_hover = false;
+                        cx.notify();
+                    });
+                }
             }
         });
 

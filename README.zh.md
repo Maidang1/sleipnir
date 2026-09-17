@@ -22,6 +22,7 @@ Sleipnir 是一个独立终端应用，基于 [GPUI](https://gpui.rs) 构建，�
 - 标签页、分屏和多窗口会话
 - 原生 PTY / ConPTY 支持；每个新窗口从一个新标签页开始
 - 智能粘贴、路径链接以及跟随系统的主题
+- 把文件拖到窗格上即可插入 shell 转义后的路径（走 bracketed paste）
 - 滚动历史搜索、Diff 检查和内存中的命令运行状态
 - 兼容 Zed 的 `terminal.*` 设置，支持热重载
 - 内置 Agents 面板与本地 worker 协调，开箱即用

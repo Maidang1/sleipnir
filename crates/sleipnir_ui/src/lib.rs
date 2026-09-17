@@ -61,9 +61,10 @@ use collections::HashMap;
 use gpui::Pixels;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, rgb,
+    App, AppContext as _, ClipboardEntry, Context, DragMoveEvent, Entity, EventEmitter,
+    ExternalPaths, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
+    Keystroke, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Task, Window, div, rgb,
 };
 use sleipnir_settings::{
     NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
@@ -130,6 +131,8 @@ pub struct TermView {
     starfield_animation: starfield::Animation,
     /// Bottom toast after copy / copy-on-select.
     copy_toast: Option<CopyToast>,
+    /// Highlight while OS files hover over this pane (drop pastes quoted paths).
+    pub(crate) file_drop_hover: bool,
     /// Last time `render` ran, i.e. the last time this pane was actually in the
     /// window's element tree. `AppShell::render_content` only emits the active
     /// tab's panes (and, under pane zoom, only the zoomed one), so a stale value
@@ -253,6 +256,7 @@ impl TermView {
             last_input_at: Instant::now(),
             starfield_animation: starfield::Animation::default(),
             copy_toast: None,
+            file_drop_hover: false,
             last_render_at: None,
             last_offscreen_notify_at: None,
             blocks: crate::plugin_block::BlockRegistry::new(),
@@ -816,6 +820,29 @@ impl TermView {
         }
     }
 
+    /// OS file drop (Finder/desktop drag onto the grid): quote every path and
+    /// write it through the bracketed-paste path (`Terminal::paste`), matching
+    /// how Terminal.app / iTerm2 / Ghostty insert dropped files.
+    fn handle_external_file_drop(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_drop_hover = false;
+        let text = format_external_paths(paths.paths());
+        if text.trim().is_empty() {
+            cx.notify();
+            return;
+        }
+        window.focus(&self.focus_handle, cx);
+        if let Some(terminal) = self.terminal_entity().cloned() {
+            terminal.update(cx, |term, _| term.paste(&text));
+            self.note_user_typed(cx);
+        }
+        cx.notify();
+    }
+
     fn clear(&mut self, _: &Clear, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(terminal) = self.terminal_entity().cloned() {
             terminal.update(cx, |term, _| term.clear());
@@ -1061,7 +1088,23 @@ impl Render for TermView {
                         // there; we keep it always-on and read-only).
                         .role(gpui::Role::MultilineTextInput)
                         .aria_label("Terminal")
-                        .aria_value(a11y_text);
+                        .aria_value(a11y_text)
+                        // OS file drag (GPUI turns it into an `ExternalPaths`
+                        // drag): hover highlights the pane, drop pastes the
+                        // shell-quoted paths into the PTY. The listener fires
+                        // for every move of the drag session, so it also
+                        // clears the highlight when the pointer leaves this
+                        // pane (e.g. onto a sibling pane).
+                        .on_drag_move::<ExternalPaths>(cx.listener(
+                            |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                                let hovered = event.bounds.contains(&event.event.position);
+                                if this.file_drop_hover != hovered {
+                                    this.file_drop_hover = hovered;
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .on_drop::<ExternalPaths>(cx.listener(Self::handle_external_file_drop));
                     let body = if let Some(word) = hovered {
                         body.tooltip(move |_window, cx| {
                             let text: SharedString = word.clone().into();
@@ -1212,6 +1255,19 @@ impl Render for TermView {
                                         .child(toast_message),
                                 ),
                         ),
+                )
+            })
+            // File-drop hover affordance: lime wash + frame over the pane that
+            // will receive the dropped paths. Pure paint (no hitbox), so the
+            // terminal under it keeps receiving the drag.
+            .when(self.file_drop_hover, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(palette.ansi[2].opacity(0.08))
+                        .border(chrome::pixel::PIXEL_BORDER)
+                        .border_color(palette.ansi[2]),
                 )
             })
     }

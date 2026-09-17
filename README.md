@@ -22,6 +22,7 @@ Sleipnir is a standalone terminal built on [GPUI](https://gpui.rs), with a forke
 - Tabs, splits, and multi-window sessions
 - Native PTY/ConPTY support; every new window starts with a fresh tab
 - Smart paste, path links, and system-aware themes
+- Drag files onto a pane to insert shell-quoted paths (bracketed paste)
 - Search in scrollback, diff inspection, and in-memory command status tracking
 - Zed-compatible `terminal.*` settings and hot reload
 - Built-in Agents panel and local worker coordination, enabled out of the box
