@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.8
+
+### Features
+- Add a native Browser side panel on macOS and Windows with URL navigation, history controls, localhost support, and safe focus/overlay handling.
+- Add an explicitly authorized, per-window browser MCP capability for coding agents: discover the embedded browser, inspect status, navigate HTTP/HTTPS URLs, and read capped visible page text without exposing arbitrary JavaScript, cookies, form values, downloads, or terminal input.
+
+### Changes
+- Add preview-only and explicit Codex MCP registration commands with atomic, locked configuration updates; no agent configuration is changed automatically.
+- Add bilingual browser-agent documentation and Sleipnir social-card source assets.
+
 ## 0.6.7
 
 ### Features
