@@ -10,6 +10,7 @@ pub const TOKEN_ENV: &str = "SLEIPNIR_BROWSER_TOKEN";
 pub const WINDOW_ENV: &str = "SLEIPNIR_WINDOW_ID";
 pub const MAX_TEXT_CHARS: usize = 20_000;
 pub const MAX_URL_BYTES: usize = 8192;
+pub const MAX_TITLE_CHARS: usize = 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]

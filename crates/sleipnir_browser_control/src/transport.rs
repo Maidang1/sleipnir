@@ -14,6 +14,7 @@ use std::{
 
 pub const MAX_FRAME: usize = 256 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_CONNECTIONS: usize = 8;
 #[derive(Clone)]
 pub struct Credentials {
     pub endpoint: SocketAddr,
@@ -95,6 +96,44 @@ fn token_matches(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |n, (a, b)| n | (a ^ b)) == 0
 }
 
+/// Handle one accepted connection: read a single framed request, authorize it,
+/// and write one framed response. Runs on its own worker thread.
+fn serve_connection(
+    mut stream: TcpStream,
+    token: &str,
+    stop: &AtomicBool,
+    window: u64,
+    handler: &(impl Fn(Request, Instant) -> Response + Send + Sync),
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let response = match read_line(&mut BufReader::new(&mut stream)) {
+        Ok(Some(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
+            Ok(envelope)
+                if token_matches(&envelope.token, token) && !stop.load(Ordering::Acquire) =>
+            {
+                if envelope.request.window().is_some_and(|id| id != window) {
+                    Response::error(
+                        "wrong_window",
+                        "This connection is bound to a different window",
+                    )
+                } else if let Err(error) = envelope.request.validate() {
+                    Response::error("invalid_arguments", error)
+                } else {
+                    handler(envelope.request, Instant::now() + REQUEST_TIMEOUT)
+                }
+            }
+            Ok(_) => Response::error("unauthorized", "Invalid or expired browser capability"),
+            Err(_) => Response::error("invalid_request", "Invalid browser request"),
+        },
+        _ => Response::error(
+            "invalid_request",
+            "Missing, oversized or incomplete browser request",
+        ),
+    };
+    let _ = write_line(&mut stream, &response);
+}
+
 pub struct Server {
     pub credentials: Credentials,
     stop: Arc<AtomicBool>,
@@ -121,40 +160,50 @@ impl Server {
         let stopped = stop.clone();
         let handler = Arc::new(handler);
         let active = Arc::new(AtomicUsize::new(0));
-        let join = thread::Builder::new().name("browser-control".into()).spawn(move || {
-            while !stopped.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if active.load(Ordering::Acquire) >= 8 { continue; }
-                        active.fetch_add(1, Ordering::AcqRel);
-                        let active = active.clone(); let handler = handler.clone(); let token = token.clone(); let stop = stopped.clone();
-                        let worker_active = active.clone();
-                        if thread::Builder::new().name("browser-request".into()).spawn(move || {
-                            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                            let response = match read_line(&mut BufReader::new(&mut stream)) {
-                                Ok(Some(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
-                                    Ok(envelope) if token_matches(&envelope.token, &token) && !stop.load(Ordering::Acquire) => {
-                                        if envelope.request.window().is_some_and(|id| id != window) {
-                                            Response::error("wrong_window", "This connection is bound to a different window")
-                                        } else if let Err(error) = envelope.request.validate() {
-                                            Response::error("invalid_arguments", error)
-                                        } else { handler(envelope.request, Instant::now() + REQUEST_TIMEOUT) }
-                                    }
-                                    Ok(_) => Response::error("unauthorized", "Invalid or expired browser capability"),
-                                    Err(_) => Response::error("invalid_request", "Invalid browser request"),
-                                },
-                                _ => Response::error("invalid_request", "Missing, oversized or incomplete browser request"),
-                            };
-                            let _ = write_line(&mut stream, &response);
-                            worker_active.fetch_sub(1, Ordering::AcqRel);
-                        }).is_err() { active.fetch_sub(1, Ordering::AcqRel); }
+        let join = thread::Builder::new()
+            .name("browser-control".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            if active.load(Ordering::Acquire) >= MAX_CONNECTIONS {
+                                let _ = write_line(
+                                    &mut stream,
+                                    &Response::error(
+                                        "busy",
+                                        "Too many concurrent browser connections",
+                                    ),
+                                );
+                                continue;
+                            }
+                            active.fetch_add(1, Ordering::AcqRel);
+                            let worker_active = active.clone();
+                            let handler = handler.clone();
+                            let token = token.clone();
+                            let stop = stopped.clone();
+                            let spawned = thread::Builder::new()
+                                .name("browser-request".into())
+                                .spawn(move || {
+                                    serve_connection(
+                                        stream,
+                                        &token,
+                                        &stop,
+                                        window,
+                                        handler.as_ref(),
+                                    );
+                                    worker_active.fetch_sub(1, Ordering::AcqRel);
+                                });
+                            if spawned.is_err() {
+                                active.fetch_sub(1, Ordering::AcqRel);
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(20))
+                        }
+                        Err(_) => break,
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(20)),
-                    Err(_) => break,
                 }
-            }
-        })?;
+            })?;
         Ok(Self {
             credentials,
             stop,

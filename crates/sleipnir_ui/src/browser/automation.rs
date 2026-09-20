@@ -1,7 +1,9 @@
 //! Explicitly gated automation surface. Page scripts are fixed, never caller-supplied.
 use super::BrowserView;
 use gpui::{Context, Window};
-use sleipnir_browser_control::{BrowserStatus, MAX_TEXT_CHARS, Request, Response, check_access};
+use sleipnir_browser_control::{
+    BrowserStatus, MAX_TEXT_CHARS, MAX_TITLE_CHARS, Request, Response, check_access,
+};
 use std::{
     sync::{
         Arc,
@@ -32,7 +34,7 @@ impl BrowserView {
             }),
             title: self
                 .agent_access
-                .then(|| self.title.chars().take(1024).collect()),
+                .then(|| self.title.chars().take(MAX_TITLE_CHARS).collect()),
         }
     }
     pub(crate) fn control(
@@ -44,55 +46,63 @@ impl BrowserView {
         cx: &mut Context<Self>,
     ) {
         let id = window.window_handle().window_id().as_u64();
-        if let Request::List = request {
-            let _ = reply.send(Response::Windows {
-                windows: vec![self.status_for_agent(id)],
-            });
-            return;
+        // `List` is authorized for any caller and needs no WebView host; every
+        // other operation must match the bound window, pass the access gate,
+        // and have a live host.
+        if !matches!(request, Request::List) {
+            if request.window() != Some(id) {
+                let _ = reply.send(Response::error("wrong_window", "Window binding mismatch"));
+                return;
+            }
+            if let Err(error) = check_access(self.open, self.agent_access, self.blocked) {
+                let _ = reply.send(error);
+                return;
+            }
+            if let Err(error) = request.validate() {
+                let _ = reply.send(Response::error("invalid_arguments", error));
+                return;
+            }
+            if self.host.is_none() {
+                let _ = reply.send(Response::error("not_ready", "System WebView is not ready"));
+                return;
+            }
         }
-        if request.window() != Some(id) {
-            let _ = reply.send(Response::error("wrong_window", "Window binding mismatch"));
-            return;
-        }
-        if let Err(error) = check_access(self.open, self.agent_access, self.blocked) {
-            let _ = reply.send(error);
-            return;
-        }
-        if let Err(error) = request.validate() {
-            let _ = reply.send(Response::error("invalid_arguments", error));
-            return;
-        }
-        let Some(host) = self.host.as_ref() else {
-            let _ = reply.send(Response::error("not_ready", "System WebView is not ready"));
-            return;
-        };
         match request {
+            Request::List => {
+                let _ = reply.send(Response::Windows {
+                    windows: vec![self.status_for_agent(id)],
+                });
+            }
             Request::Status { .. } => {
                 self.poll(window, cx);
                 let _ = reply.send(Response::Status {
                     browser: self.status_for_agent(id),
                 });
             }
-            Request::Navigate { url, .. } => match host.webview.load_url(&url) {
-                Ok(()) => {
-                    self.access_epoch.fetch_add(1, Ordering::AcqRel);
-                    self.loading = true;
-                    self.error = None;
-                    self.address.update(cx, |input, cx| {
-                        input.dirty = false;
-                        input.set_url(url.clone(), window, cx);
-                    });
-                    cx.notify();
-                    let _ = reply.send(Response::NavigationAccepted {
-                        window: id,
-                        requested_url: url,
-                    });
+            Request::Navigate { url, .. } => {
+                let host = self.host.as_ref().expect("host checked above");
+                match host.webview.load_url(&url) {
+                    Ok(()) => {
+                        self.access_epoch.fetch_add(1, Ordering::AcqRel);
+                        self.loading = true;
+                        self.error = None;
+                        self.address.update(cx, |input, cx| {
+                            input.dirty = false;
+                            input.set_url(url.clone(), window, cx);
+                        });
+                        cx.notify();
+                        let _ = reply.send(Response::NavigationAccepted {
+                            window: id,
+                            requested_url: url,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Response::error("navigation_failed", error.to_string()));
+                    }
                 }
-                Err(error) => {
-                    let _ = reply.send(Response::error("navigation_failed", error.to_string()));
-                }
-            },
+            }
             Request::ReadText { .. } => {
+                let host = self.host.as_ref().expect("host checked above");
                 if self.loading {
                     let _ = reply.send(Response::error(
                         "loading",
@@ -105,7 +115,7 @@ impl BrowserView {
                 let callback_reply = reply.clone();
                 // innerText reads rendered text, not input/textarea values or hidden DOM.
                 let script = format!(
-                    r#"(() => {{ try {{ const text = document.body ? document.body.innerText : ''; return {{url: location.href, title: document.title.slice(0,1024), text: text.slice(0,{MAX_TEXT_CHARS}), truncated: text.length > {MAX_TEXT_CHARS}}}; }} catch (_) {{ return {{error:'Unable to read page text'}}; }} }})()"#
+                    r#"(() => {{ try {{ const text = document.body ? document.body.innerText : ''; return {{url: location.href, title: document.title.slice(0,{MAX_TITLE_CHARS}), text: text.slice(0,{MAX_TEXT_CHARS}), truncated: text.length > {MAX_TEXT_CHARS}}}; }} catch (_) {{ return {{error:'Unable to read page text'}}; }} }})()"#
                 );
                 let result = host
                     .webview
@@ -126,10 +136,10 @@ impl BrowserView {
                     let _ = reply.send(Response::error("read_failed", error.to_string()));
                 }
             }
-            Request::List => unreachable!(),
         }
     }
 }
+
 fn decode_page(window: u64, raw: &str) -> Response {
     #[derive(serde::Deserialize)]
     struct Page {
@@ -149,7 +159,7 @@ fn decode_page(window: u64, raw: &str) -> Response {
     Response::PageText {
         window,
         url: page.url,
-        title: page.title.chars().take(1024).collect(),
+        title: page.title.chars().take(MAX_TITLE_CHARS).collect(),
         text: page.text.chars().take(MAX_TEXT_CHARS).collect(),
         truncated: page.truncated || too_long,
         untrusted: true,
