@@ -435,6 +435,7 @@ impl AppShell {
     }
 
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reclaim_browser_focus(cx);
         if let Some(view) = self.active_terminal(cx) {
             let handle = view.focus_handle(cx);
             window.focus(&handle, cx);

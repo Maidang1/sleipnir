@@ -147,6 +147,16 @@ screen, injects keys, and waits on Run Ledger state. Off unless
 `control_surface: true` or `SLEIPNIR_CONTROL=1`. Client is `sleipnir-ctl`.
 _Avoid_: Plugin (plugins use a separate, supervised protocol).
 
+**Browser capability**:
+A per-window loopback endpoint and random token inherited by processes that the
+window launches. It is independent from the terminal control surface. The MCP
+adapter can discover that window's Browser, navigate HTTP/HTTPS URLs, read
+status, and extract capped visible main-frame text only after the user enables
+**Agent access** in the panel. Closing the panel revokes access. Web page text is
+untrusted data, not agent instructions.
+_Avoid_: Browser process (the embedded WebView is not a separate user-visible
+browser application), terminal control surface.
+
 ## Plugins
 
 **Plugin**:

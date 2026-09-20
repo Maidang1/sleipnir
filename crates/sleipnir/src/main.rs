@@ -21,8 +21,8 @@ use sleipnir_ui::{
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
     ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
-    ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
-    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, builtin_bindings,
+    ToggleBroadcast, ToggleBrowser, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch,
+    TogglePaneFacts, TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, builtin_bindings,
     install_finder_services, last_window_close_quits, open_sleipnir_window, tmux_preset_bindings,
     try_open_sleipnir_window,
 };
@@ -41,6 +41,9 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
         Some("agentctl") => return sleipnir_agentctl::run_cli(args),
+        Some(mode @ ("browser-mcp" | "browser-ctl" | "browser-agent")) => {
+            return sleipnir_browser_control::cli::run(mode, args);
+        }
         _ => {}
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -311,6 +314,7 @@ fn key_bindings_for_spec(spec: &KeyBindingSpec) -> Vec<KeyBinding> {
             "scroll_to_bottom" => KeyBinding::new(&spec.key, ScrollToBottom, Some(ctx)),
             "toggle_vi_mode" => KeyBinding::new(&spec.key, ToggleViMode, Some(ctx)),
             "show_character_palette" => KeyBinding::new(&spec.key, ShowCharacterPalette, Some(ctx)),
+            "toggle_browser" | "browser" => KeyBinding::new(&spec.key, ToggleBrowser, Some(ctx)),
             "toggle_plugin_monitor" | "plugin_monitor" => {
                 KeyBinding::new(&spec.key, TogglePluginMonitor, Some(ctx))
             }

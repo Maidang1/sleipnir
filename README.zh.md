@@ -26,6 +26,7 @@ Sleipnir 是一个独立终端应用，基于 [GPUI](https://gpui.rs) 构建，�
 - 滚动历史搜索、Diff 检查和内存中的命令运行状态
 - 兼容 Zed 的 `terminal.*` 设置，支持热重载
 - 内置 Agents 面板与本地 worker 协调，开箱即用
+- macOS 与 Windows 原生浏览器面板；可选、需显式授权的 MCP 工具允许 agent 发现面板、导航 HTTP/HTTPS 地址并读取可见页面正文
 - 可选的外部进程插件：扩展面板、滚动历史内嵌内容和命令面板，默认关闭
 
 重启后不恢复窗口布局或终端滚动历史。持久化命令历史和 Run Ledger 面板由
@@ -100,6 +101,20 @@ Agents 随终端启动，在独立进程中运行。命令面板中的 **Agents:
 这是同一系统用户可访问的本地控制接口，不是沙箱，也不会代替用户确认 agent 的原生审批。
 如需关闭，设置 `"plugins": { "builtin_agents": false }`。`plugins.enabled`
 仍只控制外部插件，默认关闭。详见 [Agents](crates/sleipnir_plugin_agents/README.md)。
+
+## 内置浏览器 Agent 工具
+
+原生 Browser 面板支持 macOS 和 Windows。浏览器自动化使用独立、仅限浏览器的能力，不会顺带启用终端控制接口，也不开放任意 JavaScript、Cookie、表单值、页面点击、下载或终端输入。
+
+默认不会注册到任何 agent。只预览 Codex MCP 配置、不写入文件：
+
+```bash
+"$SLEIPNIR_BIN" browser-agent register codex --dry-run
+```
+
+明确需要注册时，运行 `"$SLEIPNIR_BIN" browser-agent register codex --apply`，然后在新的 Sleipnir 终端中重新启动 Codex。在目标窗口打开 **Browser**，点击 **Agent: off** 临时授权；关闭面板会撤销授权。每个 Sleipnir 窗口都有独立的本机回环地址和随机凭据，只由该窗口之后启动的进程继承。
+
+MCP 提供四个工具：发现当前窗口的浏览器、读取状态、打开绝对 HTTP/HTTPS 地址、读取最多 20,000 个字符的主页面可见正文。返回的网页正文会标记为不可信内容，不能作为 agent 指令执行。
 
 ## 快捷键
 

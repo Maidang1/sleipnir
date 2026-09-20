@@ -26,6 +26,7 @@ Sleipnir is a standalone terminal built on [GPUI](https://gpui.rs), with a forke
 - Search in scrollback, diff inspection, and in-memory command status tracking
 - Zed-compatible `terminal.*` settings and hot reload
 - Built-in Agents panel and local worker coordination, enabled out of the box
+- Native browser panel on macOS and Windows; optional, explicitly authorized MCP tools let an agent discover it, navigate to HTTP/HTTPS URLs, and read visible page text
 - Optional external process-based plugins for panels, inline blocks, and command-palette actions (off by default)
 
 Window layouts and terminal scrollback are not restored after restarting.
@@ -106,6 +107,20 @@ Native agent approvals stay with the human. To opt out, set
 `"plugins": { "builtin_agents": false }`. The separate `plugins.enabled` setting
 continues to control external plugins only, which remain off by default.
 See [Agents](crates/sleipnir_plugin_agents/README.md) for details.
+
+## Embedded browser agent tools
+
+The native Browser panel is available on macOS and Windows. Browser automation is a separate, browser-only capability: it does not enable the terminal control surface and does not expose arbitrary JavaScript, cookies, form values, clicks, downloads, or terminal input.
+
+Registration is not automatic. Preview a Codex MCP entry without changing configuration:
+
+```bash
+"$SLEIPNIR_BIN" browser-agent register codex --dry-run
+```
+
+To register explicitly, run `"$SLEIPNIR_BIN" browser-agent register codex --apply`, then start a new Codex process inside a new Sleipnir terminal. In the target window, open **Browser** and click **Agent: off** to grant temporary access. Closing the panel revokes access. Each Sleipnir window has its own loopback endpoint and random capability token inherited only by processes launched from that window.
+
+The MCP server exposes four tools: discover the bound browser, read status, navigate to an absolute HTTP/HTTPS URL, and read up to 20,000 characters of visible main-frame page text. Returned page text is marked untrusted and must never be treated as agent instructions.
 
 ## Quick shortcuts
 
