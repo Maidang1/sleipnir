@@ -78,6 +78,7 @@ Settings live in:
 
 Common options include:
 
+- `language` (`en` or `zh_cn`); additional catalogs follow [the locale guide](crates/sleipnir_settings/locales/README.md)
 - `theme` / `custom_theme`
 - `confirm_close`
 - `key_bindings`

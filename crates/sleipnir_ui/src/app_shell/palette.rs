@@ -8,6 +8,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, deferred, div,
     prelude::FluentBuilder as _, px, relative,
 };
+use sleipnir_settings::TerminalSettings;
 
 use super::AppShell;
 use crate::chrome::ChromeTokens;
@@ -133,9 +134,10 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let hits = self.filtered_palette_indices();
+        let language = TerminalSettings::get_global(cx).language;
         let selected = self.palette.selected.min(hits.len().saturating_sub(1));
         let query: SharedString = if self.palette.query.is_empty() {
-            "Type a command…".into()
+            language.text("palette.prompt").into()
         } else {
             format!("{}|", self.palette.query).into()
         };
@@ -162,7 +164,7 @@ impl AppShell {
                     .py_2()
                     .text_color(tokens.fg_muted)
                     .text_sm()
-                    .child("No matching commands"),
+                    .child(language.text("palette.no_match")),
             );
         } else {
             for (row_i, &item_i) in hits.iter().enumerate() {

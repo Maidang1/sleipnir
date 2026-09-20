@@ -5,7 +5,10 @@
 //! `%APPDATA%\sleipnir\settings.json` on Windows.
 
 pub mod agent_hooks;
+mod i18n;
 mod themes;
+
+pub use i18n::Language;
 
 pub use themes::{
     Appearance, CustomPalette, TerminalPalette, ThemeName, ThemeSetting, get_color_at_index,
@@ -141,6 +144,8 @@ pub enum CursorShape {
 
 #[derive(Clone, Debug)]
 pub struct TerminalSettings {
+    /// Language for application chrome, menus, settings, and commands.
+    pub language: Language,
     pub font_size: Option<Pixels>,
     pub font_family: Option<String>,
     pub font_fallbacks: Option<FontFallbacks>,
@@ -294,6 +299,7 @@ pub fn option_as_meta_default_for(windows: bool) -> bool {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
+            language: Language::En,
             font_size: Some(px(14.)),
             font_family: Some(default_font_family().into()),
             font_fallbacks: default_font_fallbacks(),
@@ -425,6 +431,21 @@ impl TerminalSettings {
             cx,
             &what,
         );
+    }
+
+    /// Set the interface language and persist it at the top level.
+    pub fn set_language(language: Language, cx: &mut App) {
+        Self::update(
+            |s| s.language = language,
+            |doc| {
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert("language".into(), language.as_str().into());
+                }
+            },
+            cx,
+            &format!("language -> {}", language.as_str()),
+        );
+        cx.refresh_windows();
     }
 
     /// Toggle font ligatures and persist under `terminal.font_ligatures`.
@@ -562,6 +583,9 @@ fn load_user_themes() -> StdHashMap<String, CustomPalette> {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 struct SettingsFile {
+    /// Registered interface locale code (currently en or zh_cn).
+    #[serde(default)]
+    language: Option<Language>,
     /// Theme name: auto | mocha | … or any user theme name from `themes.json`.
     #[serde(default)]
     theme: Option<String>,
@@ -675,6 +699,9 @@ fn load_or_default() -> TerminalSettings {
 }
 
 fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
+    if let Some(language) = file.language {
+        settings.language = language;
+    }
     if let Some(name) = file.theme {
         settings.theme = ThemeName::from_str(&name)
             .map(ThemeSetting::Builtin)
@@ -825,6 +852,7 @@ pub fn ensure_default_config_file() -> anyhow::Result<()> {
 
 fn default_settings_file() -> SettingsFile {
     SettingsFile {
+        language: Some(Language::En),
         theme: Some("mocha".into()),
         custom_theme: None,
         key_bindings: None,
@@ -1525,5 +1553,15 @@ mod tests {
         let mut settings = TerminalSettings::default();
         merge_file(&mut settings, file);
         assert!(!settings.agent_icons);
+    }
+
+    #[test]
+    fn interface_language_defaults_to_english_and_parses_chinese() {
+        assert_eq!(TerminalSettings::default().language, Language::En);
+        let file: SettingsFile = serde_json::from_str(r#"{"language":"zh_cn"}"#).unwrap();
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.language, Language::ZhCn);
+        assert_eq!(settings.language.text("settings.title"), "设置");
     }
 }

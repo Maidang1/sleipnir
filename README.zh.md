@@ -76,6 +76,7 @@ cargo build --release -p sleipnir
 
 常用配置项包括：
 
+- `language`（`en` 或 `zh_cn`）；扩展其他语言请参考[语言包指南](crates/sleipnir_settings/locales/README.md)
 - `theme` / `custom_theme`
 - `confirm_close`
 - `key_bindings`

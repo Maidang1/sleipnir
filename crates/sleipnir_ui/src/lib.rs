@@ -43,7 +43,9 @@ pub use app_shell::{
     try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
-pub use command_palette::{CommandId, CommandItem, commands as palette_commands};
+pub use command_palette::{
+    CommandId, CommandItem, commands as palette_commands, commands_for as palette_commands_for,
+};
 pub use finder_service::install_finder_services;
 pub use keymap::{
     BindingContext, BuiltinAction, BuiltinBinding, builtin_bindings, display_shortcut,

@@ -162,7 +162,7 @@ impl AppShell {
         }
         self.mark_missing_blocks_stale(&live, cx);
         if self.plugin_chrome.sync_live(&live) {
-            self.rebuild_palette_items();
+            self.rebuild_palette_items(cx);
         }
     }
     pub(super) fn apply_panel_render(
@@ -326,7 +326,7 @@ impl AppShell {
             .apply_status(plugin_id, instance_id, tree, granted, hint)
         {
             ApplyChrome::Applied => {
-                self.rebuild_palette_items();
+                self.rebuild_palette_items(cx);
                 cx.notify();
             }
             ApplyChrome::DeniedGrant => {
@@ -468,7 +468,7 @@ impl AppShell {
     pub(super) fn refresh_plugin_commands(&mut self, cx: &mut Context<Self>) {
         crate::plugin_runtime::PluginRuntime::reload(cx);
         self.palette.plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
-        self.rebuild_palette_items();
+        self.rebuild_palette_items(cx);
         self.palette.selected = 0;
         self.start_resident_plugins(cx);
     }

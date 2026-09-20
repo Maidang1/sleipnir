@@ -27,12 +27,12 @@ use gpui::{
     prelude::FluentBuilder as _, px, size,
 };
 use run_ledger::{PaneKey, RunEvent};
-use sleipnir_settings::{Appearance, ConfirmClose, TerminalPalette, TerminalSettings};
+use sleipnir_settings::{Appearance, ConfirmClose, Language, TerminalPalette, TerminalSettings};
 use std::path::PathBuf;
 
 use crate::chrome::pixel;
 use crate::chrome::{ChromeGeometry, ChromeTokens};
-use crate::command_palette::{CommandId, CommandItem, commands as palette_commands};
+use crate::command_palette::{CommandId, CommandItem, commands_for as palette_commands_for};
 use crate::pane_tree::{CloseOutcome, Direction, PaneId, PaneRect, SplitAxis, SplitPath, neighbor};
 use crate::run_ledger_global::RunLedgerGlobal;
 pub(crate) use crate::tab_convert::Tab;
@@ -281,12 +281,12 @@ impl SettingsSection {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self, language: Language) -> &'static str {
         match self {
-            SettingsSection::Theme => "theme",
-            SettingsSection::General => "general",
-            SettingsSection::Agents => "agents",
-            SettingsSection::Shortcuts => "shortcuts",
+            SettingsSection::Theme => language.text("settings.section.theme"),
+            SettingsSection::General => language.text("settings.section.general"),
+            SettingsSection::Agents => language.text("settings.section.agents"),
+            SettingsSection::Shortcuts => language.text("settings.section.shortcuts"),
         }
     }
 }
@@ -864,7 +864,7 @@ impl AppShell {
         );
         crate::plugin_runtime::PluginRuntime::init(cx);
         let plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
-        let mut palette_items = palette_commands();
+        let mut palette_items = palette_commands_for(TerminalSettings::get_global(cx).language);
         palette_items.extend(crate::command_palette::plugin_items(&plugin_commands));
         let mut shell = Self {
             tabs: Vec::new(),
@@ -1251,8 +1251,8 @@ impl AppShell {
         self.plugin_chrome.badges_for_tab(tab_panes, tab_is_active)
     }
 
-    fn rebuild_palette_items(&mut self) {
-        self.palette.items = palette_commands();
+    fn rebuild_palette_items(&mut self, cx: &gpui::App) {
+        self.palette.items = palette_commands_for(TerminalSettings::get_global(cx).language);
         self.palette
             .items
             .extend(crate::command_palette::plugin_items(

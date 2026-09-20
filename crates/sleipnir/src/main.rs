@@ -110,7 +110,7 @@ fn main() -> std::process::ExitCode {
         bind_user_key_bindings(cx);
 
         // After keybindings so menu items pick up key equivalents from the keymap.
-        cx.set_menus(app_menus());
+        cx.set_menus(app_menus(TerminalSettings::get_global(cx).language));
 
         // Finder Services ("New Sleipnir Tab/Window Here") must be bound before
         // didFinishLaunching returns so a cold-start invocation is not dropped.
