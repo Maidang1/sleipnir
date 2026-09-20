@@ -17,10 +17,11 @@ fn parse_catalog(source: &'static str, code: &str) -> Catalog {
 }
 
 macro_rules! define_languages {
-    ($( $variant:ident => ($code:literal, $name:literal, $file:literal) ),+ $(,)?) => {
-        #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+    ($( $(#[$variant_meta:meta])* $variant:ident => ($code:literal, $name:literal, $file:literal) ),+ $(,)?) => {
+        #[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
         pub enum Language {
             $(
+                $(#[$variant_meta])*
                 #[serde(rename = $code)]
                 $variant,
             )+
@@ -73,14 +74,9 @@ macro_rules! define_languages {
 
 // Adding a language requires one line here and one JSON catalog.
 define_languages! {
+    #[default]
     En => ("en", "English", "../locales/en.json"),
     ZhCn => ("zh_cn", "简体中文", "../locales/zh_cn.json"),
-}
-
-impl Default for Language {
-    fn default() -> Self {
-        Self::En
-    }
 }
 
 #[cfg(test)]
@@ -120,6 +116,9 @@ mod tests {
         assert_eq!(Language::ZhCn.text("missing.example"), "missing.example");
         assert!(Language::ALL.len() >= 2);
         assert_eq!(Language::ALL[0].next(), Language::ALL[1]);
-        assert_eq!(Language::ALL.last().copied().unwrap().next(), Language::ALL[0]);
+        assert_eq!(
+            Language::ALL.last().copied().unwrap().next(),
+            Language::ALL[0]
+        );
     }
 }

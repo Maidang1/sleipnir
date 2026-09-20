@@ -836,7 +836,11 @@ impl AppShell {
 
     /// Read-only shortcut reference generated from the same command catalog
     /// used by the command palette, so labels stay in sync with the bindings.
-    fn render_settings_shortcuts_section(&self, tokens: &ChromeTokens, cx: &gpui::App) -> impl IntoElement {
+    fn render_settings_shortcuts_section(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &gpui::App,
+    ) -> impl IntoElement {
         let border_w = pixel::PIXEL_BORDER;
         let mut list = div()
             .id("settings-shortcuts")
@@ -845,10 +849,11 @@ impl AppShell {
             .gap(px(12.0))
             .w_full()
             .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(tokens.fg_muted)
-                    .child(TerminalSettings::get_global(cx).language.text("settings.shortcuts.description")),
+                div().text_size(px(11.0)).text_color(tokens.fg_muted).child(
+                    TerminalSettings::get_global(cx)
+                        .language
+                        .text("settings.shortcuts.description"),
+                ),
             );
 
         let mut rows = div()
@@ -856,10 +861,11 @@ impl AppShell {
             .border(border_w)
             .border_color(tokens.border)
             .overflow_hidden();
-        let commands: Vec<_> = crate::command_palette::commands_for(TerminalSettings::get_global(cx).language)
-            .into_iter()
-            .filter(|command| !command.shortcut.is_empty())
-            .collect();
+        let commands: Vec<_> =
+            crate::command_palette::commands_for(TerminalSettings::get_global(cx).language)
+                .into_iter()
+                .filter(|command| !command.shortcut.is_empty())
+                .collect();
         let command_count = commands.len();
 
         for (index, command) in commands.into_iter().enumerate() {
