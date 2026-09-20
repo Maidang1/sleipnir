@@ -6,6 +6,16 @@ Settings live in `~/.config/sleipnir/settings.json` on macOS/Linux and
 Settings to re-read the file; user key-binding changes currently require an
 application restart.
 
+## Interface language
+
+`language` selects Sleipnir's own interface language: `"en"` (default) or
+`"zh_cn"` (Simplified Chinese). The settings panel and command palette update
+immediately; native application menus update after restarting Sleipnir. Terminal
+programs keep their own locale and are not affected.
+
+Additional interface languages can be added without changing UI call sites; see
+[the locale catalog guide](../crates/sleipnir_settings/locales/README.md).
+
 ## Windows and appearance
 
 - Each new window starts with a fresh terminal tab. Window layouts, running

@@ -4,6 +4,7 @@
 //! in `main.rs`; the palette is a discoverability surface, not a keymap editor.
 
 use gpui::SharedString;
+use sleipnir_settings::Language;
 
 /// Stable command identifiers used by the palette and optional key_bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -140,205 +141,210 @@ pub struct CommandItem {
     pub keywords: SharedString,
 }
 
-/// Built-in command catalog.
+/// Built-in command catalog in English (kept for compatibility and tests).
 pub fn commands() -> Vec<CommandItem> {
+    commands_for(Language::En)
+}
+
+/// Built-in command catalog localized for the selected interface language.
+pub fn commands_for(language: Language) -> Vec<CommandItem> {
     use crate::keymap::display_shortcut;
     vec![
         CommandItem {
             id: CommandId::NewTab,
-            title: "New Tab".into(),
+            title: language.text("command.new_tab").into(),
             shortcut: display_shortcut("new_tab").into(),
             keywords: "tab new open".into(),
         },
         CommandItem {
             id: CommandId::ClosePane,
-            title: "Close Pane / Tab".into(),
+            title: language.text("command.close_pane").into(),
             shortcut: display_shortcut("close_tab").into(),
             keywords: "close pane tab".into(),
         },
         CommandItem {
             id: CommandId::NextTab,
-            title: "Next Tab".into(),
+            title: language.text("command.next_tab").into(),
             shortcut: display_shortcut("next_tab").into(),
             keywords: "tab next".into(),
         },
         CommandItem {
             id: CommandId::PrevTab,
-            title: "Previous Tab".into(),
+            title: language.text("command.previous_tab").into(),
             shortcut: display_shortcut("prev_tab").into(),
             keywords: "tab previous prev".into(),
         },
         CommandItem {
             id: CommandId::SplitRight,
-            title: "Split Pane Right".into(),
+            title: language.text("command.split_right").into(),
             shortcut: display_shortcut("split_right").into(),
             keywords: "split right vertical".into(),
         },
         CommandItem {
             id: CommandId::SplitDown,
-            title: "Split Pane Down".into(),
+            title: language.text("command.split_down").into(),
             shortcut: display_shortcut("split_down").into(),
             keywords: "split down horizontal".into(),
         },
         CommandItem {
             id: CommandId::Find,
-            title: "Find in Scrollback".into(),
+            title: language.text("command.find").into(),
             shortcut: display_shortcut("find").into(),
             keywords: "find search scrollback".into(),
         },
         CommandItem {
             id: CommandId::OpenSettings,
-            title: "Open Settings".into(),
+            title: language.text("command.open_settings").into(),
             shortcut: display_shortcut("open_settings").into(),
             keywords: "settings preferences theme".into(),
         },
         CommandItem {
             id: CommandId::ReloadSettings,
-            title: "Reload Settings".into(),
+            title: language.text("command.reload_settings").into(),
             shortcut: display_shortcut("reload_settings").into(),
             keywords: "reload settings config".into(),
         },
         CommandItem {
             id: CommandId::CycleTheme,
-            title: "Cycle Theme".into(),
+            title: language.text("command.cycle_theme").into(),
             shortcut: display_shortcut("cycle_theme").into(),
             keywords: "theme cycle appearance".into(),
         },
         CommandItem {
             id: CommandId::CheckForUpdates,
-            title: "Check for Updates".into(),
+            title: language.text("command.check_updates").into(),
             shortcut: display_shortcut("check_for_updates").into(),
             keywords: "update upgrade release".into(),
         },
         CommandItem {
             id: CommandId::ToggleCommandPalette,
-            title: "Toggle Command Palette".into(),
+            title: language.text("command.toggle_palette").into(),
             shortcut: display_shortcut("toggle_command_palette").into(),
             keywords: "command palette actions".into(),
         },
         CommandItem {
             id: CommandId::NewWindow,
-            title: "New Window".into(),
+            title: language.text("command.new_window").into(),
             shortcut: display_shortcut("new_window").into(),
             keywords: "window new open".into(),
         },
         CommandItem {
             id: CommandId::IncreaseFontSize,
-            title: "Increase Font Size".into(),
+            title: language.text("command.increase_font_size").into(),
             shortcut: display_shortcut("increase_font_size").into(),
             keywords: "font zoom larger bigger size".into(),
         },
         CommandItem {
             id: CommandId::DecreaseFontSize,
-            title: "Decrease Font Size".into(),
+            title: language.text("command.decrease_font_size").into(),
             shortcut: display_shortcut("decrease_font_size").into(),
             keywords: "font zoom smaller size".into(),
         },
         CommandItem {
             id: CommandId::ResetFontSize,
-            title: "Reset Font Size".into(),
+            title: language.text("command.reset_font_size").into(),
             shortcut: display_shortcut("reset_font_size").into(),
             keywords: "font zoom reset default size".into(),
         },
         CommandItem {
             id: CommandId::TogglePaneZoom,
-            title: "Toggle Pane Zoom".into(),
+            title: language.text("command.toggle_pane_zoom").into(),
             shortcut: display_shortcut("toggle_pane_zoom").into(),
             keywords: "zoom maximize pane split".into(),
         },
         CommandItem {
             id: CommandId::ToggleBroadcast,
-            title: "Toggle Broadcast Input".into(),
+            title: language.text("command.toggle_broadcast").into(),
             shortcut: display_shortcut("toggle_broadcast").into(),
             keywords: "broadcast all panes input".into(),
         },
         CommandItem {
             id: CommandId::JumpPrevPrompt,
-            title: "Jump to Previous Prompt".into(),
+            title: language.text("command.previous_prompt").into(),
             shortcut: display_shortcut("jump_prev_prompt").into(),
             keywords: "prompt shell osc133 jump previous".into(),
         },
         CommandItem {
             id: CommandId::JumpNextPrompt,
-            title: "Jump to Next Prompt".into(),
+            title: language.text("command.next_prompt").into(),
             shortcut: display_shortcut("jump_next_prompt").into(),
             keywords: "prompt shell osc133 jump next".into(),
         },
         CommandItem {
             id: CommandId::ToggleQuickSelect,
-            title: "Toggle Quick Select".into(),
+            title: language.text("command.quick_select").into(),
             shortcut: display_shortcut("toggle_quick_select").into(),
             keywords: "quick select labels links".into(),
         },
         CommandItem {
             id: CommandId::OpenQuickTerminal,
-            title: "Open Quick Terminal".into(),
+            title: language.text("command.quick_terminal").into(),
             shortcut: display_shortcut("open_quick_terminal").into(),
             keywords: "quick terminal dropdown window".into(),
         },
         CommandItem {
             id: CommandId::ExportScrollback,
-            title: "Export Scrollback to File".into(),
+            title: language.text("command.export_scrollback").into(),
             shortcut: display_shortcut("export_scrollback").into(),
             keywords: "export scrollback save file editor dump".into(),
         },
         CommandItem {
             id: CommandId::MarkTabSeen,
-            title: "Mark Tab as Seen".into(),
+            title: language.text("command.mark_tab_seen").into(),
             shortcut: "".into(),
             keywords: "mark seen attention unread tab badge".into(),
         },
         CommandItem {
             id: CommandId::TogglePaneFacts,
-            title: "Toggle Pane Facts".into(),
+            title: language.text("command.pane_facts").into(),
             shortcut: "".into(),
             keywords: "pane facts cwd process tree ports info".into(),
         },
         CommandItem {
             id: CommandId::SendSelection,
-            title: "Send Selection to Pane".into(),
+            title: language.text("command.send_selection").into(),
             shortcut: "".into(),
             keywords: "send selection paste pty agent".into(),
         },
         CommandItem {
             id: CommandId::PipeSelection,
-            title: "Pipe Selection to Command".into(),
+            title: language.text("command.pipe_selection").into(),
             shortcut: "".into(),
             keywords: "pipe selection command external".into(),
         },
         CommandItem {
             id: CommandId::SendGitDiff,
-            title: "Send Git Diff to Pane".into(),
+            title: language.text("command.send_git_diff").into(),
             shortcut: "".into(),
             keywords: "git diff send review pane".into(),
         },
         CommandItem {
             id: CommandId::ToggleDiff,
-            title: "Toggle Diff Inspector".into(),
+            title: language.text("command.diff_inspector").into(),
             shortcut: display_shortcut("toggle_diff").into(),
             keywords: "git diff inspector review overlay patch".into(),
         },
         CommandItem {
             id: CommandId::ToggleHistorySearch,
-            title: "Search Shell History".into(),
+            title: language.text("command.search_history").into(),
             shortcut: display_shortcut("toggle_history_search").into(),
             keywords: "history fuzzy search histfile".into(),
         },
         CommandItem {
             id: CommandId::ToggleBrowser,
-            title: "Toggle Browser Panel (macOS / Windows)".into(),
+            title: language.text("command.toggle_browser").into(),
             shortcut: "".into(),
             keywords: "browser webview preview localhost".into(),
         },
         CommandItem {
             id: CommandId::TogglePluginMonitor,
-            title: "Toggle Plugin Monitor".into(),
+            title: language.text("command.plugin_monitor").into(),
             shortcut: display_shortcut("toggle_plugin_monitor").into(),
             keywords: "plugin monitor process kill".into(),
         },
         CommandItem {
             id: CommandId::ReopenClosedTab,
-            title: "Reopen Closed Tab".into(),
+            title: language.text("command.reopen_tab").into(),
             shortcut: display_shortcut("reopen_closed_tab").into(),
             keywords: "reopen closed tab undo".into(),
         },
@@ -641,5 +647,16 @@ mod tests {
                 .any(|&i| merged[i].id == CommandId::PluginContribution(0))
         );
         assert!(hits[0] < hits[1] || merged[hits[0]].id == CommandId::ReloadSettings);
+    }
+
+    #[test]
+    fn chinese_catalog_localizes_builtin_titles() {
+        let items = commands_for(Language::ZhCn);
+        let new_tab = items
+            .iter()
+            .find(|item| item.id == CommandId::NewTab)
+            .expect("New Tab command");
+        assert_eq!(new_tab.title.as_ref(), "新建标签页");
+        assert_eq!(items.len(), commands().len());
     }
 }

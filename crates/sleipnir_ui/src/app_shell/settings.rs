@@ -9,7 +9,7 @@ use gpui::{
     deferred, div, hsla, prelude::FluentBuilder as _, px,
 };
 use sleipnir_settings::{
-    TerminalSettings, ThemeName, ThemeSetting, default_font_family, palette_for_theme,
+    Language, TerminalSettings, ThemeName, ThemeSetting, default_font_family, palette_for_theme,
 };
 
 use super::{AppShell, OpenSettings, SettingsSection, appearance_of};
@@ -179,6 +179,7 @@ impl AppShell {
     ) -> impl IntoElement {
         let section = self.settings.section;
         let border_w = pixel::PIXEL_BORDER;
+        let language = TerminalSettings::get_global(cx).language;
 
         // ── Pixel-terminal tab strip: active section gets a boxed label ──
         let mut tab_strip = div()
@@ -192,9 +193,9 @@ impl AppShell {
             let active = s == section;
             let tab_id: ElementId = format!("settings-section-{}", s.id()).into();
             let label: SharedString = if active {
-                format!("[ {} ]", s.label()).into()
+                format!("[ {} ]", s.label(language)).into()
             } else {
-                format!("  {}  ", s.label()).into()
+                format!("  {}  ", s.label(language)).into()
             };
             tab_strip = tab_strip.child(
                 div()
@@ -234,7 +235,7 @@ impl AppShell {
                 .render_settings_agents_section(tokens, cx)
                 .into_any_element(),
             SettingsSection::Shortcuts => self
-                .render_settings_shortcuts_section(tokens)
+                .render_settings_shortcuts_section(tokens, cx)
                 .into_any_element(),
         };
 
@@ -276,7 +277,7 @@ impl AppShell {
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .child("esc"),
                             )
-                            .child("close"),
+                            .child(language.text("settings.close")),
                     ),
             )
             .child(
@@ -345,7 +346,7 @@ impl AppShell {
                                 div()
                                     .text_color(tokens.fg)
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .child("settings"),
+                                    .child(language.text("settings.title")),
                             )
                             .child(div().text_color(tokens.accent).child("█")),
                     )
@@ -409,6 +410,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let settings = TerminalSettings::get_global(cx);
+        let language = settings.language;
         let ligatures = settings.font_ligatures;
         let border_w = pixel::PIXEL_BORDER;
 
@@ -433,7 +435,7 @@ impl AppShell {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(tokens.fg_muted)
                             .pl(px(2.0))
-                            .child("# TERMINAL"),
+                            .child(language.text("settings.group.terminal")),
                     )
                     .child(
                         div()
@@ -441,6 +443,24 @@ impl AppShell {
                             .border(border_w)
                             .border_color(tokens.border)
                             .overflow_hidden()
+                            .child(self.settings_toggle_row(
+                                "language",
+                                language.text("settings.language.title"),
+                                language.text("settings.language.description"),
+                                language != Language::En,
+                                tokens,
+                                cx,
+                                |_this, cx| {
+                                    let next = TerminalSettings::get_global(cx).language.next();
+                                    TerminalSettings::set_language(next, cx);
+                                    cx.notify();
+                                },
+                            ))
+                            .child(
+                                div().w_full().pl(px(14.0)).child(
+                                    div().w_full().h(px(1.0)).bg(tokens.border),
+                                ),
+                            )
                             .child(self.settings_toggle_row(
                                 "font-ligatures",
                                 "Font ligatures",
@@ -512,7 +532,7 @@ impl AppShell {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(tokens.fg_muted)
                             .pl(px(2.0))
-                            .child("# ADVANCED"),
+                            .child(language.text("settings.group.advanced")),
                     )
                     .child(
                         div()
@@ -816,7 +836,11 @@ impl AppShell {
 
     /// Read-only shortcut reference generated from the same command catalog
     /// used by the command palette, so labels stay in sync with the bindings.
-    fn render_settings_shortcuts_section(&self, tokens: &ChromeTokens) -> impl IntoElement {
+    fn render_settings_shortcuts_section(
+        &self,
+        tokens: &ChromeTokens,
+        cx: &gpui::App,
+    ) -> impl IntoElement {
         let border_w = pixel::PIXEL_BORDER;
         let mut list = div()
             .id("settings-shortcuts")
@@ -825,10 +849,11 @@ impl AppShell {
             .gap(px(12.0))
             .w_full()
             .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(tokens.fg_muted)
-                    .child("Built-in shortcuts for this platform. Custom bindings in settings.json take precedence."),
+                div().text_size(px(11.0)).text_color(tokens.fg_muted).child(
+                    TerminalSettings::get_global(cx)
+                        .language
+                        .text("settings.shortcuts.description"),
+                ),
             );
 
         let mut rows = div()
@@ -836,10 +861,11 @@ impl AppShell {
             .border(border_w)
             .border_color(tokens.border)
             .overflow_hidden();
-        let commands: Vec<_> = crate::command_palette::commands()
-            .into_iter()
-            .filter(|command| !command.shortcut.is_empty())
-            .collect();
+        let commands: Vec<_> =
+            crate::command_palette::commands_for(TerminalSettings::get_global(cx).language)
+                .into_iter()
+                .filter(|command| !command.shortcut.is_empty())
+                .collect();
         let command_count = commands.len();
 
         for (index, command) in commands.into_iter().enumerate() {
@@ -968,6 +994,7 @@ impl AppShell {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let language = TerminalSettings::get_global(cx).language;
         let current = TerminalSettings::get_global(cx).theme.clone();
         let appearance = appearance_of(window.appearance());
         let items = self.filtered_theme_items(cx);
@@ -980,7 +1007,7 @@ impl AppShell {
 
         // Type-to-filter: shell-prompt style search field with block cursor.
         let filter_text: SharedString = if self.settings.theme_query.is_empty() {
-            "search themes…".into()
+            language.text("settings.theme.search").into()
         } else {
             self.settings.theme_query.clone().into()
         };
@@ -1036,7 +1063,7 @@ impl AppShell {
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(tokens.fg_muted)
-                        .child(SharedString::from("# USER THEMES")),
+                        .child(SharedString::from(language.text("settings.theme.user"))),
                 );
             }
 
@@ -1127,7 +1154,7 @@ impl AppShell {
                     .py(px(12.0))
                     .text_size(px(12.0))
                     .text_color(tokens.fg_muted)
-                    .child(SharedString::from("no themes match")),
+                    .child(SharedString::from(language.text("settings.theme.no_match"))),
             );
         }
 
