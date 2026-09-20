@@ -4,6 +4,10 @@ mod app_shell;
 mod assets;
 mod attention_chrome;
 mod blink;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod browser;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod browser_control;
 mod chrome;
 mod command_palette;
 mod control_surface;
@@ -38,8 +42,8 @@ pub use app_shell::{
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
     ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
-    ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
-    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, open_sleipnir_window,
+    ToggleBroadcast, ToggleBrowser, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch,
+    TogglePaneFacts, TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, open_sleipnir_window,
     try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
@@ -206,6 +210,8 @@ impl TermView {
                 executable.to_string_lossy().into_owned(),
             );
         }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        crate::browser_control::inject_environment(window_id, &mut env, cx);
         let shell = match command {
             Some((program, args)) => Shell::WithArguments {
                 program,

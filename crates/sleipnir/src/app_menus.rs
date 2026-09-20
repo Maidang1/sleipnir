@@ -9,8 +9,8 @@ use sleipnir_ui::{
     FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt,
     MarkTabSeen, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PipeSelection,
     PrevTab, ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
-    ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
-    TogglePluginMonitor, ToggleQuickSelect,
+    ToggleBroadcast, ToggleBrowser, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
+    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect,
 };
 use terminal::{Clear, Copy, Paste, PasteText, ToggleViMode};
 
@@ -79,6 +79,7 @@ fn shared_edit_view_window() -> [Menu; 3] {
             MenuItem::separator(),
             MenuItem::action("Pane Facts", TogglePaneFacts),
             MenuItem::action("Diff Inspector", ToggleDiff),
+            MenuItem::action("Browser Panel", ToggleBrowser),
             MenuItem::separator(),
             MenuItem::action("Toggle Vi Mode", ToggleViMode),
         ]),

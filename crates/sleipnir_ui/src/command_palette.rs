@@ -39,6 +39,7 @@ pub enum CommandId {
     ToggleHistorySearch,
     ToggleDiff,
     TogglePluginMonitor,
+    ToggleBrowser,
     ReopenClosedTab,
     /// Runtime-discovered external plugin command index.
     Plugin(usize),
@@ -82,6 +83,7 @@ impl CommandId {
             CommandId::ToggleHistorySearch => "toggle_history_search",
             CommandId::ToggleDiff => "toggle_diff",
             CommandId::TogglePluginMonitor => "toggle_plugin_monitor",
+            CommandId::ToggleBrowser => "toggle_browser",
             CommandId::ReopenClosedTab => "reopen_closed_tab",
             CommandId::Plugin(_) => "plugin",
             CommandId::PluginContribution(_) => "plugin_contribution",
@@ -121,6 +123,7 @@ impl CommandId {
             "toggle_history_search" | "history_search" => Some(CommandId::ToggleHistorySearch),
             "toggle_diff" => Some(CommandId::ToggleDiff),
             "toggle_plugin_monitor" | "plugin_monitor" => Some(CommandId::TogglePluginMonitor),
+            "toggle_browser" | "browser" => Some(CommandId::ToggleBrowser),
             "reopen_closed_tab" | "reopen_tab" => Some(CommandId::ReopenClosedTab),
             _ if s.trim().starts_with("plugin.") => None,
             _ => None,
@@ -320,6 +323,12 @@ pub fn commands() -> Vec<CommandItem> {
             title: "Search Shell History".into(),
             shortcut: display_shortcut("toggle_history_search").into(),
             keywords: "history fuzzy search histfile".into(),
+        },
+        CommandItem {
+            id: CommandId::ToggleBrowser,
+            title: "Toggle Browser Panel (macOS / Windows)".into(),
+            shortcut: "".into(),
+            keywords: "browser webview preview localhost".into(),
         },
         CommandItem {
             id: CommandId::TogglePluginMonitor,
