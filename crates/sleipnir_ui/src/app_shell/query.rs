@@ -14,7 +14,9 @@
 //! Ranges on the [`InputHandler`] trait are UTF-16 offsets into the query
 //! string; the helpers below do the mapping and are unit-tested.
 
-use gpui::{App, Bounds, Entity, InputHandler, Pixels, UTF16Selection, Window};
+use gpui::{
+    App, Bounds, Entity, InputHandler, Keystroke, Pixels, ScrollHandle, UTF16Selection, Window,
+};
 use std::ops::Range;
 
 use super::AppShell;
@@ -53,46 +55,127 @@ pub(crate) fn byte_to_utf16(s: &str, byte_offset: usize) -> usize {
     utf16_len(&s[..end])
 }
 
+/// Resolve a UTF-16 range to a byte range, clamped to `s` and never inverted.
+pub(crate) fn clamped_byte_range(s: &str, range_utf16: Range<usize>) -> Range<usize> {
+    let start = utf16_to_byte(s, range_utf16.start);
+    let end = utf16_to_byte(s, range_utf16.end).max(start);
+    start..end
+}
+
 /// Replace `range_utf16` (clamped) with `text`. Returns the UTF-16 offset at
 /// which `text` was inserted.
 pub(crate) fn splice_utf16(s: &mut String, range_utf16: Range<usize>, text: &str) -> usize {
-    let start = utf16_to_byte(s, range_utf16.start);
-    let end = utf16_to_byte(s, range_utf16.end).max(start);
+    let start = clamped_byte_range(s, range_utf16.clone()).start;
     let start_utf16 = byte_to_utf16(s, start);
-    s.replace_range(start..end, text);
+    s.replace_range(clamped_byte_range(s, range_utf16), text);
     start_utf16
 }
 
+/// One overlay query box: the editable text, its IME composition range, and
+/// the selection cursor over the filtered results. Every query surface
+/// (palette, find, history, theme picker, inline rename) composes this instead
+/// of re-implementing the same text editing and selection wrapping. A surface
+/// with no result set — inline rename — simply leaves `selected` at zero.
+#[derive(Clone, Default)]
+pub(crate) struct QueryBox {
+    pub(crate) text: String,
+    pub(crate) marked: Option<Range<usize>>,
+    pub(crate) selected: usize,
+    pub(crate) scroll: ScrollHandle,
+}
+
+impl QueryBox {
+    pub(crate) fn reset(&mut self) {
+        self.text.clear();
+        self.marked = None;
+        self.selected = 0;
+    }
+
+    /// A box pre-filled with `text` (inline rename seeds the current label).
+    pub(crate) fn seeded(text: String) -> Self {
+        Self {
+            text,
+            ..Self::default()
+        }
+    }
+
+    /// Clamp `selected` into the live result set.
+    pub(crate) fn clamp_selected(&mut self, items: usize) {
+        self.selected = self.selected.min(items.saturating_sub(1));
+    }
+
+    /// Move `selected` by `delta`, wrapping inside `0..items`.
+    pub(crate) fn move_selected(&mut self, items: usize, delta: i32) {
+        if items == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).rem_euclid(items as i32) as usize;
+        self.scroll.scroll_to_item(self.selected);
+    }
+
+    /// Handle the keystrokes every query box shares: backspace, ⌘V paste,
+    /// printable typing, and up/down selection over `items` results. Returns
+    /// true when the box changed. Escape, enter, and surface-specific
+    /// modifiers stay with the caller.
+    pub(crate) fn edit(
+        &mut self,
+        event: &Keystroke,
+        items: usize,
+        read_clipboard: &mut dyn FnMut() -> Option<String>,
+    ) -> bool {
+        let key = event.key.as_str();
+        let modifiers = event.modifiers;
+        let changed = match key {
+            "backspace" => {
+                self.text.pop();
+                true
+            }
+            "v" if modifiers.platform && !modifiers.alt => {
+                let Some(pasted) = read_clipboard() else {
+                    return false;
+                };
+                self.text.push_str(&pasted.replace(['\n', '\r'], ""));
+                true
+            }
+            "up" | "arrowup" => {
+                self.move_selected(items, -1);
+                true
+            }
+            "down" | "arrowdown" => {
+                self.move_selected(items, 1);
+                true
+            }
+            _ => match event.key_char.as_ref() {
+                Some(ch) if !ch.is_empty() && !ch.chars().any(char::is_control) => {
+                    self.text.push_str(ch);
+                    true
+                }
+                _ => false,
+            },
+        };
+        if changed && !matches!(key, "up" | "arrowup" | "down" | "arrowdown") {
+            self.selected = 0;
+        }
+        changed
+    }
+}
+
 impl AppShell {
-    pub(crate) fn query_text(&self, surface: QuerySurface) -> &str {
+    /// The query box backing an overlay surface.
+    pub(crate) fn query_box(&self, surface: QuerySurface) -> &QueryBox {
         match surface {
-            QuerySurface::Palette => &self.palette.query,
-            QuerySurface::Find => &self.find.query,
-            QuerySurface::History => &self.history.query,
+            QuerySurface::Palette => &self.palette.input,
+            QuerySurface::Find => &self.find.input,
+            QuerySurface::History => &self.history.input,
         }
     }
 
-    fn query_text_mut(&mut self, surface: QuerySurface) -> &mut String {
+    fn query_box_mut(&mut self, surface: QuerySurface) -> &mut QueryBox {
         match surface {
-            QuerySurface::Palette => &mut self.palette.query,
-            QuerySurface::Find => &mut self.find.query,
-            QuerySurface::History => &mut self.history.query,
-        }
-    }
-
-    pub(crate) fn query_marked(&self, surface: QuerySurface) -> Option<Range<usize>> {
-        match surface {
-            QuerySurface::Palette => self.palette.marked.clone(),
-            QuerySurface::Find => self.find.marked.clone(),
-            QuerySurface::History => self.history.marked.clone(),
-        }
-    }
-
-    fn set_query_marked(&mut self, surface: QuerySurface, marked: Option<Range<usize>>) {
-        match surface {
-            QuerySurface::Palette => self.palette.marked = marked,
-            QuerySurface::Find => self.find.marked = marked,
-            QuerySurface::History => self.history.marked = marked,
+            QuerySurface::Palette => &mut self.palette.input,
+            QuerySurface::Find => &mut self.find.input,
+            QuerySurface::History => &mut self.history.input,
         }
     }
 
@@ -100,12 +183,12 @@ impl AppShell {
     fn query_changed(&mut self, surface: QuerySurface, cx: &mut gpui::Context<Self>) {
         match surface {
             QuerySurface::Palette => {
-                self.palette.selected = 0;
+                self.palette.input.selected = 0;
                 cx.notify();
             }
             QuerySurface::Find => self.debounce_find(cx),
             QuerySurface::History => {
-                self.history.selected = 0;
+                self.history.input.selected = 0;
                 cx.notify();
             }
         }
@@ -122,13 +205,14 @@ impl AppShell {
         mark: bool,
         cx: &mut gpui::Context<Self>,
     ) {
-        let fallback = self.query_marked(surface).unwrap_or_else(|| {
-            let end = utf16_len(self.query_text(surface));
+        let fallback = self.query_box(surface).marked.clone().unwrap_or_else(|| {
+            let end = utf16_len(&self.query_box(surface).text);
             end..end
         });
         let range = range_utf16.unwrap_or(fallback);
-        let start = splice_utf16(self.query_text_mut(surface), range, text);
-        self.set_query_marked(surface, mark.then(|| start..start + utf16_len(text)));
+        let input = self.query_box_mut(surface);
+        let start = splice_utf16(&mut input.text, range, text);
+        input.marked = mark.then(|| start..start + utf16_len(text));
         self.query_changed(surface, cx);
     }
 
@@ -177,7 +261,7 @@ impl InputHandler for QueryInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<UTF16Selection> {
-        let end = utf16_len(self.shell.read(cx).query_text(self.surface));
+        let end = utf16_len(&self.shell.read(cx).query_box(self.surface).text);
         Some(UTF16Selection {
             range: end..end,
             reversed: false,
@@ -185,7 +269,7 @@ impl InputHandler for QueryInputHandler {
     }
 
     fn marked_text_range(&mut self, _window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
-        self.shell.read(cx).query_marked(self.surface)
+        self.shell.read(cx).query_box(self.surface).marked.clone()
     }
 
     fn text_for_range(
@@ -196,7 +280,7 @@ impl InputHandler for QueryInputHandler {
         cx: &mut App,
     ) -> Option<String> {
         let shell = self.shell.read(cx);
-        let query = shell.query_text(self.surface);
+        let query = &shell.query_box(self.surface).text;
         let start = utf16_to_byte(query, range_utf16.start);
         let end = utf16_to_byte(query, range_utf16.end).max(start);
         *adjusted_range = Some(byte_to_utf16(query, start)..byte_to_utf16(query, end));
@@ -230,7 +314,7 @@ impl InputHandler for QueryInputHandler {
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut App) {
         self.shell.update(cx, |this, cx| {
-            this.set_query_marked(self.surface, None);
+            this.query_box_mut(self.surface).marked = None;
             cx.notify();
         });
     }
@@ -250,7 +334,7 @@ impl InputHandler for QueryInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<usize> {
-        Some(utf16_len(self.shell.read(cx).query_text(self.surface)))
+        Some(utf16_len(&self.shell.read(cx).query_box(self.surface).text))
     }
 
     /// Overlay query boxes exist for typing, so when a CJK input source is
@@ -264,6 +348,111 @@ impl InputHandler for QueryInputHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keystroke(key: &str, key_char: Option<&str>, platform: bool) -> Keystroke {
+        Keystroke {
+            modifiers: gpui::Modifiers {
+                platform,
+                ..Default::default()
+            },
+            key: key.to_string(),
+            key_char: key_char.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn edit_backspace_pops_text_and_resets_selected() {
+        let mut input = QueryBox::seeded("abc".to_string());
+        input.selected = 2;
+        assert!(input.edit(&keystroke("backspace", None, false), 5, &mut || None));
+        assert_eq!(input.text, "ab");
+        assert_eq!(input.selected, 0);
+    }
+
+    #[test]
+    fn edit_paste_appends_clipboard_without_newlines() {
+        let mut input = QueryBox::seeded("a".to_string());
+        input.selected = 1;
+        let mut clipboard = || {
+            Some(
+                "b
+c
+"
+                .to_string(),
+            )
+        };
+        assert!(input.edit(&keystroke("v", None, true), 5, &mut clipboard));
+        assert_eq!(input.text, "abc");
+        assert_eq!(input.selected, 0);
+    }
+
+    #[test]
+    fn edit_paste_without_clipboard_changes_nothing() {
+        let mut input = QueryBox::seeded("a".to_string());
+        input.selected = 1;
+        assert!(!input.edit(&keystroke("v", None, true), 5, &mut || None));
+        assert_eq!(input.text, "a");
+        assert_eq!(input.selected, 1);
+    }
+
+    #[test]
+    fn edit_plain_v_types_instead_of_pasting() {
+        let mut input = QueryBox::default();
+        let mut clipboard = || Some("pasted".to_string());
+        assert!(input.edit(&keystroke("v", Some("v"), false), 5, &mut clipboard));
+        assert_eq!(input.text, "v");
+    }
+
+    #[test]
+    fn edit_types_printable_but_not_control_chars() {
+        let mut input = QueryBox::default();
+        assert!(input.edit(&keystroke("s", Some("s"), false), 5, &mut || None));
+        assert_eq!(input.text, "s");
+        assert!(!input.edit(&keystroke("a", Some("\u{7}"), false), 5, &mut || None));
+        assert!(!input.edit(&keystroke("x", Some(""), false), 5, &mut || None));
+        assert!(!input.edit(&keystroke("c", None, true), 5, &mut || None));
+        assert_eq!(input.text, "s");
+    }
+
+    #[test]
+    fn edit_selection_keys_move_without_resetting_selected() {
+        let mut input = QueryBox::default();
+        input.selected = 1;
+        assert!(input.edit(&keystroke("down", None, false), 5, &mut || None));
+        assert_eq!(input.selected, 2);
+        assert!(input.edit(&keystroke("up", None, false), 5, &mut || None));
+        assert_eq!(input.selected, 1);
+    }
+
+    #[test]
+    fn move_selected_wraps_around_both_ends() {
+        let mut input = QueryBox::default();
+        input.move_selected(3, -1);
+        assert_eq!(input.selected, 2);
+        input.move_selected(3, 1);
+        assert_eq!(input.selected, 0);
+    }
+
+    #[test]
+    fn move_and_clamp_with_empty_result_set() {
+        let mut input = QueryBox::default();
+        input.selected = 4;
+        input.move_selected(0, 1);
+        assert_eq!(input.selected, 0);
+        input.selected = 4;
+        input.clamp_selected(0);
+        assert_eq!(input.selected, 0);
+    }
+
+    #[test]
+    fn clamp_selected_caps_at_last_item() {
+        let mut input = QueryBox::default();
+        input.selected = 5;
+        input.clamp_selected(3);
+        assert_eq!(input.selected, 2);
+        input.clamp_selected(3);
+        assert_eq!(input.selected, 2);
+    }
 
     #[test]
     fn utf16_len_counts_surrogate_pairs() {

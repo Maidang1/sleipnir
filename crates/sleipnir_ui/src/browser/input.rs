@@ -1,5 +1,6 @@
 //! Single-line GPUI address editor, including selection, clipboard and IME.
 //! Uses GPUI's ElementInputHandler contract (see its input example).
+use crate::app_shell::query::{byte_to_utf16, clamped_byte_range, utf16_to_byte};
 use crate::chrome::ChromeTokens;
 use gpui::{prelude::*, *};
 use sleipnir_settings::TerminalPalette;
@@ -62,22 +63,11 @@ impl AddressInput {
     fn selection(&self) -> Range<usize> {
         self.anchor.min(self.cursor)..self.anchor.max(self.cursor)
     }
-    fn byte_at_utf16(text: &str, offset: usize) -> usize {
-        let mut n = 0;
-        for (i, ch) in text.char_indices() {
-            if n >= offset {
-                return i;
-            }
-            n += ch.len_utf16();
-        }
-        text.len()
-    }
     fn utf16_at(&self, byte: usize) -> usize {
-        self.text[..byte].encode_utf16().count()
+        byte_to_utf16(&self.text, byte)
     }
     fn byte_range(&self, range: Range<usize>) -> Range<usize> {
-        let start = Self::byte_at_utf16(&self.text, range.start);
-        start..Self::byte_at_utf16(&self.text, range.end).max(start)
+        clamped_byte_range(&self.text, range)
     }
     fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         let text: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -248,8 +238,8 @@ impl EntityInputHandler for AddressInput {
         self.marked = (end > start).then_some(start..end);
         if let Some(selection) = selection {
             let inserted = &self.text[start..end];
-            self.anchor = start + Self::byte_at_utf16(inserted, selection.start);
-            self.cursor = start + Self::byte_at_utf16(inserted, selection.end);
+            self.anchor = start + utf16_to_byte(inserted, selection.start);
+            self.cursor = start + utf16_to_byte(inserted, selection.end);
         }
     }
     fn bounds_for_range(
@@ -510,14 +500,41 @@ impl Element for AddressText {
 
 #[cfg(test)]
 mod tests {
-    use super::AddressInput;
+    use crate::app_shell::query::{byte_to_utf16, clamped_byte_range, utf16_to_byte};
+
     #[test]
     fn browser_address_utf16_boundaries_do_not_split_unicode() {
         let value = "a😀中";
-        assert_eq!(AddressInput::byte_at_utf16(value, 0), 0);
-        assert_eq!(AddressInput::byte_at_utf16(value, 1), 1);
-        assert_eq!(AddressInput::byte_at_utf16(value, 3), 5);
-        assert_eq!(AddressInput::byte_at_utf16(value, 4), value.len());
-        assert_eq!(AddressInput::byte_at_utf16(value, 999), value.len());
+        assert_eq!(utf16_to_byte(value, 0), 0);
+        assert_eq!(utf16_to_byte(value, 1), 1);
+        assert_eq!(utf16_to_byte(value, 3), 5);
+        assert_eq!(utf16_to_byte(value, 4), value.len());
+        assert_eq!(utf16_to_byte(value, 999), value.len());
+    }
+
+    #[test]
+    fn browser_address_utf16_roundtrip_and_clamped_ranges() {
+        let value = "a😀中";
+        // Every UTF-16 offset resolves to a char boundary, and mapping back
+        // lands on the start of the char that contains the offset.
+        for utf16 in 0..=byte_to_utf16(value, value.len()) {
+            let byte = utf16_to_byte(value, utf16);
+            assert!(value.is_char_boundary(byte), "utf16 {utf16} -> byte {byte}");
+            assert!(byte_to_utf16(value, byte) >= utf16);
+        }
+        // Offsets that already sit on a char boundary round-trip exactly.
+        for utf16 in [0, 1, 3] {
+            assert_eq!(byte_to_utf16(value, utf16_to_byte(value, utf16)), utf16);
+        }
+        // Inverted and out-of-range IME ranges clamp instead of panicking.
+        // The inverted range is deliberately malformed input, built with the
+        // struct literal so clippy's reversed_empty_ranges lint stays quiet.
+        assert_eq!(
+            clamped_byte_range(value, std::ops::Range { start: 9, end: 1 }),
+            8..8
+        );
+        assert_eq!(clamped_byte_range(value, 1..999), 1..value.len());
+        // Off-boundary byte offsets snap back to the containing char's start.
+        assert_eq!(byte_to_utf16(value, 4), 1);
     }
 }

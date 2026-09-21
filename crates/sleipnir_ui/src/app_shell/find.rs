@@ -19,9 +19,8 @@ use crate::chrome::pixel;
 /// ([`FindState::pattern`]) is unit-testable without a live terminal.
 #[derive(Default)]
 pub(crate) struct FindState {
-    pub(crate) query: String,
-    /// IME composition range (UTF-16) inside `query`, if composing.
-    pub(crate) marked: Option<std::ops::Range<usize>>,
+    /// The query box: editable text, IME composition range, selection.
+    pub(crate) input: crate::app_shell::query::QueryBox,
     /// Monotonic generation used to discard stale debounce timers.
     pub(crate) debounce_gen: u64,
     /// Monotonic request id used to discard stale asynchronous search results.
@@ -42,7 +41,7 @@ impl FindState {
     /// composition range and bump the debounce generation so any pending
     /// timer fires into a stale generation and is discarded.
     pub(crate) fn teardown(&mut self) {
-        self.marked = None;
+        self.input.marked = None;
         self.debounce_gen = self.debounce_gen.wrapping_add(1);
     }
 
@@ -56,7 +55,7 @@ impl FindState {
         let pattern = if self.regex {
             query.to_owned()
         } else {
-            regex_escape_literal(query)
+            regex::escape(query)
         };
         if self.match_case {
             format!("(?-i){pattern}")
@@ -75,7 +74,7 @@ impl AppShell {
         self.set_input(crate::ui_mode::InputMode::Find, cx);
         window.focus(&self.focus_handle, cx);
         cx.notify();
-        if !self.find.query.is_empty() {
+        if !self.find.input.text.is_empty() {
             self.run_find(cx);
         }
     }
@@ -105,7 +104,7 @@ impl AppShell {
     /// count and highlights describe the pane actually on screen. Called from
     /// `commit_workspace` (tab switches and pane focus moves).
     pub(crate) fn refresh_find_for_active_pane(&mut self, cx: &mut Context<Self>) {
-        if !self.input.is_find() || self.find.query.is_empty() {
+        if !self.input.is_find() || self.find.input.text.is_empty() {
             return;
         }
         let Some(view) = self.active_view(cx) else {
@@ -137,7 +136,7 @@ impl AppShell {
     pub(super) fn run_find(&mut self, cx: &mut Context<Self>) {
         // An immediate search (for example Enter) supersedes pending debounce timers.
         self.find.debounce_gen = self.find.debounce_gen.wrapping_add(1);
-        let query = self.find.query.clone();
+        let query = self.find.input.text.clone();
         if query.is_empty() {
             self.clear_find_matches(cx);
             cx.notify();
@@ -207,7 +206,7 @@ impl AppShell {
 
     fn step_find(&mut self, delta: i32, cx: &mut Context<Self>) {
         if self.find.match_count == 0 {
-            if self.input.is_find() && !self.find.query.is_empty() {
+            if self.input.is_find() && !self.find.input.text.is_empty() {
                 self.run_find(cx);
             }
             return;
@@ -251,11 +250,6 @@ impl AppShell {
                 }
                 true
             }
-            "backspace" => {
-                self.find.query.pop();
-                self.debounce_find(cx);
-                true
-            }
             // ⌥⌘C toggles match-case; ⌥⌘R toggles regex (macOS find-bar convention).
             "c" if event.keystroke.modifiers.alt && event.keystroke.modifiers.platform => {
                 self.find.match_case = !self.find.match_case;
@@ -267,20 +261,15 @@ impl AppShell {
                 self.debounce_find(cx);
                 true
             }
-            "v" if event.keystroke.modifiers.platform && !event.keystroke.modifiers.alt => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.find.query.push_str(&text.replace(['\n', '\r'], ""));
-                    self.debounce_find(cx);
-                }
-                true
-            }
-            _ if event.keystroke.modifiers.platform => true,
+            // Swallow other ⌘-keys so they don't reach the PTY; ⌘V falls
+            // through to `edit` for paste.
+            _ if event.keystroke.modifiers.platform && key != "v" => true,
             _ => {
-                if let Some(ch) = event.keystroke.key_char.as_ref() {
-                    if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                        self.find.query.push_str(ch);
-                        self.debounce_find(cx);
-                    }
+                let changed = self.find.input.edit(&event.keystroke, 0, &mut || {
+                    cx.read_from_clipboard().and_then(|item| item.text())
+                });
+                if changed {
+                    self.debounce_find(cx);
                 }
                 // Swallow non-platform keys so they don't go to the PTY.
                 true
@@ -293,17 +282,17 @@ impl AppShell {
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let query_display: SharedString = if self.find.query.is_empty() {
+        let query_display: SharedString = if self.find.input.text.is_empty() {
             "Find in scrollback…".into()
         } else {
-            format!("{}|", self.find.query).into()
+            format!("{}|", self.find.input.text).into()
         };
-        let query_color = if self.find.query.is_empty() {
+        let query_color = if self.find.input.text.is_empty() {
             tokens.fg_muted
         } else {
             tokens.fg
         };
-        let count: SharedString = if self.find.query.is_empty() {
+        let count: SharedString = if self.find.input.text.is_empty() {
             "".into()
         } else if self.find.match_count == 0 {
             "0 matches".into()
@@ -448,21 +437,6 @@ impl AppShell {
     }
 }
 
-/// Escape a literal string for use inside a regex (alacritty search is regex-based).
-fn regex_escape_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for c in s.chars() {
-        if matches!(
-            c,
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$'
-        ) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::FindState;
@@ -495,12 +469,12 @@ mod tests {
     #[test]
     fn teardown_clears_marked_and_bumps_debounce_gen() {
         let mut state = FindState {
-            marked: Some(0..3),
             debounce_gen: 41,
             ..FindState::default()
         };
+        state.input.marked = Some(0..3);
         state.teardown();
-        assert!(state.marked.is_none(), "marked must be cleared");
+        assert!(state.input.marked.is_none(), "marked must be cleared");
         assert_eq!(state.debounce_gen, 42, "debounce_gen must be bumped by 1");
     }
 

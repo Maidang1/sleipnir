@@ -44,37 +44,13 @@ pub fn parse_service_path(raw: &str) -> PathBuf {
         } else {
             rest.to_string()
         };
-        PathBuf::from(percent_decode(&path))
+        PathBuf::from(
+            percent_encoding::percent_decode(path.as_bytes())
+                .decode_utf8_lossy()
+                .into_owned(),
+        )
     } else {
         PathBuf::from(trimmed)
-    }
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(high), Some(low)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2]))
-        {
-            out.push((high << 4) | low);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn from_hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }
 

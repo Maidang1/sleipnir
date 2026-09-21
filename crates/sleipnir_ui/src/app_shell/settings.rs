@@ -1,7 +1,7 @@
 //! Settings overlay: section tabs, the general section, and the theme picker.
 //!
 //! A child module of `app_shell` so it can use `AppShell`'s private state
-//! (`settings_section`, `theme_query`) without widening it to the crate.
+//! (`settings_section`, `themes`) without widening it to the crate.
 
 use gpui::{
     ClickEvent, Context, ElementId, Hsla, InteractiveElement as _, IntoElement, MouseButton,
@@ -89,7 +89,7 @@ impl AppShell {
     /// header counts as a child), which is what `ScrollHandle::scroll_to_item`
     /// addresses.
     fn filtered_theme_items(&self, cx: &gpui::App) -> Vec<ThemeItem> {
-        let query = self.settings.theme_query.trim().to_lowercase();
+        let query = self.settings.themes.text.trim().to_lowercase();
         let matches = |hay: &str| query.is_empty() || hay.to_lowercase().contains(&query);
         let mut items: Vec<ThemeItem> = Vec::new();
         for &theme in ThemeName::ALL {
@@ -121,6 +121,11 @@ impl AppShell {
         items
     }
 
+    /// Number of keyboard-navigable rows in the theme picker.
+    pub(super) fn theme_item_count(&self, cx: &gpui::App) -> usize {
+        self.filtered_theme_items(cx).len()
+    }
+
     /// Point the keyboard selection at the applied theme and scroll to it.
     fn reset_theme_selection(&mut self, cx: &mut Context<Self>) {
         let current = TerminalSettings::get_global(cx).theme.clone();
@@ -132,9 +137,9 @@ impl AppShell {
                 ThemeItemKind::Custom(n) => current == ThemeSetting::Custom(n.clone()),
             })
             .unwrap_or(0);
-        self.settings.theme_selected = ix;
+        self.settings.themes.selected = ix;
         if let Some(item) = items.get(ix) {
-            self.settings.theme_scroll.scroll_to_item(item.scroll_ix);
+            self.settings.themes.scroll.scroll_to_item(item.scroll_ix);
         }
     }
 
@@ -145,17 +150,12 @@ impl AppShell {
         if items.is_empty() {
             return;
         }
-        let last = items.len() - 1;
-        let selected = self.settings.theme_selected.min(last);
         match key {
-            "up" | "arrowup" => {
-                self.settings.theme_selected = if selected == 0 { last } else { selected - 1 };
-            }
-            "down" | "arrowdown" => {
-                self.settings.theme_selected = if selected == last { 0 } else { selected + 1 };
-            }
+            "up" | "arrowup" => self.settings.themes.move_selected(items.len(), -1),
+            "down" | "arrowdown" => self.settings.themes.move_selected(items.len(), 1),
             "enter" => {
-                if let Some(item) = items.get(selected) {
+                self.settings.themes.clamp_selected(items.len());
+                if let Some(item) = items.get(self.settings.themes.selected) {
                     match &item.kind {
                         ThemeItemKind::Builtin(theme) => self.select_theme(*theme, cx),
                         ThemeItemKind::Custom(name) => self.select_custom_theme(name.clone(), cx),
@@ -165,14 +165,16 @@ impl AppShell {
             }
             _ => {}
         }
-        if let Some(item) = items.get(self.settings.theme_selected) {
-            self.settings.theme_scroll.scroll_to_item(item.scroll_ix);
+        // `move_selected` scrolls to the row index; the list also contains the
+        // user-themes header, so re-scroll to the row's real child index.
+        if let Some(item) = items.get(self.settings.themes.selected) {
+            self.settings.themes.scroll.scroll_to_item(item.scroll_ix);
         }
         cx.notify();
     }
 
     pub(super) fn render_settings_overlay(
-        &self,
+        &mut self,
         tokens: &ChromeTokens,
         window: &Window,
         cx: &mut Context<Self>,
@@ -989,7 +991,7 @@ impl AppShell {
     /// Theme section body: selectable list with ANSI swatches (type to filter,
     /// arrow keys move the selection with scroll-follow, enter applies).
     fn render_settings_theme_section(
-        &self,
+        &mut self,
         tokens: &ChromeTokens,
         window: &Window,
         cx: &mut Context<Self>,
@@ -998,18 +1000,16 @@ impl AppShell {
         let current = TerminalSettings::get_global(cx).theme.clone();
         let appearance = appearance_of(window.appearance());
         let items = self.filtered_theme_items(cx);
-        let kb_selected = self
-            .settings
-            .theme_selected
-            .min(items.len().saturating_sub(1));
+        self.settings.themes.clamp_selected(items.len());
+        let kb_selected = self.settings.themes.selected;
         let catalog = TerminalSettings::user_themes(cx);
         let border_w = pixel::PIXEL_BORDER;
 
         // Type-to-filter: shell-prompt style search field with block cursor.
-        let filter_text: SharedString = if self.settings.theme_query.is_empty() {
+        let filter_text: SharedString = if self.settings.themes.text.is_empty() {
             language.text("settings.theme.search").into()
         } else {
-            self.settings.theme_query.clone().into()
+            self.settings.themes.text.clone().into()
         };
         let filter_box = div()
             .flex()
@@ -1031,7 +1031,7 @@ impl AppShell {
             )
             .child(
                 div()
-                    .text_color(if self.settings.theme_query.is_empty() {
+                    .text_color(if self.settings.themes.text.is_empty() {
                         tokens.fg_muted
                     } else {
                         tokens.fg
@@ -1049,7 +1049,7 @@ impl AppShell {
             .gap(px(2.0))
             .w_full()
             .overflow_y_scroll()
-            .track_scroll(&self.settings.theme_scroll);
+            .track_scroll(&self.settings.themes.scroll);
 
         let mut wrote_custom_header = false;
         for (i, item) in items.iter().enumerate() {
@@ -1126,7 +1126,7 @@ impl AppShell {
                 .when(kb, |el| el.bg(tokens.hover))
                 .hover(|el| el.bg(tokens.hover))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.settings.theme_selected = i;
+                    this.settings.themes.selected = i;
                     match &kind {
                         ThemeItemKind::Builtin(theme) => this.select_theme(*theme, cx),
                         ThemeItemKind::Custom(name) => this.select_custom_theme(name.clone(), cx),

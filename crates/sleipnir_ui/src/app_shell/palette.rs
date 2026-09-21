@@ -19,9 +19,7 @@ use crate::ui_mode::OverlayKind;
 impl AppShell {
     pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_overlay(OverlayKind::Palette, cx);
-        self.palette.query.clear();
-        self.palette.marked = None;
-        self.palette.selected = 0;
+        self.palette.input.reset();
         // The query box owns text input while open: focus the shell so the IME
         // input handler registered by `query_input_canvas` becomes active.
         window.focus(&self.focus_handle, cx);
@@ -30,17 +28,15 @@ impl AppShell {
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_overlay(OverlayKind::Palette, cx) {
-            self.palette.query.clear();
-            self.palette.marked = None;
-            self.palette.selected = 0;
+            self.palette.input.reset();
             self.focus_active(window, cx);
             cx.notify();
         }
     }
 
     fn filtered_palette_indices(&self) -> Vec<usize> {
-        let mut indices = filter_commands(&self.palette.items, &self.palette.query);
-        if self.palette.query.trim().is_empty() {
+        let mut indices = filter_commands(&self.palette.items, &self.palette.input.text);
+        if self.palette.input.text.trim().is_empty() {
             prioritize_recents(&self.palette.items, &mut indices, &self.palette.recents);
         }
         indices
@@ -65,63 +61,26 @@ impl AppShell {
         if !self.input.is_overlay(OverlayKind::Palette) {
             return false;
         }
-        let key = event.keystroke.key.as_str();
-        match key {
+        match event.keystroke.key.as_str() {
             "escape" => {
                 self.close_palette(window, cx);
                 true
             }
             "enter" => {
                 let hits = self.filtered_palette_indices();
-                if let Some(&idx) = hits.get(self.palette.selected) {
+                if let Some(&idx) = hits.get(self.palette.input.selected) {
                     let id = self.palette.items[idx].id;
                     self.run_command(id, window, cx);
                 }
                 true
             }
-            "up" | "arrowup" => {
-                let hits = self.filtered_palette_indices();
-                if !hits.is_empty() {
-                    self.palette.selected = if self.palette.selected == 0 {
-                        hits.len() - 1
-                    } else {
-                        self.palette.selected - 1
-                    };
-                    self.palette.scroll.scroll_to_item(self.palette.selected);
-                    cx.notify();
-                }
-                true
-            }
-            "down" | "arrowdown" => {
-                let hits = self.filtered_palette_indices();
-                if !hits.is_empty() {
-                    self.palette.selected = (self.palette.selected + 1) % hits.len();
-                    self.palette.scroll.scroll_to_item(self.palette.selected);
-                    cx.notify();
-                }
-                true
-            }
-            "backspace" => {
-                self.palette.query.pop();
-                self.palette.selected = 0;
-                cx.notify();
-                true
-            }
-            "v" if event.keystroke.modifiers.platform && !event.keystroke.modifiers.alt => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.palette.query.push_str(&text.replace(['\n', '\r'], ""));
-                    self.palette.selected = 0;
-                    cx.notify();
-                }
-                true
-            }
             _ => {
-                if let Some(ch) = event.keystroke.key_char.as_ref() {
-                    if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                        self.palette.query.push_str(ch);
-                        self.palette.selected = 0;
-                        cx.notify();
-                    }
+                let items = self.filtered_palette_indices().len();
+                let changed = self.palette.input.edit(&event.keystroke, items, &mut || {
+                    cx.read_from_clipboard().and_then(|item| item.text())
+                });
+                if changed {
+                    cx.notify();
                 }
                 true
             }
@@ -129,19 +88,20 @@ impl AppShell {
     }
 
     pub(super) fn render_command_palette(
-        &self,
+        &mut self,
         tokens: &ChromeTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let hits = self.filtered_palette_indices();
         let language = TerminalSettings::get_global(cx).language;
-        let selected = self.palette.selected.min(hits.len().saturating_sub(1));
-        let query: SharedString = if self.palette.query.is_empty() {
+        self.palette.input.clamp_selected(hits.len());
+        let selected = self.palette.input.selected;
+        let query: SharedString = if self.palette.input.text.is_empty() {
             language.text("palette.prompt").into()
         } else {
-            format!("{}|", self.palette.query).into()
+            format!("{}|", self.palette.input.text).into()
         };
-        let query_color = if self.palette.query.is_empty() {
+        let query_color = if self.palette.input.text.is_empty() {
             tokens.fg_muted
         } else {
             tokens.fg
@@ -154,7 +114,7 @@ impl AppShell {
             .w_full()
             .max_h(px(320.0))
             .overflow_y_scroll()
-            .track_scroll(&self.palette.scroll)
+            .track_scroll(&self.palette.input.scroll)
             .py_1();
 
         if hits.is_empty() {
@@ -187,7 +147,7 @@ impl AppShell {
                         .hover(|el| el.bg(tokens.hover))
                         .on_hover(cx.listener(move |this, hovered, _, cx| {
                             if *hovered {
-                                this.palette.selected = row_i;
+                                this.palette.input.selected = row_i;
                                 cx.notify();
                             }
                         }))

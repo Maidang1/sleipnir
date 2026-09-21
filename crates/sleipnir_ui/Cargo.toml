@@ -35,6 +35,8 @@ row_geometry.workspace = true
 sysinfo.workspace = true
 async-channel.workspace = true
 futures.workspace = true
+regex.workspace = true
+percent-encoding.workspace = true
 url.workspace = true
 unicode-segmentation = "1.12"
 

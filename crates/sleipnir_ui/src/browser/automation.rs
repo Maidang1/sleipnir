@@ -1,9 +1,10 @@
 //! Explicitly gated automation surface. Page scripts are fixed, never caller-supplied.
-use super::BrowserView;
+use super::{BrowserView, native::NativeHost};
 use gpui::{Context, Window};
 use sleipnir_browser_control::{
     BrowserStatus, MAX_TEXT_CHARS, MAX_TITLE_CHARS, Request, Response, check_access,
 };
+use std::rc::Rc;
 use std::{
     sync::{
         Arc,
@@ -37,6 +38,21 @@ impl BrowserView {
                 .then(|| self.title.chars().take(MAX_TITLE_CHARS).collect()),
         }
     }
+    /// Window binding, access gate, argument validation, and host resolution for
+    /// one request. Returns the live WebView host the operation needs.
+    fn authorize(&self, request: &Request, id: u64) -> Result<Rc<NativeHost>, Response> {
+        if request.window() != Some(id) {
+            return Err(Response::error("wrong_window", "Window binding mismatch"));
+        }
+        check_access(self.open, self.agent_access, self.blocked)?;
+        request
+            .validate()
+            .map_err(|error| Response::error("invalid_arguments", error))?;
+        self.host
+            .clone()
+            .ok_or_else(|| Response::error("not_ready", "System WebView is not ready"))
+    }
+
     pub(crate) fn control(
         &mut self,
         request: Request,
@@ -47,26 +63,20 @@ impl BrowserView {
     ) {
         let id = window.window_handle().window_id().as_u64();
         // `List` is authorized for any caller and needs no WebView host; every
-        // other operation must match the bound window, pass the access gate,
-        // and have a live host.
-        if !matches!(request, Request::List) {
-            if request.window() != Some(id) {
-                let _ = reply.send(Response::error("wrong_window", "Window binding mismatch"));
-                return;
+        // other operation must match the bound window, pass the access gate, and
+        // have a live host. Both are resolved once here, so no arm below
+        // re-derives them or assumes a host it never checked.
+        let host = if matches!(request, Request::List) {
+            None
+        } else {
+            match self.authorize(&request, id) {
+                Ok(host) => Some(host),
+                Err(response) => {
+                    let _ = reply.send(response);
+                    return;
+                }
             }
-            if let Err(error) = check_access(self.open, self.agent_access, self.blocked) {
-                let _ = reply.send(error);
-                return;
-            }
-            if let Err(error) = request.validate() {
-                let _ = reply.send(Response::error("invalid_arguments", error));
-                return;
-            }
-            if self.host.is_none() {
-                let _ = reply.send(Response::error("not_ready", "System WebView is not ready"));
-                return;
-            }
-        }
+        };
         match request {
             Request::List => {
                 let _ = reply.send(Response::Windows {
@@ -80,10 +90,13 @@ impl BrowserView {
                 });
             }
             Request::Navigate { url, .. } => {
-                let host = self.host.as_ref().expect("host checked above");
+                let Some(host) = host else {
+                    let _ = reply.send(Response::error("not_ready", "System WebView is not ready"));
+                    return;
+                };
                 match host.webview.load_url(&url) {
                     Ok(()) => {
-                        self.access_epoch.fetch_add(1, Ordering::AcqRel);
+                        self.invalidate_page();
                         self.loading = true;
                         self.error = None;
                         self.address.update(cx, |input, cx| {
@@ -102,7 +115,10 @@ impl BrowserView {
                 }
             }
             Request::ReadText { .. } => {
-                let host = self.host.as_ref().expect("host checked above");
+                let Some(host) = host else {
+                    let _ = reply.send(Response::error("not_ready", "System WebView is not ready"));
+                    return;
+                };
                 if self.loading {
                     let _ = reply.send(Response::error(
                         "loading",

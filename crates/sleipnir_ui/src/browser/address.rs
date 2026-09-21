@@ -1,28 +1,31 @@
-//! Address resolution and native navigation policy. No privileged URL schemes.
+//! Address-bar input normalization. The URL policy itself is owned by
+//! `sleipnir_browser_control::validate_url` — this module only turns what the
+//! user typed into a candidate absolute URL, then defers to that policy.
 
+/// Navigation policy for the native WebView: the same contract the agent
+/// control protocol enforces, plus the local `about:blank` placeholder the
+/// panel starts on.
 pub(super) fn allowed_url(raw: &str) -> bool {
-    raw == "about:blank"
-        || url::Url::parse(raw)
-            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+    raw == "about:blank" || sleipnir_browser_control::validate_url(raw).is_ok()
 }
 
-pub(super) fn resolve_address(raw: &str) -> Result<String, &'static str> {
+pub(super) fn resolve_address(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err("Enter a URL, for example http://localhost:3000");
+        return Err("Enter a URL, for example http://localhost:3000".to_string());
     }
     if raw == "about:blank" {
         return Ok(raw.into());
     }
     if raw.chars().any(char::is_whitespace) {
-        return Err("Enter a URL without spaces");
+        return Err("Enter a URL without spaces".to_string());
     }
     let explicit = raw.contains("://");
     let authority = raw.split(['/', '?', '#']).next().unwrap_or(raw);
     let host_port = authority.rsplit_once(':');
     let has_port = host_port.is_some_and(|(_, port)| port.parse::<u16>().is_ok());
     if !explicit && raw.contains(':') && !has_port && !raw.starts_with('[') {
-        return Err("Only HTTP and HTTPS addresses are supported");
+        return Err("Only HTTP and HTTPS addresses are supported".to_string());
     }
     let candidate = if explicit {
         raw.to_string()
@@ -43,13 +46,12 @@ pub(super) fn resolve_address(raw: &str) -> Result<String, &'static str> {
             || host.parse::<std::net::IpAddr>().is_ok();
         format!("{}://{raw}", if local { "http" } else { "https" })
     };
-    let url = url::Url::parse(&candidate).map_err(|_| "Invalid URL")?;
-    if !allowed_url(url.as_str()) {
-        return Err("Only HTTP and HTTPS addresses are supported");
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("Credentials in URLs are not supported");
-    }
+    // One policy decision, owned by the control protocol crate, applied to the
+    // raw candidate so the length and control-character caps see user input.
+    sleipnir_browser_control::validate_url(&candidate)?;
+    // Normalize only after the policy passes, so the address bar shows the
+    // canonical form (`localhost:3000` -> `http://localhost:3000/`).
+    let url = url::Url::parse(&candidate).map_err(|_| "Invalid URL".to_string())?;
     Ok(url.into())
 }
 

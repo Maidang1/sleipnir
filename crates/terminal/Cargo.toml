@@ -31,7 +31,6 @@ sleipnir_settings.workspace = true
 thiserror.workspace = true
 url.workspace = true
 util.workspace = true
-urlencoding.workspace = true
 vte.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true

@@ -56,7 +56,6 @@ use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
 use sleipnir_settings::{TerminalPalette, get_color_at_index as palette_get_color};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
-use urlencoding;
 use util::shell::Shell;
 use util::{paths::PathStyle, truncate_and_trailoff};
 
@@ -1497,9 +1496,10 @@ impl Terminal {
         let working_directory = self.cwd_at_line(match_line, history_size);
         if is_url {
             if let Some(path) = text.strip_prefix("file://") {
-                let decoded_path = urlencoding::decode(path)
+                let decoded_path = percent_encoding::percent_decode(path.as_bytes())
+                    .decode_utf8()
                     .map(|decoded| decoded.into_owned())
-                    .unwrap_or(path.to_owned());
+                    .unwrap_or_else(|_| path.to_owned());
 
                 MaybeNavigationTarget::PathLike(PathLikeTarget {
                     maybe_path: decoded_path,
@@ -2856,8 +2856,6 @@ fn foreground_process_command_from_argv(argv: &[String]) -> Option<String> {
         .or(command)
 }
 
-/// Pure busy predicate for close-confirm (M12).
-///
 /// Accumulate wheel pixels using the stable v0.4.1 uniform-grid behavior.
 ///
 /// This intentionally keeps the remainder out of `ViewportPosition::sub`:
@@ -2890,6 +2888,8 @@ fn accumulate_uniform_wheel(
     new_offset - old_offset
 }
 
+/// Pure busy predicate for close-confirm (M12).
+///
 /// Returns true when the foreground process group id differs from the shell
 /// child pid (a non-shell job is running). Idle shell → foreground equals
 /// shell → not busy.

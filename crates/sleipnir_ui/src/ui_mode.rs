@@ -33,6 +33,12 @@ pub(crate) enum OverlayKind {
     PluginMonitor,
 }
 
+/// Whether the browser panel must hide. Any modal keyboard owner, quick
+/// select, or broadcast hides it: the WebView is a surface, never an input mode.
+pub(crate) fn browser_is_blocked(input: &InputMode, quick_select: bool, broadcast: bool) -> bool {
+    !matches!(input, InputMode::Terminal | InputMode::Find) || quick_select || broadcast
+}
+
 /// Independent of [`InputMode`]: quick-select banners the terminal without
 /// taking capture-phase keys.
 #[derive(Default)]
@@ -517,5 +523,28 @@ mod tests {
             state.needs_refresh_for(other, day),
             "focus moving to another pane needs a new collection"
         );
+    }
+
+    #[test]
+    fn browser_is_hidden_for_every_application_overlay() {
+        for overlay in [
+            OverlayKind::Settings,
+            OverlayKind::Update,
+            OverlayKind::Palette,
+            OverlayKind::PaneFacts,
+            OverlayKind::History,
+            OverlayKind::Diff,
+            OverlayKind::PluginMonitor,
+        ] {
+            assert!(browser_is_blocked(
+                &InputMode::Overlay(overlay),
+                false,
+                false
+            ));
+        }
+        assert!(!browser_is_blocked(&InputMode::Terminal, false, false));
+        assert!(!browser_is_blocked(&InputMode::Find, false, false));
+        assert!(browser_is_blocked(&InputMode::Terminal, true, false));
+        assert!(browser_is_blocked(&InputMode::Terminal, false, true));
     }
 }

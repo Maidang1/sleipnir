@@ -109,7 +109,6 @@ sysinfo = "0.37.0"
 tempfile = "3"
 thiserror = "2.0.12"
 url = "2.2"
-urlencoding = "2.1.2"
 ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 vte = { version = "0.15.0", features = ["ansi"] }

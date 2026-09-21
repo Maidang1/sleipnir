@@ -1,6 +1,9 @@
 //! Core browser integration. Hidden behind modal UI; never an input mode or PTY.
 use super::{AppShell, ToggleBrowser};
-use crate::{chrome::ChromeTokens, ui_mode::InputMode};
+use crate::{
+    chrome::ChromeTokens,
+    ui_mode::{InputMode, browser_is_blocked},
+};
 use gpui::{prelude::*, *};
 
 impl AppShell {
@@ -13,7 +16,6 @@ impl AppShell {
         self.toggle_browser(window, cx);
     }
     pub(super) fn toggle_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             use crate::browser::{BrowserEvent, BrowserView};
             self.browser_open = !self.browser_open;
@@ -44,15 +46,9 @@ impl AppShell {
             }
             cx.notify();
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = (window, cx);
-            log::info!("Browser panel is available on macOS and Windows only");
-        }
     }
 
     pub(super) fn sync_browser_presentation(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(browser) = &self.browser {
             let blocked =
                 browser_is_blocked(&self.input, self.mode.quick_select_open, self.broadcast);
@@ -60,24 +56,19 @@ impl AppShell {
                 browser.set_presentation(self.browser_open, blocked, cx)
             });
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let _ = cx;
     }
     pub(super) fn reclaim_browser_focus(&self, cx: &App) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(browser) = &self.browser {
             browser.read(cx).reclaim_focus();
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let _ = cx;
     }
     pub(super) fn poll_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(browser) = &self.browser {
             browser.update(cx, |browser, cx| browser.poll(window, cx));
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let _ = (window, cx);
+    }
+    pub(super) fn browser_panel_is_open(&self) -> bool {
+        self.browser_open
     }
     pub(super) fn render_browser_toggle(
         &self,
@@ -116,46 +107,11 @@ impl AppShell {
             .flex_shrink_0()
             .border_l_1()
             .border_color(tokens.border);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let panel = panel.children(self.browser.clone());
         panel.into_any_element()
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
-fn browser_is_blocked(input: &InputMode, quick_select: bool, broadcast: bool) -> bool {
-    !matches!(input, InputMode::Terminal | InputMode::Find) || quick_select || broadcast
-}
-
-#[cfg(test)]
-mod tests {
-    use super::browser_is_blocked;
-    use crate::ui_mode::{InputMode, OverlayKind};
-    #[test]
-    fn browser_is_hidden_for_every_application_overlay() {
-        for overlay in [
-            OverlayKind::Settings,
-            OverlayKind::Update,
-            OverlayKind::Palette,
-            OverlayKind::PaneFacts,
-            OverlayKind::History,
-            OverlayKind::Diff,
-            OverlayKind::PluginMonitor,
-        ] {
-            assert!(browser_is_blocked(
-                &InputMode::Overlay(overlay),
-                false,
-                false
-            ));
-        }
-        assert!(!browser_is_blocked(&InputMode::Terminal, false, false));
-        assert!(!browser_is_blocked(&InputMode::Find, false, false));
-        assert!(browser_is_blocked(&InputMode::Terminal, true, false));
-        assert!(browser_is_blocked(&InputMode::Terminal, false, true));
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl AppShell {
     pub(crate) fn browser_control_request(
         &mut self,

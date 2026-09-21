@@ -71,8 +71,7 @@ impl BrowserView {
                     .update_in(cx, |this, window, cx| {
                         match event {
                             NativeEvent::Loading(loading) => {
-                                this.access_epoch
-                                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                                this.invalidate_page();
                                 this.loading = loading;
                                 this.error = None;
                             }
@@ -130,12 +129,18 @@ impl BrowserView {
             }
         }
     }
+    /// Invalidate any in-flight agent page read. Every mutation that can change
+    /// what the page shows must call this — otherwise a read can complete with
+    /// the *previous* document and report it as the current snapshot.
+    pub(super) fn invalidate_page(&self) {
+        self.access_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
     pub fn set_presentation(&mut self, open: bool, blocked: bool, cx: &mut Context<Self>) {
         if self.open == open && self.blocked == blocked {
             return;
         }
-        self.access_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.invalidate_page();
         if !open {
             self.agent_access = false;
         }
@@ -165,8 +170,7 @@ impl BrowserView {
         }
         if let Ok(url) = host.webview.url() {
             if url != self.url && !url.is_empty() {
-                self.access_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.invalidate_page();
                 self.url = url;
                 cx.notify();
             }
@@ -186,6 +190,7 @@ impl BrowserView {
                 if let Some(host) = &self.host {
                     match host.webview.load_url(&url) {
                         Ok(()) => {
+                            self.invalidate_page();
                             self.error = None;
                             self.loading = true;
                             self.address.update(cx, |input, cx| {
@@ -199,12 +204,13 @@ impl BrowserView {
                     self.error = Some("System WebView is not ready".into());
                 }
             }
-            Err(error) => self.error = Some(error.into()),
+            Err(error) => self.error = Some(error),
         }
         cx.notify();
     }
     fn navigation(&mut self, back: bool, cx: &mut Context<Self>) {
         if let Some(host) = &self.host {
+            self.invalidate_page();
             if let Err(error) = host.go(back) {
                 self.error = Some(error);
             }
@@ -412,7 +418,6 @@ impl Render for BrowserView {
 
 impl Drop for BrowserView {
     fn drop(&mut self) {
-        self.access_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.invalidate_page();
     }
 }

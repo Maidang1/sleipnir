@@ -3,7 +3,10 @@
 /// Maps `CommandId` to canonical shell actions. A child module so it can reach
 /// `AppShell`'s private methods without widening them to the whole crate.
 mod agent_hud;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod browser_panel;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod browser_panel_stub;
 mod command_dispatch;
 mod diff;
 mod find;
@@ -12,7 +15,7 @@ mod palette;
 mod panels;
 pub(crate) mod plugin_paint;
 mod plugins;
-mod query;
+pub(crate) mod query;
 mod settings;
 mod tabs;
 mod terminal_menu;
@@ -230,7 +233,7 @@ impl Tab {
 #[derive(Clone)]
 pub(crate) struct RenameState {
     pub(crate) tab_id: u64,
-    pub(crate) buffer: String,
+    pub(crate) query: crate::app_shell::query::QueryBox,
 }
 
 #[derive(Clone, Copy)]
@@ -307,27 +310,20 @@ struct DragState {
 /// Window root: unified chrome band + active terminal.
 struct SettingsState {
     section: SettingsSection,
-    theme_query: String,
-    theme_selected: usize,
-    theme_scroll: ScrollHandle,
+    themes: crate::app_shell::query::QueryBox,
 }
 
 impl Default for SettingsState {
     fn default() -> Self {
         Self {
             section: SettingsSection::Theme,
-            theme_query: String::new(),
-            theme_selected: 0,
-            theme_scroll: ScrollHandle::new(),
+            themes: crate::app_shell::query::QueryBox::default(),
         }
     }
 }
 
 struct PaletteState {
-    query: String,
-    selected: usize,
-    marked: Option<std::ops::Range<usize>>,
-    scroll: ScrollHandle,
+    input: crate::app_shell::query::QueryBox,
     recents: Vec<CommandId>,
     items: Vec<CommandItem>,
     plugin_commands: Vec<plugin_host::LoadedPluginCommand>,
@@ -339,10 +335,7 @@ impl PaletteState {
         plugin_commands: Vec<plugin_host::LoadedPluginCommand>,
     ) -> Self {
         Self {
-            query: String::new(),
-            selected: 0,
-            marked: None,
-            scroll: ScrollHandle::new(),
+            input: crate::app_shell::query::QueryBox::default(),
             recents: Vec::new(),
             items,
             plugin_commands,
@@ -352,9 +345,22 @@ impl PaletteState {
 
 #[derive(Default)]
 struct HistoryState {
-    query: String,
-    selected: usize,
-    marked: Option<std::ops::Range<usize>>,
+    input: crate::app_shell::query::QueryBox,
+    /// Hits loaded once when the overlay opens. Reading `$HISTFILE` per
+    /// keystroke or per render frame was measurable on large histories.
+    hits: Vec<crate::chrome::history_search::HistoryHit>,
+}
+
+impl HistoryState {
+    /// Load the shell history once for this overlay session.
+    fn load_hits(&mut self) {
+        self.hits = crate::chrome::history_search::load_history_hits();
+    }
+
+    /// The hits matching `query`, capped for display and selection.
+    fn shown(&self) -> Vec<&crate::chrome::history_search::HistoryHit> {
+        crate::chrome::history_search::filter_history(&self.hits, &self.input.text, 20)
+    }
 }
 
 pub struct AppShell {
@@ -416,6 +422,9 @@ pub struct AppShell {
     plugin_watch: crate::plugin_event_watch::PluginEventWatch,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     browser: Option<Entity<crate::browser::BrowserView>>,
+    /// Read through `browser_panel_is_open()` so the render path stays
+    /// platform-independent.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     browser_open: bool,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     _browser_bridge: Option<crate::browser_control::WindowBridge>,
@@ -562,7 +571,7 @@ impl AppShell {
             InputOwner::Rename => {}
             InputOwner::TabMenu | InputOwner::TerminalMenu => {}
             InputOwner::Overlay(OverlayKind::Settings) => {
-                self.settings.theme_query.clear();
+                self.settings.themes.reset();
             }
             InputOwner::Overlay(OverlayKind::PaneFacts) => {
                 self.discard_pane_facts();
@@ -716,8 +725,8 @@ impl AppShell {
                             return;
                         }
                         "escape" => {
-                            if !self.settings.theme_query.is_empty() {
-                                self.settings.theme_query.clear();
+                            if !self.settings.themes.text.is_empty() {
+                                self.settings.themes.text.clear();
                                 cx.notify();
                             } else {
                                 self.close_settings(window, cx);
@@ -725,23 +734,14 @@ impl AppShell {
                             cx.stop_propagation();
                             return;
                         }
-                        "backspace" => {
-                            self.settings.theme_query.pop();
-                            self.settings.theme_selected = 0;
-                            self.settings.theme_scroll.scroll_to_item(0);
-                            cx.notify();
-                            cx.stop_propagation();
-                            return;
-                        }
                         _ => {
-                            if !event.keystroke.modifiers.platform
-                                && let Some(ch) = event.keystroke.key_char.as_ref()
-                                && !ch.is_empty()
-                                && !ch.chars().any(|c| c.is_control())
-                            {
-                                self.settings.theme_query.push_str(ch);
-                                self.settings.theme_selected = 0;
-                                self.settings.theme_scroll.scroll_to_item(0);
+                            let items = self.theme_item_count(cx);
+                            let changed =
+                                self.settings.themes.edit(&event.keystroke, items, &mut || {
+                                    cx.read_from_clipboard().and_then(|item| item.text())
+                                });
+                            if changed {
+                                self.settings.themes.scroll.scroll_to_item(0);
                                 cx.notify();
                             }
                         }
@@ -911,6 +911,7 @@ impl AppShell {
             plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             browser: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             browser_open: false,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             _browser_bridge: crate::browser_control::start(window, cx),
@@ -1829,11 +1830,10 @@ impl AppShell {
     /// Toggle the history overlay, resetting the query when it closes.
     fn toggle_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.toggle_overlay(OverlayKind::History, cx) {
-            self.history.query.clear();
-            self.history.marked = None;
-            self.history.selected = 0;
+            self.history.input.reset();
             self.focus_active(window, cx);
         } else {
+            self.history.load_hits();
             // Focus the shell so the history query box's IME input handler
             // activates and keystrokes stop leaking to the PTY underneath.
             window.focus(&self.focus_handle, cx);
@@ -1843,9 +1843,13 @@ impl AppShell {
 
     /// Send the selected history hit to the active pane and close the overlay.
     pub(crate) fn run_history_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let hits = crate::chrome::history_search::load_history_hits();
-        let shown = crate::chrome::history_search::filter_history(&hits, &self.history.query, 20);
-        let Some(hit) = shown.get(self.history.selected.min(shown.len().saturating_sub(1))) else {
+        let shown = self.history.shown();
+        let Some(hit) = shown.get(
+            self.history
+                .input
+                .selected
+                .min(shown.len().saturating_sub(1)),
+        ) else {
             return;
         };
         let cmd = hit.command.clone();
@@ -1863,45 +1867,19 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = event.keystroke.key.as_str();
-        match key {
+        match event.keystroke.key.as_str() {
             "escape" => {
                 self.toggle_history_search(window, cx);
             }
             "enter" => {
                 self.run_history_selection(window, cx);
             }
-            "up" | "down" => {
-                let hits = crate::chrome::history_search::load_history_hits();
-                let shown =
-                    crate::chrome::history_search::filter_history(&hits, &self.history.query, 20)
-                        .len();
-                if shown > 0 {
-                    if key == "up" {
-                        self.history.selected = if self.history.selected == 0 {
-                            shown - 1
-                        } else {
-                            self.history.selected - 1
-                        };
-                    } else {
-                        self.history.selected = (self.history.selected + 1) % shown;
-                    }
-                    cx.notify();
-                }
-            }
-            "backspace" => {
-                self.history.query.pop();
-                self.history.selected = 0;
-                cx.notify();
-            }
             _ => {
-                if !event.keystroke.modifiers.platform
-                    && let Some(ch) = event.keystroke.key_char.as_ref()
-                    && !ch.is_empty()
-                    && !ch.chars().any(|c| c.is_control())
-                {
-                    self.history.query.push_str(ch);
-                    self.history.selected = 0;
+                let shown = self.history.shown().len();
+                let changed = self.history.input.edit(&event.keystroke, shown, &mut || {
+                    cx.read_from_clipboard().and_then(|item| item.text())
+                });
+                if changed {
                     cx.notify();
                 }
             }
@@ -2387,7 +2365,7 @@ impl Render for AppShell {
                                 .agent_panel;
                         let has_agents = agent_panel_enabled && !self.agent_hud_rows(cx).is_empty();
                         let content = self.render_content(&tokens, window, cx);
-                        if has_agents || self.browser_open {
+                        if has_agents || self.browser_panel_is_open() {
                             div()
                                 .flex_1()
                                 .min_h_0()
@@ -2397,7 +2375,7 @@ impl Render for AppShell {
                                 .when(has_agents, |el| {
                                     el.child(self.render_agent_panel(&tokens, cx))
                                 })
-                                .when(self.browser_open, |el| {
+                                .when(self.browser_panel_is_open(), |el| {
                                     el.child(self.render_browser_panel(&tokens, window, cx))
                                 })
                                 .into_any_element()

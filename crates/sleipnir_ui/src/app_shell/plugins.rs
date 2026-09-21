@@ -469,7 +469,7 @@ impl AppShell {
         crate::plugin_runtime::PluginRuntime::reload(cx);
         self.palette.plugin_commands = crate::plugin_runtime::PluginRuntime::commands(cx);
         self.rebuild_palette_items(cx);
-        self.palette.selected = 0;
+        self.palette.input.selected = 0;
         self.start_resident_plugins(cx);
     }
     pub(super) fn run_plugin_contribution(&mut self, index: usize, cx: &mut Context<Self>) {

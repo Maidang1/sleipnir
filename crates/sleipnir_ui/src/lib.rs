@@ -788,7 +788,7 @@ impl TermView {
             Some(ClipboardEntry::Image(image)) if !image.bytes().is_empty() => {
                 match write_clipboard_image_to_temp(image) {
                     Ok(path) => {
-                        let text = format!("{} ", shell_quote_path(&path));
+                        let text = format!("{} ", quote_path_for_shell(&path, cfg!(windows)));
                         terminal.update(cx, |term, _| term.paste(&text));
                         self.note_user_typed(cx);
                         cx.notify();
@@ -1649,18 +1649,9 @@ fn write_clipboard_image_to_temp(image: &gpui::Image) -> Result<PathBuf, String>
     Ok(path)
 }
 
-/// Quote a filesystem path for safe insertion into a shell command line.
-fn shell_quote_path(path: &Path) -> String {
-    quote_path_for_shell(path)
-}
-
-/// Quote `path` for the compiling OS shell (POSIX or PowerShell).
-pub fn quote_path_for_shell(path: &Path) -> String {
-    quote_path_for_shell_os(path, cfg!(windows))
-}
-
-/// Quote `path`. `windows = true` uses PowerShell single-quote rules.
-pub fn quote_path_for_shell_os(path: &Path, windows: bool) -> String {
+/// Quote `path` for safe insertion into a shell command line.
+/// `windows = true` uses PowerShell single-quote rules, otherwise POSIX rules.
+pub(crate) fn quote_path_for_shell(path: &Path, windows: bool) -> String {
     let s = path.to_string_lossy();
     if s.is_empty() {
         return "''".to_string();
@@ -1687,7 +1678,7 @@ fn format_external_paths(paths: &[PathBuf]) -> String {
     let mut out = String::new();
     for path in paths {
         out.push(' ');
-        out.push_str(&shell_quote_path(path));
+        out.push_str(&quote_path_for_shell(path, cfg!(windows)));
     }
     if !out.is_empty() {
         out.push(' ');
@@ -1776,30 +1767,30 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_path_quotes_unsafe_paths() {
+    fn quote_path_for_shell_quotes_unsafe_paths() {
         assert_eq!(
-            quote_path_for_shell(Path::new("/tmp/safe-name")),
+            quote_path_for_shell(Path::new("/tmp/safe-name"), false),
             "/tmp/safe-name"
         );
         assert_eq!(
-            quote_path_for_shell(Path::new("/tmp/has space")),
+            quote_path_for_shell(Path::new("/tmp/has space"), false),
             "'/tmp/has space'"
         );
         assert_eq!(
-            quote_path_for_shell_os(Path::new("/tmp/o'reilly"), false),
+            quote_path_for_shell(Path::new("/tmp/o'reilly"), false),
             "'/tmp/o'\\''reilly'"
         );
-        assert_eq!(quote_path_for_shell(Path::new("")), "''");
+        assert_eq!(quote_path_for_shell(Path::new(""), false), "''");
         assert_eq!(
-            quote_path_for_shell_os(Path::new(r"C:\Program Files\x"), true),
+            quote_path_for_shell(Path::new(r"C:\Program Files\x"), true),
             r"'C:\Program Files\x'"
         );
         assert_eq!(
-            quote_path_for_shell_os(Path::new(r"C:\o'reilly"), true),
+            quote_path_for_shell(Path::new(r"C:\o'reilly"), true),
             r"'C:\o''reilly'"
         );
         assert_eq!(
-            quote_path_for_shell_os(Path::new(r"C:\safe"), true),
+            quote_path_for_shell(Path::new(r"C:\safe"), true),
             r"C:\safe"
         );
     }

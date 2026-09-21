@@ -66,7 +66,7 @@ impl AppShell {
                 self.input
                     .rename()
                     .filter(|state| state.tab_id == tab.id)
-                    .map(|state| state.buffer.clone()),
+                    .map(|state| state.query.text.clone()),
                 plugin_badges,
                 failed,
                 agent,

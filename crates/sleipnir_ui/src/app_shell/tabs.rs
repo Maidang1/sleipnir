@@ -76,9 +76,12 @@ impl AppShell {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
-        let buffer = tab.path_label(cx).to_string();
+        let text = tab.path_label(cx).to_string();
         self.set_input(
-            crate::ui_mode::InputMode::Rename(RenameState { tab_id, buffer }),
+            crate::ui_mode::InputMode::Rename(RenameState {
+                tab_id,
+                query: crate::app_shell::query::QueryBox::seeded(text),
+            }),
             cx,
         );
         cx.notify();
@@ -90,7 +93,7 @@ impl AppShell {
     pub(super) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = self.take_rename_input(cx) {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == state.tab_id) {
-                let trimmed = state.buffer.trim();
+                let trimmed = state.query.text.trim();
                 tab.custom_title = if trimmed.is_empty() {
                     None
                 } else {
@@ -120,8 +123,7 @@ impl AppShell {
         if self.input.rename().is_none() {
             return false;
         }
-        let key = event.keystroke.key.as_str();
-        match key {
+        match event.keystroke.key.as_str() {
             "enter" => {
                 self.commit_rename(window, cx);
                 true
@@ -130,21 +132,14 @@ impl AppShell {
                 self.cancel_rename(cx);
                 true
             }
-            "backspace" => {
-                if let Some(state) = self.input.rename_mut() {
-                    state.buffer.pop();
-                    cx.notify();
-                }
-                true
-            }
             _ => {
-                // Append any typed printable character to the buffer.
-                if let Some(ch) = event.keystroke.key_char.as_ref() {
-                    if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                        if let Some(state) = self.input.rename_mut() {
-                            state.buffer.push_str(ch);
-                            cx.notify();
-                        }
+                // Rename has no result list, so `items` is zero.
+                if let Some(state) = self.input.rename_mut() {
+                    let changed = state.query.edit(&event.keystroke, 0, &mut || {
+                        cx.read_from_clipboard().and_then(|item| item.text())
+                    });
+                    if changed {
+                        cx.notify();
                     }
                 }
                 // While renaming, swallow every other key too so shortcuts
