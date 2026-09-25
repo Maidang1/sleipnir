@@ -402,14 +402,12 @@ mod tests {
         for cap in [
             Capability::Resident,
             Capability::SubscribeEvents,
-            Capability::RenderBlock,
             Capability::RenderPanel,
             Capability::RenderStatus,
             Capability::HostCallNotify,
             Capability::HostCallReadScreen,
             Capability::HostCallListPanes,
             Capability::HostCallOpenPane,
-            Capability::HostCallScrollToRun,
             Capability::HostCallFocusPane,
             Capability::HostCallSendText,
             Capability::HostCallSendKey,
@@ -474,7 +472,7 @@ mod tests {
                 &[
                     Capability::ReadCwd,
                     Capability::SubscribeEvents,
-                    Capability::RenderBlock,
+                    Capability::RenderPanel,
                 ],
             ),
         );
@@ -501,7 +499,7 @@ mod tests {
             "version": 1,
             "grants": {
                 "port-watcher": {
-                    "granted": ["read_cwd", "subscribe_events", "render_block"],
+                    "granted": ["read_cwd", "subscribe_events", "render_panel"],
                     "binary_hash": "sha256:ab12",
                     "granted_at": "2026-01-01T00:00:00Z",
                     "tier": "sandboxed"
@@ -515,7 +513,7 @@ mod tests {
         assert_eq!(rec.binary_hash, "sha256:ab12");
         assert!(rec.granted.contains(&Capability::ReadCwd));
         assert!(rec.granted.contains(&Capability::SubscribeEvents));
-        assert!(rec.granted.contains(&Capability::RenderBlock));
+        assert!(rec.granted.contains(&Capability::RenderPanel));
     }
 
     #[test]

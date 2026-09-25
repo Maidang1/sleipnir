@@ -1,11 +1,10 @@
 use gpui::App;
 use plugin_host::resident::Inbound;
-use plugin_protocol::v2::{HostCall, HostCallResult, PaneKey, RenderTarget, RunId};
+use plugin_protocol::v2::{HostCall, HostCallResult, PaneKey, RenderTarget};
 use std::collections::BTreeMap;
 
 use crate::app_shell::AppShell;
 use crate::plugin_runtime;
-use crate::run_ledger_global::RunLedgerGlobal;
 
 #[derive(Default)]
 pub(crate) struct PluginDispatcher {
@@ -15,7 +14,6 @@ pub(crate) struct PluginDispatcher {
 #[derive(Default)]
 struct WindowRoutes {
     panes: BTreeMap<PaneKey, usize>,
-    runs: BTreeMap<RunId, PaneKey>,
     preferred: Option<usize>,
     window_count: usize,
 }
@@ -30,25 +28,12 @@ impl WindowRoutes {
                 return (0..self.window_count).collect();
             }
             Inbound::Render {
-                target: RenderTarget::Block { anchor },
-                ..
-            } => self
-                .runs
-                .get(anchor)
-                .and_then(|pane| self.panes.get(pane))
-                .copied(),
-            Inbound::Render {
                 target: RenderTarget::Panel { pane },
                 ..
             } => self.panes.get(pane).copied().or(self.preferred),
             Inbound::Call { call, .. } => {
                 if let Some(pane) = call.target_pane() {
                     self.panes.get(&pane).copied()
-                } else if let HostCall::ScrollToRun { run_id } = call {
-                    self.runs
-                        .get(run_id)
-                        .and_then(|pane| self.panes.get(pane))
-                        .copied()
                 } else {
                     self.preferred
                 }
@@ -109,14 +94,6 @@ impl PluginDispatcher {
             window_count: windows.len(),
             ..WindowRoutes::default()
         };
-        if cx.has_global::<RunLedgerGlobal>() {
-            routes.runs = cx
-                .global::<RunLedgerGlobal>()
-                .snapshot()
-                .into_iter()
-                .map(|run| (run.id, run.pane))
-                .collect();
-        }
         for (index, handle) in windows.iter().enumerate() {
             if let Ok((terminals, panels)) =
                 handle.update(cx, |shell, _, _| shell.terminal_and_panel_keys())
@@ -223,22 +200,9 @@ mod tests {
     fn two_windows() -> WindowRoutes {
         WindowRoutes {
             panes: BTreeMap::from([(Uuid::from_u128(1), 0), (Uuid::from_u128(2), 1)]),
-            runs: BTreeMap::from([(Uuid::from_u128(10), Uuid::from_u128(2))]),
             preferred: Some(0),
             window_count: 2,
         }
-    }
-
-    #[test]
-    fn block_routes_to_its_owner_not_the_active_window() {
-        let message = Inbound::Render {
-            id: 1,
-            target: RenderTarget::Block {
-                anchor: Uuid::from_u128(10),
-            },
-            tree: Widget::Sep,
-        };
-        assert_eq!(two_windows().destinations(&message), vec![1]);
     }
 
     #[test]
@@ -267,20 +231,6 @@ mod tests {
         };
         assert_eq!(routes.destinations(&message), vec![1]);
         routes.panes.remove(&Uuid::from_u128(2));
-        assert!(routes.destinations(&message).is_empty());
-    }
-
-    #[test]
-    fn scroll_to_run_routes_to_the_runs_window_and_missing_runs_do_not_fall_back() {
-        let mut routes = two_windows();
-        let message = Inbound::Call {
-            id: 1,
-            call: HostCall::ScrollToRun {
-                run_id: Uuid::from_u128(10),
-            },
-        };
-        assert_eq!(routes.destinations(&message), vec![1]);
-        routes.runs.remove(&Uuid::from_u128(10));
         assert!(routes.destinations(&message).is_empty());
     }
 

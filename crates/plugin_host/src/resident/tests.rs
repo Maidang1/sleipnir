@@ -182,23 +182,15 @@ fn pane(n: u128) -> uuid::Uuid {
     uuid::Uuid::from_u128(n)
 }
 
-fn run_started(p: uuid::Uuid, command: &str) -> HostEvent {
-    HostEvent::RunStarted {
-        run_id: uuid::Uuid::from_u128(p.as_u128() + 100),
+fn cwd_changed(p: uuid::Uuid) -> HostEvent {
+    HostEvent::CwdChanged {
         pane: p,
-        command: command.into(),
-        cwd: Some("/tmp".into()),
-        inferred: false,
+        cwd: "/tmp".into(),
     }
 }
 
-fn run_finished(p: uuid::Uuid) -> HostEvent {
-    HostEvent::RunFinished {
-        run_id: uuid::Uuid::from_u128(p.as_u128() + 100),
-        pane: p,
-        exit_code: Some(0),
-        duration_ms: 12,
-    }
+fn pane_focused(p: uuid::Uuid) -> HostEvent {
+    HostEvent::PaneFocused { pane: p }
 }
 
 fn handshake_events(ep: &mut PluginEndpoint, id: &str, filter: EventFilter) {
@@ -1959,7 +1951,7 @@ fn declared_capabilities_include_resident_from_lifecycle() {
 #[test]
 fn declared_capabilities_include_plugin_level_v2_permissions() {
     // Ready.requests is checked against this set. If plugin.json cannot
-    // name subscribe_events / render_block, a v2 plugin cannot load.
+    // name subscribe_events / render_panel, a v2 plugin cannot load.
     let manifest = crate::PluginManifest {
         id: "demo".into(),
         name: "Demo".into(),
@@ -1972,17 +1964,17 @@ fn declared_capabilities_include_plugin_level_v2_permissions() {
         args: vec![],
         permissions: BTreeSet::from([
             plugin_protocol::v2::Capability::SubscribeEvents,
-            plugin_protocol::v2::Capability::RenderBlock,
+            plugin_protocol::v2::Capability::RenderPanel,
             plugin_protocol::v2::Capability::ReadCwd,
         ]),
         commands: vec![],
     };
     let caps = declared_capabilities(&manifest);
     assert!(caps.contains(&Capability::SubscribeEvents));
-    assert!(caps.contains(&Capability::RenderBlock));
+    assert!(caps.contains(&Capability::RenderPanel));
     assert!(caps.contains(&Capability::ReadCwd));
     assert!(caps.contains(&Capability::Resident));
-    assert!(!caps.contains(&Capability::RenderPanel));
+    assert!(!caps.contains(&Capability::RenderStatus));
 }
 
 fn connect_subscriber(
@@ -2017,7 +2009,7 @@ fn plugin_without_subscribe_events_receives_nothing() {
         collect_until_invoke(ep, &tx);
     });
     env.sup.connect(&spec()).unwrap();
-    let report = env.sup.broadcast(run_started(pane(1), "echo hi"));
+    let report = env.sup.broadcast(cwd_changed(pane(1)));
     assert_eq!(report.delivered(), 0);
     assert_eq!(report.filtered(), 1);
     barrier_invoke(&env, "demo");
@@ -2034,16 +2026,16 @@ fn empty_filter_receives_everything() {
     let env = Env::new();
     let (tx, rx) = mpsc::channel();
     let plugin = connect_subscriber(&env, "demo", EventFilter::default(), tx);
-    env.sup.broadcast(run_started(pane(1), "echo a"));
-    env.sup.broadcast(run_finished(pane(1)));
+    env.sup.broadcast(cwd_changed(pane(1)));
+    env.sup.broadcast(pane_focused(pane(1)));
     env.sup.broadcast(HostEvent::PaneFocused { pane: pane(2) });
     barrier_invoke(&env, "demo");
     let kinds: Vec<_> = rx.try_iter().map(|e| e.kind()).collect();
     assert_eq!(
         kinds,
         [
-            EventKind::RunStarted,
-            EventKind::RunFinished,
+            EventKind::CwdChanged,
+            EventKind::PaneFocused,
             EventKind::PaneFocused
         ]
     );
@@ -2060,8 +2052,8 @@ fn pane_filter_excludes_other_panes() {
         kinds: vec![],
     };
     let plugin = connect_subscriber(&env, "demo", filter, tx);
-    env.sup.broadcast(run_started(pane(1), "echo a"));
-    env.sup.broadcast(run_started(pane(2), "echo b"));
+    env.sup.broadcast(cwd_changed(pane(1)));
+    env.sup.broadcast(cwd_changed(pane(2)));
     barrier_invoke(&env, "demo");
     let panes: Vec<_> = rx.try_iter().map(|e| e.pane()).collect();
     assert_eq!(panes, [pane(1)]);
@@ -2075,14 +2067,14 @@ fn kind_filter_excludes_other_kinds() {
     let (tx, rx) = mpsc::channel();
     let filter = EventFilter {
         panes: vec![],
-        kinds: vec![EventKind::RunFinished],
+        kinds: vec![EventKind::PaneFocused],
     };
     let plugin = connect_subscriber(&env, "demo", filter, tx);
-    env.sup.broadcast(run_started(pane(1), "echo a"));
-    env.sup.broadcast(run_finished(pane(1)));
+    env.sup.broadcast(cwd_changed(pane(1)));
+    env.sup.broadcast(pane_focused(pane(1)));
     barrier_invoke(&env, "demo");
     let kinds: Vec<_> = rx.try_iter().map(|e| e.kind()).collect();
-    assert_eq!(kinds, [EventKind::RunFinished]);
+    assert_eq!(kinds, [EventKind::PaneFocused]);
     env.sup.shutdown("demo");
     let _ = plugin.join();
 }
@@ -2106,19 +2098,19 @@ fn multiple_subscribers_each_get_their_filtered_view() {
         "beta",
         EventFilter {
             panes: vec![],
-            kinds: vec![EventKind::RunFinished],
+            kinds: vec![EventKind::PaneFocused],
         },
         tx_b,
     );
-    env.sup.broadcast(run_started(pane(1), "echo a"));
-    env.sup.broadcast(run_started(pane(2), "echo b"));
-    env.sup.broadcast(run_finished(pane(2)));
+    env.sup.broadcast(cwd_changed(pane(1)));
+    env.sup.broadcast(cwd_changed(pane(2)));
+    env.sup.broadcast(pane_focused(pane(2)));
     barrier_invoke(&env, "alpha");
     barrier_invoke(&env, "beta");
     let a_kinds: Vec<_> = rx_a.try_iter().map(|e| e.kind()).collect();
     let b_kinds: Vec<_> = rx_b.try_iter().map(|e| e.kind()).collect();
-    assert_eq!(a_kinds, [EventKind::RunStarted]);
-    assert_eq!(b_kinds, [EventKind::RunFinished]);
+    assert_eq!(a_kinds, [EventKind::CwdChanged]);
+    assert_eq!(b_kinds, [EventKind::PaneFocused]);
     env.sup.shutdown_all();
     let _ = a.join();
     let _ = b.join();
@@ -2142,10 +2134,10 @@ fn per_plugin_order_is_preserved_under_interleaved_emissions() {
     env.sup.connect(&event_spec("demo")).unwrap();
     let a = pane(1);
     let b = pane(2);
-    env.sup.broadcast(run_started(a, "echo a"));
-    env.sup.broadcast(run_started(b, "echo b"));
-    env.sup.broadcast(run_finished(a));
-    env.sup.broadcast(run_finished(b));
+    env.sup.broadcast(cwd_changed(a));
+    env.sup.broadcast(cwd_changed(b));
+    env.sup.broadcast(pane_focused(a));
+    env.sup.broadcast(pane_focused(b));
     wait_until(
         || mutex_lock(&collected).len() == 4,
         "all four events should arrive",
@@ -2157,12 +2149,12 @@ fn per_plugin_order_is_preserved_under_interleaved_emissions() {
     assert_eq!(
         kinds,
         [
-            (a, EventKind::RunStarted),
-            (b, EventKind::RunStarted),
-            (a, EventKind::RunFinished),
-            (b, EventKind::RunFinished),
+            (a, EventKind::CwdChanged),
+            (b, EventKind::CwdChanged),
+            (a, EventKind::PaneFocused),
+            (b, EventKind::PaneFocused),
         ],
-        "a plugin must not observe RunFinished before the RunStarted that was broadcast first"
+        "per-plugin order must follow the broadcast order"
     );
     env.sup.shutdown("demo");
     let _ = plugin.join();

@@ -27,7 +27,7 @@ use plugin_protocol::v2::Output as WireOutput;
 pub use plugin_protocol::v2::{
     BlockId, Capability, CommandSpec, EventFilter, EventKind, HostCall, HostCallResult, HostEvent,
     InvokeContext, Lifecycle, MAX_SEND_TEXT_CHARS, Manifest, MessageId, PROTOCOL_VERSION, PaneInfo,
-    PaneKey, RenderTarget, RunId, Tone, Widget,
+    PaneKey, RenderTarget, Tone, Widget,
 };
 
 /// One command invocation delivered to the plugin.
@@ -87,7 +87,7 @@ pub trait Plugin {
         let _ = (granted, instance_id, ctx);
     }
 
-    /// A fact the app already computes (`run_ledger`, `pane_facts`).
+    /// A fact the app already computes (`pane_facts`).
     fn on_event(&mut self, event: HostEvent, ctx: &mut Context<'_>) {
         let _ = (event, ctx);
     }
@@ -159,15 +159,6 @@ impl Context<'_> {
 
     pub fn call_with_timeout(&mut self, call: HostCall, timeout: Duration) -> HostCallResult {
         self.io.call(call, timeout)
-    }
-
-    /// Scroll a pane back to the output anchor of `run_id` and focus it.
-    ///
-    /// An inferred run (a busy-probe guess, `HostEvent::RunStarted.inferred`)
-    /// has no scrollback anchor; the pane is focused instead. An unknown
-    /// `run_id` returns `HostCallResult::Error`.
-    pub fn scroll_to_run(&mut self, run_id: RunId) -> HostCallResult {
-        self.call(HostCall::ScrollToRun { run_id })
     }
 
     /// Focus a terminal pane. Plugin panels and unknown keys are errors.

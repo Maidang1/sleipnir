@@ -6,7 +6,7 @@
 //! line by `line_height` for a y, or divides y by `line_height` for a line,
 //! is a mouse-versus-paint drift bug.
 
-use row_geometry::{HitTarget, RowGeometry};
+use row_geometry::RowGeometry;
 
 use crate::{Point, SelectionSide, TerminalBounds};
 use gpui::{Pixels, Point as GpuiPoint, px};
@@ -24,9 +24,9 @@ pub fn viewport_top_abs(history_size: i32, display_offset: usize) -> i32 {
 ///
 /// A shrink means every stored absolute line is stale by this much. History
 /// belongs to the terminal, so this is computed once there rather than
-/// re-derived by each mount that stores absolute lines (gutter markers, Block
-/// anchors) — two trackers of the same fact drift, and a drift here strands
-/// content on the wrong row.
+/// re-derived by each mount that stores absolute lines (gutter markers,
+/// prompt markers) — two trackers of the same fact drift, and a drift here
+/// strands content on the wrong row.
 pub fn history_shrink(previous: usize, current: usize) -> i32 {
     i32::try_from(previous.saturating_sub(current)).unwrap_or(i32::MAX)
 }
@@ -37,10 +37,11 @@ pub fn y_for_display(geom: &RowGeometry, display_line: i32, top_abs: i32, sub: f
     geom.y_for(top_abs.saturating_add(display_line)) - geom.y_for(top_abs) - sub
 }
 
-/// Inverse of [`y_for_display`]: a y relative to the viewport origin.
-pub fn hit_display(geom: &RowGeometry, local_y: f32, top_abs: i32, sub: f32) -> HitTarget {
+/// Inverse of [`y_for_display`]: absolute line for a y relative to the
+/// viewport origin.
+pub fn hit_display(geom: &RowGeometry, local_y: f32, top_abs: i32, sub: f32) -> i32 {
     if !local_y.is_finite() {
-        return HitTarget::Cell { line: top_abs };
+        return top_abs;
     }
     geom.hit(geom.y_for(top_abs) + sub + local_y)
 }
@@ -92,15 +93,7 @@ impl<'a> PointerMap<'a> {
         }
         let column = min(column, last_column);
 
-        let hit = hit_display(self.geometry, f32::from(pos.y), self.top_abs(), self.sub);
-        let abs = match hit {
-            HitTarget::Cell { line } => line,
-            HitTarget::Block { id, .. } => self
-                .geometry
-                .get(id)
-                .map(|b| b.anchor.line)
-                .unwrap_or_else(|| self.top_abs()),
-        };
+        let abs = hit_display(self.geometry, f32::from(pos.y), self.top_abs(), self.sub);
         let mut line = abs_to_grid_point_line(abs, self.history_size);
         let bottommost_line = i32::try_from(self.size.num_lines().saturating_sub(1))
             .unwrap_or(i32::MAX)
@@ -122,24 +115,16 @@ impl<'a> PointerMap<'a> {
         (Point::new(line, column), side)
     }
 
-    pub fn hit(self, pos: GpuiPoint<Pixels>) -> HitTarget {
+    pub fn hit(self, pos: GpuiPoint<Pixels>) -> i32 {
         hit_display(self.geometry, f32::from(pos.y), self.top_abs(), self.sub)
     }
 
     /// Cell index into `Content.cells` (row-major display). Used for hyperlink
-    /// lookup; a Block hit maps to the anchor's display row.
+    /// lookup.
     pub fn content_index(self, pos: GpuiPoint<Pixels>) -> usize {
         let col = (pos.x / self.size.cell_width()).round() as usize;
         let clamped_col = min(col, self.size.num_columns().saturating_sub(1));
-        let hit = self.hit(pos);
-        let abs = match hit {
-            HitTarget::Cell { line } => line,
-            HitTarget::Block { id, .. } => self
-                .geometry
-                .get(id)
-                .map(|b| b.anchor.line)
-                .unwrap_or_else(|| self.top_abs()),
-        };
+        let abs = self.hit(pos);
         let display = abs
             .saturating_sub(self.history_size)
             .saturating_add(i32::try_from(self.display_offset).unwrap_or(0));
@@ -152,23 +137,11 @@ impl<'a> PointerMap<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use row_geometry::{Anchor, Block, BlockId, RunId, ViewportPosition};
+    use row_geometry::ViewportPosition;
 
-    fn bid(n: u128) -> BlockId {
-        BlockId::from_u128(n)
-    }
-
-    fn geom(lh: f32, blocks: &[(u128, i32, u16)]) -> RowGeometry {
+    fn geom(lh: f32) -> RowGeometry {
         let mut g = RowGeometry::new(lh);
         g.set_line_count(80);
-        for &(n, line, height) in blocks {
-            g.upsert(Block {
-                id: bid(n),
-                run_id: RunId::from_u128(n),
-                anchor: Anchor { line, column: 0 },
-                height,
-            });
-        }
         g
     }
 
@@ -185,7 +158,7 @@ mod tests {
 
     #[test]
     fn empty_geometry_matches_linear_y() {
-        let g = geom(16.0, &[]);
+        let g = geom(16.0);
         let top = 40;
         for d in 0..10 {
             assert_eq!(y_for_display(&g, d, top, 0.0), d as f32 * 16.0);
@@ -194,13 +167,8 @@ mod tests {
 
     #[test]
     fn mouse_and_paint_agree_across_geometries() {
-        for &(lh, blocks) in &[
-            (16.0, &[][..]),
-            (16.0, &[(1, 42, 5)][..]),
-            (17.0, &[(1, 40, 3), (2, 45, 2)][..]),
-            (18.5, &[(1, 0, 4)][..]),
-        ] {
-            let g = geom(lh, blocks);
+        for &lh in &[16.0, 17.0, 18.5] {
+            let g = geom(lh);
             let history = 40;
             let offset = 5usize;
             let top = viewport_top_abs(history, offset);
@@ -214,19 +182,8 @@ mod tests {
             };
             for display in 0..8 {
                 let y = y_for_display(&g, display, top, sub);
-                let hit = hit_display(&g, y, top, sub);
-                let abs = match hit {
-                    HitTarget::Cell { line } => line,
-                    HitTarget::Block { id, local_y } => {
-                        assert_eq!(local_y, 0.0);
-                        g.get(id).unwrap().anchor.line
-                    }
-                };
-                assert_eq!(
-                    abs,
-                    top.saturating_add(display),
-                    "lh={lh} display={display} y={y}"
-                );
+                let abs = hit_display(&g, y, top, sub);
+                assert_eq!(abs, top.saturating_add(display), "lh={lh} y={y}");
                 let pos = gpui::point(px(4.0), px(y));
                 let point = map.grid_point(pos);
                 assert_eq!(
@@ -239,32 +196,17 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_is_linear_even_with_blocks_stored() {
-        let mut g = geom(16.0, &[(1, 42, 8)]);
-        g.set_alt_screen(true);
-        let top = 40;
-        assert_eq!(y_for_display(&g, 2, top, 0.0), 2.0 * 16.0);
-        assert_eq!(
-            hit_display(&g, 2.0 * 16.0, top, 0.0),
-            HitTarget::Cell { line: top + 2 }
-        );
-    }
-
-    #[test]
     fn sub_shifts_paint_and_hit_together() {
-        let g = geom(16.0, &[]);
+        let g = geom(16.0);
         let top = 10;
         let y0 = y_for_display(&g, 0, top, 4.0);
         assert_eq!(y0, -4.0);
-        match hit_display(&g, 0.0, top, 4.0) {
-            HitTarget::Cell { line } => assert_eq!(line, top),
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(hit_display(&g, 0.0, top, 4.0), top);
     }
 
     #[test]
     fn wheel_delta_preserves_the_legacy_scroll_delta_direction() {
-        let g = geom(16.0, &[]);
+        let g = geom(16.0);
         for (initial_sub, delta_px, expected_display_offset_delta) in
             [(0.0, 40.0, 2), (4.0, -20.0, -1)]
         {
@@ -285,7 +227,6 @@ mod tests {
     fn wheel_route_characterization() {
         struct Case {
             name: &'static str,
-            blocks: &'static [(u128, i32, u16)],
             history_size: i32,
             display_offset: usize,
             initial_sub: f32,
@@ -299,7 +240,6 @@ mod tests {
         let cases = [
             Case {
                 name: "positive delta",
-                blocks: &[],
                 history_size: 40,
                 display_offset: 0,
                 initial_sub: 0.0,
@@ -311,7 +251,6 @@ mod tests {
             },
             Case {
                 name: "negative delta",
-                blocks: &[],
                 history_size: 40,
                 display_offset: 2,
                 initial_sub: 4.0,
@@ -322,32 +261,7 @@ mod tests {
                 expected_sub: 0.0,
             },
             Case {
-                name: "inside tall block",
-                blocks: &[(1, 38, 5)],
-                history_size: 40,
-                display_offset: 2,
-                initial_sub: 0.0,
-                delta_px: 3.0 * 16.0,
-                expected_absolute_delta: 0,
-                expected_display_offset_delta: 0,
-                expected_clamped_offset: 2,
-                expected_sub: 3.0 * 16.0,
-            },
-            Case {
-                name: "across tall block",
-                blocks: &[(1, 38, 5)],
-                history_size: 40,
-                display_offset: 2,
-                initial_sub: 3.0 * 16.0,
-                delta_px: 2.0 * 16.0 + 4.0,
-                expected_absolute_delta: 1,
-                expected_display_offset_delta: 1,
-                expected_clamped_offset: 3,
-                expected_sub: 4.0,
-            },
-            Case {
                 name: "clamped before absolute line zero",
-                blocks: &[],
                 history_size: 40,
                 display_offset: 40,
                 initial_sub: 0.0,
@@ -359,7 +273,6 @@ mod tests {
             },
             Case {
                 name: "clamped at bottom display offset",
-                blocks: &[],
                 history_size: 40,
                 display_offset: 0,
                 initial_sub: 0.0,
@@ -371,7 +284,6 @@ mod tests {
             },
             Case {
                 name: "NaN is ignored",
-                blocks: &[],
                 history_size: 40,
                 display_offset: 2,
                 initial_sub: 3.0,
@@ -383,7 +295,6 @@ mod tests {
             },
             Case {
                 name: "infinity is ignored",
-                blocks: &[],
                 history_size: 40,
                 display_offset: 2,
                 initial_sub: 3.0,
@@ -396,7 +307,7 @@ mod tests {
         ];
 
         for case in cases {
-            let g = geom(16.0, case.blocks);
+            let g = geom(16.0);
             let top_abs = viewport_top_abs(case.history_size, case.display_offset);
             let mut viewport = ViewportPosition {
                 row: usize::try_from(top_abs).unwrap_or(0),

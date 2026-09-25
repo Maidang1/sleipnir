@@ -356,13 +356,9 @@ impl Session {
 
     /// Offer one event to this connection. Never blocks.
     ///
-    /// `RunStarted.command` is redacted with `plugin_protocol::redact` here — the
-    /// only wire choke point — so a missed redact at the capture site cannot
-    /// leak a secret onto the wire. A plugin without
-    /// [`Capability::SubscribeEvents`] is Filtered, not Delivered — that is the
-    /// security property of the event path.
+    /// A plugin without [`Capability::SubscribeEvents`] is Filtered, not
+    /// Delivered — that is the security property of the event path.
     pub fn receive_event(&self, event: &v2::HostEvent) -> Delivery {
-        let event = redact_run_started(event.clone());
         if self.is_dead() || self.is_shutting_down() {
             return Delivery::Skipped;
         }
@@ -704,25 +700,6 @@ fn validate_ready(spec: &LaunchSpec, ready: &ReadyInfo) -> Result<(), SessionErr
         }
     }
     Ok(())
-}
-
-fn redact_run_started(event: v2::HostEvent) -> v2::HostEvent {
-    match event {
-        v2::HostEvent::RunStarted {
-            run_id,
-            pane,
-            command,
-            cwd,
-            inferred,
-        } => v2::HostEvent::RunStarted {
-            run_id,
-            pane,
-            command: plugin_protocol::redact::redact_command(&command),
-            cwd,
-            inferred,
-        },
-        other => other,
-    }
 }
 
 fn writer_loop(mut sink: Box<dyn LineSink>, rx: mpsc::Receiver<WriteCmd>, session: Weak<Session>) {
@@ -1130,34 +1107,5 @@ mod worker_error_tests {
             &["cancel_io", "kill", "wait_zero"],
             "zero grace must skip the grace wait and clean immediately"
         );
-    }
-}
-
-#[cfg(test)]
-mod redact_tests {
-    use super::redact_run_started;
-    use plugin_protocol::v2::HostEvent;
-    use uuid::Uuid;
-
-    #[test]
-    fn run_started_command_is_redacted_before_anyone_sees_it() {
-        let event = HostEvent::RunStarted {
-            run_id: Uuid::nil(),
-            pane: Uuid::nil(),
-            command: "AWS_SECRET_ACCESS_KEY=supersecret aws s3 ls".into(),
-            cwd: None,
-            inferred: true,
-        };
-        let HostEvent::RunStarted {
-            command, inferred, ..
-        } = redact_run_started(event)
-        else {
-            panic!("expected RunStarted");
-        };
-        assert!(
-            !command.contains("supersecret"),
-            "raw secret must not survive redact: {command}"
-        );
-        assert!(inferred, "redaction must not rewrite the provenance flag");
     }
 }

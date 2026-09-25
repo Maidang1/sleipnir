@@ -1,24 +1,22 @@
-//! Host-side sub-row scroll offset (ADR-0018 decision 2).
+//! Host-side sub-row scroll offset.
 //!
 //! `display_offset` is owned by the grid and is an integer row count.
-//! Pixel-accurate scrolling over variable-height Blocks cannot be expressed
-//! that way, so the host keeps a remainder `sub` that is never sent to the
-//! grid. Wheel deltas accumulate here; whole rows spill as a line delta the
-//! way they do today, but the leftover is retained instead of discarded
-//! (`terminal.rs` currently takes `scroll_px` modulo the viewport height).
+//! Pixel-accurate scrolling cannot be expressed that way, so the host keeps a
+//! remainder `sub` that is never sent to the grid. Wheel deltas accumulate
+//! here; whole rows spill as a line delta the way they do today, but the
+//! leftover is retained instead of discarded (`terminal.rs` currently takes
+//! `scroll_px` modulo the viewport height).
 //!
 //! `row` is the absolute line at the viewport origin, not the grid's
 //! `display_offset`. Each spilled whole row is an absolute-line delta; the
 //! host converts it at the `Scroll::Delta` boundary.
 
 use crate::geometry::{RowGeometry, i32_from_usize, usize_from_i32};
-use crate::{HitTarget, Px};
+use crate::Px;
 
 /// Integer row plus a pixel remainder within that row's height.
 ///
 /// `sub` is always in `[0, height_of(row))` after [`Self::apply_pixel_delta`].
-/// When the current row is a tall Block, that interval is the Block's full
-/// pixel height, which is what makes scrolling over it pixel-accurate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewportPosition {
     /// Absolute line at the viewport origin. This is not a `display_offset`;
@@ -33,8 +31,7 @@ impl ViewportPosition {
         Self { row, sub: 0.0 }
     }
 
-    /// Land `abs_line` flush at the viewport origin. A Block anchored there
-    /// sits against the edge rather than clipped (ADR-0018 decision 2).
+    /// Land `abs_line` flush at the viewport origin.
     pub fn scroll_to_anchor(abs_line: i32) -> Self {
         Self {
             row: usize_from_i32(abs_line.max(0)),
@@ -52,8 +49,8 @@ impl ViewportPosition {
     ///
     /// Positive `delta_px` moves forward through the document (later lines
     /// toward the origin). Negative deltas walk backward. Deltas larger than
-    /// several rows, including tall Blocks, are handled in one mapping step
-    /// rather than a per-row loop, so an absurd delta cannot spin.
+    /// several rows are handled in one mapping step rather than a per-row
+    /// loop, so an absurd delta cannot spin.
     pub fn apply_pixel_delta(&mut self, delta_px: Px, geom: &RowGeometry) -> i32 {
         if !delta_px.is_finite() {
             return 0;
@@ -66,11 +63,7 @@ impl ViewportPosition {
             return 0;
         }
 
-        let hit = geom.hit(target_y);
-        let new_line = match hit {
-            HitTarget::Cell { line } => line,
-            HitTarget::Block { id, .. } => geom.get(id).map(|b| b.anchor.line).unwrap_or(old_line),
-        };
+        let new_line = geom.hit(target_y);
 
         if new_line < 0 {
             let spilled = 0i32.saturating_sub(old_line);

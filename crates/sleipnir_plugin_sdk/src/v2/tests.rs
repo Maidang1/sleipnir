@@ -153,8 +153,8 @@ struct ProbeState {
     events: Vec<String>,
     actions: Vec<(String, Option<String>)>,
     hellos: u32,
-    call_on_finished: bool,
-    render_on_finished: bool,
+    call_on_event: bool,
+    render_on_event: bool,
     last_call: Option<HostCallResult>,
     shutdown_during_call: bool,
 }
@@ -169,8 +169,8 @@ impl Probe {
             events: Vec::new(),
             actions: Vec::new(),
             hellos: 0,
-            call_on_finished: false,
-            render_on_finished: false,
+            call_on_event: false,
+            render_on_event: false,
             last_call: None,
             shutdown_during_call: false,
         }));
@@ -205,7 +205,7 @@ impl Plugin for Probe {
         vec![
             Capability::Resident,
             Capability::SubscribeEvents,
-            Capability::RenderBlock,
+            Capability::RenderPanel,
             Capability::HostCallListPanes,
         ]
     }
@@ -213,7 +213,7 @@ impl Plugin for Probe {
     fn event_filter(&self) -> EventFilter {
         EventFilter {
             panes: vec![],
-            kinds: vec![EventKind::RunFinished],
+            kinds: vec![EventKind::PaneFocused],
         }
     }
 
@@ -226,18 +226,18 @@ impl Plugin for Probe {
             .borrow_mut()
             .events
             .push(format!("{:?}", event.kind()));
-        let call_on_finished = self.state.borrow().call_on_finished;
-        let render_on_finished = self.state.borrow().render_on_finished;
-        if matches!(event, HostEvent::RunFinished { .. }) {
-            if render_on_finished {
+        let call_on_event = self.state.borrow().call_on_event;
+        let render_on_event = self.state.borrow().render_on_event;
+        if matches!(event, HostEvent::PaneFocused { .. }) {
+            if render_on_event {
                 let _ = ctx.render(
-                    RenderTarget::Block {
-                        anchor: Uuid::nil(),
+                    RenderTarget::Panel {
+                        pane: Uuid::nil(),
                     },
-                    text("failed").tone(Tone::Err),
+                    text("focused").tone(Tone::Err),
                 );
             }
-            if call_on_finished {
+            if call_on_event {
                 let result = ctx.call(HostCall::ListPanes);
                 let mut state = self.state.borrow_mut();
                 if matches!(
@@ -263,8 +263,8 @@ impl Plugin for Probe {
             .actions
             .push((action.to_string(), arg.map(str::to_string)));
         let _ = ctx.render(
-            RenderTarget::Block {
-                anchor: Uuid::nil(),
+            RenderTarget::Panel {
+                pane: Uuid::nil(),
             },
             text("retried").tone(Tone::Ok),
         );
@@ -277,7 +277,7 @@ fn hello(version: u32) -> String {
         granted: vec![
             Capability::Resident,
             Capability::SubscribeEvents,
-            Capability::RenderBlock,
+            Capability::RenderPanel,
             Capability::HostCallListPanes,
         ],
         plugin_instance_id: Uuid::from_u128(7),
@@ -296,22 +296,9 @@ fn conversation(plugin: Probe, input: &str) -> Vec<PluginMessage> {
         .collect()
 }
 
-fn run_finished() -> String {
-    serde_json::to_string(&HostMessage::Event {
-        id: 10,
-        event: HostEvent::RunFinished {
-            run_id: Uuid::nil(),
-            pane: Uuid::nil(),
-            exit_code: Some(1),
-            duration_ms: 40,
-        },
-    })
-    .unwrap()
-}
-
 fn pane_focused() -> String {
     serde_json::to_string(&HostMessage::Event {
-        id: 11,
+        id: 10,
         event: HostEvent::PaneFocused { pane: Uuid::nil() },
     })
     .unwrap()
@@ -333,17 +320,17 @@ fn handshake_replies_ready_with_manifest_requests_and_filter() {
     assert_eq!(*protocol_version, v2::PROTOCOL_VERSION);
     assert_eq!(manifest.id, "probe");
     assert!(requests.contains(&Capability::SubscribeEvents));
-    assert_eq!(event_filter.kinds, vec![EventKind::RunFinished]);
+    assert_eq!(event_filter.kinds, vec![EventKind::PaneFocused]);
     assert_eq!(state.borrow().hellos, 1);
 }
 
 #[test]
 fn render_is_a_push_not_a_reply() {
     let (plugin, _) = Probe::new();
-    plugin.state.borrow_mut().render_on_finished = true;
+    plugin.state.borrow_mut().render_on_event = true;
     let msgs = conversation(
         plugin,
-        &format!("{}\n{}\n", hello(v2::PROTOCOL_VERSION), run_finished()),
+        &format!("{}\n{}\n", hello(v2::PROTOCOL_VERSION), pane_focused()),
     );
     assert!(
         msgs.iter()
@@ -379,7 +366,7 @@ fn action_callback_carries_block_id_action_and_arg() {
 #[test]
 fn out_of_order_reply_is_correlated_by_id() {
     let (plugin, state) = Probe::new();
-    plugin.state.borrow_mut().call_on_finished = true;
+    plugin.state.borrow_mut().call_on_event = true;
     let stray = serde_json::to_string(&HostMessage::Reply {
         id: 99,
         result: HostCallResult::Error {
@@ -397,7 +384,7 @@ fn out_of_order_reply_is_correlated_by_id() {
         &format!(
             "{}\n{}\n{stray}\n{reply}\n",
             hello(v2::PROTOCOL_VERSION),
-            run_finished()
+            pane_focused()
         ),
     );
     match &state.borrow().last_call {
@@ -409,10 +396,18 @@ fn out_of_order_reply_is_correlated_by_id() {
 #[test]
 fn event_arriving_while_a_host_call_is_pending_is_not_lost() {
     let (plugin, state) = Probe::new();
-    plugin.state.borrow_mut().call_on_finished = true;
+    plugin.state.borrow_mut().call_on_event = true;
     let reply = serde_json::to_string(&HostMessage::Reply {
         id: 1,
         result: HostCallResult::Ok,
+    })
+    .unwrap();
+    let intervening = serde_json::to_string(&HostMessage::Event {
+        id: 12,
+        event: HostEvent::CwdChanged {
+            pane: Uuid::nil(),
+            cwd: "/tmp".into(),
+        },
     })
     .unwrap();
     let _ = conversation(
@@ -420,14 +415,14 @@ fn event_arriving_while_a_host_call_is_pending_is_not_lost() {
         &format!(
             "{}\n{}\n{}\n{reply}\n",
             hello(v2::PROTOCOL_VERSION),
-            run_finished(),
-            pane_focused()
+            pane_focused(),
+            intervening
         ),
     );
     let events = state.borrow().events.clone();
     assert_eq!(
         events,
-        vec!["RunFinished".to_string(), "PaneFocused".to_string()],
+        vec!["PaneFocused".to_string(), "CwdChanged".to_string()],
         "the intervening event must still be delivered"
     );
     assert!(matches!(state.borrow().last_call, Some(HostCallResult::Ok)));
@@ -436,7 +431,7 @@ fn event_arriving_while_a_host_call_is_pending_is_not_lost() {
 #[test]
 fn shutdown_mid_flight_ends_the_call_and_the_session() {
     let (plugin, state) = Probe::new();
-    plugin.state.borrow_mut().call_on_finished = true;
+    plugin.state.borrow_mut().call_on_event = true;
     let shutdown = serde_json::to_string(&HostMessage::Shutdown).unwrap();
     let extra = serde_json::to_string(&HostMessage::Event {
         id: 50,
@@ -448,7 +443,7 @@ fn shutdown_mid_flight_ends_the_call_and_the_session() {
         &format!(
             "{}\n{}\n{shutdown}\n{extra}\n",
             hello(v2::PROTOCOL_VERSION),
-            run_finished()
+            pane_focused()
         ),
     );
     assert!(state.borrow().shutdown_during_call);
@@ -460,7 +455,7 @@ fn shutdown_mid_flight_ends_the_call_and_the_session() {
     );
     assert_eq!(
         state.borrow().events,
-        vec!["RunFinished".to_string()],
+        vec!["PaneFocused".to_string()],
         "nothing after Shutdown is served"
     );
 }
@@ -474,10 +469,10 @@ fn malformed_host_input_does_not_panic() {
         &format!(
             "{}\n{{not json\n{}\n{shutdown}\n",
             hello(v2::PROTOCOL_VERSION),
-            run_finished()
+            pane_focused()
         ),
     );
-    assert_eq!(state.borrow().events, vec!["RunFinished".to_string()]);
+    assert_eq!(state.borrow().events, vec!["PaneFocused".to_string()]);
     assert_eq!(
         msgs.len(),
         1,
@@ -660,8 +655,16 @@ fn inbound_messages_are_not_starved_by_ticks() {
         || ticks.load(std::sync::atomic::Ordering::SeqCst) >= 1,
         Duration::from_millis(400)
     ));
-    tx.send(run_finished()).unwrap();
     tx.send(pane_focused()).unwrap();
+    let cwd_changed = serde_json::to_string(&HostMessage::Event {
+        id: 21,
+        event: HostEvent::CwdChanged {
+            pane: Uuid::nil(),
+            cwd: "/tmp".into(),
+        },
+    })
+    .unwrap();
+    tx.send(cwd_changed).unwrap();
     assert!(
         wait_until(
             || events.lock().unwrap().len() >= 2,
@@ -672,7 +675,7 @@ fn inbound_messages_are_not_starved_by_ticks() {
     );
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["RunFinished".to_string(), "PaneFocused".to_string()]
+        vec!["PaneFocused".to_string(), "CwdChanged".to_string()]
     );
     tx.send(serde_json::to_string(&HostMessage::Shutdown).unwrap())
         .unwrap();

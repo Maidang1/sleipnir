@@ -26,7 +26,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub mod builtin;
 pub mod resident;
 
 /// The only manifest / protocol version this host speaks (ADR-0016).
@@ -103,7 +102,6 @@ pub struct LoadedPlugin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PluginSource {
     External,
-    BuiltInAgents,
 }
 
 impl LoadedPlugin {
@@ -652,7 +650,7 @@ mod tests {
                 "api_version":2,
                 "lifecycle":"resident",
                 "binary":"./demo-resident",
-                "permissions":["subscribe_events","render_block","read_cwd"]
+                "permissions":["subscribe_events","render_panel","read_cwd"]
             }"#,
         );
         write_binary(
@@ -679,12 +677,12 @@ mod tests {
             plugin
                 .manifest
                 .permissions
-                .contains(&Capability::RenderBlock)
+                .contains(&Capability::RenderPanel)
         );
         assert!(plugin.manifest.permissions.contains(&Capability::ReadCwd));
         let caps = crate::resident::declared_capabilities(&plugin.manifest);
         assert!(caps.contains(&plugin_protocol::v2::Capability::SubscribeEvents));
-        assert!(caps.contains(&plugin_protocol::v2::Capability::RenderBlock));
+        assert!(caps.contains(&plugin_protocol::v2::Capability::RenderPanel));
         assert!(caps.contains(&plugin_protocol::v2::Capability::ReadCwd));
         assert!(caps.contains(&plugin_protocol::v2::Capability::Resident));
     }

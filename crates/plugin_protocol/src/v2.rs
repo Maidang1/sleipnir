@@ -55,13 +55,7 @@ pub type MessageId = u64;
 
 /// Identifies one plugin-rendered surface, assigned by the host.
 pub type BlockId = Uuid;
-pub type RunId = Uuid;
 pub type PaneKey = Uuid;
-
-/// Scrollback position of a Run or Block. Defined in [`crate::geometry`]
-/// (process-local, never on the wire); re-exported here for consumers that
-/// historically imported it from `v2`.
-pub use crate::geometry::Anchor;
 
 /// True when the host can speak to a plugin claiming `plugin`. The accepted
 /// range is anchored on the dialects actually implemented
@@ -104,14 +98,12 @@ pub enum Capability {
     Resident,
     /// Continuous observation. Narrowable with `EventFilter`.
     SubscribeEvents,
-    RenderBlock,
     RenderPanel,
     RenderStatus,
     HostCallNotify,
     HostCallReadScreen,
     HostCallListPanes,
     HostCallOpenPane,
-    HostCallScrollToRun,
     /// Focus a specific terminal pane. Never implied by snapshot writes.
     HostCallFocusPane,
     /// Type into a specific terminal pane via the paste-aware insertion path.
@@ -143,8 +135,6 @@ pub struct EventFilter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
-    RunStarted,
-    RunFinished,
     PortOpened,
     ForegroundChanged,
     CwdChanged,
@@ -156,32 +146,11 @@ pub enum EventKind {
 // Events: host → plugin
 // ---------------------------------------------------------------------------
 
-/// Facts the app already computes (`run_ledger`, `pane_facts`, `chrome/agent`).
-/// v2 opens an outlet; it adds no instrumentation.
+/// Facts the app already computes (`pane_facts`). v2 opens an outlet; it adds
+/// no instrumentation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum HostEvent {
-    /// `command` is the **redacted** form. The ledger redacts at capture time
-    /// and the host redacts again at the wire choke point, both via
-    /// [`crate::redact`]; plugins never see the raw command line.
-    RunStarted {
-        run_id: RunId,
-        pane: PaneKey,
-        command: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        /// True when the run was guessed by the busy probe instead of
-        /// reported by OSC 133. An inferred run has no scrollback anchor.
-        #[serde(default)]
-        inferred: bool,
-    },
-    RunFinished {
-        run_id: RunId,
-        pane: PaneKey,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
-        duration_ms: u64,
-    },
     PortOpened {
         pane: PaneKey,
         pid: u32,
@@ -189,8 +158,6 @@ pub enum HostEvent {
     },
     ForegroundChanged {
         pane: PaneKey,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<String>,
     },
     CwdChanged {
         pane: PaneKey,
@@ -199,8 +166,7 @@ pub enum HostEvent {
     PaneFocused {
         pane: PaneKey,
     },
-    /// The pane is gone (closed, or its tab/window/app went away). Runs that
-    /// were still open in it will never report a `RunFinished`.
+    /// The pane is gone (closed, or its tab/window/app went away).
     PaneClosed {
         pane: PaneKey,
     },
@@ -209,8 +175,6 @@ pub enum HostEvent {
 impl HostEvent {
     pub fn kind(&self) -> EventKind {
         match self {
-            Self::RunStarted { .. } => EventKind::RunStarted,
-            Self::RunFinished { .. } => EventKind::RunFinished,
             Self::PortOpened { .. } => EventKind::PortOpened,
             Self::ForegroundChanged { .. } => EventKind::ForegroundChanged,
             Self::CwdChanged { .. } => EventKind::CwdChanged,
@@ -221,9 +185,7 @@ impl HostEvent {
 
     pub fn pane(&self) -> PaneKey {
         match self {
-            Self::RunStarted { pane, .. }
-            | Self::RunFinished { pane, .. }
-            | Self::PortOpened { pane, .. }
+            Self::PortOpened { pane, .. }
             | Self::ForegroundChanged { pane, .. }
             | Self::CwdChanged { pane, .. }
             | Self::PaneFocused { pane }
@@ -280,12 +242,6 @@ pub enum HostCall {
         program: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
-    },
-    /// Scroll a pane back to the output anchor of a Run. An inferred run has
-    /// no anchor; the pane is focused instead. An unknown `run_id` is an
-    /// `Error`, not a drop.
-    ScrollToRun {
-        run_id: RunId,
     },
     /// Focus a terminal pane. Plugin panels and unknown keys are errors.
     /// Requires [`Capability::HostCallFocusPane`]; not implied by
@@ -345,7 +301,6 @@ impl HostCall {
             Self::ReadScreen { .. } => Capability::HostCallReadScreen,
             Self::ListPanes => Capability::HostCallListPanes,
             Self::OpenPane { .. } | Self::OpenPaneArgv { .. } => Capability::HostCallOpenPane,
-            Self::ScrollToRun { .. } => Capability::HostCallScrollToRun,
             Self::FocusPane { .. } => Capability::HostCallFocusPane,
             Self::SendText { .. } => Capability::HostCallSendText,
             Self::SendKey { .. } => Capability::HostCallSendKey,
@@ -365,8 +320,7 @@ impl HostCall {
             Self::Notify { .. }
             | Self::ListPanes
             | Self::OpenPane { .. }
-            | Self::OpenPaneArgv { .. }
-            | Self::ScrollToRun { .. } => None,
+            | Self::OpenPaneArgv { .. } => None,
         }
     }
 }
@@ -404,16 +358,12 @@ pub enum HostCallResult {
 // Rendering
 // ---------------------------------------------------------------------------
 
-/// Where a rendered tree goes. Per ADR-0017, Panel is implemented first and
-/// Block last; the wire shape is fixed now so the ordering is an implementation
-/// detail rather than a protocol change.
+/// Where a rendered tree goes. Per ADR-0017, the Panel is the mount point;
+/// the wire shape is fixed now so the ordering is an implementation detail
+/// rather than a protocol change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "target", rename_all = "snake_case")]
 pub enum RenderTarget {
-    /// Anchored to a Run, inside scrollback (ADR-0018).
-    Block {
-        anchor: RunId,
-    },
     /// Occupies a split (ADR-0017's first mount point).
     Panel {
         pane: PaneKey,
@@ -424,7 +374,6 @@ pub enum RenderTarget {
 impl RenderTarget {
     pub fn required_capability(&self) -> Capability {
         match self {
-            Self::Block { .. } => Capability::RenderBlock,
             Self::Panel { .. } => Capability::RenderPanel,
             Self::Status => Capability::RenderStatus,
         }
@@ -723,16 +672,13 @@ mod tests {
     fn correlation_id_round_trips() {
         let msg = HostMessage::Event {
             id: 42,
-            event: HostEvent::RunFinished {
-                run_id: Uuid::nil(),
+            event: HostEvent::PaneFocused {
                 pane: Uuid::nil(),
-                exit_code: Some(1),
-                duration_ms: 1500,
             },
         };
         let line = serde_json::to_string(&msg).unwrap();
         assert!(line.contains(r#""msg":"event""#));
-        assert!(line.contains(r#""event":"run_finished""#));
+        assert!(line.contains(r#""event":"pane_focused""#));
         assert_eq!(serde_json::from_str::<HostMessage>(&line).unwrap(), msg);
     }
 
@@ -756,7 +702,7 @@ mod tests {
         }));
         assert!(!event.matches(&EventFilter {
             panes: vec![],
-            kinds: vec![EventKind::RunStarted],
+            kinds: vec![EventKind::PortOpened],
         }));
     }
 
@@ -767,11 +713,11 @@ mod tests {
             Capability::HostCallListPanes
         );
         assert_eq!(
-            RenderTarget::Block {
-                anchor: Uuid::nil()
+            RenderTarget::Panel {
+                pane: Uuid::nil()
             }
             .required_capability(),
-            Capability::RenderBlock
+            Capability::RenderPanel
         );
         assert_eq!(
             RenderTarget::Status.required_capability(),
@@ -878,17 +824,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn scroll_to_run_call_round_trips_and_declares_its_capability() {
-        let call = HostCall::ScrollToRun {
-            run_id: Uuid::from_u128(5),
-        };
-        assert_eq!(call.required_capability(), Capability::HostCallScrollToRun);
-        let line = serde_json::to_string(&call).unwrap();
-        assert!(line.contains(r#""call":"scroll_to_run""#));
-        assert_eq!(serde_json::from_str::<HostCall>(&line).unwrap(), call);
     }
 
     #[test]
@@ -999,30 +934,7 @@ mod tests {
         }));
         assert!(!event.matches(&EventFilter {
             panes: vec![],
-            kinds: vec![EventKind::RunFinished],
+            kinds: vec![EventKind::CwdChanged],
         }));
-    }
-
-    #[test]
-    fn run_started_inferred_round_trips_and_defaults_to_false() {
-        let event = HostEvent::RunStarted {
-            run_id: Uuid::nil(),
-            pane: Uuid::nil(),
-            command: "make".into(),
-            cwd: None,
-            inferred: true,
-        };
-        let line = serde_json::to_string(&event).unwrap();
-        assert_eq!(serde_json::from_str::<HostEvent>(&line).unwrap(), event);
-        // A payload from an older host without the field decodes as a precise
-        // (OSC 133) run, never as an inferred guess.
-        let old: HostEvent = serde_json::from_str(
-            r#"{"event":"run_started","run_id":"00000000-0000-0000-0000-000000000000","pane":"00000000-0000-0000-0000-000000000000","command":"make"}"#,
-        )
-        .unwrap();
-        let HostEvent::RunStarted { inferred, .. } = old else {
-            panic!("expected RunStarted");
-        };
-        assert!(!inferred);
     }
 }

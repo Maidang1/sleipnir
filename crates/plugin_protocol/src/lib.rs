@@ -3,9 +3,7 @@
 //! Pure types and pure functions over them. No I/O, no process handling, no
 //! host or SDK logic. Both the host (`plugin_host`) and the author-facing SDK
 //! (`sleipnir-plugin`) depend on this crate so the contract is defined in
-//! exactly one place — including [`redact`], the single implementation of the
-//! "plugins never see the raw command line" invariant (ADR-0016 §2), applied
-//! by the ledger at capture time and by the host at the wire choke point.
+//! exactly one place.
 //!
 //! Transport is line-delimited JSON, one object per line, matching the house
 //! IPC style of the control surface (ADR-0011, `sleipnir_ctl`): tagged unions,
@@ -20,8 +18,4 @@
 /// correlation ids, event push, widget rendering and plugin-initiated host
 /// calls. The resident supervisor and the SDK's `v2` module speak this
 /// dialect.
-pub mod geometry;
-pub mod redact;
 pub mod v2;
-
-pub use redact::redact_command;
