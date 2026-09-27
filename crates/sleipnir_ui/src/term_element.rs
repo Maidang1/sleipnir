@@ -78,6 +78,7 @@ struct LayoutPoint {
     column: i32,
 }
 
+#[derive(Clone)]
 struct BatchedTextRun {
     start: LayoutPoint,
     text: String,
@@ -207,6 +208,98 @@ fn cell_column_span(next_is_wide_spacer: bool) -> usize {
     if next_is_wide_spacer { 2 } else { 1 }
 }
 
+/// One grid cell as the row segmenter sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowGlyph {
+    column: i32,
+    ch: char,
+    column_span: usize,
+    wide_spacer: bool,
+}
+
+/// A shaped piece of one row, painted at `column`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RowSegment {
+    column: i32,
+    columns: usize,
+    text: String,
+}
+
+/// A glyph whose advance may not be one mono cell: non-ASCII, or a wide cell.
+fn pins_its_column(ch: char, column_span: usize) -> bool {
+    !ch.is_ascii() || column_span > 1
+}
+
+/// Turn off the substitutions that collapse several cells into fewer glyphs.
+fn terminal_font_features(features: &gpui::FontFeatures) -> gpui::FontFeatures {
+    let mut tags: Vec<(String, u32)> = features
+        .tag_value_list()
+        .iter()
+        .filter(|(tag, _)| !matches!(tag.as_str(), "liga" | "calt" | "dlig"))
+        .cloned()
+        .collect();
+    tags.push(("liga".into(), 0));
+    tags.push(("calt".into(), 0));
+    tags.push(("dlig".into(), 0));
+    gpui::FontFeatures(std::sync::Arc::new(tags))
+}
+
+/// Split one grid row into column-pinned segments.
+///
+/// Runs of ASCII shape together. Each non-ASCII cell and each wide cell is its
+/// own segment starting at that cell's column, so a fallback advance cannot
+/// slide the rest of the row. Wide spacers are skipped. A tab is one blank
+/// cell — the grid already expanded the stop, and the shaper must not expand
+/// it again.
+fn segment_row(glyphs: &[RowGlyph]) -> Vec<RowSegment> {
+    let mut segments = Vec::new();
+    let mut text = String::new();
+    let mut start = 0i32;
+    let mut columns = 0usize;
+    let mut open = false;
+
+    let flush = |segments: &mut Vec<RowSegment>,
+                 text: &mut String,
+                 start: i32,
+                 columns: usize,
+                 open: &mut bool| {
+        if !*open || text.is_empty() {
+            *open = false;
+            return;
+        }
+        segments.push(RowSegment {
+            column: start,
+            columns,
+            text: std::mem::take(text),
+        });
+        *open = false;
+    };
+
+    for glyph in glyphs {
+        if glyph.wide_spacer {
+            continue;
+        }
+        let ch = if glyph.ch == '\t' { ' ' } else { glyph.ch };
+        let pinned = pins_its_column(ch, glyph.column_span);
+        let adjacent = open && start + columns as i32 == glyph.column;
+        if pinned || (open && !adjacent) {
+            flush(&mut segments, &mut text, start, columns, &mut open);
+        }
+        if !open {
+            start = glyph.column;
+            columns = 0;
+            open = true;
+        }
+        text.push(ch);
+        columns += glyph.column_span;
+        if pinned {
+            flush(&mut segments, &mut text, start, columns, &mut open);
+        }
+    }
+    flush(&mut segments, &mut text, start, columns, &mut open);
+    segments
+}
+
 fn build_cell_text_run(
     text: String,
     columns: usize,
@@ -215,6 +308,7 @@ fn build_cell_text_run(
     cell_style: TerminalCellTextStyle,
 ) -> BatchedTextRun {
     let mut font = text_style.font();
+    font.features = terminal_font_features(&font.features);
     if cell_style.bold {
         font.weight = gpui::FontWeight::BOLD;
     }
@@ -376,10 +470,12 @@ impl Element for TermElement {
                     .unwrap_or(px(14.))
                     .max(px(8.));
                 let line_height_factor = settings.line_height.value().max(1.0);
-                let font_features = settings
-                    .font_features
-                    .clone()
-                    .unwrap_or_else(gpui::FontFeatures::disable_ligatures);
+                let font_features = terminal_font_features(
+                    &settings
+                        .font_features
+                        .clone()
+                        .unwrap_or_else(gpui::FontFeatures::disable_ligatures),
+                );
                 let font_weight = settings.font_weight.unwrap_or_default();
                 let font_fallbacks = settings.font_fallbacks.clone();
                 let foreground = palette.foreground;
@@ -915,18 +1011,16 @@ fn layout_grid(
     let mut batches: Vec<BatchedTextRun> = Vec::new();
     let mut backgrounds: Vec<BgRect> = Vec::new();
     let mut selection_backgrounds: Vec<BgRect> = Vec::new();
-    let mut current: Option<BatchedTextRun> = None;
 
     let linegroups = cells.iter().chunk_by(|c| c.point.line);
     for (line_index, (_, line)) in linegroups.into_iter().enumerate() {
-        if let Some(batch) = current.take() {
-            batches.push(batch);
-        }
         let display_line = line_index as i32;
         if skip_lines.contains(&display_line) {
             continue;
         }
 
+        let mut glyphs = Vec::new();
+        let mut runs = Vec::new();
         let mut line = line.peekable();
         while let Some(indexed) = line.next() {
             let cell = &indexed.cell;
@@ -965,7 +1059,17 @@ fn layout_grid(
                 }
             }
 
-            if cell.is_wide_char_spacer() || is_blank(cell) {
+            let column = indexed.point.column as i32;
+            if cell.is_wide_char_spacer() {
+                glyphs.push(RowGlyph {
+                    column,
+                    ch: cell.character(),
+                    column_span: 1,
+                    wide_spacer: true,
+                });
+                continue;
+            }
+            if is_blank(cell) {
                 continue;
             }
 
@@ -973,36 +1077,64 @@ fn layout_grid(
             if cell.is_dim() {
                 color = color.opacity(0.55);
             }
-            let text = compose_cell_text(cell.character(), cell.zerowidth());
+            // A stored tab is one blank cell. The grid already expanded the
+            // stop; leaving `\t` in the run lets the shaper expand it again.
+            let ch = if cell.character() == '\t' {
+                ' '
+            } else {
+                cell.character()
+            };
+            let text = compose_cell_text(ch, cell.zerowidth());
             let mut run = build_cell_text_run(
-                text.clone(),
+                text,
                 columns,
                 text_style,
                 color,
                 TerminalCellTextStyle::from_cell(cell),
             );
-            let point = LayoutPoint {
+            run.start = LayoutPoint {
                 line: display_line,
-                column: indexed.point.column as i32,
+                column,
             };
-            run.start = point;
             run.font_size = font_size;
-
-            if let Some(ref mut batch) = current {
-                if batch.can_append_run(point, &run.style, run.column_span) {
-                    batch.append_cell_text(&text);
-                } else {
-                    let old = current.take().unwrap();
-                    batches.push(old);
-                    current = Some(run);
-                }
-            } else {
-                current = Some(run);
-            }
+            glyphs.push(RowGlyph {
+                column,
+                ch,
+                column_span: columns,
+                wide_spacer: false,
+            });
+            runs.push(run);
         }
-    }
-    if let Some(batch) = current {
-        batches.push(batch);
+
+        // Segment boundaries come from `segment_row`. Style may split a
+        // segment further; it must not join across a pinned column.
+        let segments = segment_row(&glyphs);
+        let mut index = 0;
+        for segment in segments {
+            let mut covered = 0usize;
+            let mut end = index;
+            while end < runs.len() && covered < segment.columns {
+                covered += runs[end].column_span;
+                end += 1;
+            }
+            let mut batch: Option<BatchedTextRun> = None;
+            for run in runs.iter().take(end).skip(index) {
+                if let Some(current) = batch.as_mut()
+                    && current.can_append_run(run.start, &run.style, run.column_span)
+                {
+                    current.append_cell_text(&run.text);
+                    continue;
+                }
+                if let Some(done) = batch.take() {
+                    batches.push(done);
+                }
+                batch = Some(run.clone());
+            }
+            if let Some(done) = batch {
+                batches.push(done);
+            }
+            index = end;
+        }
     }
     (batches, backgrounds, selection_backgrounds)
 }
@@ -1431,6 +1563,103 @@ mod tests {
         })
         .expect("code renders");
         assert_eq!(code, "let x = 1;\nx += 1;");
+    }
+
+    #[test]
+    fn segment_row_pins_fallback_and_wide_cells_to_their_columns() {
+        let row = [
+            RowGlyph {
+                column: 0,
+                ch: 'A',
+                column_span: 1,
+                wide_spacer: false,
+            },
+            RowGlyph {
+                column: 1,
+                ch: 'B',
+                column_span: 1,
+                wide_spacer: false,
+            },
+            RowGlyph {
+                column: 2,
+                ch: '好',
+                column_span: 2,
+                wide_spacer: false,
+            },
+            RowGlyph {
+                column: 3,
+                ch: ' ',
+                column_span: 1,
+                wide_spacer: true,
+            },
+            RowGlyph {
+                column: 4,
+                ch: 'C',
+                column_span: 1,
+                wide_spacer: false,
+            },
+            RowGlyph {
+                column: 5,
+                ch: '\t',
+                column_span: 1,
+                wide_spacer: false,
+            },
+            RowGlyph {
+                column: 6,
+                ch: 'D',
+                column_span: 1,
+                wide_spacer: false,
+            },
+        ];
+        let segments = segment_row(&row);
+        assert_eq!(
+            segments.len(),
+            3,
+            "ASCII coalesces, the wide cell is its own segment, and the spacer is not a run"
+        );
+        assert_eq!(segments[0].column, 0);
+        assert_eq!(segments[0].text, "AB");
+        assert_eq!(segments[1].column, 2, "wide glyph starts at its own column");
+        assert_eq!(segments[1].text, "好");
+        assert_eq!(
+            segments[2].column, 4,
+            "text after the wide glyph starts at the next grid column, not inside it"
+        );
+        assert_eq!(segments[2].text, "C D");
+
+        let mut style = TextStyle::default();
+        style.font_features = gpui::FontFeatures(std::sync::Arc::new(vec![
+            ("liga".into(), 1),
+            ("calt".into(), 1),
+            ("dlig".into(), 1),
+            ("ss01".into(), 1),
+        ]));
+        let run = build_cell_text_run(
+            segments[0].text.clone(),
+            1,
+            &style,
+            gpui::Hsla::white(),
+            TerminalCellTextStyle::default(),
+        );
+        let tags = run.style.font.features.tag_value_list();
+        for name in ["liga", "calt", "dlig"] {
+            let value = tags
+                .iter()
+                .find(|(tag, _)| tag == name)
+                .map(|(_, value)| *value);
+            assert_eq!(
+                value,
+                Some(0),
+                "{name} must stay disabled on a terminal text run"
+            );
+        }
+        assert_eq!(
+            tags.iter()
+                .find(|(tag, _)| tag == "ss01")
+                .map(|(_, value)| *value),
+            Some(1),
+            "features other than the ligature set are kept"
+        );
     }
 
     #[test]
