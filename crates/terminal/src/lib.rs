@@ -17,6 +17,7 @@ mod osc133;
 mod osc_notify;
 mod pty_info;
 mod run_tracker;
+mod scroll_follow;
 mod shell_semantics;
 pub mod terminal_settings;
 
@@ -85,8 +86,8 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, DamageKind, HyperlinkMatch, PtySender, RegexSearches,
     clear_saved_screen, content_text, display_offset, find_from_terminal_point, grid_text_range,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text,
+    is_alt_screen, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
     set_selection as set_term_selection, spawn_event_loop, take_damage_kind,
     toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
     update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
@@ -1045,6 +1046,8 @@ struct ViewportState {
     /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) rebases
     /// OSC-133 markers and block anchors.
     last_history_size: usize,
+    /// New output sticks to the bottom only while this stays pinned.
+    follow: scroll_follow::ScrollFollow,
 }
 
 impl ViewportState {
@@ -1054,6 +1057,7 @@ impl ViewportState {
             position: ViewportPosition::new(0),
             geometry: RowGeometry::new(16.0),
             last_history_size: 0,
+            follow: scroll_follow::ScrollFollow::default(),
         }
     }
 }
@@ -2207,6 +2211,18 @@ impl Terminal {
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
+        }
+
+        // New rows auto-scroll only while the view is pinned to the bottom.
+        // History growth keeps the pin; a scroll with the same history is the
+        // user. Alt-screen apps own the viewport, so they are left alone.
+        if !is_alt_screen(&terminal) {
+            let history = terminal.history_size();
+            let offset = terminal.grid().display_offset();
+            if self.viewport.follow.observe(history, offset) {
+                scroll_display(&mut terminal, Scroll::Bottom);
+                self.viewport.position.sub = 0.0;
+            }
         }
 
         // A shrinking scrollback (e.g. `clear` sends `ED 3`) gives a real

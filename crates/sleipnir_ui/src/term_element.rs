@@ -422,6 +422,8 @@ impl Element for TermElement {
 
                 let content = terminal.update(cx, |terminal, cx| {
                     terminal.set_size(dimensions);
+                    // Applies scroll-follow: output sticks to the bottom only
+                    // while the viewport is pinned there.
                     terminal.sync(window, cx);
                     terminal.last_content().clone()
                 });

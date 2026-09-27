@@ -206,6 +206,10 @@ pub(super) fn display_offset(term: &AlacrittyTerm) -> usize {
     term.grid().display_offset()
 }
 
+pub(super) fn is_alt_screen(term: &AlacrittyTerm) -> bool {
+    term.mode().contains(TermMode::ALT_SCREEN)
+}
+
 pub(super) fn scroll_display(term: &mut AlacrittyTerm, scroll: Scroll) {
     term.scroll_display(scroll.to_alacritty());
 }
@@ -951,6 +955,66 @@ mod tests {
             term.scroll_display(AlacScroll::Delta(-spilled));
         }
         spilled
+    }
+
+    #[test]
+    fn output_follows_only_while_pinned_to_the_bottom() {
+        use crate::scroll_follow::ScrollFollow;
+        use vte::ansi::Handler;
+
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        let mut follow = ScrollFollow::default();
+        // `Term::input` drops `\n` (width is none). Linefeeds go through the
+        // same handler the parser calls, which is what grows scrollback.
+        let feed = |term: &mut Term<ZedListener>, n: usize| {
+            for i in 0..n {
+                for c in format!("line{i}").chars() {
+                    term.input(c);
+                }
+                Handler::newline(term);
+            }
+        };
+        let observe = |term: &Term<ZedListener>, follow: &mut ScrollFollow| {
+            follow.observe(term.history_size(), term.grid().display_offset())
+        };
+
+        let lines = term.screen_lines() + 20;
+        feed(&mut term, lines);
+        assert!(
+            term.history_size() > 4,
+            "need scrollback, history={}",
+            term.history_size()
+        );
+        assert!(!observe(&term, &mut follow));
+        assert_eq!(term.grid().display_offset(), 0);
+        assert!(follow.following());
+
+        term.scroll_display(AlacScroll::Delta(5));
+        assert!(!observe(&term, &mut follow));
+        assert!(!follow.following());
+        let parked = term.grid().display_offset();
+        assert!(parked >= 5);
+
+        feed(&mut term, 15);
+        assert!(
+            !observe(&term, &mut follow),
+            "new output must not re-pin a view the user scrolled away from"
+        );
+        assert!(
+            term.grid().display_offset() >= parked,
+            "scrolled-up viewport must stay in history when output arrives, offset={} parked={parked}",
+            term.grid().display_offset()
+        );
+
+        term.scroll_display(AlacScroll::Bottom);
+        assert!(!observe(&term, &mut follow));
+        assert!(follow.following());
+        feed(&mut term, 10);
+        assert_eq!(term.grid().display_offset(), 0);
+        assert!(!observe(&term, &mut follow));
+        assert!(follow.following());
     }
 
     #[test]
