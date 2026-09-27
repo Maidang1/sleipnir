@@ -44,11 +44,8 @@ use crate::ui_mode::{InputMode, InputOwner, OverlayKind, PaneFactsState, UiMode}
 use crate::{TermView, UpdateModel, UpdateUiState};
 
 /// Map a GPUI window appearance to our light/dark `Appearance`.
-fn appearance_of(a: gpui::WindowAppearance) -> Appearance {
-    match a {
-        gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => Appearance::Light,
-        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => Appearance::Dark,
-    }
+fn appearance_of(appearance: gpui::WindowAppearance) -> Appearance {
+    crate::appearance::from_window(appearance)
 }
 
 actions!(
@@ -916,15 +913,11 @@ impl AppShell {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             _browser_bridge: crate::browser_control::start(window, cx),
         };
-        // Seed the current system appearance and follow future changes so the
-        // `Auto` theme tracks light/dark (ADR-0002).
-        TerminalSettings::set_appearance(appearance_of(window.appearance()), cx);
-        window
-            .observe_window_appearance(|window, cx| {
-                TerminalSettings::set_appearance(appearance_of(window.appearance()), cx);
-                cx.refresh_windows();
-            })
-            .detach();
+        // Seed appearance state from this window and follow OS changes.
+        // `Auto` resolves through AppearanceState; a pinned mode ignores the
+        // OS report. Repaint goes through refresh_windows, not notify.
+        crate::appearance::boot(appearance_of(window.appearance()), cx);
+        crate::appearance::observe_window(window, cx).detach();
 
         RunLedgerGlobal::init(cx);
         crate::control_surface::init(cx);
@@ -1290,14 +1283,16 @@ impl AppShell {
         crate::run_ledger_global::RunLedgerGlobal::reload_settings_in(cx);
         crate::control_surface::reload(cx);
         crate::attention_chrome::refresh(cx);
-        cx.notify();
+        // Settings are read at paint time. notify() would repaint this entity
+        // and leave other windows on the cached palette.
+        crate::appearance::apply(cx);
     }
 
     /// Advance to the next built-in theme.
     fn cycle_theme(&mut self, cx: &mut Context<Self>) {
         let next = TerminalSettings::get_global(cx).theme.next();
         TerminalSettings::set_theme(next, cx);
-        cx.notify();
+        cx.refresh_windows();
     }
 
     fn on_increase_font_size(

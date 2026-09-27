@@ -1,7 +1,14 @@
 //! Palette-derived opaque chrome colors for the unified title-tab band.
+//!
+//! Tokens are contrast-paired: a light palette and its dark counterpart land
+//! within 1.0 contrast ratio of each other against their own backgrounds.
+//! The direction of a surface (lift or sink) follows which of black or white
+//! contrasts more with the content background, not a raw HSL lightness cut.
 
 use gpui::Hsla;
 use sleipnir_settings::TerminalPalette;
+
+use crate::theme_color;
 
 /// Window chrome colors derived from the active terminal palette.
 /// Terminal cell colors stay on [`TerminalPalette`]; this is shell-only.
@@ -23,48 +30,82 @@ pub struct ChromeTokens {
     pub err: Hsla,
 }
 
+/// White contrasts at least as well as black, so ink on this background is light.
+fn prefers_light_ink(bg: Hsla) -> bool {
+    theme_color::contrast_ratio(Hsla::white(), bg) >= theme_color::contrast_ratio(Hsla::black(), bg)
+}
+
+/// Blend `ink` over `bg` until the result's contrast against `bg` meets `target`.
+///
+/// `t = 0` is `bg` (contrast 1). `t = 1` is opaque `ink`. When `ink` cannot
+/// reach `target`, the opaque ink is returned — that is the most contrast this
+/// pair can make.
+fn blend_toward_contrast(bg: Hsla, ink: Hsla, target: f32) -> Hsla {
+    let bg = bg.alpha(1.0);
+    let ink = ink.alpha(1.0);
+    if theme_color::contrast_ratio(ink, bg) <= target {
+        return ink;
+    }
+    let mut lo = 0.0f32;
+    let mut hi = 1.0f32;
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        let mixed = bg.blend(ink.alpha(mid)).alpha(1.0);
+        if theme_color::contrast_ratio(mixed, bg) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    bg.blend(ink.alpha(hi)).alpha(1.0)
+}
+
+/// Text ink for `bg` aimed at `target` contrast.
+///
+/// Prefer the palette foreground when it can reach the target, so a theme hue
+/// survives. Otherwise step to black or white, whichever contrasts more, so a
+/// light and a dark palette can hit the same ratio.
+fn tone_for_contrast(bg: Hsla, preferred: Hsla, target: f32) -> Hsla {
+    let preferred = preferred.alpha(1.0);
+    let extreme = if prefers_light_ink(bg) {
+        Hsla::white()
+    } else {
+        Hsla::black()
+    };
+    let ink = if theme_color::contrast_ratio(preferred, bg) + 0.05 >= target {
+        preferred
+    } else {
+        extreme
+    };
+    blend_toward_contrast(bg, ink, target)
+}
+
 impl ChromeTokens {
     pub fn from_palette(p: &TerminalPalette, window_active: bool) -> Self {
-        let content_bg = p.background;
-        let is_dark = content_bg.l < 0.5;
-
-        let surface = if is_dark {
-            content_bg.blend(p.foreground.opacity(0.06))
+        let content_bg = p.background.alpha(1.0);
+        // Same target ratios on every palette. Light and dark then land within
+        // 1.0 of each other because both are solved to the same number, not
+        // because one is the other with lightness flipped.
+        let surface_ink = if prefers_light_ink(content_bg) {
+            Hsla::white()
         } else {
-            content_bg.blend(Hsla::black().opacity(0.06))
+            Hsla::black()
         };
-
-        let hover = if is_dark {
-            surface.blend(p.foreground.opacity(0.08))
-        } else {
-            surface.blend(Hsla::black().opacity(0.08))
-        };
-
-        let border = if is_dark {
-            content_bg.blend(p.foreground.opacity(0.12))
-        } else {
-            content_bg.blend(Hsla::black().opacity(0.12))
-        };
-
-        let fg = p.foreground;
-        let fg_muted = if is_dark {
-            p.foreground.blend(surface.opacity(0.35))
-        } else {
-            p.foreground.blend(surface.opacity(0.25))
-        };
-        let fg_muted = fg_muted.alpha(1.0);
-        let surface = surface.alpha(1.0);
-        let hover = hover.alpha(1.0);
-        let border = border.alpha(1.0);
+        let surface = blend_toward_contrast(content_bg, surface_ink, 1.18);
+        let hover = blend_toward_contrast(content_bg, surface_ink, 1.32);
+        let border = blend_toward_contrast(content_bg, surface_ink, 1.55);
+        let fg = tone_for_contrast(content_bg, p.foreground, 7.0);
+        let fg_muted = tone_for_contrast(surface, p.foreground, 4.6);
+        let fg_disabled = tone_for_contrast(surface, p.foreground, 3.2);
 
         let mut tokens = Self {
-            content_bg: content_bg.alpha(1.0),
+            content_bg,
             surface,
             hover,
             border,
-            fg: fg.alpha(1.0),
+            fg,
             fg_muted,
-            fg_disabled: fg_muted.blend(surface.opacity(0.4)).alpha(1.0),
+            fg_disabled,
             accent: p.ansi[4].alpha(1.0),
             ok: p.ansi[2].alpha(1.0),
             warn: p.ansi[3].alpha(1.0),
@@ -94,25 +135,9 @@ impl ChromeTokens {
     }
 }
 
-/// Relative luminance of an opaque-ish HSLA color (sRGB).
-pub fn relative_luminance(c: Hsla) -> f32 {
-    let rgb = c.to_rgb();
-    fn lin(v: f32) -> f32 {
-        if v <= 0.03928 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b)
-}
-
 /// WCAG contrast ratio between two colors (assumes opaque presentation).
 pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
-    let l1 = relative_luminance(a);
-    let l2 = relative_luminance(b);
-    let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
-    (hi + 0.05) / (lo + 0.05)
+    theme_color::contrast_ratio(a, b)
 }
 
 #[cfg(test)]
@@ -191,6 +216,45 @@ mod tests {
             contrast_ratio(inactive.fg, inactive.content_bg)
                 <= contrast_ratio(active.fg, active.content_bg) + 0.01
         );
+    }
+
+    /// Light chrome is paired to dark by contrast ratio, not by flipping lightness.
+    #[test]
+    fn light_tokens_match_dark_contrast() {
+        let pairs = [
+            (ThemeName::Mocha, ThemeName::Latte),
+            (ThemeName::GithubDark, ThemeName::GithubLight),
+        ];
+        for (dark_name, light_name) in pairs {
+            let dark =
+                ChromeTokens::from_palette(&palette_for_theme(dark_name, Appearance::Dark), true);
+            let light =
+                ChromeTokens::from_palette(&palette_for_theme(light_name, Appearance::Light), true);
+            for (name, dark_fg, dark_bg, light_fg, light_bg) in [
+                ("fg", dark.fg, dark.content_bg, light.fg, light.content_bg),
+                (
+                    "fg_muted",
+                    dark.fg_muted,
+                    dark.surface,
+                    light.fg_muted,
+                    light.surface,
+                ),
+                (
+                    "fg_disabled",
+                    dark.fg_disabled,
+                    dark.surface,
+                    light.fg_disabled,
+                    light.surface,
+                ),
+            ] {
+                let dark_ratio = contrast_ratio(dark_fg, dark_bg);
+                let light_ratio = contrast_ratio(light_fg, light_bg);
+                assert!(
+                    (dark_ratio - light_ratio).abs() < 1.0,
+                    "{dark_name:?}/{light_name:?} {name}: dark {dark_ratio:.2}:1 vs light {light_ratio:.2}:1"
+                );
+            }
+        }
     }
 
     #[test]

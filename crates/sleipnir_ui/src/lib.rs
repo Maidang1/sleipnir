@@ -1,6 +1,7 @@
 //! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
 mod app_shell;
+pub mod appearance;
 mod assets;
 mod attention_chrome;
 mod blink;
@@ -29,6 +30,7 @@ mod run_ledger_global;
 mod starfield;
 mod tab_convert;
 mod term_element;
+pub mod theme_color;
 mod ui_mode;
 mod update_model;
 mod workspace_commit;
