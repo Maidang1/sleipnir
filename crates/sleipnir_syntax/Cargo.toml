@@ -1,0 +1,42 @@
+[package]
+name = "sleipnir_syntax"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+description = "Tree-sitter syntax classification — a language registry, injections, and (byte range, kind) spans"
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+
+[features]
+default = ["rust", "python", "typescript", "json", "go", "bash", "toml"]
+wasm = ["tree-sitter/wasm"]
+rust = ["dep:tree-sitter-rust"]
+python = ["dep:tree-sitter-python"]
+# Both the TypeScript and TSX rows — one grammar crate, and JavaScript rides TSX.
+typescript = ["dep:tree-sitter-typescript"]
+json = ["dep:tree-sitter-json"]
+go = ["dep:tree-sitter-go"]
+bash = ["dep:tree-sitter-bash"]
+toml = ["dep:tree-sitter-toml-ng"]
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-highlight = "0.25"
+tree-sitter-language = "0.1"
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+tree-sitter-toml-ng = { version = "0.7", optional = true }
+
+[dev-dependencies]
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-rust = "0.24"

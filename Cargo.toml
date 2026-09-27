@@ -12,6 +12,7 @@ members = [
     "crates/run_ledger",
     "crates/diff_core",
     "crates/syntax",
+    "crates/sleipnir_syntax",
     "crates/sleipnir_ctl",
     "crates/sleipnir_browser_control",
     "crates/plugin_host",
@@ -65,6 +66,7 @@ updater = { path = "crates/updater" }
 run_ledger = { path = "crates/run_ledger" }
 diff_core = { path = "crates/diff_core" }
 syntax = { path = "crates/syntax" }
+sleipnir_syntax = { path = "crates/sleipnir_syntax" }
 sleipnir_ctl = { path = "crates/sleipnir_ctl" }
 sleipnir_browser_control = { path = "crates/sleipnir_browser_control" }
 plugin_host = { path = "crates/plugin_host" }
