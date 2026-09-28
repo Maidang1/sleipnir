@@ -13,8 +13,9 @@
 
 use gpui::{
     ClickEvent, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, svg,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px, svg,
 };
+use sleipnir_settings::Appearance;
 
 use super::AppShell;
 use crate::chrome::ChromeTokens;
@@ -27,6 +28,75 @@ pub(crate) enum AgentRunStatus {
     Running,
     Exited,
     Unknown,
+}
+
+/// Semantic agent status to one orb drawing. Running is the working orbit,
+/// a finished run breathes, and a pane the ledger has never seen is still
+/// connecting.
+pub(crate) fn orb_state_for(status: AgentRunStatus) -> crate::orbs::OrbState {
+    match status {
+        AgentRunStatus::Running => crate::orbs::OrbState::Working,
+        AgentRunStatus::Exited => crate::orbs::OrbState::Breathing,
+        AgentRunStatus::Unknown => crate::orbs::OrbState::Connecting,
+    }
+}
+
+/// One orb for the whole panel: any running agent wins, then any exited one.
+pub(crate) fn panel_orb_state(rows: &[AgentHudRow]) -> crate::orbs::OrbState {
+    if rows.iter().any(|row| row.status == AgentRunStatus::Running) {
+        orb_state_for(AgentRunStatus::Running)
+    } else if rows.iter().any(|row| row.status == AgentRunStatus::Exited) {
+        orb_state_for(AgentRunStatus::Exited)
+    } else {
+        orb_state_for(AgentRunStatus::Unknown)
+    }
+}
+
+fn orb_seconds() -> f32 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f32()
+}
+
+fn status_orb(state: crate::orbs::OrbState) -> impl IntoElement {
+    let preset = crate::orbs::resolve_preset(state, crate::orbs::OrbSize::Inline);
+    let edge = crate::orbs::OrbSize::Inline.pixels();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            let dark = cx
+                .try_global::<crate::appearance::AppearanceState>()
+                .is_none_or(|appearance| {
+                    crate::appearance::resolve(appearance.mode, appearance.system)
+                        != Appearance::Light
+                });
+            let mut frame = crate::orbs::engine::Frame::new();
+            crate::orbs::engine::draw_mode_into(
+                preset.mode,
+                edge,
+                orb_seconds() * preset.speed,
+                &preset.opts,
+                &mut frame,
+            );
+            crate::orbs::paint_frame(
+                window,
+                bounds,
+                &frame,
+                dark,
+                preset.opts.r_min.unwrap_or(0.3),
+            );
+            // One orb, and only while an agent is actually working. A still
+            // breath does not keep the window on the display clock.
+            if state == crate::orbs::OrbState::Working {
+                window.request_animation_frame();
+            }
+        },
+    )
+    .w(px(edge))
+    .h(px(edge))
+    .flex_shrink_0()
 }
 
 /// The single presence rule the host owns: given every run the ledger knows for
@@ -146,6 +216,7 @@ impl AppShell {
             .py_1p5()
             .border_b(border_w)
             .border_color(tokens.border)
+            .child(status_orb(panel_orb_state(&rows)))
             .child(
                 div()
                     .text_xs()

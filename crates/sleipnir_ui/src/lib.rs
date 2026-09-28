@@ -16,6 +16,7 @@ mod diff;
 mod finder_service;
 mod git_service;
 mod keymap;
+mod orbs;
 mod pane_tree;
 mod plugin_block;
 mod plugin_chrome;
