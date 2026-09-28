@@ -100,6 +100,7 @@ libc = "0.2"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 parking_lot = "0.12.1"
 percent-encoding = "2.3.2"
+polling = "3.8.0"
 rand = "0.9"
 regex = "1.5"
 schemars = { version = "1.0", features = ["indexmap2"] }

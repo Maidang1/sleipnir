@@ -8,8 +8,10 @@
 //! The crate accepts GPUI input events (`Mouse*Event`, `Window`) for pointer
 //! session tracking; `sleipnir_ui` owns painting and element layout.
 
+pub mod kitty;
 mod mappings;
 mod row_map;
+pub mod scanner;
 
 mod alacritty;
 mod cwd_timeline;
