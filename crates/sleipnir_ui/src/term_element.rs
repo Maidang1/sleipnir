@@ -1354,6 +1354,9 @@ fn named_color(named: NamedColor, palette: &TerminalPalette) -> gpui::Hsla {
 }
 
 fn is_blank(cell: &Cell) -> bool {
+    if cell.character() == terminal::graphics::PLACEHOLDER {
+        return true;
+    }
     let only_anchors = cell
         .zerowidth()
         .map(|marks| marks.iter().all(|ch| terminal::graphics::is_anchor(*ch)))

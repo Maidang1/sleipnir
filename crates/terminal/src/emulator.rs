@@ -116,6 +116,11 @@ impl Emulator {
         self.graphics.painted(&self.term)
     }
 
+    /// Which frame `id` shows at `now`, and whether a later frame is due.
+    pub fn frame_at(&mut self, id: u32, now: std::time::Instant) -> Option<(usize, bool)> {
+        self.graphics.frame_index(id, now)
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(GridSize::new(cols, rows));
     }
@@ -170,7 +175,9 @@ impl Emulator {
         let mut text = String::new();
         for col in 0..grid.columns() {
             let cell = &grid[line][Column(col)];
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || cell.c == crate::placeholder::PLACEHOLDER
+            {
                 continue;
             }
             text.push(cell.c);

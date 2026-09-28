@@ -1112,3 +1112,486 @@ fn a_query_by_temporary_file_deletes_it_as_a_transmission_would() {
     assert_eq!(reply, b"\x1b_Gi=31;OK\x1b\\");
     assert!(!path.exists());
 }
+// ---------------------------------------------------------------------------
+// Unicode placeholders
+// ---------------------------------------------------------------------------
+
+/// The diacritics for 0, 1 and 2.
+const D: [char; 3] = ['\u{0305}', '\u{030D}', '\u{030E}'];
+const P: char = '\u{10EEEE}';
+
+/// A 20x40 image under id 42 with a 2x2 virtual placement: one cell per
+/// 10x20 quarter.
+fn virtual_emulator() -> Emulator {
+    let mut emulator = placed_emulator(20, 10);
+    emulator.feed(&transmit(42, 20, 40));
+    emulator.feed(&apc("a=p,U=1,i=42,c=2,r=2,q=2"));
+    emulator
+}
+
+fn pieces(emulator: &Emulator) -> Vec<(usize, usize, u16, f32, f32)> {
+    let mut out: Vec<_> = emulator
+        .placements()
+        .iter()
+        .map(|p| (p.row, p.col, p.cols, p.frame.x, p.frame.y))
+        .collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
+}
+
+#[test]
+fn a_virtual_placement_puts_nothing_on_the_grid() {
+    let emulator = virtual_emulator();
+    assert!(emulator.placements().is_empty());
+    assert_eq!(emulator.cursor().map(|c| (c.row, c.col)), Some((0, 0)));
+}
+
+#[test]
+fn placeholder_cells_show_their_slices() {
+    let mut emulator = virtual_emulator();
+    let text = format!(
+        "\x1b[38;5;42m{P}{}{}{P}{}{}\x1b[39m\r\n\x1b[38;5;42m{P}{}{}{P}{}{}\x1b[39m",
+        D[0], D[0], D[0], D[1], D[1], D[0], D[1], D[1]
+    );
+    emulator.feed(text.as_bytes());
+    // One run per row, each drawing the whole frame shifted by its row.
+    assert_eq!(
+        pieces(&emulator),
+        vec![(0, 0, 2, 0.0, 0.0), (1, 0, 2, 0.0, -1.0)]
+    );
+    assert!(emulator.placements().iter().all(|p| p.image == 42));
+    // The placeholder never reaches the glyphs.
+    assert_eq!(emulator.row_text(0), "");
+}
+
+#[test]
+fn a_cell_without_marks_continues_the_one_to_its_left() {
+    let mut emulator = virtual_emulator();
+    let text = format!("\x1b[38;5;42m{P}{}{P}\r\n{P}{}{P}\x1b[39m", D[0], D[1]);
+    emulator.feed(text.as_bytes());
+    assert_eq!(
+        pieces(&emulator),
+        vec![(0, 0, 2, 0.0, 0.0), (1, 0, 2, 0.0, -1.0)]
+    );
+}
+
+#[test]
+fn a_slice_starts_where_its_column_says() {
+    let mut emulator = virtual_emulator();
+    // The right-hand column alone, drawn at the left edge of the screen.
+    let text = format!("\x1b[38;5;42m{P}{}{}\x1b[39m", D[0], D[1]);
+    emulator.feed(text.as_bytes());
+    assert_eq!(pieces(&emulator), vec![(0, 0, 1, -1.0, 0.0)]);
+}
+
+#[test]
+fn a_third_mark_is_the_high_byte_of_the_id() {
+    let mut emulator = placed_emulator(20, 10);
+    let id = 42 + (2 << 24);
+    emulator.feed(&transmit(id, 10, 20));
+    emulator.feed(&apc(&format!("a=p,U=1,i={id},c=1,r=1,q=2")));
+    let text = format!("\x1b[38;5;42m{P}{}{}{}\x1b[39m", D[0], D[0], D[2]);
+    emulator.feed(text.as_bytes());
+    assert_eq!(emulator.placements().first().map(|p| p.image), Some(id));
+}
+
+#[test]
+fn the_underline_color_picks_the_placement() {
+    let mut emulator = virtual_emulator();
+    // A second virtual placement of the same image, two cells by one.
+    emulator.feed(&apc("a=p,U=1,i=42,p=7,c=2,r=1,q=2"));
+    let text = format!("\x1b[38;5;42;58;5;7m{P}{}{}\x1b[m", D[0], D[0]);
+    emulator.feed(text.as_bytes());
+    let frame = emulator.placements()[0].frame;
+    // The 20x20 box pillarboxes the 10x20 fit half a cell in from the left.
+    assert_eq!(
+        (frame.x, frame.y, frame.width, frame.height),
+        (0.5, 0.0, 1.0, 1.0)
+    );
+}
+
+#[test]
+fn a_cell_naming_no_placement_is_not_drawn() {
+    let mut emulator = virtual_emulator();
+    let text = format!("\x1b[38;5;41m{P}{}{}\x1b[39m", D[0], D[0]);
+    emulator.feed(text.as_bytes());
+    assert!(emulator.placements().is_empty());
+}
+
+#[test]
+fn only_deletes_by_image_reach_a_virtual_placement() {
+    let mut emulator = virtual_emulator();
+    let text = format!("\x1b[38;5;42m{P}{}{}\x1b[39m", D[0], D[0]);
+    emulator.feed(text.as_bytes());
+    emulator.feed(&apc("a=d,d=a"));
+    emulator.feed(&apc("a=d,d=p,x=1,y=1"));
+    assert_eq!(emulator.placements().len(), 1);
+
+    emulator.feed(&apc("a=d,d=I,i=42"));
+    assert!(emulator.placements().is_empty());
+    assert!(emulator.graphics().get(42).is_none());
+}
+
+#[test]
+fn a_virtual_placement_keeps_its_image_from_being_freed() {
+    let mut emulator = virtual_emulator();
+    emulator.feed(&apc("a=p,i=42,C=1"));
+    emulator.feed(&apc("a=d,d=A"));
+    // `A` frees everything, virtual or not.
+    assert!(emulator.graphics().get(42).is_none());
+
+    let mut emulator = virtual_emulator();
+    emulator.feed(&apc("a=p,i=42,C=1"));
+    emulator.feed(&apc("a=d,d=C"));
+    assert!(emulator.graphics().get(42).is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Relative placements
+// ---------------------------------------------------------------------------
+
+/// Image 1 placed at row 2, column 3 under placement id 1, and image 2 held
+/// to hang off it.
+fn parented() -> Emulator {
+    let mut emulator = placed_emulator(20, 10);
+    emulator.feed(&transmit(1, 10, 20));
+    emulator.feed(&transmit(2, 10, 20));
+    emulator.feed(b"\x1b[3;4H");
+    emulator.feed(&apc("a=p,i=1,p=1,C=1"));
+    emulator
+}
+
+#[test]
+fn a_relative_placement_sits_off_its_parent() {
+    let mut emulator = parented();
+    let reply = emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=1,H=4,V=-1"));
+    assert_eq!(reply, b"\x1b_Gi=2,p=5;OK\x1b\\");
+    assert_eq!(at(&emulator), vec![(1, 2, 3), (2, 1, 7)]);
+    // No `C=1`, and still the cursor stays put.
+    assert_eq!(emulator.cursor().map(|c| (c.row, c.col)), Some((2, 3)));
+}
+
+#[test]
+fn a_relative_placement_moves_with_its_parent() {
+    let mut emulator = parented();
+    emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=1,H=1"));
+    emulator.feed(b"\x1b[10;1H\n\n");
+    assert_eq!(at(&emulator), vec![(1, 0, 3), (2, 0, 4)]);
+}
+
+#[test]
+fn a_relative_placement_follows_a_chain() {
+    let mut emulator = parented();
+    emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=1,H=1"));
+    emulator.feed(&apc("a=p,i=2,p=6,P=2,Q=5,V=1"));
+    assert_eq!(at(&emulator), vec![(1, 2, 3), (2, 2, 4), (2, 3, 4)]);
+}
+
+#[test]
+fn a_parent_that_is_not_there_is_refused() {
+    let mut emulator = parented();
+    let reply = emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=9"));
+    assert_eq!(reply, b"\x1b_Gi=2,p=5;ENOPARENT\x1b\\");
+    assert_eq!(emulator.placements().len(), 1);
+}
+
+#[test]
+fn a_cycle_is_refused() {
+    let mut emulator = parented();
+    emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=1"));
+    emulator.feed(&apc("a=p,i=2,p=6,P=2,Q=5"));
+    let reply = emulator.feed(&apc("a=p,i=1,p=1,P=2,Q=6"));
+    assert_eq!(reply, b"\x1b_Gi=1,p=1;ECYCLE\x1b\\");
+}
+
+#[test]
+fn a_chain_past_eight_is_refused() {
+    let mut emulator = parented();
+    for p in 2..=9 {
+        let reply = emulator.feed(&apc(&format!(
+            "a=p,i=2,p={p},P={},Q={}",
+            if p == 2 { 1 } else { 2 },
+            p - 1
+        )));
+        assert_eq!(
+            reply,
+            format!("\x1b_Gi=2,p={p};OK\x1b\\").into_bytes(),
+            "p={p}"
+        );
+    }
+    let reply = emulator.feed(&apc("a=p,i=2,p=10,P=2,Q=9"));
+    assert_eq!(reply, b"\x1b_Gi=2,p=10;ETOODEEP\x1b\\");
+}
+
+#[test]
+fn a_virtual_placement_cannot_be_relative() {
+    let mut emulator = parented();
+    let reply = emulator.feed(&apc("a=p,U=1,i=2,p=5,P=1,Q=1"));
+    assert_eq!(
+        reply,
+        b"\x1b_Gi=2,p=5;EINVAL:a virtual placement cannot be relative\x1b\\"
+    );
+}
+
+#[test]
+fn a_quiet_command_is_refused_quietly() {
+    let mut emulator = parented();
+    assert!(emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=9,q=2")).is_empty());
+    // `q=1` silences a success, not a refusal.
+    assert_eq!(
+        emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=9,q=1")),
+        b"\x1b_Gi=2,p=5;ENOPARENT\x1b\\"
+    );
+}
+
+#[test]
+fn deleting_a_parent_takes_its_relatives_and_their_images() {
+    let mut emulator = parented();
+    emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=1,H=2"));
+    emulator.feed(&apc("a=d,d=i,i=1,p=1"));
+    assert!(emulator.placements().is_empty());
+    assert!(
+        emulator.graphics().get(1).is_some(),
+        "a lower-case delete freed the parent's image"
+    );
+    assert!(
+        emulator.graphics().get(2).is_none(),
+        "the relative's image outlived its last placement"
+    );
+}
+
+#[test]
+fn a_delete_by_position_finds_a_relative_where_it_sits() {
+    let mut emulator = parented();
+    emulator.feed(&apc("a=p,i=2,p=5,P=1,Q=1,H=5"));
+    emulator.feed(&apc("a=d,d=p,x=9,y=3"));
+    assert_eq!(at(&emulator), vec![(1, 2, 3)]);
+}
+
+#[test]
+fn a_virtual_parent_is_where_its_placeholders_are() {
+    let mut emulator = virtual_emulator();
+    emulator.feed(&transmit(2, 10, 20));
+    let text = format!("\x1b[2;5H\x1b[38;5;42m{P}{}{}{P}\x1b[39m", D[0], D[0]);
+    emulator.feed(text.as_bytes());
+    emulator.feed(&apc("a=p,i=2,p=5,P=42,H=1,V=2"));
+    let relative: Vec<_> = at(&emulator).into_iter().filter(|p| p.0 == 2).collect();
+    assert_eq!(relative, vec![(2, 3, 5)]);
+}
+
+// ---------------------------------------------------------------------------
+// Animation
+// ---------------------------------------------------------------------------
+
+const RED: [u8; 4] = [0xff, 0, 0, 0xff];
+const BLUE: [u8; 4] = [0, 0, 0xff, 0xff];
+const CLEAR: [u8; 4] = [0, 0, 0, 0];
+
+/// A 2x1 RGBA image under id 1, both pixels red.
+fn animated() -> Emulator {
+    let mut emulator = placed_emulator(20, 10);
+    emulator.feed(&apc(&format!(
+        "a=t,f=32,s=2,v=1,i=1;{}",
+        base64(&[RED, RED].concat())
+    )));
+    emulator
+}
+
+fn frame_bytes(emulator: &Emulator, index: usize) -> Vec<u8> {
+    emulator
+        .graphics()
+        .get(1)
+        .and_then(|image| image.frame(index))
+        .unwrap_or_default()
+        .to_vec()
+}
+
+/// `a=f` with `keys`, carrying one RGBA pixel.
+fn one_pixel_frame(keys: &str, pixel: [u8; 4]) -> Vec<u8> {
+    apc(&format!("a=f,i=1,f=32,s=1,v=1{keys};{}", base64(&pixel)))
+}
+
+#[test]
+fn a_frame_lands_on_a_blank_canvas_by_default() {
+    let mut emulator = animated();
+    let reply = emulator.feed(&one_pixel_frame(",x=1", BLUE));
+    assert_eq!(reply, b"\x1b_Gi=1;OK\x1b\\");
+    let image = emulator.graphics().get(1).unwrap();
+    assert_eq!(image.frame_count(), 2);
+    assert_eq!(
+        image.gaps,
+        vec![0, 40],
+        "the root has no gap, a new frame the default"
+    );
+    assert_eq!(frame_bytes(&emulator, 1), [CLEAR, BLUE].concat());
+}
+
+#[test]
+fn a_frame_can_start_from_another_or_from_a_color() {
+    let mut emulator = animated();
+    emulator.feed(&one_pixel_frame(",c=1", BLUE));
+    assert_eq!(frame_bytes(&emulator, 1), [BLUE, RED].concat());
+
+    // 0x00ff00ff: opaque green.
+    emulator.feed(&one_pixel_frame(",Y=16711935,x=1", BLUE));
+    assert_eq!(
+        frame_bytes(&emulator, 2),
+        [[0, 0xff, 0, 0xff], BLUE].concat()
+    );
+}
+
+#[test]
+fn a_frame_edit_draws_over_the_frame_it_names() {
+    let mut emulator = animated();
+    emulator.feed(&one_pixel_frame(",r=1,x=1,z=100", BLUE));
+    let image = emulator.graphics().get(1).unwrap();
+    assert_eq!(image.frame_count(), 1, "an edit made a frame");
+    assert_eq!(image.gaps, vec![100]);
+    assert_eq!(frame_bytes(&emulator, 0), [RED, BLUE].concat());
+}
+
+#[test]
+fn a_translucent_frame_blends_unless_told_to_replace() {
+    let half_blue = [0, 0, 0xff, 0x80];
+    let mut emulator = animated();
+    emulator.feed(&one_pixel_frame(",r=1", half_blue));
+    let blended = frame_bytes(&emulator, 0);
+    assert_eq!(blended[3], 0xff, "blending onto opaque stays opaque");
+    assert!(blended[0] > 0 && blended[2] > 0, "{blended:?}");
+
+    let mut emulator = animated();
+    emulator.feed(&one_pixel_frame(",r=1,X=1", half_blue));
+    assert_eq!(&frame_bytes(&emulator, 0)[..4], &half_blue);
+}
+
+#[test]
+fn a_frame_for_an_image_that_is_not_there_is_refused() {
+    let mut emulator = animated();
+    assert_eq!(
+        emulator.feed(&apc(&format!("a=f,i=9,f=32,s=1,v=1;{}", base64(&BLUE)))),
+        b"\x1b_Gi=9;ENOENT:image\x1b\\"
+    );
+    let reply = emulator.feed(&apc(&format!(
+        "a=f,i=1,f=32,s=3,v=1;{}",
+        base64(&[BLUE; 3].concat())
+    )));
+    assert_eq!(reply, b"\x1b_Gi=1;EINVAL:frame larger than the image\x1b\\");
+}
+
+#[test]
+fn the_control_command_sets_state_frame_loops_and_gaps() {
+    use terminal::kitty::AnimationState;
+    let mut emulator = animated();
+    emulator.feed(&one_pixel_frame("", BLUE));
+    emulator.feed(&apc("a=a,i=1,s=3,c=2,v=3,r=1,z=25"));
+    let image = emulator.graphics().get(1).unwrap();
+    assert_eq!(image.animation.state, AnimationState::Running);
+    assert_eq!(image.animation.current, 1);
+    assert_eq!(image.animation.loops, 2);
+    assert_eq!(image.gaps, vec![25, 40]);
+
+    emulator.feed(&apc("a=a,i=1,s=1,r=2,z=-1"));
+    let image = emulator.graphics().get(1).unwrap();
+    assert_eq!(image.animation.state, AnimationState::Stopped);
+    assert_eq!(image.gaps, vec![25, 0], "a negative gap is gapless");
+}
+
+#[test]
+fn composing_copies_a_rectangle_between_frames() {
+    let mut emulator = animated();
+    emulator.feed(&one_pixel_frame("", BLUE));
+    // Frame 2's left pixel onto frame 1's right one, replacing.
+    let reply = emulator.feed(&apc("a=c,i=1,r=2,c=1,w=1,h=1,x=1,C=1"));
+    assert_eq!(reply, b"\x1b_Gi=1;OK\x1b\\");
+    assert_eq!(frame_bytes(&emulator, 0), [RED, BLUE].concat());
+}
+
+#[test]
+fn composing_refuses_what_it_cannot_do() {
+    let mut emulator = animated();
+    assert_eq!(
+        emulator.feed(&apc("a=c,i=1,r=1,c=3")),
+        b"\x1b_Gi=1;ENOENT:frame\x1b\\"
+    );
+    emulator.feed(&one_pixel_frame("", BLUE));
+    assert_eq!(
+        emulator.feed(&apc("a=c,i=1,r=2,c=1,w=2,h=1,x=1")),
+        b"\x1b_Gi=1;EINVAL:rectangle out of bounds\x1b\\"
+    );
+    assert_eq!(
+        emulator.feed(&apc("a=c,i=1,r=1,c=1,w=2,h=1")),
+        b"\x1b_Gi=1;EINVAL:rectangles overlap\x1b\\"
+    );
+}
+
+fn playing(control: &str) -> Emulator {
+    let mut emulator = animated();
+    emulator.feed(&apc("a=p,i=1,C=1"));
+    emulator.feed(&one_pixel_frame(",z=100", BLUE));
+    emulator.feed(&one_pixel_frame(",z=100", BLUE));
+    emulator.feed(&apc(&format!("a=a,i=1,r=1,z=100,{control}")));
+    emulator
+}
+
+#[test]
+fn a_stopped_animation_stays_on_its_current_frame() {
+    let mut emulator = playing("c=2");
+    let start = std::time::Instant::now();
+    assert_eq!(emulator.frame_at(1, start), Some((1, false)));
+    assert_eq!(
+        emulator.frame_at(1, start + std::time::Duration::from_secs(5)),
+        Some((1, false))
+    );
+}
+
+#[test]
+fn a_running_animation_steps_by_its_gaps_and_loops() {
+    use std::time::Duration;
+    let mut emulator = playing("s=3");
+    let start = std::time::Instant::now();
+    assert_eq!(emulator.frame_at(1, start), Some((0, true)));
+    assert_eq!(
+        emulator.frame_at(1, start + Duration::from_millis(150)),
+        Some((1, true))
+    );
+    assert_eq!(
+        emulator.frame_at(1, start + Duration::from_millis(250)),
+        Some((2, true))
+    );
+    assert_eq!(
+        emulator.frame_at(1, start + Duration::from_millis(350)),
+        Some((0, true))
+    );
+}
+
+#[test]
+fn a_limited_animation_stops_on_its_last_frame() {
+    let mut emulator = playing("s=3,v=2");
+    let start = std::time::Instant::now();
+    emulator.frame_at(1, start);
+    assert_eq!(
+        emulator.frame_at(1, start + std::time::Duration::from_secs(5)),
+        Some((2, false))
+    );
+}
+
+#[test]
+fn deleting_a_frame_moves_the_rest_up() {
+    let mut emulator = animated();
+    emulator.feed(&one_pixel_frame("", BLUE));
+    emulator.feed(&one_pixel_frame(",c=1", BLUE));
+    emulator.feed(&apc("a=d,d=f,i=1"));
+    let image = emulator.graphics().get(1).unwrap();
+    assert_eq!(image.frame_count(), 2);
+    assert_eq!(
+        frame_bytes(&emulator, 0),
+        [BLUE, CLEAR].concat(),
+        "the second frame is the root now"
+    );
+
+    emulator.feed(&apc("a=d,d=f,i=1,r=2"));
+    assert_eq!(emulator.graphics().get(1).unwrap().frame_count(), 1);
+    // `F` on the one frame left frees the image.
+    emulator.feed(&apc("a=d,d=F,i=1"));
+    assert!(emulator.graphics().get(1).is_none());
+}

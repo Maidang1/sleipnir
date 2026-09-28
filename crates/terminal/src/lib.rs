@@ -14,6 +14,7 @@ pub mod kitty;
 mod mappings;
 mod media;
 mod pixels;
+mod placeholder;
 mod row_map;
 pub mod scanner;
 
