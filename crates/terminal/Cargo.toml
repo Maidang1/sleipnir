@@ -21,7 +21,9 @@ collections.workspace = true
 futures.workspace = true
 futures-lite.workspace = true
 gpui.workspace = true
+image = { version = "0.25.1", default-features = false, features = ["png"] }
 itertools.workspace = true
+miniz_oxide = "0.8"
 log.workspace = true
 regex.workspace = true
 release_channel.workspace = true
@@ -34,6 +36,7 @@ util.workspace = true
 vte.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
+polling.workspace = true
 row_geometry.workspace = true
 
 [target.'cfg(unix)'.dependencies]

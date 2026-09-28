@@ -385,6 +385,7 @@ impl TerminalSettings {
             settings.font_size
         );
         apply_loaded(settings, cx);
+        cx.refresh_windows();
     }
 
     /// Apply an in-memory settings snapshot (e.g. session theme cycle).
@@ -422,7 +423,7 @@ impl TerminalSettings {
     /// Set the active theme, refresh the palette, and persist to settings.json.
     pub fn set_theme(theme: ThemeSetting, cx: &mut App) {
         let what = format!("theme -> {}", theme.as_str());
-        Self::update(
+        if Self::update(
             |s| {
                 s.theme = theme.clone();
                 s.custom_theme = None;
@@ -430,7 +431,11 @@ impl TerminalSettings {
             |doc| patch_theme_document(doc, &theme),
             cx,
             &what,
-        );
+        ) {
+            // notify() on the settings entity would leave other windows painting
+            // the previous palette. Colors are read at paint time.
+            cx.refresh_windows();
+        }
     }
 
     /// Set the interface language and persist it at the top level.
@@ -514,6 +519,7 @@ impl TerminalSettings {
         let settings = Self::get_global(cx).clone();
         let palette = Arc::new(resolve_palette(&settings, appearance, cx));
         cx.set_global(TerminalPaletteGlobal(palette));
+        cx.refresh_windows();
     }
 }
 

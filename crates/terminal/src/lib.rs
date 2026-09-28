@@ -8,8 +8,15 @@
 //! The crate accepts GPUI input events (`Mouse*Event`, `Window`) for pointer
 //! session tracking; `sleipnir_ui` owns painting and element layout.
 
+pub mod emulator;
+pub mod graphics;
+pub mod kitty;
 mod mappings;
+mod media;
+mod pixels;
+mod placeholder;
 mod row_map;
+pub mod scanner;
 
 mod alacritty;
 mod cwd_timeline;
@@ -17,6 +24,7 @@ mod osc133;
 mod osc_notify;
 mod pty_info;
 mod run_tracker;
+mod scroll_follow;
 mod shell_semantics;
 pub mod terminal_settings;
 
@@ -85,8 +93,8 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, DamageKind, HyperlinkMatch, PtySender, RegexSearches,
     clear_saved_screen, content_text, display_offset, find_from_terminal_point, grid_text_range,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text,
+    is_alt_screen, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
     set_selection as set_term_selection, spawn_event_loop, take_damage_kind,
     toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
     update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
@@ -898,7 +906,14 @@ impl TerminalBuilder {
             };
 
             let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
-            let pty_tx = spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+            let graphics = Arc::new(parking_lot::Mutex::new(graphics::Graphics::new()));
+            let pty_tx = spawn_event_loop(
+                term.clone(),
+                graphics.clone(),
+                events_tx,
+                pty,
+                pty_options.drain_on_exit,
+            )?;
 
             let terminal = Terminal {
                 terminal_type: TerminalType::Pty {
@@ -906,6 +921,7 @@ impl TerminalBuilder {
                     info: Arc::new(pty_info),
                 },
                 term,
+                graphics,
                 term_config: config,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10),
@@ -1045,6 +1061,8 @@ struct ViewportState {
     /// Last observed scrollback size; a shrink (e.g. `clear`'s `ED 3`) rebases
     /// OSC-133 markers and block anchors.
     last_history_size: usize,
+    /// New output sticks to the bottom only while this stays pinned.
+    follow: scroll_follow::ScrollFollow,
 }
 
 impl ViewportState {
@@ -1054,6 +1072,7 @@ impl ViewportState {
             position: ViewportPosition::new(0),
             geometry: RowGeometry::new(16.0),
             last_history_size: 0,
+            follow: scroll_follow::ScrollFollow::default(),
         }
     }
 }
@@ -1215,6 +1234,7 @@ impl SemanticsState {
 pub struct Terminal {
     terminal_type: TerminalType,
     term: Arc<AlacrittyTermLock>,
+    graphics: Arc<parking_lot::Mutex<graphics::Graphics>>,
     term_config: AlacrittyTermConfig,
     events: VecDeque<InternalEvent>,
     pub matches: Vec<Range>,
@@ -1980,6 +2000,23 @@ impl Terminal {
     }
 
     ///Resize the terminal and the PTY.
+    /// The pixel size of one cell, measured by the view. An image that arrives
+    /// before this has been called is stored and not placed.
+    ///
+    /// Locks the grid first, then the graphics store, which is the same order
+    /// the pty thread uses.
+    pub fn set_graphics_cell_size(&self, width: f32, height: f32) {
+        let _term = self.term.lock();
+        self.graphics.lock().set_cell_size(width, height);
+    }
+
+    /// Images anchored on the visible grid, decoded for paint. Payloads that
+    /// do not decode are omitted.
+    pub fn painted_images(&self) -> Vec<graphics::PaintedImage> {
+        let term = self.term.lock();
+        self.graphics.lock().painted(&term)
+    }
+
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
         let new_bounds = normalize_terminal_bounds(new_bounds);
 
@@ -2207,6 +2244,18 @@ impl Terminal {
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
+        }
+
+        // New rows auto-scroll only while the view is pinned to the bottom.
+        // History growth keeps the pin; a scroll with the same history is the
+        // user. Alt-screen apps own the viewport, so they are left alone.
+        if !is_alt_screen(&terminal) {
+            let history = terminal.history_size();
+            let offset = terminal.grid().display_offset();
+            if self.viewport.follow.observe(history, offset) {
+                scroll_display(&mut terminal, Scroll::Bottom);
+                self.viewport.position.sub = 0.0;
+            }
         }
 
         // A shrinking scrollback (e.g. `clear` sends `ED 3`) gives a real
@@ -2929,6 +2978,7 @@ mod tests {
     use crate::{
         Osc133Kind,
         alacritty::{RegexSearches, new_term, pty_term_config, resize, take_damage_kind},
+        graphics,
         terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
     };
     use alacritty_terminal::grid::Dimensions as _;
@@ -2937,6 +2987,7 @@ mod tests {
     use gpui::{AppContext as _, Bounds, Context, Empty, Render, Size, TestAppContext, Window, px};
     use row_geometry::{Anchor, Block};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use util::paths::PathStyle;
     use vte::ansi::Handler;
 
@@ -3817,6 +3868,7 @@ mod tests {
         let mut terminal = Terminal {
             terminal_type: TerminalType::Closed,
             term,
+            graphics: Arc::new(parking_lot::Mutex::new(graphics::Graphics::new())),
             term_config: config,
             events: VecDeque::new(),
             matches: Vec::new(),

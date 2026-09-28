@@ -76,12 +76,12 @@ impl AppShell {
 
     fn select_theme(&mut self, theme: ThemeName, cx: &mut Context<Self>) {
         TerminalSettings::set_theme(ThemeSetting::Builtin(theme), cx);
-        cx.notify();
+        cx.refresh_windows();
     }
 
     fn select_custom_theme(&mut self, name: String, cx: &mut Context<Self>) {
         TerminalSettings::set_theme(ThemeSetting::Custom(name), cx);
-        cx.notify();
+        cx.refresh_windows();
     }
 
     /// One keyboard-navigable row in the theme picker. `scroll_ix` is the

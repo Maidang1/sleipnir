@@ -4,11 +4,12 @@ use std::num::NonZeroU32;
 use std::os::fd::AsRawFd;
 use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
 
+mod byte_loop;
 mod hyperlinks;
 
 use alacritty_terminal::{
-    event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
-    event_loop::{EventLoop, Msg, Notifier},
+    event::{Event as AlacTermEvent, EventListener, WindowSize},
+    event_loop::Msg,
     grid::{Dimensions, GridIterator, Scroll as AlacScroll},
     index::{Boundary, Column, Direction as AlacDirection, Line, Point as AlacPoint},
     selection::{
@@ -89,18 +90,24 @@ impl From<&AlacrittyPty> for ProcessIdGetter {
 }
 
 pub(super) struct PtySender {
-    notifier: Notifier,
+    sender: byte_loop::ByteLoopSender,
 }
 
 impl PtySender {
     pub(super) fn notify(&self, input: impl Into<Cow<'static, [u8]>>) {
-        self.notifier.notify(input);
+        let bytes = input.into();
+        // Terminal hangs if we send 0 bytes through.
+        if bytes.is_empty() {
+            return;
+        }
+        if let Err(error) = self.sender.send(Msg::Input(bytes)) {
+            log::error!("failed to write to alacritty pty: {error}");
+        }
     }
 
     pub(super) fn resize(&self, bounds: TerminalBounds) {
         if let Err(error) = self
-            .notifier
-            .0
+            .sender
             .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
         {
             log::error!("failed to resize alacritty pty: {error}");
@@ -108,7 +115,7 @@ impl PtySender {
     }
 
     pub(super) fn shutdown(&self) {
-        if let Err(error) = self.notifier.0.send(Msg::Shutdown) {
+        if let Err(error) = self.sender.send(Msg::Shutdown) {
             log::debug!("failed to shut down alacritty pty loop: {error}");
         }
     }
@@ -184,18 +191,16 @@ pub(super) fn new_term(
 
 pub(super) fn spawn_event_loop(
     term: Arc<AlacrittyTermLock>,
+    graphics: Arc<parking_lot::Mutex<crate::graphics::Graphics>>,
     events_tx: UnboundedSender<PtyEvent>,
     pty: AlacrittyPty,
     drain_on_exit: bool,
 ) -> Result<PtySender> {
-    let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
-        .context("failed to create event loop")?;
-    let pty_tx = event_loop.channel();
-    let _io_thread = event_loop.spawn();
+    let sender =
+        byte_loop::ByteLoop::spawn(term, graphics, ZedListener(events_tx), pty, drain_on_exit)
+            .context("failed to create event loop")?;
 
-    Ok(PtySender {
-        notifier: Notifier(pty_tx),
-    })
+    Ok(PtySender { sender })
 }
 
 pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds) {
@@ -204,6 +209,10 @@ pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds) {
 
 pub(super) fn display_offset(term: &AlacrittyTerm) -> usize {
     term.grid().display_offset()
+}
+
+pub(super) fn is_alt_screen(term: &AlacrittyTerm) -> bool {
+    term.mode().contains(TermMode::ALT_SCREEN)
 }
 
 pub(super) fn scroll_display(term: &mut AlacrittyTerm, scroll: Scroll) {
@@ -228,7 +237,10 @@ pub(super) fn update_selection(
 }
 
 pub(super) fn selection_text(term: &AlacrittyTerm) -> Option<String> {
+    // Anchors are zerowidth private-use characters. Copying across an image
+    // would otherwise paste a character nobody can see.
     term.selection_to_string()
+        .map(|text| text.replace(crate::graphics::is_anchor, ""))
 }
 
 pub(super) fn scroll_to_point(term: &mut AlacrittyTerm, point: Point) {
@@ -951,6 +963,66 @@ mod tests {
             term.scroll_display(AlacScroll::Delta(-spilled));
         }
         spilled
+    }
+
+    #[test]
+    fn output_follows_only_while_pinned_to_the_bottom() {
+        use crate::scroll_follow::ScrollFollow;
+        use vte::ansi::Handler;
+
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        let mut follow = ScrollFollow::default();
+        // `Term::input` drops `\n` (width is none). Linefeeds go through the
+        // same handler the parser calls, which is what grows scrollback.
+        let feed = |term: &mut Term<ZedListener>, n: usize| {
+            for i in 0..n {
+                for c in format!("line{i}").chars() {
+                    term.input(c);
+                }
+                Handler::newline(term);
+            }
+        };
+        let observe = |term: &Term<ZedListener>, follow: &mut ScrollFollow| {
+            follow.observe(term.history_size(), term.grid().display_offset())
+        };
+
+        let lines = term.screen_lines() + 20;
+        feed(&mut term, lines);
+        assert!(
+            term.history_size() > 4,
+            "need scrollback, history={}",
+            term.history_size()
+        );
+        assert!(!observe(&term, &mut follow));
+        assert_eq!(term.grid().display_offset(), 0);
+        assert!(follow.following());
+
+        term.scroll_display(AlacScroll::Delta(5));
+        assert!(!observe(&term, &mut follow));
+        assert!(!follow.following());
+        let parked = term.grid().display_offset();
+        assert!(parked >= 5);
+
+        feed(&mut term, 15);
+        assert!(
+            !observe(&term, &mut follow),
+            "new output must not re-pin a view the user scrolled away from"
+        );
+        assert!(
+            term.grid().display_offset() >= parked,
+            "scrolled-up viewport must stay in history when output arrives, offset={} parked={parked}",
+            term.grid().display_offset()
+        );
+
+        term.scroll_display(AlacScroll::Bottom);
+        assert!(!observe(&term, &mut follow));
+        assert!(follow.following());
+        feed(&mut term, 10);
+        assert_eq!(term.grid().display_offset(), 0);
+        assert!(!observe(&term, &mut follow));
+        assert!(follow.following());
     }
 
     #[test]
