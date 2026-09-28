@@ -2978,6 +2978,7 @@ mod tests {
     use crate::{
         Osc133Kind,
         alacritty::{RegexSearches, new_term, pty_term_config, resize, take_damage_kind},
+        graphics,
         terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
     };
     use alacritty_terminal::grid::Dimensions as _;
@@ -2986,6 +2987,7 @@ mod tests {
     use gpui::{AppContext as _, Bounds, Context, Empty, Render, Size, TestAppContext, Window, px};
     use row_geometry::{Anchor, Block};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use util::paths::PathStyle;
     use vte::ansi::Handler;
 

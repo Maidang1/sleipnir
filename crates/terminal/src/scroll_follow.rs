@@ -47,11 +47,16 @@ impl Default for ScrollFollow {
 }
 
 impl ScrollFollow {
+    /// The pin, as the last observe left it. Production drives that through
+    /// [`Self::observe`]; this is what the state-machine tests read.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn following(&self) -> bool {
         self.pinned
     }
 
     /// Re-pin. The next observe snaps to the bottom if the view is not there.
+    /// Callers that already scrolled to the bottom re-pin through [`Self::observe`].
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn follow(&mut self) {
         self.pinned = true;
         self.pending = true;

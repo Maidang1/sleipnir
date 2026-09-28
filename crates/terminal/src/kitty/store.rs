@@ -414,21 +414,24 @@ impl Store {
             id => id,
         };
 
+        let mut command = command;
         let mut held = match self.pending.take() {
             Some((pending, held)) if pending == id => held,
             // A fresh transmission abandons an unfinished one: two at once is
             // outside the protocol, and holding the old chunks would splice
-            // one image into the other.
-            _ => Command {
-                payload: Vec::new(),
-                ..command.clone()
-            },
+            // one image into the other. The chunk's bytes stay on `command`
+            // and are appended below; cloning them here would only drop the copy.
+            _ => {
+                let payload = std::mem::take(&mut command.payload);
+                let fresh = command.clone();
+                command.payload = payload;
+                fresh
+            }
         };
         // Kitty states a transmission's control keys on its first chunk, and
         // the chunk that ends it carries `m=0` and little else. `held` is
         // where those keys live, so the silence the client asked for is read
         // from there rather than from the chunk in hand.
-        let mut command = command;
         command.quiet = command.quiet.max(held.quiet);
         held.quiet = command.quiet;
         if held.payload.len() + command.payload.len() > MAX_IMAGE {
