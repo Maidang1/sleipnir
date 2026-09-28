@@ -1,10 +1,12 @@
 //! Tab strip / shared tab-chip rendering.
 
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    deferred, div, prelude::FluentBuilder as _, px, svg,
+    AnimationExt as _, App, AppContext as _, ClickEvent, Context, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, deferred, div,
+    prelude::FluentBuilder as _, px, svg,
 };
+use sleipnir_motion::TAB_SLIDE;
 use sleipnir_settings::{TerminalPalette, TerminalSettings};
 
 use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview, TabMenuState};
@@ -321,7 +323,7 @@ pub(crate) fn render_tab_chip(
             )
         });
 
-    if is_renaming {
+    let chip = if is_renaming {
         chip.into_any_element()
     } else {
         chip.tooltip(move |_window, cx| {
@@ -329,6 +331,18 @@ pub(crate) fn render_tab_chip(
             cx.new(move |_| TabPathPreview { text }).into()
         })
         .into_any_element()
+    };
+    // Activation slides the chip down into the strip on TAB_SLIDE (150ms
+    // ease-out). The id is the tab, so a later rebuild does not restart it.
+    if is_active {
+        div()
+            .child(chip)
+            .with_animation(("tab-slide", tab_id), TAB_SLIDE.animation(), |el, t| {
+                el.relative().top(px(2.0 * (1.0 - t)))
+            })
+            .into_any_element()
+    } else {
+        chip
     }
 }
 

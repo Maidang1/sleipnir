@@ -13,6 +13,7 @@ collections.workspace = true
 dirs.workspace = true
 gpui.workspace = true
 terminal.workspace = true
+sleipnir_motion.workspace = true
 sleipnir_settings.workspace = true
 release_channel.workspace = true
 updater.workspace = true

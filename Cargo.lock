@@ -6428,6 +6428,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sleipnir_motion"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
 name = "sleipnir_paths"
 version = "0.1.0"
 dependencies = [
@@ -6518,6 +6525,7 @@ dependencies = [
  "serde_json",
  "sleipnir_browser_control",
  "sleipnir_ctl",
+ "sleipnir_motion",
  "sleipnir_settings",
  "sleipnir_widget",
  "syntax",
