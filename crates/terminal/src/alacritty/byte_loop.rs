@@ -13,7 +13,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use alacritty_terminal::event::{self, Event, EventListener};
 use alacritty_terminal::event_loop::Msg;
@@ -23,9 +25,9 @@ use alacritty_terminal::thread;
 use alacritty_terminal::tty::{self, EventedPty};
 use log::error;
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
-use vte::ansi;
 
-use crate::scanner::{Scanner, Segment};
+use crate::graphics::{self, Graphics, HOLD_TIMEOUT, NoSync};
+use crate::scanner::Scanner;
 
 /// Max bytes to read from the PTY before forced terminal synchronization.
 /// Matches alacritty's `READ_BUFFER_SIZE`.
@@ -120,8 +122,10 @@ impl Writing {
 struct LoopState {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
-    parser: ansi::Processor,
+    parser: vte::ansi::Processor<NoSync>,
     scanner: Scanner,
+    /// When the current mode-2026 hold began. Redraws wait until it ends.
+    hold: Option<Instant>,
 }
 
 impl LoopState {
@@ -153,8 +157,9 @@ impl Default for LoopState {
         Self {
             write_list: VecDeque::new(),
             writing: None,
-            parser: ansi::Processor::new(),
+            parser: vte::ansi::Processor::new(),
             scanner: Scanner::new(),
+            hold: None,
         }
     }
 }
@@ -197,6 +202,7 @@ where
     pty: T,
     rx: PeekableReceiver<Msg>,
     terminal: Arc<FairMutex<Term<U>>>,
+    graphics: Arc<Mutex<Graphics>>,
     event_proxy: U,
     drain_on_exit: bool,
 }
@@ -208,6 +214,7 @@ where
 {
     pub(super) fn spawn(
         terminal: Arc<FairMutex<Term<U>>>,
+        graphics: Arc<Mutex<Graphics>>,
         event_proxy: U,
         pty: T,
         drain_on_exit: bool,
@@ -223,6 +230,7 @@ where
             pty,
             rx: PeekableReceiver::new(rx),
             terminal,
+            graphics,
             event_proxy,
             drain_on_exit,
         };
@@ -244,10 +252,7 @@ where
         let mut events = Events::with_capacity(NonZeroUsize::new(1024).unwrap());
 
         'event_loop: loop {
-            let handler = state.parser.sync_timeout();
-            let timeout = handler
-                .sync_timeout()
-                .map(|st| st.saturating_duration_since(Instant::now()));
+            let timeout = hold_timeout(state.hold);
 
             events.clear();
             if let Err(err) = self.poll.wait(&mut events, timeout) {
@@ -261,8 +266,9 @@ where
             }
 
             if events.is_empty() && self.rx.peek().is_none() {
-                state.parser.stop_sync(&mut *self.terminal.lock());
-                self.event_proxy.send_event(Event::Wakeup);
+                if state.hold.take().is_some() {
+                    self.event_proxy.send_event(Event::Wakeup);
+                }
                 continue;
             }
 
@@ -363,12 +369,28 @@ where
                 }),
             };
 
-            feed_parser(
-                &mut state.parser,
-                &mut state.scanner,
-                terminal,
-                &buf[..unprocessed],
-            );
+            let fed = {
+                let mut graphics = self.graphics.lock();
+                graphics::feed(
+                    &mut state.parser,
+                    &mut state.scanner,
+                    terminal,
+                    &mut graphics,
+                    &buf[..unprocessed],
+                )
+            };
+            for edge in fed.syncs {
+                if edge {
+                    if state.hold.is_none() {
+                        state.hold = Some(Instant::now());
+                    }
+                } else {
+                    state.hold = None;
+                }
+            }
+            if !fed.replies.is_empty() {
+                state.write_list.push_back(Cow::Owned(fed.replies));
+            }
 
             processed += unprocessed;
             unprocessed = 0;
@@ -378,7 +400,12 @@ where
             }
         }
 
-        if state.parser.sync_bytes_count() < processed && processed > 0 {
+        if let Some(started) = state.hold
+            && started.elapsed() >= HOLD_TIMEOUT
+        {
+            state.hold = None;
+        }
+        if state.hold.is_none() && processed > 0 {
             self.event_proxy.send_event(Event::Wakeup);
         }
 
@@ -417,21 +444,7 @@ where
     }
 }
 
-/// Advance the parser over the text the scanner left, in order.
-///
-/// Graphics, sixel, and iTerm payloads are taken off the stream here. Their
-/// handlers arrive with the static-image work; until then a payload must not
-/// reach the grid as text. Synchronized-update and cell-size bytes stay in
-/// the text runs, which is what the parser has always seen.
-fn feed_parser<U: EventListener>(
-    parser: &mut ansi::Processor,
-    scanner: &mut Scanner,
-    terminal: &mut Term<U>,
-    bytes: &[u8],
-) {
-    for segment in scanner.feed(bytes) {
-        if let Segment::Text(text) = segment {
-            parser.advance(terminal, text);
-        }
-    }
+fn hold_timeout(hold: Option<Instant>) -> Option<Duration> {
+    let started = hold?;
+    Some(HOLD_TIMEOUT.saturating_sub(started.elapsed()))
 }

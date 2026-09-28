@@ -15,8 +15,8 @@ use std::ops::Range as StdRange;
 use std::time::{Duration, Instant};
 use terminal::{
     Cell, Color, CursorShape, IndexedCell, Modes, NamedColor, Range as TerminalRange, Terminal,
-    TerminalBounds, absolute_to_display_line, is_default_background_color, viewport_top_abs,
-    y_for_display,
+    TerminalBounds, absolute_to_display_line, graphics::PaintedImage, is_default_background_color,
+    viewport_top_abs, y_for_display,
 };
 
 pub struct TermElement {
@@ -199,7 +199,12 @@ fn compose_cell_text(base: char, zerowidth: Option<&[char]>) -> String {
     let mut text = String::new();
     text.push(base);
     if let Some(zerowidth) = zerowidth {
-        text.extend(zerowidth.iter().copied());
+        text.extend(
+            zerowidth
+                .iter()
+                .copied()
+                .filter(|ch| !terminal::graphics::is_anchor(*ch)),
+        );
     }
     text
 }
@@ -398,6 +403,7 @@ pub struct LayoutState {
     /// Whether to request another animation frame (M11).
     blink_animating: bool,
     map: PaintMap,
+    images: Vec<PaintedImage>,
 }
 
 impl Element for TermElement {
@@ -516,12 +522,14 @@ impl Element for TermElement {
                     },
                 );
 
-                let content = terminal.update(cx, |terminal, cx| {
+                let (content, images) = terminal.update(cx, |terminal, cx| {
                     terminal.set_size(dimensions);
                     // Applies scroll-follow: output sticks to the bottom only
                     // while the viewport is pinned there.
                     terminal.sync(window, cx);
-                    terminal.last_content().clone()
+                    terminal.set_graphics_cell_size(f32::from(cell_width), f32::from(line_height));
+                    let images = terminal.painted_images();
+                    (terminal.last_content().clone(), images)
                 });
                 view.update(cx, |v, cx| v.sync_block_lifecycle(cx));
 
@@ -655,6 +663,7 @@ impl Element for TermElement {
                     blink_alpha,
                     blink_animating,
                     map,
+                    images,
                 }
             },
         )
@@ -701,6 +710,14 @@ impl Element for TermElement {
                     for bg in &layout.backgrounds {
                         paint_bg(origin, bg, &layout.dimensions, &layout.map, window);
                     }
+                    paint_images(
+                        &layout.images,
+                        origin,
+                        &layout.dimensions,
+                        &layout.map,
+                        true,
+                        window,
+                    );
                     if TerminalSettings::get_global(cx).starfield {
                         let palette = TerminalPalette::get_global(cx);
                         crate::starfield::paint(
@@ -724,6 +741,14 @@ impl Element for TermElement {
                     for batch in &layout.batches {
                         batch.paint(origin, &layout.dimensions, &layout.map, window, cx);
                     }
+                    paint_images(
+                        &layout.images,
+                        origin,
+                        &layout.dimensions,
+                        &layout.map,
+                        false,
+                        window,
+                    );
 
                     if self.focused
                         && let Some((col, line, ch, shape)) = layout.cursor
@@ -872,6 +897,58 @@ impl IntoElement for TermElement {
     type Element = Self;
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+fn paint_images(
+    images: &[PaintedImage],
+    origin: GpuiPoint<Pixels>,
+    dimensions: &TerminalBounds,
+    map: &PaintMap,
+    under_text: bool,
+    window: &mut Window,
+) {
+    let cell_w = dimensions.cell_width;
+    let line_h = dimensions.line_height();
+    for image in images {
+        let under = image.z < 0;
+        if under != under_text {
+            continue;
+        }
+        let src_w = image.source.width as f32;
+        let src_h = image.source.height as f32;
+        if src_w <= 0.0 || src_h <= 0.0 || image.pixel_width == 0 || image.pixel_height == 0 {
+            continue;
+        }
+        let line = image.row as i32;
+        let frame_x = origin.x + (image.col as f32 + image.frame.x) * cell_w;
+        let frame_y = map.y(origin, line) + line_h * image.frame.y;
+        let frame_w = cell_w * image.frame.width;
+        let frame_h = line_h * image.frame.height;
+        if frame_w <= px(0.) || frame_h <= px(0.) {
+            continue;
+        }
+        let scale_x = f32::from(frame_w) / src_w;
+        let scale_y = f32::from(frame_h) / src_h;
+        let image_bounds = Bounds::new(
+            point(
+                frame_x - px(image.source.x as f32 * scale_x),
+                frame_y - px(image.source.y as f32 * scale_y),
+            ),
+            size(
+                px(image.pixel_width as f32 * scale_x),
+                px(image.pixel_height as f32 * scale_y),
+            ),
+        );
+        let clip = Bounds::new(point(frame_x, frame_y), size(frame_w, frame_h));
+        let _ = window.paint_image(
+            clip,
+            image_bounds,
+            gpui::Corners::default(),
+            image.image.clone(),
+            0,
+            false,
+        );
     }
 }
 
@@ -1277,10 +1354,11 @@ fn named_color(named: NamedColor, palette: &TerminalPalette) -> gpui::Hsla {
 }
 
 fn is_blank(cell: &Cell) -> bool {
-    cell.character() == ' '
-        && cell.zerowidth().map(|z| z.is_empty()).unwrap_or(true)
-        && !cell.has_underline()
-        && !cell.has_strikeout()
+    let only_anchors = cell
+        .zerowidth()
+        .map(|marks| marks.iter().all(|ch| terminal::graphics::is_anchor(*ch)))
+        .unwrap_or(true);
+    cell.character() == ' ' && only_anchors && !cell.has_underline() && !cell.has_strikeout()
 }
 
 struct TerminalInputHandler {

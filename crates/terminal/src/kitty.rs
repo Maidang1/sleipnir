@@ -1,8 +1,19 @@
-//! Kitty graphics commands parsed off the pty stream.
+//! The kitty graphics protocol: commands, and the store that carries them out.
 //!
-//! The store, placements, and paint land with static images. This module is
-//! the command parser the scanner needs to tell a graphics APC from any other.
+//! Placements — where an image sits on the grid — live in [`crate::graphics`].
+//! Painting is the view's.
 
+use std::collections::HashMap;
+
+/// The most one assembled image may carry, chunks included: 64 MiB.
+const MAX_IMAGE: usize = 64 << 20;
+
+/// How many images are kept before the oldest is dropped.
+const MAX_IMAGES: usize = 64;
+
+mod animation;
 mod command;
+mod store;
 
-pub use command::{Action, Command, CursorMovement, Format};
+pub use command::*;
+pub use store::*;

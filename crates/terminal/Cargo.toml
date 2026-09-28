@@ -21,7 +21,9 @@ collections.workspace = true
 futures.workspace = true
 futures-lite.workspace = true
 gpui.workspace = true
+image = { version = "0.25.1", default-features = false, features = ["png"] }
 itertools.workspace = true
+miniz_oxide = "0.8"
 log.workspace = true
 regex.workspace = true
 release_channel.workspace = true

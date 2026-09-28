@@ -8,8 +8,12 @@
 //! The crate accepts GPUI input events (`Mouse*Event`, `Window`) for pointer
 //! session tracking; `sleipnir_ui` owns painting and element layout.
 
+pub mod emulator;
+pub mod graphics;
 pub mod kitty;
 mod mappings;
+mod media;
+mod pixels;
 mod row_map;
 pub mod scanner;
 
@@ -901,7 +905,14 @@ impl TerminalBuilder {
             };
 
             let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
-            let pty_tx = spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+            let graphics = Arc::new(parking_lot::Mutex::new(graphics::Graphics::new()));
+            let pty_tx = spawn_event_loop(
+                term.clone(),
+                graphics.clone(),
+                events_tx,
+                pty,
+                pty_options.drain_on_exit,
+            )?;
 
             let terminal = Terminal {
                 terminal_type: TerminalType::Pty {
@@ -909,6 +920,7 @@ impl TerminalBuilder {
                     info: Arc::new(pty_info),
                 },
                 term,
+                graphics,
                 term_config: config,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10),
@@ -1221,6 +1233,7 @@ impl SemanticsState {
 pub struct Terminal {
     terminal_type: TerminalType,
     term: Arc<AlacrittyTermLock>,
+    graphics: Arc<parking_lot::Mutex<graphics::Graphics>>,
     term_config: AlacrittyTermConfig,
     events: VecDeque<InternalEvent>,
     pub matches: Vec<Range>,
@@ -1986,6 +1999,23 @@ impl Terminal {
     }
 
     ///Resize the terminal and the PTY.
+    /// The pixel size of one cell, measured by the view. An image that arrives
+    /// before this has been called is stored and not placed.
+    ///
+    /// Locks the grid first, then the graphics store, which is the same order
+    /// the pty thread uses.
+    pub fn set_graphics_cell_size(&self, width: f32, height: f32) {
+        let _term = self.term.lock();
+        self.graphics.lock().set_cell_size(width, height);
+    }
+
+    /// Images anchored on the visible grid, decoded for paint. Payloads that
+    /// do not decode are omitted.
+    pub fn painted_images(&self) -> Vec<graphics::PaintedImage> {
+        let term = self.term.lock();
+        self.graphics.lock().painted(&term)
+    }
+
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
         let new_bounds = normalize_terminal_bounds(new_bounds);
 
@@ -3835,6 +3865,7 @@ mod tests {
         let mut terminal = Terminal {
             terminal_type: TerminalType::Closed,
             term,
+            graphics: Arc::new(parking_lot::Mutex::new(graphics::Graphics::new())),
             term_config: config,
             events: VecDeque::new(),
             matches: Vec::new(),

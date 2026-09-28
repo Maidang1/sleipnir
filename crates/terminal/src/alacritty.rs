@@ -191,12 +191,14 @@ pub(super) fn new_term(
 
 pub(super) fn spawn_event_loop(
     term: Arc<AlacrittyTermLock>,
+    graphics: Arc<parking_lot::Mutex<crate::graphics::Graphics>>,
     events_tx: UnboundedSender<PtyEvent>,
     pty: AlacrittyPty,
     drain_on_exit: bool,
 ) -> Result<PtySender> {
-    let sender = byte_loop::ByteLoop::spawn(term, ZedListener(events_tx), pty, drain_on_exit)
-        .context("failed to create event loop")?;
+    let sender =
+        byte_loop::ByteLoop::spawn(term, graphics, ZedListener(events_tx), pty, drain_on_exit)
+            .context("failed to create event loop")?;
 
     Ok(PtySender { sender })
 }
@@ -235,7 +237,10 @@ pub(super) fn update_selection(
 }
 
 pub(super) fn selection_text(term: &AlacrittyTerm) -> Option<String> {
+    // Anchors are zerowidth private-use characters. Copying across an image
+    // would otherwise paste a character nobody can see.
     term.selection_to_string()
+        .map(|text| text.replace(crate::graphics::is_anchor, ""))
 }
 
 pub(super) fn scroll_to_point(term: &mut AlacrittyTerm, point: Point) {

@@ -1,6 +1,7 @@
 //! Helpers the graphics tests share.
 #![allow(dead_code)]
 
+use terminal::emulator::Emulator;
 use terminal::scanner::{Scanner, Segment};
 
 /// `ESC _ G` … `ESC \` around a body.
@@ -47,4 +48,12 @@ pub fn passed(scanner: &mut Scanner, bytes: &[u8]) -> Vec<u8> {
             out.extend_from_slice(text);
             out
         })
+}
+
+/// A terminal whose cells are 10x20 pixels, which is what turns an image's
+/// pixel size into the rows it covers.
+pub fn placed_emulator(cols: u16, rows: u16) -> Emulator {
+    let mut emulator = Emulator::new(cols, rows);
+    emulator.set_cell_size(10.0, 20.0);
+    emulator
 }
