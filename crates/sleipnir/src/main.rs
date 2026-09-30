@@ -33,14 +33,9 @@ use terminal::{
 
 fn main() -> std::process::ExitCode {
     // Dispatch before GPUI, settings, or logging: the same shipped executable
-    // also serves as an isolated built-in plugin and a headless socket client.
+    // also serves as a headless socket client.
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("--builtin-agents") => {
-            sleipnir_plugin_agents::run_builtin();
-            return std::process::ExitCode::SUCCESS;
-        }
-        Some("agentctl") => return sleipnir_agentctl::run_cli(args),
         Some(mode @ ("browser-mcp" | "browser-ctl" | "browser-agent")) => {
             return sleipnir_browser_control::cli::run(mode, args);
         }
@@ -48,7 +43,7 @@ fn main() -> std::process::ExitCode {
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let app = application().with_assets(sleipnir_ui::AgentAssets);
+    let app = application();
     // Last-window close does not quit on macOS. Dock / Cmd-Tab reactivation
     // fires `applicationShouldHandleReopen` with no visible windows; without
     // this callback the click is a no-op and the process stays headless.

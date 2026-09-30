@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.9
+
+### Removed
+- Remove the built-in Agents capability: the first-party Agents plugin, the `sleipnir agentctl` command, the agent coordination socket and protocol, the agent status panel and tab agent icons, and the agent hook installer. The terminal no longer launches, coordinates, or tracks coding agents; run your own agent CLI in a pane as any other command.
+- Remove the now-dead settings `agent_icons`, `plugins.builtin_agents`, and `plugins.agent_panel`. Unknown keys in `settings.json` are ignored, so existing configs keep working.
+- The generic external plugin system (protocol v2, SDK, grants, Run Ledger plugin) is unchanged and still off by default.
+
 ## 0.6.8
 
 ### Features

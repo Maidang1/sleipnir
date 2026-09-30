@@ -379,7 +379,6 @@ impl Supervisor {
             }
 
             let idle = session.lifecycle == PluginLifecycle::Resident
-                && !session.keep_alive
                 && session.in_flight() == 0
                 && now.saturating_sub(session.last_activity_ms()) >= idle_ms;
             if idle {

@@ -1,6 +1,6 @@
 //! Debounced pane-fact deltas for the plugin event bus.
 //!
-//! Cwd, foreground agent, focus and listen ports are polled, not pushed.
+//! Cwd, focus and listen ports are polled, not pushed.
 //! Emitting on every frame would storm every `SubscribeEvents` plugin.
 //! This store emits a delta only when a value actually changes.
 
@@ -15,13 +15,11 @@ use crate::chrome::pane_facts::ListenPort;
 pub struct PaneUiFacts {
     pub pane: PaneKey,
     pub cwd: Option<String>,
-    pub agent: Option<String>,
 }
 
 #[derive(Default)]
 struct WatchedPane {
     cwd: Option<String>,
-    agent: Option<String>,
     ports: BTreeSet<(u32, String)>,
 }
 
@@ -46,7 +44,7 @@ impl PluginEventWatch {
         true
     }
 
-    /// Compare cheap UI-thread facts (cwd / agent / focus) to the last emit.
+    /// Compare cheap UI-thread facts (cwd / focus) to the last emit.
     pub fn ingest_ui(&mut self, focus: Option<PaneKey>, facts: &[PaneUiFacts]) -> Vec<HostEvent> {
         let live: BTreeSet<PaneKey> = facts.iter().map(|f| f.pane).collect();
         self.panes.retain(|pane, _| live.contains(pane));
@@ -68,13 +66,6 @@ impl PluginEventWatch {
                         cwd,
                     });
                 }
-            }
-            if fact.agent != entry.agent {
-                entry.agent = fact.agent.clone();
-                out.push(HostEvent::ForegroundChanged {
-                    pane: fact.pane,
-                    agent: fact.agent.clone(),
-                });
             }
         }
         out
@@ -126,7 +117,6 @@ mod tests {
         let facts = [PaneUiFacts {
             pane: p,
             cwd: Some("/a".into()),
-            agent: Some("claude".into()),
         }];
         let first = w.ingest_ui(Some(p), &facts);
         assert!(
@@ -139,10 +129,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, HostEvent::CwdChanged { cwd, .. } if cwd == "/a"))
         );
-        assert!(first.iter().any(|e| matches!(
-            e,
-            HostEvent::ForegroundChanged { agent, .. } if agent.as_deref() == Some("claude")
-        )));
         let second = w.ingest_ui(Some(p), &facts);
         assert!(second.is_empty(), "unchanged facts must not re-emit");
     }

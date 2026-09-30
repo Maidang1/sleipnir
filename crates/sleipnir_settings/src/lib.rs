@@ -4,7 +4,6 @@
 //! Path: `config_path()` — `~/.config/sleipnir/settings.json` on macOS/Unix,
 //! `%APPDATA%\sleipnir\settings.json` on Windows.
 
-pub mod agent_hooks;
 mod i18n;
 mod themes;
 
@@ -198,8 +197,6 @@ pub struct TerminalSettings {
     pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
     pub run_ledger_redact: bool,
-    /// Draw Streamline icons on tab chips for known coding-agent processes.
-    pub agent_icons: bool,
     /// Default-off external control surface (ADR-0011).
     pub control_surface: bool,
     /// User command to receive the current selection. Empty = disabled.
@@ -212,28 +209,13 @@ pub struct TerminalSettings {
     pub plugins: PluginSettings,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default)]
 pub struct PluginSettings {
     /// External plugins only. Disabled means no user manifests are read.
     pub enabled: bool,
-    /// First-party Agents runs by default, independently of external plugins.
-    pub builtin_agents: bool,
-    /// Show the agent status panel on the right side of the terminal area.
-    pub agent_panel: bool,
     /// Extra plugin roots layered after the platform config directory.
     pub directories: Vec<PathBuf>,
-}
-
-impl Default for PluginSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            builtin_agents: true,
-            agent_panel: true,
-            directories: Vec::new(),
-        }
-    }
 }
 
 /// One user-defined key binding: GPUI keystroke string + action name.
@@ -334,7 +316,6 @@ impl Default for TerminalSettings {
             run_ledger: RunLedgerMode::Persist,
             run_ledger_max_runs: 500,
             run_ledger_redact: true,
-            agent_icons: true,
             control_surface: false,
             pipe_selection_command: None,
             keybinding_preset: KeybindingPreset::Default,
@@ -480,26 +461,6 @@ impl TerminalSettings {
         );
     }
 
-    /// Toggle the agent panel and persist under `plugins.agent_panel`.
-    pub fn set_agent_panel(enabled: bool, cx: &mut App) {
-        Self::update(
-            |s| s.plugins.agent_panel = enabled,
-            |doc| set_document_bool(doc, "plugins", "agent_panel", enabled),
-            cx,
-            &format!("agent_panel -> {enabled}"),
-        );
-    }
-
-    /// Toggle the built-in agents plugin and persist under `plugins.builtin_agents`.
-    pub fn set_builtin_agents(enabled: bool, cx: &mut App) {
-        Self::update(
-            |s| s.plugins.builtin_agents = enabled,
-            |doc| set_document_bool(doc, "plugins", "builtin_agents", enabled),
-            cx,
-            &format!("builtin_agents -> {enabled}"),
-        );
-    }
-
     /// Toggle the starfield and persist under `terminal.starfield`.
     pub fn set_starfield(enabled: bool, cx: &mut App) {
         let persisted = Self::update(
@@ -626,9 +587,6 @@ struct SettingsFile {
     run_ledger_max_runs: Option<usize>,
     #[serde(default)]
     run_ledger_redact: Option<bool>,
-    /// Draw Streamline icons on tabs for known coding-agent processes. Default true.
-    #[serde(default)]
-    agent_icons: Option<bool>,
     #[serde(default)]
     control_surface: Option<bool>,
     #[serde(default)]
@@ -747,9 +705,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
     if let Some(v) = file.run_ledger_redact {
         settings.run_ledger_redact = v;
-    }
-    if let Some(v) = file.agent_icons {
-        settings.agent_icons = v;
     }
     if let Some(v) = file.control_surface {
         settings.control_surface = v;
@@ -871,7 +826,6 @@ fn default_settings_file() -> SettingsFile {
         run_ledger: Some(RunLedgerMode::Memory),
         run_ledger_max_runs: None,
         run_ledger_redact: Some(true),
-        agent_icons: Some(true),
         control_surface: Some(false),
         pipe_selection_command: None,
         keybinding_preset: Some(KeybindingPreset::Default),
@@ -1471,28 +1425,11 @@ mod tests {
         let file: SettingsFile = serde_json::from_str(raw).expect("parse plugins");
         let mut settings = TerminalSettings::default();
         assert!(!settings.plugins.enabled);
-        assert!(settings.plugins.builtin_agents);
         merge_file(&mut settings, file);
         assert!(settings.plugins.enabled);
-        assert!(settings.plugins.builtin_agents);
         assert_eq!(
             settings.plugins.directories,
             vec![PathBuf::from("/opt/sleipnir-plugins")]
-        );
-    }
-
-    #[test]
-    fn builtin_agents_can_be_disabled_without_enabling_external_plugins() {
-        let file: SettingsFile =
-            serde_json::from_str(r#"{"plugins":{"builtin_agents":false}}"#).unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert!(!settings.plugins.enabled);
-        assert!(!settings.plugins.builtin_agents);
-        let old: PluginSettings = serde_json::from_str(r#"{"enabled":false}"#).unwrap();
-        assert!(
-            old.builtin_agents,
-            "old configs also get the built-in default"
         );
     }
 
@@ -1541,24 +1478,6 @@ mod tests {
             serde_json::to_string(&TerminalBell::Visual).unwrap(),
             "\"visual\""
         );
-    }
-
-    #[test]
-    fn tab_rail_keys_default_when_absent() {
-        let s = TerminalSettings::default();
-        assert!(s.agent_icons);
-        let file: SettingsFile = serde_json::from_str("{}").unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert!(settings.agent_icons);
-    }
-
-    #[test]
-    fn agent_icons_can_be_disabled() {
-        let file: SettingsFile = serde_json::from_str(r#"{"agent_icons":false}"#).unwrap();
-        let mut settings = TerminalSettings::default();
-        merge_file(&mut settings, file);
-        assert!(!settings.agent_icons);
     }
 
     #[test]

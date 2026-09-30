@@ -146,7 +146,6 @@ pub enum EventKind {
     RunStarted,
     RunFinished,
     PortOpened,
-    ForegroundChanged,
     CwdChanged,
     PaneFocused,
     PaneClosed,
@@ -156,7 +155,7 @@ pub enum EventKind {
 // Events: host → plugin
 // ---------------------------------------------------------------------------
 
-/// Facts the app already computes (`run_ledger`, `pane_facts`, `chrome/agent`).
+/// Facts the app already computes (`run_ledger`, pane facts).
 /// v2 opens an outlet; it adds no instrumentation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -187,11 +186,6 @@ pub enum HostEvent {
         pid: u32,
         addr: String,
     },
-    ForegroundChanged {
-        pane: PaneKey,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<String>,
-    },
     CwdChanged {
         pane: PaneKey,
         cwd: String,
@@ -212,7 +206,6 @@ impl HostEvent {
             Self::RunStarted { .. } => EventKind::RunStarted,
             Self::RunFinished { .. } => EventKind::RunFinished,
             Self::PortOpened { .. } => EventKind::PortOpened,
-            Self::ForegroundChanged { .. } => EventKind::ForegroundChanged,
             Self::CwdChanged { .. } => EventKind::CwdChanged,
             Self::PaneFocused { .. } => EventKind::PaneFocused,
             Self::PaneClosed { .. } => EventKind::PaneClosed,
@@ -224,7 +217,6 @@ impl HostEvent {
             Self::RunStarted { pane, .. }
             | Self::RunFinished { pane, .. }
             | Self::PortOpened { pane, .. }
-            | Self::ForegroundChanged { pane, .. }
             | Self::CwdChanged { pane, .. }
             | Self::PaneFocused { pane }
             | Self::PaneClosed { pane } => *pane,

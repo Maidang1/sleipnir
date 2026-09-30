@@ -25,7 +25,6 @@ Sleipnir is a standalone terminal built on [GPUI](https://gpui.rs), with a forke
 - Drag files onto a pane to insert shell-quoted paths (bracketed paste)
 - Search in scrollback, diff inspection, and in-memory command status tracking
 - Zed-compatible `terminal.*` settings and hot reload
-- Built-in Agents panel and local worker coordination, enabled out of the box
 - Native browser panel on macOS and Windows; optional, explicitly authorized MCP tools let an agent discover it, navigate to HTTP/HTTPS URLs, and read visible page text
 - Optional external process-based plugins for panels, inline blocks, and command-palette actions (off by default)
 
@@ -93,20 +92,6 @@ and [`docs/settings.md`](docs/settings.md) for current behavior and removed sett
 has the same in-memory behavior. Disk history is owned by the optional plugin.
 See [`docs/plugins.md`](docs/plugins.md) for plugin development and the local,
 unsandboxed trust model.
-
-## Built-in agent coordination
-
-Agents starts automatically in its own process. Open **Agents: Open panel**
-from the command palette, or use `sleipnir agentctl list`. In a Sleipnir pane,
-`"$SLEIPNIR_BIN" agentctl list` also works without adding the application to PATH.
-No separate plugin or client installation is needed; agent CLIs still need to
-be installed independently. Coordination is Unix-only; Windows is observer-only.
-
-This is a same-user local control socket, not a sandbox or an approval proxy.
-Native agent approvals stay with the human. To opt out, set
-`"plugins": { "builtin_agents": false }`. The separate `plugins.enabled` setting
-continues to control external plugins only, which remain off by default.
-See [Agents](crates/sleipnir_plugin_agents/README.md) for details.
 
 ## Embedded browser agent tools
 

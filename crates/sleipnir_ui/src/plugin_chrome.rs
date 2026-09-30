@@ -598,30 +598,6 @@ mod tests {
     }
 
     #[test]
-    fn agents_titlebar_status_is_one_compact_row() {
-        let mut reg = ChromeRegistry::default();
-        reg.apply_status(
-            "agents",
-            owner(1),
-            Widget::Row {
-                gap: 1,
-                children: vec![badge("●1", Tone::Accent), btn("Agents", "open_panel")],
-            },
-            true,
-            None,
-        );
-        let status = reg.status_layout(MAX_STATUS_COLS).unwrap();
-        assert_eq!(
-            status.height, 1,
-            "titlebar status must not contain a second attribution row"
-        );
-        assert!(
-            status.width <= 13,
-            "one short Agents chip must not reserve a 24-column panel"
-        );
-    }
-
-    #[test]
     fn multiline_status_keeps_only_first_row_and_preserves_provenance() {
         let mut reg = ChromeRegistry::default();
         reg.apply_status(

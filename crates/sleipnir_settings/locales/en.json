@@ -86,7 +86,6 @@
 
   "settings.section.theme": "theme",
   "settings.section.general": "general",
-  "settings.section.agents": "agents",
   "settings.section.shortcuts": "shortcuts",
   "settings.close": "close",
   "settings.title": "settings",

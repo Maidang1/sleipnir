@@ -55,8 +55,6 @@ pub use transport::{
 #[derive(Clone, Debug)]
 pub struct LaunchSpec {
     pub plugin_id: String,
-    /// Host-only policy for built-in services; never set by user manifests.
-    pub keep_alive: bool,
     pub lifecycle: PluginLifecycle,
     pub declared_capabilities: BTreeSet<Capability>,
     pub granted: Vec<Capability>,
@@ -74,7 +72,6 @@ impl LaunchSpec {
     ) -> Self {
         Self {
             plugin_id: manifest.id.clone(),
-            keep_alive: false,
             lifecycle: manifest.lifecycle,
             declared_capabilities: declared_capabilities(manifest),
             granted,

@@ -1,6 +1,6 @@
 [package]
 name = "sleipnir"
-version = "0.6.8"
+version = "0.6.9"
 edition.workspace = true
 publish = false
 license.workspace = true
@@ -22,15 +22,12 @@ release_channel.workspace = true
 terminal.workspace = true
 updater.workspace = true
 log.workspace = true
-sleipnir_plugin_agents.workspace = true
-sleipnir_agentctl.workspace = true
 sleipnir_browser_control.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
-agent_coordination.workspace = true
 plugin_protocol.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

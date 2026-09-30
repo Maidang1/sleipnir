@@ -4,13 +4,12 @@ use gpui::{
     AnimationExt as _, App, AppContext as _, ClickEvent, Context, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, deferred, div,
-    prelude::FluentBuilder as _, px, svg,
+    prelude::FluentBuilder as _, px,
 };
 use sleipnir_motion::TAB_SLIDE;
-use sleipnir_settings::{TerminalPalette, TerminalSettings};
+use sleipnir_settings::TerminalPalette;
 
 use crate::app_shell::{AppShell, PaneDrag, Tab, TabDragPreview, TabMenuState};
-use crate::chrome::agent::{self, AgentKind};
 use crate::chrome::pixel;
 use crate::chrome::{ChromeGeometry, ChromeTokens};
 use crate::run_ledger_global::RunLedgerGlobal;
@@ -24,9 +23,6 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = TerminalPalette::get_global(cx);
-        let settings = TerminalSettings::get_global(cx);
-        let show_icons = settings.agent_icons;
-        let filter_agents_badge = settings.plugins.agent_panel;
         let active = self.active;
         let hovered = self.hovered_tab;
 
@@ -40,24 +36,10 @@ impl AppShell {
         };
         for (ix, tab) in self.tabs.iter().enumerate() {
             let keys = tab.tree.all_pane_keys();
-            let plugin_badges = if filter_agents_badge {
-                // Agent status lives in the squeezed right panel; suppress the
-                // built-in agents plugin badge from the tab chip.
-                self.plugin_badges_for_tab(&keys, ix == active)
-                    .into_iter()
-                    .filter(|b| b.plugin_id != "agents")
-                    .collect()
-            } else {
-                self.plugin_badges_for_tab(&keys, ix == active)
-            };
+            let plugin_badges = self.plugin_badges_for_tab(&keys, ix == active);
             // The Failed wash is the ledger's own verdict; plugin badges
             // can never set or suppress it.
             let failed = tab_has_failed_attention(tab, cx);
-            let agent = if show_icons {
-                agent::identify_tab(tab, cx)
-            } else {
-                None
-            };
             chips.push(render_tab_chip(
                 tab,
                 ix,
@@ -71,7 +53,6 @@ impl AppShell {
                     .map(|state| state.query.text.clone()),
                 plugin_badges,
                 failed,
-                agent,
                 tokens,
                 geo,
                 &palette,
@@ -126,7 +107,6 @@ pub(crate) fn render_tab_chip(
     rename_buffer: Option<String>,
     plugin_badges: Vec<crate::plugin_chrome::PluginTabBadge>,
     failed: bool,
-    agent: Option<AgentKind>,
     tokens: &ChromeTokens,
     geo: &ChromeGeometry,
     palette: &TerminalPalette,
@@ -267,7 +247,6 @@ pub(crate) fn render_tab_chip(
                     .bg(tokens.accent),
             )
         })
-        .when_some(agent, |el, kind| el.child(render_agent_mark(kind)))
         .child(body)
         .children(plugin_badges.into_iter().map(|b| {
             let color = match b.tone {
@@ -518,15 +497,6 @@ fn truncated_label(text: impl Into<gpui::SharedString>) -> impl IntoElement {
         .whitespace_nowrap()
         .text_ellipsis()
         .child(text.into())
-}
-
-fn render_agent_mark(kind: AgentKind) -> impl IntoElement {
-    svg()
-        .path(kind.icon)
-        .flex_shrink_0()
-        .w(px(12.0))
-        .h(px(12.0))
-        .text_color(kind.color)
 }
 
 /// Failed Attention is a faint red wash on the chip, not a glyph.

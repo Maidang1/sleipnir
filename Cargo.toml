@@ -18,13 +18,10 @@ members = [
     "crates/plugin_host",
     "crates/plugin_protocol",
     "crates/plugin_grants",
-    "crates/agent_coordination",
-    "crates/sleipnir_agentctl",
     "crates/atomic_write",
     "crates/sleipnir_paths",
     "crates/sleipnir_plugin_sdk",
     "crates/sleipnir_plugin_runledger",
-    "crates/sleipnir_plugin_agents",
     "crates/sleipnir_motion",
     "crates/sleipnir_widget",
     "crates/row_geometry",
@@ -74,9 +71,6 @@ sleipnir_browser_control = { path = "crates/sleipnir_browser_control" }
 plugin_host = { path = "crates/plugin_host" }
 plugin_protocol = { path = "crates/plugin_protocol" }
 plugin_grants = { path = "crates/plugin_grants" }
-agent_coordination = { path = "crates/agent_coordination" }
-sleipnir_agentctl = { path = "crates/sleipnir_agentctl" }
-sleipnir_plugin_agents = { path = "crates/sleipnir_plugin_agents" }
 atomic_write = { path = "crates/atomic_write" }
 sleipnir_paths = { path = "crates/sleipnir_paths" }
 sleipnir-plugin = { path = "crates/sleipnir_plugin_sdk" }

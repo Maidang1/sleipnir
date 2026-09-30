@@ -2,7 +2,6 @@
 
 /// Maps `CommandId` to canonical shell actions. A child module so it can reach
 /// `AppShell`'s private methods without widening them to the whole crate.
-mod agent_hud;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod browser_panel;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -188,11 +187,6 @@ impl Tab {
         crate::chrome::workspace::tab_path_label(self.workspace_cwd(cx).as_deref()).into()
     }
 
-    /// The focused leaf in this tab (falls back to the first leaf).
-    pub(crate) fn active_pane_id(&self) -> PaneId {
-        self.active_pane
-    }
-
     /// Working directory of the active pane, when the PTY reports one.
     pub(crate) fn workspace_cwd(&self, cx: &App) -> Option<std::path::PathBuf> {
         let mut leaves = Vec::new();
@@ -261,8 +255,6 @@ enum SettingsSection {
     Theme,
     /// Session restore, ligatures, and other app/terminal toggles.
     General,
-    /// Agent panel and built-in agents toggles.
-    Agents,
     /// Read-only reference for the shortcuts shipped on the current platform.
     Shortcuts,
 }
@@ -271,7 +263,6 @@ impl SettingsSection {
     const ALL: &'static [SettingsSection] = &[
         SettingsSection::Theme,
         SettingsSection::General,
-        SettingsSection::Agents,
         SettingsSection::Shortcuts,
     ];
 
@@ -279,7 +270,6 @@ impl SettingsSection {
         match self {
             SettingsSection::Theme => "theme",
             SettingsSection::General => "general",
-            SettingsSection::Agents => "agents",
             SettingsSection::Shortcuts => "shortcuts",
         }
     }
@@ -288,7 +278,6 @@ impl SettingsSection {
         match self {
             SettingsSection::Theme => language.text("settings.section.theme"),
             SettingsSection::General => language.text("settings.section.general"),
-            SettingsSection::Agents => language.text("settings.section.agents"),
             SettingsSection::Shortcuts => language.text("settings.section.shortcuts"),
         }
     }
@@ -2354,25 +2343,15 @@ impl Render for AppShell {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
                     .child({
-                        let agent_panel_enabled =
-                            sleipnir_settings::TerminalSettings::get_global(cx)
-                                .plugins
-                                .agent_panel;
-                        let has_agents = agent_panel_enabled && !self.agent_hud_rows(cx).is_empty();
                         let content = self.render_content(&tokens, window, cx);
-                        if has_agents || self.browser_panel_is_open() {
+                        if self.browser_panel_is_open() {
                             div()
                                 .flex_1()
                                 .min_h_0()
                                 .flex()
                                 .flex_row()
                                 .child(div().flex_1().min_w_0().size_full().child(content))
-                                .when(has_agents, |el| {
-                                    el.child(self.render_agent_panel(&tokens, cx))
-                                })
-                                .when(self.browser_panel_is_open(), |el| {
-                                    el.child(self.render_browser_panel(&tokens, window, cx))
-                                })
+                                .child(self.render_browser_panel(&tokens, window, cx))
                                 .into_any_element()
                         } else {
                             content

@@ -8,7 +8,6 @@
   "notify_on_command_finish_mode": "unfocused",
   "run_ledger": "memory",
   "run_ledger_redact": true,
-  "agent_icons": true,
   "control_surface": false,
   "pipe_selection_command": "",
   "keybinding_preset": "default",

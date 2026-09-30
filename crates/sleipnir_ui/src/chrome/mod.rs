@@ -1,7 +1,6 @@
 //! Unified macOS chrome: geometry, palette-derived tokens, pure helpers.
 
-pub(crate) mod agent;
-mod chrome_tokens;
+pub(crate) mod chrome_tokens;
 pub(crate) mod close_copy;
 mod close_index;
 pub(crate) mod desktop_window_controls;
