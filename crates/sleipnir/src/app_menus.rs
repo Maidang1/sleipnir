@@ -80,10 +80,16 @@ fn shared_edit_view_window(language: Language) -> [Menu; 3] {
         MenuItem::action(tr(language, "menu.diff_inspector"), ToggleDiff),
     ];
     if sleipnir_ui::BROWSER_PANEL_ENABLED {
-        view_items.push(MenuItem::action(tr(language, "menu.browser_panel"), ToggleBrowser));
+        view_items.push(MenuItem::action(
+            tr(language, "menu.browser_panel"),
+            ToggleBrowser,
+        ));
     }
     view_items.push(MenuItem::separator());
-    view_items.push(MenuItem::action(tr(language, "menu.toggle_vi_mode"), ToggleViMode));
+    view_items.push(MenuItem::action(
+        tr(language, "menu.toggle_vi_mode"),
+        ToggleViMode,
+    ));
     [
         Menu::new(tr(language, "menu.edit")).items([
             MenuItem::action(tr(language, "menu.copy"), Copy),
