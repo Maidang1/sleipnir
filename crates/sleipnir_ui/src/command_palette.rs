@@ -149,7 +149,7 @@ pub fn commands() -> Vec<CommandItem> {
 /// Built-in command catalog localized for the selected interface language.
 pub fn commands_for(language: Language) -> Vec<CommandItem> {
     use crate::keymap::display_shortcut;
-    vec![
+    let mut items = vec![
         CommandItem {
             id: CommandId::NewTab,
             title: language.text("command.new_tab").into(),
@@ -348,7 +348,11 @@ pub fn commands_for(language: Language) -> Vec<CommandItem> {
             shortcut: display_shortcut("reopen_closed_tab").into(),
             keywords: "reopen closed tab undo".into(),
         },
-    ]
+    ];
+    if !crate::BROWSER_PANEL_ENABLED {
+        items.retain(|item| item.id != CommandId::ToggleBrowser);
+    }
+    items
 }
 
 pub fn plugin_items(commands: &[plugin_host::LoadedPluginCommand]) -> Vec<CommandItem> {
