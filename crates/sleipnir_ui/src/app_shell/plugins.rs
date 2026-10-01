@@ -66,19 +66,13 @@ impl AppShell {
                     .read(cx)
                     .working_directory(cx)
                     .map(|p| p.to_string_lossy().into_owned());
-                let fg = view.read(cx).foreground_process_command_name(cx);
-                let agent = fg
-                    .as_deref()
-                    .and_then(crate::chrome::agent::identify)
-                    .map(|kind| kind.id.to_string());
                 port_jobs.push((pane, view.read(cx).shell_pid(cx)));
-                facts.push(PaneUiFacts { pane, cwd, agent });
+                facts.push(PaneUiFacts { pane, cwd });
             }
         }
         for ev in self.plugin_watch.ingest_ui(focus, &facts) {
             crate::plugin_runtime::broadcast_event(ev, cx);
         }
-        // The built-in Agents observer does not subscribe to port events.
         if !TerminalSettings::get_global(cx).plugins.enabled {
             return;
         }
@@ -551,10 +545,6 @@ impl AppShell {
         if !crate::plugin_runtime::PluginRuntime::commands(cx).contains(&plugin) {
             return;
         }
-        if plugin.source == plugin_host::PluginSource::BuiltInAgents {
-            self.invoke_plugin_command(plugin, cx);
-            return;
-        }
         let request = crate::plugin_runtime::requested_capabilities(&plugin);
         let Some(hash) = crate::plugin_runtime::plugin_binary_hash(&plugin) else {
             log::warn!(
@@ -640,14 +630,11 @@ impl AppShell {
             return;
         };
         let grants = crate::plugin_runtime::grants();
-        let granted: Vec<plugin_protocol::v2::Capability> =
-            crate::plugin_runtime::builtin_grants(&loaded).unwrap_or_else(|| {
-                grants
-                    .grants
-                    .get(&plugin.plugin_id)
-                    .map(|r| r.granted.iter().copied().collect())
-                    .unwrap_or_else(|| crate::plugin_runtime::requested_capabilities(&plugin))
-            });
+        let granted: Vec<plugin_protocol::v2::Capability> = grants
+            .grants
+            .get(&plugin.plugin_id)
+            .map(|r| r.granted.iter().copied().collect())
+            .unwrap_or_else(|| crate::plugin_runtime::requested_capabilities(&plugin));
         let spec = crate::plugin_runtime::launch_spec(&loaded, granted);
         let Some(sup) = crate::plugin_runtime::supervisor(cx) else {
             return;
@@ -677,8 +664,8 @@ impl AppShell {
         })
         .detach();
     }
-    /// Handshake every resident. Built-ins use their compiled capability set;
-    /// external first-run / binary-change / new-cap gaps need explicit consent.
+    /// Handshake every resident. First-run / binary-change / new-capability
+    /// gaps need explicit consent before a resident may connect.
     pub(super) fn start_resident_plugins(&mut self, cx: &mut Context<Self>) {
         if self.input.consent().is_some() {
             return;
@@ -688,10 +675,6 @@ impl AppShell {
                 continue;
             }
             if crate::plugin_runtime::is_plugin_live(&plugin.manifest.id, cx) {
-                continue;
-            }
-            if let Some(granted) = crate::plugin_runtime::builtin_grants(&plugin) {
-                self.connect_resident(plugin, granted, cx);
                 continue;
             }
             let request = crate::plugin_runtime::requested_capabilities_for_plugin(&plugin);

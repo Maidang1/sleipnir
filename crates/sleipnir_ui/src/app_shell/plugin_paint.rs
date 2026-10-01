@@ -157,12 +157,6 @@ impl AppShell {
         if self.plugin_chrome.is_empty() {
             return div().into_any_element();
         }
-        let builtins: std::collections::BTreeSet<_> =
-            crate::plugin_runtime::PluginRuntime::plugins(cx)
-                .into_iter()
-                .filter(|plugin| plugin.source == plugin_host::PluginSource::BuiltInAgents)
-                .map(|plugin| plugin.manifest.id)
-                .collect();
         let Some(status) = self.plugin_chrome.status_layout(MAX_STATUS_COLS) else {
             return div().into_any_element();
         };
@@ -185,12 +179,6 @@ impl AppShell {
             .text_size(px(12.0))
             .line_height(px(16.0));
         for (index, item) in status.items.iter().enumerate() {
-            // The built-in Agents plugin's status chip is replaced by the
-            // bottom-right agent HUD, so the titlebar shows a single, minimal
-            // entry point rather than two. External contributions still render.
-            if builtins.contains(&item.plugin_id) && item.plugin_id == "agents" {
-                continue;
-            }
             let Some(cl) = item.kind.chrome_label() else {
                 continue;
             };
@@ -200,20 +188,10 @@ impl AppShell {
                 cl.action
                     .map(|(a, arg)| (a.to_string(), arg.map(str::to_string))),
             );
-            let builtin = builtins.contains(&item.plugin_id);
-            // External contributions remain visibly attributed. Built-in
-            // identity comes from host provenance, never a plugin-supplied id.
-            let label = if builtin {
-                label
-            } else {
-                format!("{}: {label}", item.plugin_id)
-            };
-            let tooltip: SharedString = format!(
-                "{} · {}",
-                item.plugin_id,
-                if builtin { "built-in" } else { "plugin" }
-            )
-            .into();
+            // External contributions remain visibly attributed: the id in the
+            // label and tooltip is the plugin's own manifest id.
+            let label = format!("{}: {label}", item.plugin_id);
+            let tooltip: SharedString = format!("{} · plugin", item.plugin_id).into();
             let mut chip = div()
                 .id(("plugin-status-item", index))
                 .h(px(24.0))

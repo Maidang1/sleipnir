@@ -197,81 +197,6 @@ observation/rendering protocol at once:
 Because the host `run_id` is only meaningful within a host launch, restored
 history renders without jump buttons — same rule the built-in overlay used.
 
-## Example: Agents (resident observer, non-controlling)
-
-`crates/sleipnir_plugin_agents` is the first agent-collaboration slice: a
-resident plugin that watches which panes run a known coding agent (whatever
-`foreground_changed.agent` reports — claude, codex, gemini, opencode, …) and
-shows the most conservative status the events prove. It never writes to a
-terminal: no prompt injection, no approval answering, no model/provider
-code, no network, no persistence. Its one outward action beyond
-rendering is a single OS notification per proven unseen session exit.
-
-- `subscribe_events`, narrowed to `foreground_changed`, `run_started`,
-  `run_finished`, `pane_focused`, `pane_closed`, `cwd_changed`. Because the
-  host emits `cwd_changed` / `run_started` before the foreground poll
-  recognizes a new agent, the plugin caches the latest cwd and open run per
-  pane and adopts them when `foreground_changed` names the agent — a
-  freshly discovered agent whose launch command was observed starts as
-  `running`, not `unknown`. The containing run is pinned at that point; a
-  later `run_started` in the pane never moves the pin, and on identity
-  replacement a cached run that belonged to the outgoing agent is never
-  inherited.
-- Per-pane state is bounded to process/session facts: `running` (the shell
-  Run containing the agent process is still open — including while the
-  agent waits at its prompt), `exited-unseen` / `exited-seen` (the latest
-  agent session ended, which implies nothing about success), `unknown`.
-  The protocol carries no task percentage, no turn progress, no
-  agent-readiness, and no approval-pending fact, so the plugin never
-  displays any of them; a shell exit code is not an agent task outcome, so
-  it is not surfaced.
-- Exit records are durable and honest about their evidence: only a
-  `run_finished` matching the agent's pinned containing run proves an exit.
-  `foreground_changed` with no agent is only a loss of foreground detection
-  (a transient child/tool process can hold the foreground while the agent
-  stays alive), so it never creates an `exited-*` state; the record and its
-  cached run are preserved until the matching finish arrives or a different
-  agent takes the foreground. An `unknown` pane has no pinned run, so no
-  finish can prove an exit there. A seen record never flips back; only
-  `pane_closed` removes a row.
-- `render_status`: a ≤24-cell strip with one summary badge (`!N` Warn for
-  exited-unseen — deliberately no checkmark/Ok tone — / `●N` Accent for
-  running) and a palette-contributing **Agents** button.
-- `render_panel`: rows grouped Running / Exited — unseen / Exited — seen /
-  Unknown, captioned as process/session status, not task progress. Only
-  exited rows with a run observed this session are `Btn`s, jumping via
-  `scroll_to_run`: its start anchor is the completed output for an exited
-  session, but on a still-open run it would pull the user away from the
-  live output tail, so running and unknown rows are plain text (the
-  protocol has no focus-by-pane host call). A click marks the row seen only
-  when the host answers `HostCallResult::Ok`.
-- `host_call_notify`: exactly one OS notification when a tracked session's
-  pinned containing run finishes while its pane is unfocused
-  (`running → exited-unseen`). No notification when the pane is focused, on
-  `foreground_changed` losing the agent, on unknown/orphan finishes, on
-  mismatched, stale, duplicate, or shell-interlude finishes, or when the
-  host denies the call (a denial changes nothing and is not retried). The
-  text names the agent and the cwd basename when known and says only that
-  the session exited and output is ready to review — never success, task
-  completion, or approval state.
-
-Build and install:
-
-```sh
-cargo build --release -p sleipnir_plugin_agents
-
-mkdir -p ~/.config/sleipnir/plugins/agents
-cp target/release/sleipnir-plugin-agents ~/.config/sleipnir/plugins/agents/
-cp crates/sleipnir_plugin_agents/plugin.json ~/.config/sleipnir/plugins/agents/
-```
-
-Approve the consent prompt (`resident`, `subscribe_events`, `render_panel`,
-`render_status`, `host_call_scroll_to_run`, `host_call_notify`) on first
-launch.
-
-
-## Render targets
-
 A `Render` names one of three mounts. One widget schema, one
 renderer; the mount is where the tree is placed.
 
@@ -319,8 +244,8 @@ anchor, so the pane is only focused. An unknown `run_id` answers
 `Context::scroll_to_run(run_id) -> HostCallResult`.
 
 `focus_pane`, `send_text`, `send_key`, and `request_close_pane` are the
-generic primitives a future coordinator can use to operate **visible agent
-panes**. Each has its own grant; `write_terminal` (the snapshot
+generic primitives a plugin can use to operate **its own visible panes**.
+Each has its own grant; `write_terminal` (the snapshot
 `Output::Insert` route into the *active* pane) does **not** imply any of
 them. They take an explicit `pane` and never fall back to the focused pane.
 Plugin panels and unknown pane keys answer `HostCallResult::Error`.
@@ -370,15 +295,13 @@ line. Both calls use `host_call_open_pane`.
 With `subscribe_events` the host pushes facts the app already computes
 (`run_ledger`, `pane_facts`), narrowed by `EventFilter { panes, kinds }`.
 `kinds` names `EventKind` discriminants: `run_started`, `run_finished`,
-`port_opened`, `foreground_changed`, `cwd_changed`, `pane_focused`,
-`pane_closed`.
+`port_opened`, `cwd_changed`, `pane_focused`, `pane_closed`.
 
 | Event | Fields | Notes |
 | --- | --- | --- |
 | `run_started` | `run_id`, `pane`, `command`, `cwd?`, `inferred` | `command` is redacted at capture |
 | `run_finished` | `run_id`, `pane`, `exit_code?`, `duration_ms` | |
 | `port_opened` | `pane`, `pid`, `addr` | |
-| `foreground_changed` | `pane`, `agent?` | |
 | `cwd_changed` | `pane`, `cwd` | |
 | `pane_focused` | `pane` | |
 | `pane_closed` | `pane` | pane, its tab, or the window/app went away |
@@ -452,8 +375,8 @@ prompt listing the capabilities in plain language. Approve writes a grant
 record (`tier: local` today — labelled "unsandboxed, local" in the UI). Deny
 writes nothing. Closing the overlay is a deny.
 
-Until an external installation channel ships, plugins are Tier 0/1 only
-(built-in / locally authored). Tier 2 sandboxing is required before an open
+Until an external installation channel ships, plugins are Tier 1 only
+(locally authored). Tier 2 sandboxing is required before an open
 marketplace.
 
 **Process isolation is not a security sandbox.** Current local plugins run

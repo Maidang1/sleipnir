@@ -25,7 +25,6 @@ Sleipnir 是一个独立终端应用，基于 [GPUI](https://gpui.rs) 构建，�
 - 把文件拖到窗格上即可插入 shell 转义后的路径（走 bracketed paste）
 - 滚动历史搜索、Diff 检查和内存中的命令运行状态
 - 兼容 Zed 的 `terminal.*` 设置，支持热重载
-- 内置 Agents 面板与本地 worker 协调，开箱即用
 - macOS 与 Windows 原生浏览器面板；可选、需显式授权的 MCP 工具允许 agent 发现面板、导航 HTTP/HTTPS 地址并读取可见页面正文
 - 可选的外部进程插件：扩展面板、滚动历史内嵌内容和命令面板，默认关闭
 
@@ -89,18 +88,6 @@ cargo build --release -p sleipnir
 [`docs/settings.md`](docs/settings.md)。`run_ledger: "memory"` 在核心中采集命令事实；兼容旧配置的
 `"persist"` 值也只保存在内存中，磁盘历史由可选插件管理。
 插件开发、示例和本地未沙箱化的信任模型见 [`docs/plugins.md`](docs/plugins.md)。
-
-## 内置 Agent 协调
-
-Agents 随终端启动，在独立进程中运行。命令面板中的 **Agents: Open panel**
-可以打开面板；`sleipnir agentctl list` 可以查看协调会话。在 Sleipnir 窗格内，
-即使应用不在 PATH 中，也可以运行 `"$SLEIPNIR_BIN" agentctl list`。
-无需单独安装插件或客户端；Codex、Claude Code 等 agent CLI 仍需自行安装。
-协调 socket 目前仅支持 Unix，Windows 保留观察展示功能。
-
-这是同一系统用户可访问的本地控制接口，不是沙箱，也不会代替用户确认 agent 的原生审批。
-如需关闭，设置 `"plugins": { "builtin_agents": false }`。`plugins.enabled`
-仍只控制外部插件，默认关闭。详见 [Agents](crates/sleipnir_plugin_agents/README.md)。
 
 ## 内置浏览器 Agent 工具
 

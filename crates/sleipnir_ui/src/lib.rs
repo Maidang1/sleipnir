@@ -1,8 +1,12 @@
 //! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
+/// Feature flag for the browser panel's user-facing entries (toolbar toggle,
+/// command palette item, app menu item). When `false` the entries are hidden
+/// but all browser code stays in place; flip to `true` to re-enable.
+pub const BROWSER_PANEL_ENABLED: bool = false;
+
 mod app_shell;
 pub mod appearance;
-mod assets;
 mod attention_chrome;
 mod blink;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -16,7 +20,6 @@ mod diff;
 mod finder_service;
 mod git_service;
 mod keymap;
-mod orbs;
 mod pane_tree;
 mod plugin_block;
 mod plugin_chrome;
@@ -36,7 +39,6 @@ mod ui_mode;
 mod update_model;
 mod workspace_commit;
 
-pub use assets::AgentAssets;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 
 pub use app_shell::{
@@ -542,7 +544,7 @@ impl TermView {
                         }
                     }
                     // A pane that is not on screen must not drive the window's
-                    // repaint loop: a coding agent streaming in a background tab
+                    // repaint loop: a process streaming in a background tab
                     // otherwise requests ~250 repaints/second (one per 4 ms PTY
                     // batch) while the user types in a different pane. The grid
                     // is still updated — only the repaint request is throttled.
@@ -2048,7 +2050,6 @@ mod tests {
         assert!(chrome.contains(".items_center()"));
         assert!(chrome.contains(".whitespace_nowrap()"));
         assert!(chrome.contains("push_action("));
-        assert!(chrome.contains("PluginSource::BuiltInAgents"));
         assert!(
             chrome.contains(".tooltip("),
             "provenance must remain discoverable"

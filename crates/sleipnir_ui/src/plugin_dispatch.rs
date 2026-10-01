@@ -79,8 +79,8 @@ impl PluginDispatcher {
         }
 
         // The watch is walked every tick regardless of inbound traffic so quiet
-        // residents keep receiving polled cwd / agent / focus / port
-        // `HostEvent`s. `PluginEventWatch` self-throttles once called; the bug
+        // residents keep receiving polled cwd / focus / port `HostEvent`s.
+        // `PluginEventWatch` self-throttles once called; the bug
         // this guards against is *not calling* it on a quiet tick.
         for handle in &windows {
             let _ = handle.update(cx, |shell, _, cx| {

@@ -80,7 +80,6 @@ impl Env {
 fn spec() -> LaunchSpec {
     LaunchSpec {
         plugin_id: "demo".into(),
-        keep_alive: false,
         lifecycle: PluginLifecycle::Resident,
         declared_capabilities: BTreeSet::from([
             Capability::ReadCwd,
@@ -925,29 +924,6 @@ fn restart_backoff_caps_at_ceiling_then_disables() {
 
     drop(env.sup);
     let _ = plugin.join();
-}
-
-#[test]
-fn host_pinned_service_survives_idle_but_can_still_be_stopped() {
-    let env = Env::new();
-    let plugin = env.spawn_plugin(handshake_and_echo);
-    let mut launch = spec();
-    launch.keep_alive = true;
-    let session = env.sup.connect(&launch).unwrap();
-    let instance = session.instance_id();
-    env.clock.advance(600_000);
-    env.sup.tick();
-    assert_eq!(
-        env.sup.snapshot("demo").unwrap().state,
-        ConnectionState::Live
-    );
-    assert!(
-        env.sup
-            .has_grant_for_instance(instance, Capability::ReadCwd)
-    );
-    env.sup.shutdown("demo");
-    assert!(env.sup.live_instances().is_empty());
-    plugin.join().unwrap();
 }
 
 #[test]

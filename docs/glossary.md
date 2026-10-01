@@ -75,11 +75,11 @@ command palette, or View → Diff Inspector. `v` toggles split / unified; `m` to
 the minimap. Click `⋯ N hidden lines` to expand a gap.
 _Avoid_: Diff pane, review tab, source control panel.
 
-**Agent identity**:
-A known coding-agent process detected from the Pane's foreground command name.
-Rendered as a Streamline icon Sleipnir owns. Distinct from Attention (who vs
-what happened).
-_Avoid_: Agent (the process is workload; the user is the person), logo.
+**Agent identity (removed)**:
+The former detection of known coding-agent processes from the Pane's
+foreground command name, drawn as a Streamline icon on tab chips and in the
+agent status panel. The built-in Agents plugin, its coordination socket, and
+this detection were removed in 0.6.9; no feature replaces them.
 
 **Theme**:
 A named color palette applied to terminal content (e.g. the Catppuccin flavors

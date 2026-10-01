@@ -11,9 +11,11 @@ concept is the failure mode of the previous extraction.
 ## Already landed (do not redo)
 
 1. **`sleipnir_paths`**. Canonical `~/.config/sleipnir` (not
-   `dirs::config_dir()` on macOS). Settings, plugins, grants, `control.sock`,
-   and `agent-control.sock` all derive from one directory. Env overrides stay
-   in `sleipnir_ctl::socket_path` and `agent_coordination::default_socket_path`.
+   `dirs::config_dir()` on macOS). Settings, plugins, grants, and
+   `control.sock` all derive from one directory. Env overrides stay
+   in `sleipnir_ctl::socket_path`. (The `agent-control.sock` entry and
+   `agent_coordination::default_socket_path` were removed in 0.6.9 with the
+   built-in Agents plugin.)
 2. **Terminal pointer model**. `PointerSession` (`Idle` / `AppMouse` /
    `PendingLink` / `Selecting`). Entering `AppMouse` clears host hover.
    Gutter (`Event::GutterClicked`, `GutterMark`) is gone. OSC-8 opens through
@@ -30,7 +32,8 @@ concept is the failure mode of the previous extraction.
 4. **Partial protocol cleanup**. Host `Permission` and identity `to_v2` are
    gone. Manifests use `plugin_protocol::v2::Capability`.
    `MAX_SEND_TEXT_CHARS` lives in `plugin_protocol`.
-5. **Registry mailbox, framing, claim**. Per-session effect mailboxes;
+5. **Registry mailbox, framing, claim** (removed in 0.6.9 with the
+   built-in Agents plugin). Per-session effect mailboxes;
    interrupt names a task. `try_claim(seq)` is a seq-typed ack lease.
    `ClaimedEffect::commit_launch` / `commit_ok` ack that seq; **drop is the
    only releaser** (a failed ack still ends the lease). Public `apply` of
@@ -80,11 +83,12 @@ concept is the failure mode of the previous extraction.
     are independent; empty inbound still walks the watch). Ledger focus and
     pane-facts refresh run on AppShell's 200 ms `_housekeeping` timer, not
     `Render`.
-16. **Hook install goes through `atomic_write`.** `agent_hooks.rs` publishes
+16. **Hook install goes through `atomic_write`.** `agent_hooks.rs` published
     the hook script with `with_file_lock` + `save_atomic_with` (staged at
-    `0o755`, no write-then-chmod window) and patches `~/.claude/settings.json`
+    `0o755`, no write-then-chmod window) and patched `~/.claude/settings.json`
     as one locked read-modify-write ending in `save_atomic`, the same
     discipline as settings/ledger. `plugin_grants` stays on `save_atomic`.
+    (`agent_hooks.rs` was removed in 0.6.9 with the built-in Agents plugin.)
 17. **Settings document model + theme table.** All setters go through
     `TerminalSettings::update(change, patch, cx, what)`: one in-memory
     document mutate, then persist as a locked JSON-document patch published
@@ -126,8 +130,6 @@ file-lock discipline for app config and hook install, Terminal
 `AbsLine`/hover, Render pumps, and the settings document model have landed.
 
 ```bash
-cargo test -p agent_coordination
-cargo test -p sleipnir_plugin_agents
 cargo test -p plugin_host -p plugin_protocol -p sleipnir_ui --lib
 cargo test -p atomic_write -p sleipnir_settings -p run_ledger
 cargo test -p terminal

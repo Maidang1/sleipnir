@@ -11,7 +11,6 @@ pub const SETTINGS_FILE: &str = "settings.json";
 pub const PLUGINS_DIR: &str = "plugins";
 pub const GRANTS_FILE: &str = "plugin-grants.json";
 pub const CONTROL_SOCKET_FILE: &str = "control.sock";
-pub const AGENT_CONTROL_SOCKET_FILE: &str = "agent-control.sock";
 
 /// Directory that holds `settings.json` and local plugin configuration.
 pub fn config_dir() -> PathBuf {
@@ -47,10 +46,6 @@ pub fn control_socket_path() -> PathBuf {
     config_dir().join(CONTROL_SOCKET_FILE)
 }
 
-pub fn agent_control_socket_path() -> PathBuf {
-    config_dir().join(AGENT_CONTROL_SOCKET_FILE)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,9 +75,5 @@ mod tests {
         assert_eq!(plugin_dir(), dir.join(PLUGINS_DIR));
         assert_eq!(grants_path(), dir.join(GRANTS_FILE));
         assert_eq!(control_socket_path(), dir.join(CONTROL_SOCKET_FILE));
-        assert_eq!(
-            agent_control_socket_path(),
-            dir.join(AGENT_CONTROL_SOCKET_FILE)
-        );
     }
 }

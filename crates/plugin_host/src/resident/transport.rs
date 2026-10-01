@@ -1279,7 +1279,6 @@ mod pipe_tests {
         let launcher = ProcessLauncher;
         let spec = LaunchSpec {
             plugin_id: "demo".into(),
-            keep_alive: false,
             lifecycle: PluginLifecycle::Resident,
             declared_capabilities: BTreeSet::new(),
             granted: vec![],
@@ -1321,7 +1320,6 @@ mod pipe_tests {
         let _ = std::fs::remove_file(&marker);
         let spec = LaunchSpec {
             plugin_id: "demo".into(),
-            keep_alive: false,
             lifecycle: PluginLifecycle::Resident,
             declared_capabilities: BTreeSet::new(),
             granted: vec![],

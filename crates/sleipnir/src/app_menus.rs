@@ -58,36 +58,45 @@ fn tr(language: Language, key: &'static str) -> &'static str {
 }
 
 fn shared_edit_view_window(language: Language) -> [Menu; 3] {
+    let mut view_items: Vec<MenuItem> = vec![
+        MenuItem::action(tr(language, "menu.settings"), OpenSettings),
+        MenuItem::action(tr(language, "menu.reload_settings"), ReloadSettings),
+        MenuItem::action(tr(language, "menu.cycle_theme"), CycleTheme),
+        MenuItem::separator(),
+        MenuItem::action(tr(language, "menu.increase_font_size"), IncreaseFontSize),
+        MenuItem::action(tr(language, "menu.decrease_font_size"), DecreaseFontSize),
+        MenuItem::action(tr(language, "menu.reset_font_size"), ResetFontSize),
+        MenuItem::separator(),
+        MenuItem::action(tr(language, "menu.toggle_pane_zoom"), TogglePaneZoom),
+        MenuItem::action(tr(language, "menu.toggle_broadcast"), ToggleBroadcast),
+        MenuItem::separator(),
+        MenuItem::action(tr(language, "menu.previous_prompt"), JumpPrevPrompt),
+        MenuItem::action(tr(language, "menu.next_prompt"), JumpNextPrompt),
+        MenuItem::separator(),
+        MenuItem::action(tr(language, "menu.quick_select"), ToggleQuickSelect),
+        MenuItem::action(tr(language, "menu.quick_terminal"), OpenQuickTerminal),
+        MenuItem::separator(),
+        MenuItem::action(tr(language, "menu.pane_facts"), TogglePaneFacts),
+        MenuItem::action(tr(language, "menu.diff_inspector"), ToggleDiff),
+    ];
+    if sleipnir_ui::BROWSER_PANEL_ENABLED {
+        view_items.push(MenuItem::action(
+            tr(language, "menu.browser_panel"),
+            ToggleBrowser,
+        ));
+    }
+    view_items.push(MenuItem::separator());
+    view_items.push(MenuItem::action(
+        tr(language, "menu.toggle_vi_mode"),
+        ToggleViMode,
+    ));
     [
         Menu::new(tr(language, "menu.edit")).items([
             MenuItem::action(tr(language, "menu.copy"), Copy),
             MenuItem::action(tr(language, "menu.paste"), Paste),
             MenuItem::action(tr(language, "menu.paste_text_only"), PasteText),
         ]),
-        Menu::new(tr(language, "menu.view")).items([
-            MenuItem::action(tr(language, "menu.settings"), OpenSettings),
-            MenuItem::action(tr(language, "menu.reload_settings"), ReloadSettings),
-            MenuItem::action(tr(language, "menu.cycle_theme"), CycleTheme),
-            MenuItem::separator(),
-            MenuItem::action(tr(language, "menu.increase_font_size"), IncreaseFontSize),
-            MenuItem::action(tr(language, "menu.decrease_font_size"), DecreaseFontSize),
-            MenuItem::action(tr(language, "menu.reset_font_size"), ResetFontSize),
-            MenuItem::separator(),
-            MenuItem::action(tr(language, "menu.toggle_pane_zoom"), TogglePaneZoom),
-            MenuItem::action(tr(language, "menu.toggle_broadcast"), ToggleBroadcast),
-            MenuItem::separator(),
-            MenuItem::action(tr(language, "menu.previous_prompt"), JumpPrevPrompt),
-            MenuItem::action(tr(language, "menu.next_prompt"), JumpNextPrompt),
-            MenuItem::separator(),
-            MenuItem::action(tr(language, "menu.quick_select"), ToggleQuickSelect),
-            MenuItem::action(tr(language, "menu.quick_terminal"), OpenQuickTerminal),
-            MenuItem::separator(),
-            MenuItem::action(tr(language, "menu.pane_facts"), TogglePaneFacts),
-            MenuItem::action(tr(language, "menu.diff_inspector"), ToggleDiff),
-            MenuItem::action(tr(language, "menu.browser_panel"), ToggleBrowser),
-            MenuItem::separator(),
-            MenuItem::action(tr(language, "menu.toggle_vi_mode"), ToggleViMode),
-        ]),
+        Menu::new(tr(language, "menu.view")).items(view_items),
         // Name must be exactly "Window" so GPUI registers it as the system
         // Windows menu (Minimize / Zoom / Bring All to Front are added by AppKit).
         Menu::new("Window").items([

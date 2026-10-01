@@ -91,7 +91,6 @@ pub struct ConnectionSnapshot {
 /// A live RPC session with one plugin process.
 pub struct Session {
     pub(crate) plugin_id: String,
-    pub(crate) keep_alive: bool,
     instance_id: Uuid,
     pub(crate) lifecycle: crate::PluginLifecycle,
     clock: Arc<dyn Clock>,
@@ -192,7 +191,6 @@ impl Session {
 
         let session = Arc::new(Session {
             plugin_id: spec.plugin_id.clone(),
-            keep_alive: spec.keep_alive,
             instance_id,
             lifecycle: spec.lifecycle,
             clock: clock.clone(),
@@ -887,7 +885,6 @@ mod worker_error_tests {
     fn test_spec() -> LaunchSpec {
         LaunchSpec {
             plugin_id: "demo".into(),
-            keep_alive: false,
             lifecycle: PluginLifecycle::Resident,
             declared_capabilities: BTreeSet::new(),
             granted: vec![],
