@@ -1,10 +1,5 @@
 //! Terminal UI for sleipnir (M2 PTY input, M3 tabs + URL open, HIG chrome).
 
-/// Feature flag for the browser panel's user-facing entries (toolbar toggle,
-/// command palette item, app menu item). When `false` the entries are hidden
-/// but all browser code stays in place; flip to `true` to re-enable.
-pub const BROWSER_PANEL_ENABLED: bool = false;
-
 mod app_shell;
 pub mod appearance;
 mod attention_chrome;
@@ -34,7 +29,6 @@ mod run_ledger_global;
 mod starfield;
 mod tab_convert;
 mod term_element;
-pub mod theme_color;
 mod ui_mode;
 mod update_model;
 mod workspace_commit;

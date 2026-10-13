@@ -12,6 +12,10 @@ workspace = true
 name = "sleipnir"
 path = "src/main.rs"
 
+[features]
+# The browser panel's user-facing entries; forwards to `sleipnir_ui`.
+browser-panel = ["sleipnir_ui/browser-panel"]
+
 [dependencies]
 env_logger.workspace = true
 gpui = { workspace = true, features = ["font-kit"] }

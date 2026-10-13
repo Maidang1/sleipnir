@@ -26,8 +26,9 @@ pub use crate::widgets::{
 use plugin_protocol::v2::Output as WireOutput;
 pub use plugin_protocol::v2::{
     BlockId, Capability, CommandSpec, EventFilter, EventKind, HostCall, HostCallResult, HostEvent,
-    InvokeContext, Lifecycle, MAX_SEND_TEXT_CHARS, Manifest, MessageId, PROTOCOL_VERSION, PaneInfo,
-    PaneKey, RenderTarget, RunId, Tone, Widget,
+    InvokeContext, Lifecycle, MAX_SEND_TEXT_CHARS, MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Manifest,
+    MessageId, PROTOCOL_VERSION, PaneInfo, PaneKey, RenderTarget, RunId, Tone, TreeStats, Widget,
+    measure,
 };
 
 /// One command invocation delivered to the plugin.
@@ -255,13 +256,14 @@ pub fn serve<P: Plugin>(
     std::thread::Builder::new()
         .name("plugin-host-reader".into())
         .spawn(move || {
-            let first = read_host_line_strict(&mut reader);
+            // The handshake is strict: one message, or the run is over.
+            let first = read_host_line(&mut reader, Malformed::Fail);
             let finished = !matches!(&first, Ok(Some(_)));
             if sender.send(first).is_err() || finished {
                 return;
             }
             loop {
-                let message = read_host_line(&mut reader);
+                let message = read_host_line(&mut reader, Malformed::Skip);
                 let finished = !matches!(&message, Ok(Some(_)));
                 if sender.send(message).is_err() || finished {
                     return;
@@ -385,9 +387,23 @@ fn write_msg(writer: &mut dyn Write, msg: &PluginMessage) -> io::Result<()> {
     writer.flush()
 }
 
-/// After handshake: skip malformed lines rather than dying. A noisy host
-/// must not take down a resident plugin.
-fn read_host_line(reader: &mut impl BufRead) -> io::Result<Option<HostMessage>> {
+/// What a host line that does not parse costs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Malformed {
+    /// Log it and read on: a noisy host must not take down a resident plugin.
+    Skip,
+    /// Stop: the caller cannot proceed without the message it was promised.
+    Fail,
+}
+
+/// Read one host message, skipping blank lines and unparseable ones.
+///
+/// The two readers differ only in what a malformed line costs, which is one
+/// parameter rather than two copies of the same loop.
+fn read_host_line(
+    reader: &mut impl BufRead,
+    on_malformed: Malformed,
+) -> io::Result<Option<HostMessage>> {
     loop {
         let mut line = String::new();
         let n = reader.read_line(&mut line)?;
@@ -399,28 +415,16 @@ fn read_host_line(reader: &mut impl BufRead) -> io::Result<Option<HostMessage>> 
         }
         match serde_json::from_str::<HostMessage>(line.trim()) {
             Ok(msg) => return Ok(Some(msg)),
-            Err(err) => {
-                eprintln!("sleipnir-plugin: ignoring malformed host message: {err}");
-                continue;
-            }
+            Err(err) => match on_malformed {
+                Malformed::Skip => {
+                    eprintln!("sleipnir-plugin: ignoring malformed host message: {err}");
+                    continue;
+                }
+                Malformed::Fail => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, err));
+                }
+            },
         }
-    }
-}
-
-/// Handshake is strict: we cannot proceed without a real Hello.
-fn read_host_line_strict(reader: &mut impl BufRead) -> io::Result<Option<HostMessage>> {
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg = serde_json::from_str::<HostMessage>(line.trim())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        return Ok(Some(msg));
     }
 }
 

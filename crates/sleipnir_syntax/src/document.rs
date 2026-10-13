@@ -42,11 +42,7 @@ impl Document {
             Grammar::Wasm(_) => return None,
         };
         let query = Query::new(&language, lang.query).ok()?;
-        let kinds = query
-            .capture_names()
-            .iter()
-            .map(|name| recognized(name).map(lang::kind_of))
-            .collect();
+        let kinds = lang::capture_kinds(&query);
         let mut parser = Parser::new();
         parser.set_language(&language).ok()?;
         let source = source.into();
@@ -186,22 +182,4 @@ fn merge(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
         }
     }
     merged
-}
-
-/// The entry of [`lang::NAMES`] a capture name paints as: the one with the
-/// most dot-separated parts, all of them among the capture's. The rule
-/// `tree_sitter_highlight::HighlightConfiguration::configure` applies.
-fn recognized(capture: &str) -> Option<&'static str> {
-    let parts: Vec<&str> = capture.split('.').collect();
-    // The first of the longest, as `configure` breaks a tie.
-    let mut best: Option<(&'static str, usize)> = None;
-    for name in lang::NAMES {
-        let len = name.split('.').count();
-        if name.split('.').all(|part| parts.contains(&part))
-            && best.is_none_or(|(_, longest)| len > longest)
-        {
-            best = Some((name, len));
-        }
-    }
-    best.map(|(name, _)| name)
 }

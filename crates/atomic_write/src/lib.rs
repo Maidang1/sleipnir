@@ -62,6 +62,52 @@ pub fn save_atomic_with(path: &Path, bytes: &[u8], opts: SaveOptions) -> io::Res
     staged
 }
 
+/// Create `path` from `bytes`, refusing when it already exists.
+///
+/// A publication that must not overwrite — a new artifact, a pointer a
+/// previous run left behind — stages the payload, fsyncs it, and hard-links it
+/// onto `path`: the link succeeds only for a name that does not exist, so two
+/// concurrent publishers cannot both win, and the caller learns which did.
+/// The staged file is fsynced and the parent directory is fsynced afterwards,
+/// so the name that appears is durable.
+pub fn publish_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let tmp = sibling_path(path, ".tmp");
+    let staged = (|| {
+        let mut output = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            output.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        output.write_all(bytes)?;
+        output.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = staged {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    match fs::hard_link(&tmp, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&tmp);
+            sync_parent(path)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
+}
+
 /// Acquire an exclusive advisory lock on a sibling `.lock` file of `path`, run
 /// `body`, then release the lock. Parent directories are created if missing.
 ///
@@ -130,8 +176,15 @@ fn stage_then_publish(
     sync_parent(path)
 }
 
+/// Flush the directory entry of `path`. A rename that is not followed by this
+/// can leave the new name missing after a crash, which every publication here
+/// pays for.
+pub fn sync_parent(path: &Path) -> io::Result<()> {
+    sync_parent_impl(path)
+}
+
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
+fn sync_parent_impl(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         File::open(parent)?.sync_all()?;
     }
@@ -139,7 +192,7 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> io::Result<()> {
+fn sync_parent_impl(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -244,6 +297,20 @@ mod tests {
         t1.join().unwrap();
         t2.join().unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "2");
+    }
+
+    #[test]
+    fn publish_new_creates_the_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.json");
+        publish_new(&path, b"one").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one");
+        assert!(!sibling_path(&path, ".tmp").exists());
+        assert!(
+            publish_new(&path, b"two").is_err(),
+            "a second publication must not overwrite the first"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one");
     }
 
     #[test]

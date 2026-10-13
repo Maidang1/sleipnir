@@ -77,3 +77,60 @@ fn a_whole_name_beats_an_extension() {
         Some("typescript")
     );
 }
+
+/// A name whose bytes are not ASCII must not be indexed mid-character.
+///
+/// The extension match used to slice `name[name.len() - candidate.len() - 1..]`,
+/// which panics on any name where a multi-byte character straddles that offset.
+/// Every row here is a name whose byte length differs from its char length by
+/// exactly one, plus a whole-name match and an ASCII control.
+#[test]
+fn a_non_ascii_name_resolves_without_panicking() {
+    let _isolate = sleipnir_syntax::isolate_for_test();
+    let names = [
+        ("資料.rs", "rust"),         // CJK, 3-char prefix
+        ("日本語.ts", "typescript"), // 3-char prefix
+        ("日本語.tsx", "tsx"),       // 1-char prefix
+        ("Привет.md", "markdown"),   // Cyrillic
+        ("résumé.css", "css"),       // accented, 3-char prefix
+        ("á.ts", "typescript"),      // accented, 1-char prefix
+        ("Dörfer.go", "go"),         // accented, 2-char prefix
+        ("世界.json", "json"),       // extension sits at a boundary
+        ("némesis.rs", "rust"),      // longer accented prefix
+    ];
+    for (name, expected) in names {
+        assert_eq!(
+            registry::of_path(Path::new(name)).map(Known::name),
+            Some(expected),
+            "{name}"
+        );
+    }
+}
+
+/// A name that shares no extension with the table answers none, whatever its
+/// script — including when a multi-byte character is the last thing in it.
+#[test]
+fn a_non_ascii_name_with_no_extension_is_none() {
+    let _isolate = sleipnir_syntax::isolate_for_test();
+    for name in ["資料", "日本語", "Привет.gleam", "résumé.txt", "あ"] {
+        assert!(
+            registry::of_path(Path::new(name)).is_none(),
+            "{name} claimed a row"
+        );
+    }
+}
+
+/// The extension match still prefers the longest candidate.
+#[test]
+fn the_longest_extension_wins_under_a_non_ascii_stem() {
+    let _isolate = sleipnir_syntax::isolate_for_test();
+    assert_eq!(
+        registry::of_path(Path::new("資料.rs")).map(Known::name),
+        Some("rust")
+    );
+    // A dot inside the stem does not create a second extension match.
+    assert_eq!(
+        registry::of_path(Path::new("my.notes.md")).map(Known::name),
+        Some("markdown")
+    );
+}

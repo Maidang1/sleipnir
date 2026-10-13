@@ -85,7 +85,7 @@ fn a_bel_terminates_a_run_as_well_as_st() {
 }
 
 // ---------------------------------------------------------------------------
-// Synchronized output and cell size queries
+// Synchronized output
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -136,46 +136,12 @@ fn a_graphics_payload_cannot_finish_a_mode_2026_run() {
     assert!(!scanner.feed(b"\x1b_Ga=q\x1b\\[?2026h").iter().any(is_sync));
 }
 
+/// The cell size query nothing answers: its bytes still reach the parser,
+/// which is all the `CSI 16 t` handling ever amounted to here.
 #[test]
-fn the_scanner_reports_a_cell_size_query_and_still_passes_its_bytes_on() {
+fn a_cell_size_query_is_passed_through_as_text() {
     let mut scanner = Scanner::new();
-    let input = b"a\x1b[16tb";
-    let segments = scanner.feed(input);
-    assert_eq!(
-        segments
-            .iter()
-            .filter(|s| matches!(s, Segment::CellSizeQuery))
-            .count(),
-        1
-    );
-    let text: Vec<u8> = segments
-        .iter()
-        .filter_map(|segment| match segment {
-            Segment::Text(text) => Some(*text),
-            _ => None,
-        })
-        .flatten()
-        .copied()
-        .collect();
-    assert_eq!(text, input);
-}
-
-#[test]
-fn a_cell_size_query_split_across_reads_is_one_query() {
-    let mut scanner = Scanner::new();
-    assert!(!scanner.feed(b"\x1b[1").iter().any(is_cell_size_query));
-    assert!(scanner.feed(b"6t").iter().any(is_cell_size_query));
-}
-
-#[test]
-fn other_window_ops_are_not_a_cell_size_query() {
-    let mut scanner = Scanner::new();
-    assert!(
-        !scanner
-            .feed(b"\x1b[14t\x1b[18t\x1b[16;1t\x1b[116t")
-            .iter()
-            .any(is_cell_size_query)
-    );
+    assert_eq!(passed(&mut scanner, b"a\x1b[16tb"), b"a\x1b[16tb");
 }
 
 #[test]
@@ -185,8 +151,79 @@ fn osc133_and_osc9_notify_pass_through() {
     assert_eq!(passed(&mut scanner, input), input);
 }
 
-fn is_cell_size_query(segment: &Segment<'_>) -> bool {
-    matches!(segment, Segment::CellSizeQuery)
+// ---------------------------------------------------------------------------
+// Image payloads
+// ---------------------------------------------------------------------------
+
+/// A sixel image's data is taken off the stream; the DCS's own header and
+/// terminator still reach the parser, which leaves the sequence in the state
+/// it would have.
+#[test]
+fn a_sixel_images_data_is_swallowed_and_its_frame_is_not() {
+    let mut scanner = Scanner::new();
+    let stream = b"a\x1bP0;1q#0;2;100;100;0-bytes\x1b\\b";
+    assert_eq!(passed(&mut scanner, stream), b"a\x1bP0;1q\x1b\\b");
+}
+
+/// A sixel is swallowed from a read boundary the same way: the bytes between
+/// are held by nobody, and so cannot straddle a split.
+#[test]
+fn a_sixel_split_across_reads_is_still_swallowed() {
+    let whole = b"a\x1bP0;1q#0;2;100;100;0-bytes\x1b\\b";
+    for at in 0..whole.len() {
+        let mut scanner = Scanner::new();
+        let first = passed(&mut scanner, &whole[..at]);
+        let second = passed(&mut scanner, &whole[at..]);
+        assert_eq!(
+            [first.as_slice(), second.as_slice()].concat(),
+            b"a\x1bP0;1q\x1b\\b",
+            "split at {at}"
+        );
+    }
+}
+
+/// An `OSC 1337` image payload is swallowed; the command's head and its
+/// terminator still reach the parser.
+#[test]
+fn an_osc1337_image_payload_is_swallowed_and_its_head_is_not() {
+    let mut scanner = Scanner::new();
+    let stream = b"a\x1b]1337;File=inline=1:cGF5bG9hZA==\x1b\\b";
+    assert_eq!(
+        passed(&mut scanner, stream),
+        b"a\x1b]1337;File=inline=1:\x1b\\b"
+    );
+}
+
+/// `BEL` ends an image payload too, and the terminator is the parser's to
+/// see.
+#[test]
+fn an_osc1337_image_payload_ends_on_bel() {
+    let mut scanner = Scanner::new();
+    let stream = b"\x1b]1337;FilePart=cGF5bG9hZA==\x07tail";
+    assert_eq!(passed(&mut scanner, stream), b"\x1b]1337;FilePart=\x07tail");
+}
+
+/// A command with no payload of its own is not the scanner's: `MultipartFile`
+/// states a file is coming, and the parser is handed it and its terminator.
+#[test]
+fn a_multipart_file_header_passes_through_whole() {
+    let mut scanner = Scanner::new();
+    let stream = b"\x1b]1337;MultipartFile=size=12\x1b\\tail";
+    assert_eq!(
+        passed(&mut scanner, stream),
+        b"\x1b]1337;MultipartFile=size=12\x1b\\tail"
+    );
+}
+
+/// A payload the terminal never sees the end of is swallowed to the end of
+/// the session rather than buffered: the bytes in between cost nothing to
+/// discard.
+#[test]
+fn an_osc1337_payload_with_no_terminator_is_discarded() {
+    let mut scanner = Scanner::new();
+    let mut stream = b"\x1b]1337;File=inline=1:".to_vec();
+    stream.extend(std::iter::repeat_n(b'A', 1 << 20));
+    assert_eq!(passed(&mut scanner, &stream), b"\x1b]1337;File=inline=1:");
 }
 
 fn is_sync(segment: &Segment<'_>) -> bool {

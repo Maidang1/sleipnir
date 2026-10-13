@@ -16,33 +16,11 @@ pub fn install() {
         registry::register(Entry {
             name: lang.name,
             aliases: lang.aliases,
-            files: files_for(lang.name),
+            files: registry::files_of(lang.name),
             lang: Some(lang),
         });
     }
 }
-
-fn files_for(name: &str) -> &'static [&'static str] {
-    FILES
-        .iter()
-        .find(|(held, _)| *held == name)
-        .map(|(_, files)| *files)
-        .unwrap_or(&[])
-}
-
-/// File names and extensions for the grammars here. Fence aliases live on each
-/// [`Lang`]; these are what a path is matched against.
-#[rustfmt::skip]
-const FILES: &[(&str, &[&str])] = &[
-    ("bash", &[".bash_profile", ".bashrc", ".profile", ".zshrc", "bash", "sh", "zsh"]),
-    ("go", &["go"]),
-    ("json", &["json", "jsonc"]),
-    ("python", &["py", "pyi"]),
-    ("rust", &["rs"]),
-    ("toml", &["toml"]),
-    ("tsx", &["cjs", "jsx", "mjs", "tsx"]),
-    ("typescript", &["cts", "mts", "ts"]),
-];
 
 #[cfg(feature = "rust")]
 static RUST: Lang = Lang::new(

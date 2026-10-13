@@ -44,16 +44,17 @@ impl Rgba {
                 if pixels == 0 {
                     return None;
                 }
-                let channels = if format == Format::Rgb { 3 } else { 4 };
-                let data = bytes.get(..pixels.checked_mul(channels)?)?;
                 let bytes = match format {
-                    Format::Rgb => data
-                        .as_chunks::<3>()
-                        .0
-                        .iter()
-                        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 0xff])
-                        .collect(),
-                    _ => data.to_vec(),
+                    Format::Rgb => {
+                        let data = bytes.get(..pixels.checked_mul(3)?)?;
+                        data.as_chunks::<3>()
+                            .0
+                            .iter()
+                            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 0xff])
+                            .collect()
+                    }
+                    // RGBA carries its own four channels.
+                    _ => bytes.get(..pixels.checked_mul(4)?)?.to_vec(),
                 };
                 Some(Self {
                     width,

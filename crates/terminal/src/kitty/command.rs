@@ -39,7 +39,11 @@ pub enum Format {
 }
 
 /// Whether a display leaves the cursor where it found it — kitty's `C` key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// The ordering is load-bearing: [`Command::absorb`] merges a transmission
+/// with `max`, and `None` — the key that silences the cursor — is the stronger
+/// statement, so it is ordered above [`Self::After`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum CursorMovement {
     /// `C=0`: the cursor ends past the image, scrolling the screen when the
     /// image runs off the bottom.
@@ -49,38 +53,35 @@ pub enum CursorMovement {
     None,
 }
 
-/// A parsed graphics command: its keys, and the payload already un-base64'd.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Command {
-    pub action: Action,
-    pub format: Format,
-    /// `i`: the id the client filed the image under. Zero means unset, which
-    /// is how kitty spells "the terminal picks one".
-    pub id: u32,
-    /// `I`: an image number, which names the newest image transmitted under
-    /// it. Zero is unset. A command carrying both `i` and `I` is refused.
-    pub number: u32,
-    /// `p`: the placement id. Zero is unset.
-    pub placement: u32,
-    /// `m=1`: more chunks follow.
-    pub more: bool,
-    /// `s`, `v`: the pixel dimensions a raw payload cannot state for itself.
-    pub width: u32,
-    pub height: u32,
-    /// `c`, `r`: the cell extent the image is to be drawn across. Zero is
-    /// unset, which leaves the extent to the image's own pixels.
-    pub columns: u32,
-    pub rows: u32,
-    /// `x`, `y`: on a display, the source rectangle's top-left in the
-    /// image's pixels. On a delete, the 1-based cell a delete by position
-    /// names, or the id range of `d=r`.
+/// The rectangle a display takes out of the image's pixels: `x`, `y`, `w`, `h`.
+///
+/// `x` and `y` double as the cell a delete by position names, and as the id
+/// range of `d=r` — kitty reuses the keys, so every reader of them is here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SourceRect {
     pub x: u32,
     pub y: u32,
-    /// `w`, `h`: the source rectangle's size in pixels. Zero runs to the
-    /// image's edge.
-    pub source_width: u32,
-    pub source_height: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// How an image is put on the screen: the cell extent, the source rectangle,
+/// the nudge inside that extent, the stacking order, the cursor rule, and the
+/// placement relationship.
+///
+/// A transmission states these keys once, on its first chunk, and a later
+/// chunk states only what it changes — see [`Command::absorb`]. A display
+/// echoes them, so this is what [`crate::kitty::Display`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Placement {
+    /// `p`: the placement id. Zero is unset.
+    pub id: u32,
+    /// `c`, `r`: the cell extent. Zero is unset, which leaves the extent to
+    /// the image's own pixels.
+    pub columns: u32,
+    pub rows: u32,
+    /// `x`, `y`, `w`, `h`: the source rectangle in the image's pixels.
+    pub source: SourceRect,
     /// `X`, `Y`: where in its top-left cell the image starts, in pixels.
     pub offset_x: u32,
     pub offset_y: u32,
@@ -100,6 +101,28 @@ pub struct Command {
     pub unicode: bool,
     /// `q`: 1 suppresses success replies, 2 suppresses failures too.
     pub quiet: u8,
+}
+
+/// A parsed graphics command: its keys, and the payload already un-base64'd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Command {
+    pub action: Action,
+    pub format: Format,
+    /// `i`: the id the client filed the image under. Zero means unset, which
+    /// is how kitty spells "the terminal picks one".
+    pub id: u32,
+    /// `I`: an image number, which names the newest image transmitted under
+    /// it. Zero is unset. A command carrying both `i` and `I` is refused.
+    pub number: u32,
+    /// How the image is put on the screen: the cell extent, the source
+    /// rectangle, the stacking, and the placement relationship.
+    pub placement: Placement,
+    /// `m=1`: more chunks follow.
+    pub more: bool,
+    /// `s`, `v`: the pixel dimensions a raw payload cannot state for itself.
+    pub width: u32,
+    pub height: u32,
     /// `d`: what a delete is aimed at; an uppercase letter also frees the
     /// data of the images left with no placement.
     pub delete: char,
@@ -124,26 +147,10 @@ impl Default for Command {
             format: Format::Rgba,
             id: 0,
             number: 0,
-            placement: 0,
             more: false,
             width: 0,
             height: 0,
-            columns: 0,
-            rows: 0,
-            x: 0,
-            y: 0,
-            source_width: 0,
-            source_height: 0,
-            offset_x: 0,
-            offset_y: 0,
-            z: 0,
-            cursor_movement: CursorMovement::After,
-            parent_image: 0,
-            parent_placement: 0,
-            parent_offset_x: 0,
-            parent_offset_y: 0,
-            unicode: false,
-            quiet: 0,
+            placement: Placement::default(),
             delete: 'a',
             medium: 'd',
             read_offset: 0,
@@ -155,6 +162,50 @@ impl Default for Command {
 }
 
 impl Command {
+    /// Fold one transmission chunk into the keys the first chunk stated.
+    ///
+    /// Kitty states a transmission's control keys on its first chunk, and the
+    /// chunk that ends it carries `m=0` and little else. So `self` is the
+    /// accumulator and `chunk` is what just arrived: the chunk wins a key only
+    /// where it said something — `z` and the parent offsets are read as
+    /// "not stated" when zero, and the numeric extents as "the larger of the
+    /// two stated", which is what the accumulator already holds when the chunk
+    /// is silent.
+    pub(crate) fn absorb(&mut self, chunk: &Command) {
+        // The action lives on the first chunk in kitty's own client, and on
+        // the last in others. Either is a display, and the display keys ride
+        // whichever chunk carries it.
+        if chunk.action == Action::Display {
+            self.action = Action::Display;
+        }
+        self.payload.extend_from_slice(&chunk.payload);
+        let held = &mut self.placement;
+        let chunk = &chunk.placement;
+        held.columns = held.columns.max(chunk.columns);
+        held.rows = held.rows.max(chunk.rows);
+        held.id = held.id.max(chunk.id);
+        held.source.x = held.source.x.max(chunk.source.x);
+        held.source.y = held.source.y.max(chunk.source.y);
+        held.source.width = held.source.width.max(chunk.source.width);
+        held.source.height = held.source.height.max(chunk.source.height);
+        held.offset_x = held.offset_x.max(chunk.offset_x);
+        held.offset_y = held.offset_y.max(chunk.offset_y);
+        if chunk.z != 0 {
+            held.z = chunk.z;
+        }
+        held.cursor_movement = held.cursor_movement.max(chunk.cursor_movement);
+        held.unicode |= chunk.unicode;
+        held.parent_image = held.parent_image.max(chunk.parent_image);
+        held.parent_placement = held.parent_placement.max(chunk.parent_placement);
+        if chunk.parent_offset_x != 0 {
+            held.parent_offset_x = chunk.parent_offset_x;
+        }
+        if chunk.parent_offset_y != 0 {
+            held.parent_offset_y = chunk.parent_offset_y;
+        }
+        held.quiet = chunk.quiet;
+    }
+
     /// Parse one APC run's body. `None` for anything that is not a graphics
     /// command, which is every other APC sequence on the wire.
     pub(crate) fn parse(run: &[u8]) -> Option<Self> {
@@ -208,31 +259,31 @@ impl Command {
                 }
                 b'i' => command.id = number().unwrap_or(0),
                 b'I' => command.number = number().unwrap_or(0),
-                b'p' => command.placement = number().unwrap_or(0),
-                b'x' => command.x = number().unwrap_or(0),
-                b'y' => command.y = number().unwrap_or(0),
-                b'w' => command.source_width = number().unwrap_or(0),
-                b'h' => command.source_height = number().unwrap_or(0),
-                b'X' => command.offset_x = number().unwrap_or(0),
-                b'Y' => command.offset_y = number().unwrap_or(0),
-                b'z' => command.z = signed().unwrap_or(0),
+                b'p' => command.placement.id = number().unwrap_or(0),
+                b'x' => command.placement.source.x = number().unwrap_or(0),
+                b'y' => command.placement.source.y = number().unwrap_or(0),
+                b'w' => command.placement.source.width = number().unwrap_or(0),
+                b'h' => command.placement.source.height = number().unwrap_or(0),
+                b'X' => command.placement.offset_x = number().unwrap_or(0),
+                b'Y' => command.placement.offset_y = number().unwrap_or(0),
+                b'z' => command.placement.z = signed().unwrap_or(0),
                 b'm' => command.more = number() == Some(1),
                 b's' => command.width = number().unwrap_or(0),
                 b'v' => command.height = number().unwrap_or(0),
-                b'c' => command.columns = number().unwrap_or(0),
-                b'r' => command.rows = number().unwrap_or(0),
+                b'c' => command.placement.columns = number().unwrap_or(0),
+                b'r' => command.placement.rows = number().unwrap_or(0),
                 b'C' => {
-                    command.cursor_movement = match number() {
+                    command.placement.cursor_movement = match number() {
                         Some(1) => CursorMovement::None,
                         _ => CursorMovement::After,
                     }
                 }
-                b'U' => command.unicode = number() == Some(1),
-                b'P' => command.parent_image = number().unwrap_or(0),
-                b'Q' => command.parent_placement = number().unwrap_or(0),
-                b'H' => command.parent_offset_x = signed().unwrap_or(0),
-                b'V' => command.parent_offset_y = signed().unwrap_or(0),
-                b'q' => command.quiet = number().unwrap_or(0).min(u8::MAX as u32) as u8,
+                b'U' => command.placement.unicode = number() == Some(1),
+                b'P' => command.placement.parent_image = number().unwrap_or(0),
+                b'Q' => command.placement.parent_placement = number().unwrap_or(0),
+                b'H' => command.placement.parent_offset_x = signed().unwrap_or(0),
+                b'V' => command.placement.parent_offset_y = signed().unwrap_or(0),
+                b'q' => command.placement.quiet = number().unwrap_or(0).min(u8::MAX as u32) as u8,
                 b'd' => command.delete = letter().unwrap_or('a'),
                 b't' => command.medium = letter().unwrap_or('d'),
                 b'O' => command.read_offset = number().unwrap_or(0),
@@ -276,4 +327,77 @@ pub(crate) fn decode(bytes: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Kitty states a transmission's control keys on its first chunk, so a
+    /// closing chunk that says nothing must not erase what the first stated.
+    #[test]
+    fn a_chunk_that_states_nothing_leaves_the_first_chunks_keys_alone() {
+        let mut held = Command {
+            placement: Placement {
+                columns: 4,
+                rows: 2,
+                z: 7,
+                cursor_movement: CursorMovement::None,
+                parent_offset_x: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        held.absorb(&Command::default());
+        assert_eq!(held.placement.columns, 4);
+        assert_eq!(held.placement.rows, 2);
+        assert_eq!(held.placement.z, 7);
+        assert_eq!(held.placement.cursor_movement, CursorMovement::None);
+        assert_eq!(held.placement.parent_offset_x, 3);
+    }
+
+    /// The chunk that states a key wins it — including the action, which kitty
+    /// itself puts on the first chunk and other clients on the last.
+    #[test]
+    fn a_chunk_that_states_a_key_wins_it() {
+        let mut held = Command {
+            placement: Placement {
+                columns: 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let chunk = Command {
+            action: Action::Display,
+            placement: Placement {
+                id: 6,
+                z: 5,
+                cursor_movement: CursorMovement::None,
+                parent_offset_x: 9,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        held.absorb(&chunk);
+        assert_eq!(held.action, Action::Display);
+        assert_eq!(held.placement.id, 6);
+        assert_eq!(held.placement.z, 5);
+        assert_eq!(held.placement.cursor_movement, CursorMovement::None);
+        assert_eq!(held.placement.parent_offset_x, 9);
+        assert_eq!(held.placement.columns, 4);
+    }
+
+    /// Payload bytes accumulate across chunks, in arrival order.
+    #[test]
+    fn payload_bytes_accumulate_across_chunks() {
+        let mut held = Command {
+            payload: b"one".to_vec(),
+            ..Default::default()
+        };
+        held.absorb(&Command {
+            payload: b"two".to_vec(),
+            ..Default::default()
+        });
+        assert_eq!(held.payload, b"onetwo");
+    }
 }

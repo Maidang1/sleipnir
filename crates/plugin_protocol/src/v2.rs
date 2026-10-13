@@ -513,21 +513,29 @@ impl TreeStats {
 }
 
 /// Measure a tree so the host can reject or truncate it before layout.
+///
+/// The walk stops descending as soon as the budget is blown: a pathological
+/// tree must not cost a full traversal on the UI thread, and the answer for
+/// such a tree is only [`TreeStats::within_budget`] being false.
 pub fn measure(widget: &Widget) -> TreeStats {
-    fn walk(w: &Widget, depth: usize) -> TreeStats {
-        let children = match w {
-            Widget::Col { children, .. } | Widget::Row { children, .. } => children.as_slice(),
-            _ => &[],
-        };
-        let mut stats = TreeStats { nodes: 1, depth };
-        for child in children {
-            let sub = walk(child, depth + 1);
-            stats.nodes += sub.nodes;
-            stats.depth = stats.depth.max(sub.depth);
+    fn visit(widget: &Widget, depth: usize, stats: &mut TreeStats) -> bool {
+        stats.nodes += 1;
+        stats.depth = stats.depth.max(depth);
+        if !stats.within_budget() {
+            return false;
         }
-        stats
+        if let Widget::Col { children, .. } | Widget::Row { children, .. } = widget {
+            for child in children {
+                if !visit(child, depth + 1, stats) {
+                    return false;
+                }
+            }
+        }
+        true
     }
-    walk(widget, 1)
+    let mut stats = TreeStats { nodes: 0, depth: 0 };
+    visit(widget, 1, &mut stats);
+    stats
 }
 
 // ---------------------------------------------------------------------------

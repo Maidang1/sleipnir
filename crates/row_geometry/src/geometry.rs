@@ -161,9 +161,6 @@ impl RowGeometry {
     /// (for example width reflow or capped churn where the consumed history is
     /// not observable). This is intentionally not a guessed rebase.
     pub fn invalidate_anchors(&mut self) {
-        if self.spans.is_empty() {
-            return;
-        }
         self.spans.clear();
     }
 

@@ -2,7 +2,9 @@
 
 use std::ops::Range;
 
+use super::highlight;
 use diff_core::{DiffRow, FileStatus, PatchDiff};
+use sleipnir_syntax::HighlightKind;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ViewMode {
@@ -41,7 +43,7 @@ pub struct Cell {
     pub kind: LineKind,
     pub text: String,
     pub intra: Vec<Range<usize>>,
-    pub syntax: Vec<(Range<usize>, syntax::Token)>,
+    pub syntax: Vec<(Range<usize>, HighlightKind)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +69,7 @@ pub enum DisplayRow {
         kind: LineKind,
         text: String,
         intra: Vec<Range<usize>>,
-        syntax: Vec<(Range<usize>, syntax::Token)>,
+        syntax: Vec<(Range<usize>, HighlightKind)>,
     },
     SplitLine {
         left: Option<Cell>,
@@ -79,8 +81,8 @@ pub enum DisplayRow {
 #[derive(Clone, Debug)]
 pub struct FileUpgrade {
     pub new_lines: Vec<String>,
-    pub old_spans: Vec<Vec<(Range<usize>, syntax::Token)>>,
-    pub new_spans: Vec<Vec<(Range<usize>, syntax::Token)>>,
+    pub old_spans: Vec<Vec<(Range<usize>, HighlightKind)>>,
+    pub new_spans: Vec<Vec<(Range<usize>, HighlightKind)>>,
     pub expanded: std::collections::HashSet<usize>,
 }
 
@@ -133,7 +135,6 @@ pub fn build_rows_with(
             continue;
         }
         let upgrade = upgrades.get(&file_ix);
-        let lang = syntax::language_for_path(file.display_path());
         for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
             if let Some(upgrade) = upgrade {
                 push_gap(&mut rows, upgrade, &file.hunks, file_ix, hunk_ix, mode);
@@ -144,7 +145,7 @@ pub fn build_rows_with(
                     .iter()
                     .map(|row| upgrade_row_spans(upgrade, row))
                     .collect(),
-                None => hunk_syntax(lang, &hunk.rows),
+                None => hunk_syntax(file.display_path(), &hunk.rows),
             };
             hunk_rows.push(rows.len());
             let mut label = format!(
@@ -179,7 +180,7 @@ pub fn build_rows_with(
 fn push_unified(
     rows: &mut Vec<DisplayRow>,
     hunk_rows: &[DiffRow],
-    syntax_spans: &[Vec<(Range<usize>, syntax::Token)>],
+    syntax_spans: &[Vec<(Range<usize>, HighlightKind)>],
 ) {
     for (ix, row) in hunk_rows.iter().enumerate() {
         let syntax = syntax_spans.get(ix).cloned().unwrap_or_default();
@@ -227,7 +228,7 @@ fn push_unified(
 fn push_split(
     rows: &mut Vec<DisplayRow>,
     hunk_rows: &[DiffRow],
-    syntax_spans: &[Vec<(Range<usize>, syntax::Token)>],
+    syntax_spans: &[Vec<(Range<usize>, HighlightKind)>],
 ) {
     let mut i = 0;
     while i < hunk_rows.len() {
@@ -389,7 +390,7 @@ fn push_gap(
     }
 }
 
-fn upgrade_row_spans(upgrade: &FileUpgrade, row: &DiffRow) -> Vec<(Range<usize>, syntax::Token)> {
+fn upgrade_row_spans(upgrade: &FileUpgrade, row: &DiffRow) -> Vec<(Range<usize>, HighlightKind)> {
     let (table, no, text) = match row {
         DiffRow::Context { new_no, text, .. } | DiffRow::Added { new_no, text, .. } => {
             (&upgrade.new_spans, *new_no, text)
@@ -402,11 +403,8 @@ fn upgrade_row_spans(upgrade: &FileUpgrade, row: &DiffRow) -> Vec<(Range<usize>,
     table.get(no as usize - 1).cloned().unwrap_or_default()
 }
 
-fn hunk_syntax(
-    lang: Option<&'static syntax::Language>,
-    rows: &[DiffRow],
-) -> Vec<Vec<(Range<usize>, syntax::Token)>> {
-    let Some(lang) = lang else {
+fn hunk_syntax(path: &str, rows: &[DiffRow]) -> Vec<Vec<(Range<usize>, HighlightKind)>> {
+    let Some(lang) = highlight::language(path) else {
         return vec![Vec::new(); rows.len()];
     };
     let mut old_source = String::new();
@@ -442,7 +440,7 @@ fn hunk_syntax(
         if source.is_empty() || source.len() > MAX_HUNK_SOURCE_BYTES {
             Vec::new()
         } else {
-            syntax::highlight_lines(lang, source)
+            highlight::highlight_lines(lang, source)
         }
     };
     let old_spans = highlight(&old_source);
@@ -718,7 +716,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(
             syntax
                 .iter()
-                .any(|(r, t)| *t == syntax::Token::Keyword && &text[r.clone()] == "fn"),
+                .any(|(r, t)| *t == HighlightKind::Keyword && &text[r.clone()] == "fn"),
             "{syntax:?}"
         );
     }

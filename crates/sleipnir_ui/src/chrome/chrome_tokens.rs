@@ -8,7 +8,44 @@
 use gpui::Hsla;
 use sleipnir_settings::TerminalPalette;
 
-use crate::theme_color;
+/// HSL (gpui convention, all 0..1) -> sRGB components 0..1.
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    if s <= f32::EPSILON {
+        return [l, l, l];
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let hue = |mut t: f32| {
+        t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    [hue(h + 1.0 / 3.0), hue(h), hue(h - 1.0 / 3.0)]
+}
+
+/// WCAG 2.1 relative luminance of an opaque color.
+fn relative_luminance(color: Hsla) -> f32 {
+    let lin = |c: f32| {
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let [r, g, b] = hsl_to_rgb(color.h, color.s, color.l);
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
 
 /// Window chrome colors derived from the active terminal palette.
 /// Terminal cell colors stay on [`TerminalPalette`]; this is shell-only.
@@ -32,7 +69,7 @@ pub struct ChromeTokens {
 
 /// White contrasts at least as well as black, so ink on this background is light.
 fn prefers_light_ink(bg: Hsla) -> bool {
-    theme_color::contrast_ratio(Hsla::white(), bg) >= theme_color::contrast_ratio(Hsla::black(), bg)
+    contrast_ratio(Hsla::white(), bg) >= contrast_ratio(Hsla::black(), bg)
 }
 
 /// Blend `ink` over `bg` until the result's contrast against `bg` meets `target`.
@@ -43,7 +80,7 @@ fn prefers_light_ink(bg: Hsla) -> bool {
 fn blend_toward_contrast(bg: Hsla, ink: Hsla, target: f32) -> Hsla {
     let bg = bg.alpha(1.0);
     let ink = ink.alpha(1.0);
-    if theme_color::contrast_ratio(ink, bg) <= target {
+    if contrast_ratio(ink, bg) <= target {
         return ink;
     }
     let mut lo = 0.0f32;
@@ -51,7 +88,7 @@ fn blend_toward_contrast(bg: Hsla, ink: Hsla, target: f32) -> Hsla {
     for _ in 0..24 {
         let mid = 0.5 * (lo + hi);
         let mixed = bg.blend(ink.alpha(mid)).alpha(1.0);
-        if theme_color::contrast_ratio(mixed, bg) < target {
+        if contrast_ratio(mixed, bg) < target {
             lo = mid;
         } else {
             hi = mid;
@@ -72,7 +109,7 @@ fn tone_for_contrast(bg: Hsla, preferred: Hsla, target: f32) -> Hsla {
     } else {
         Hsla::black()
     };
-    let ink = if theme_color::contrast_ratio(preferred, bg) + 0.05 >= target {
+    let ink = if contrast_ratio(preferred, bg) + 0.05 >= target {
         preferred
     } else {
         extreme
@@ -135,15 +172,26 @@ impl ChromeTokens {
     }
 }
 
-/// WCAG contrast ratio between two colors (assumes opaque presentation).
+/// WCAG 2.1 contrast ratio between two opaque colors (1.0 .. 21.0).
 pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
-    theme_color::contrast_ratio(a, b)
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use sleipnir_settings::{Appearance, ThemeName, palette_for_theme};
+
+    #[test]
+    fn contrast_ratio_hits_known_anchors() {
+        let white = Hsla::white();
+        let black = Hsla::black();
+        assert!((contrast_ratio(white, black) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(white, white) - 1.0).abs() < 0.01);
+        assert!((contrast_ratio(black, white) - contrast_ratio(white, black)).abs() < 1e-4);
+    }
 
     #[test]
     fn dark_themes_lift_surface_above_content() {

@@ -86,7 +86,13 @@ pub fn download_verified(
         }
         file.sync_all()
             .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+        drop(file);
         std::fs::rename(&part_path, &final_path)
+            .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
+        // The rename is not durable on its own: the directory entry it created
+        // has to be flushed, which is the one step `atomic_write` always takes
+        // and a bare rename skips.
+        atomic_write::sync_parent(&final_path)
             .map_err(|err| download_error(DownloadErrorCode::Io, err.to_string()))?;
         Ok(final_path)
     })();

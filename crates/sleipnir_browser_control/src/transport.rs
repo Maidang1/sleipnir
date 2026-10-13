@@ -137,6 +137,8 @@ fn serve_connection(
 pub struct Server {
     pub credentials: Credentials,
     stop: Arc<AtomicBool>,
+    /// The listening address, so a connect can wake a parked accept.
+    wake: SocketAddr,
     join: Option<thread::JoinHandle<()>>,
 }
 impl Server {
@@ -145,7 +147,10 @@ impl Server {
         handler: impl Fn(Request, Instant) -> Response + Send + Sync + 'static,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        listener.set_nonblocking(true)?;
+        // Blocking, and the address one connect is enough to wake: the accept
+        // below parks in the kernel instead of polling the socket at 50 Hz
+        // per window to notice that `stop` was set.
+        let wake = listener.local_addr()?;
         let credentials = Credentials {
             endpoint: listener.local_addr()?,
             token: format!(
@@ -163,50 +168,39 @@ impl Server {
         let join = thread::Builder::new()
             .name("browser-control".into())
             .spawn(move || {
-                while !stopped.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            if active.load(Ordering::Acquire) >= MAX_CONNECTIONS {
-                                let _ = write_line(
-                                    &mut stream,
-                                    &Response::error(
-                                        "busy",
-                                        "Too many concurrent browser connections",
-                                    ),
-                                );
-                                continue;
-                            }
-                            active.fetch_add(1, Ordering::AcqRel);
-                            let worker_active = active.clone();
-                            let handler = handler.clone();
-                            let token = token.clone();
-                            let stop = stopped.clone();
-                            let spawned = thread::Builder::new()
-                                .name("browser-request".into())
-                                .spawn(move || {
-                                    serve_connection(
-                                        stream,
-                                        &token,
-                                        &stop,
-                                        window,
-                                        handler.as_ref(),
-                                    );
-                                    worker_active.fetch_sub(1, Ordering::AcqRel);
-                                });
-                            if spawned.is_err() {
-                                active.fetch_sub(1, Ordering::AcqRel);
-                            }
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(20))
-                        }
-                        Err(_) => break,
+                while let Ok((mut stream, _)) = listener.accept() {
+                    if stopped.load(Ordering::Acquire) {
+                        // The wake-up connect, and nothing to serve on it.
+                        break;
+                    }
+                    if active.load(Ordering::Acquire) >= MAX_CONNECTIONS {
+                        let _ = write_line(
+                            &mut stream,
+                            &Response::error("busy", "Too many concurrent browser connections"),
+                        );
+                        continue;
+                    }
+                    active.fetch_add(1, Ordering::AcqRel);
+                    let worker_active = active.clone();
+                    let handler = handler.clone();
+                    let token = token.clone();
+                    let stop = stopped.clone();
+                    let spawned =
+                        thread::Builder::new()
+                            .name("browser-request".into())
+                            .spawn(move || {
+                                serve_connection(stream, &token, &stop, window, handler.as_ref());
+                                worker_active.fetch_sub(1, Ordering::AcqRel);
+                            });
+                    if spawned.is_err() {
+                        active.fetch_sub(1, Ordering::AcqRel);
                     }
                 }
             })?;
         Ok(Self {
             credentials,
             stop,
+            wake,
             join: Some(join),
         })
     }
@@ -214,6 +208,10 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        // One connect leaves the parked accept, and the thread sees the flag.
+        if let Ok(stream) = TcpStream::connect(self.wake) {
+            drop(stream);
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }

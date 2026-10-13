@@ -6,8 +6,8 @@ mod common;
 
 use common::*;
 use terminal::{
+    Format,
     emulator::{CursorSnapshot, Emulator, SelectionType, Side},
-    kitty::Format,
 };
 
 // ---------------------------------------------------------------------------
@@ -1232,18 +1232,51 @@ fn only_deletes_by_image_reach_a_virtual_placement() {
     assert!(emulator.graphics().get(42).is_none());
 }
 
+/// `A` frees everything, whichever kind of placement was holding it.
 #[test]
-fn a_virtual_placement_keeps_its_image_from_being_freed() {
+fn an_uppercase_delete_frees_every_placement_kind() {
     let mut emulator = virtual_emulator();
-    emulator.feed(&apc("a=p,i=42,C=1"));
     emulator.feed(&apc("a=d,d=A"));
-    // `A` frees everything, virtual or not.
     assert!(emulator.graphics().get(42).is_none());
 
     let mut emulator = virtual_emulator();
     emulator.feed(&apc("a=p,i=42,C=1"));
+    emulator.feed(&apc("a=d,d=A"));
+    assert!(emulator.graphics().get(42).is_none());
+}
+
+/// One key, one placement: an ordinary display replaces the virtual one held
+/// under the same `(image, placement)`, and a delete by position then leaves
+/// nothing holding the image.
+///
+/// The two used to be held side by side — a virtual placement survived the
+/// ordinary display of its key — which is why the rule is stated here rather
+/// than left to whichever order the client happened to send.
+#[test]
+fn an_ordinary_display_replaces_the_virtual_placement_under_the_same_key() {
+    let mut emulator = virtual_emulator();
+    emulator.feed(&apc("a=p,U=1,i=42,c=2,r=2,q=2"));
+    emulator.feed(&apc("a=p,i=42,C=1"));
+    assert_eq!(emulator.placements().len(), 1);
+
     emulator.feed(&apc("a=d,d=C"));
-    assert!(emulator.graphics().get(42).is_some());
+    assert!(emulator.graphics().get(42).is_none());
+}
+
+/// The other direction: the grid anchor a display would have taken is
+/// released, so the mark in the cell names nothing.
+#[test]
+fn a_virtual_display_releases_the_grid_anchor_of_the_key_it_replaces() {
+    let mut emulator = placed_emulator(20, 10);
+    emulator.feed(&transmit(42, 20, 40));
+    emulator.feed(&apc("a=p,i=42,c=2,r=2,C=1"));
+    assert_eq!(emulator.placements().len(), 1);
+
+    emulator.feed(&apc("a=p,U=1,i=42,c=2,r=2,q=2"));
+    assert!(
+        emulator.placements().is_empty(),
+        "the anchor went out with the placement it named"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1480,7 +1513,7 @@ fn a_frame_for_an_image_that_is_not_there_is_refused() {
 
 #[test]
 fn the_control_command_sets_state_frame_loops_and_gaps() {
-    use terminal::kitty::AnimationState;
+    use terminal::AnimationState;
     let mut emulator = animated();
     emulator.feed(&one_pixel_frame("", BLUE));
     emulator.feed(&apc("a=a,i=1,s=3,c=2,v=3,r=1,z=25"));
@@ -1537,10 +1570,10 @@ fn playing(control: &str) -> Emulator {
 fn a_stopped_animation_stays_on_its_current_frame() {
     let mut emulator = playing("c=2");
     let start = std::time::Instant::now();
-    assert_eq!(emulator.frame_at(1, start), Some((1, false)));
+    assert_eq!(emulator.frame_at(1, start), Some(1));
     assert_eq!(
         emulator.frame_at(1, start + std::time::Duration::from_secs(5)),
-        Some((1, false))
+        Some(1)
     );
 }
 
@@ -1549,18 +1582,18 @@ fn a_running_animation_steps_by_its_gaps_and_loops() {
     use std::time::Duration;
     let mut emulator = playing("s=3");
     let start = std::time::Instant::now();
-    assert_eq!(emulator.frame_at(1, start), Some((0, true)));
+    assert_eq!(emulator.frame_at(1, start), Some(0));
     assert_eq!(
         emulator.frame_at(1, start + Duration::from_millis(150)),
-        Some((1, true))
+        Some(1)
     );
     assert_eq!(
         emulator.frame_at(1, start + Duration::from_millis(250)),
-        Some((2, true))
+        Some(2)
     );
     assert_eq!(
         emulator.frame_at(1, start + Duration::from_millis(350)),
-        Some((0, true))
+        Some(0)
     );
 }
 
@@ -1571,7 +1604,7 @@ fn a_limited_animation_stops_on_its_last_frame() {
     emulator.frame_at(1, start);
     assert_eq!(
         emulator.frame_at(1, start + std::time::Duration::from_secs(5)),
-        Some((2, false))
+        Some(2)
     );
 }
 

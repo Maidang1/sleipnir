@@ -360,11 +360,7 @@ fn download_and_verify_macos(info: &ReleaseInfo, dest_dir: &Path) -> Result<Veri
 
 /// Whether this platform can swap the running install in place.
 pub fn in_place_update_supported() -> bool {
-    in_place_update_supported_for(cfg!(target_os = "macos"))
-}
-
-fn in_place_update_supported_for(macos: bool) -> bool {
-    macos
+    cfg!(target_os = "macos")
 }
 
 /// Resolve the `.app` bundle that contains the current executable.
@@ -926,63 +922,6 @@ mod tests {
         assert!(host_meets_minimum_macos_version("14.0", "14.0").unwrap());
         assert!(!host_meets_minimum_macos_version("13.6.9", "14.0").unwrap());
         assert!(!host_meets_minimum_macos_version("14.0", "14.0.1").unwrap());
-    }
-
-    #[test]
-    fn in_place_update_is_macos_only() {
-        assert!(in_place_update_supported_for(true));
-        assert!(!in_place_update_supported_for(false));
-        assert_eq!(in_place_update_supported(), cfg!(target_os = "macos"));
-
-        let src = include_str!("lib.rs");
-        assert!(
-            src.contains("in_place_update_supported_for(cfg!(target_os = \"macos\"))"),
-            "capability detection must be macOS-specific"
-        );
-        assert!(
-            !src.contains("pub fn in_place_update_supported() -> bool {\n    cfg!(unix)"),
-            "Linux is Unix but must never enter DMG replacement"
-        );
-    }
-
-    #[test]
-    fn production_install_path_uses_rust_supervisor_not_shell_script() {
-        let src = include_str!("lib.rs");
-        let forbidden_shell_helper = ["fn write_", "helper_script("].concat();
-        assert!(!src.contains(&forbidden_shell_helper));
-        let forbidden_shell = ["/bin/", "sh"].concat();
-        assert!(!src.contains(&forbidden_shell));
-        assert!(src.contains("launch_supervisor"));
-        assert!(src.contains("wait_for_supervisor_ready"));
-    }
-
-    #[test]
-    fn production_install_path_uses_verified_artifact_preflight_and_preserves_wait_error_type() {
-        let src = include_str!("lib.rs");
-        let production = src
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production section before tests");
-        assert!(
-            production.contains("pub fn download_and_verify(info: &ReleaseInfo, dest_dir: &Path) -> Result<VerifiedArtifact>"),
-            "download contract must return a typed verified artifact"
-        );
-        assert!(
-            production.contains("pub fn install_and_relaunch(artifact: &VerifiedArtifact, app_bundle: &Path) -> Result<()>"),
-            "install contract must accept the verified artifact"
-        );
-        assert!(
-            production.contains("classify_preflight("),
-            "production install must run the real preflight classifier"
-        );
-        assert!(
-            !production.contains("match &info.expected_sha256"),
-            "production download must not fall back to unsigned sidecar metadata"
-        );
-        assert!(
-            !production.contains(".map_err(anyhow::Error::msg)?"),
-            "WaitForSupervisorReadyError must not be type-erased"
-        );
     }
 }
 

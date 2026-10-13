@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
@@ -11,8 +10,6 @@ use crate::transaction::{HealthMarker, Phase, Transaction, TransactionError, sav
 use rand::RngCore as _;
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
-#[cfg(unix)]
-use std::os::fd::AsRawFd as _;
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt as _;
 #[cfg(target_os = "macos")]
@@ -49,17 +46,21 @@ impl UpdateLock {
         #[cfg(target_os = "macos")]
         options.mode(0o600);
         let file = options.open(root.join("lock")).map_err(|e| e.to_string())?;
-        let mut operation = libc::LOCK_EX;
-        if nonblocking {
-            operation |= libc::LOCK_NB;
-        }
-        // SAFETY: flock operates on this process-owned descriptor.
-        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if nonblocking && error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        // `try_lock` answers `WouldBlock` rather than waiting, which is what a
+        // nonblocking acquire is for; `lock` waits for the holder to release.
+        let locked = if nonblocking {
+            file.try_lock().map_err(|error| match error {
+                TryLockError::WouldBlock => std::io::ErrorKind::WouldBlock,
+                TryLockError::Error(error) => error.kind(),
+            })
+        } else {
+            file.lock().map_err(|error| error.kind())
+        };
+        if let Err(kind) = locked {
+            if nonblocking && kind == std::io::ErrorKind::WouldBlock {
                 return Err(UPDATE_LOCK_BUSY.into());
             }
-            return Err(error.to_string());
+            return Err(std::io::Error::from(kind).to_string());
         }
         Ok(Self(file))
     }
@@ -85,8 +86,7 @@ impl UpdateLock {
 #[cfg(unix)]
 impl Drop for UpdateLock {
     fn drop(&mut self) {
-        // SAFETY: unlocks the descriptor retained by this guard.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        let _ = self.0.unlock();
     }
 }
 
@@ -118,29 +118,15 @@ fn write_active_pointer_unlocked(root: &Path, transaction_path: &Path) -> Result
         transaction_path: transaction_path.to_path_buf(),
     };
     let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
-    let tmp = root.join(format!("active-{}.json.tmp", std::process::id()));
-    let path = active_pointer_path(root);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(target_os = "macos")]
-    options.mode(0o600);
-    let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| e.to_string())?;
-    match std::fs::hard_link(&tmp, &path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&tmp);
-            Ok(())
+    // One publication discipline, in `atomic_write`: stage, fsync, link the
+    // name into place only if it is free, fsync the parent. A pointer that
+    // survives a crash but not a power loss is the same as no pointer.
+    match atomic_write::publish_new(&active_pointer_path(root), &bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err("another update transaction is already active".into())
         }
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
-                "another update transaction is already active".into()
-            } else {
-                error.to_string()
-            })
-        }
+        Err(error) => Err(error.to_string()),
     }
 }
 

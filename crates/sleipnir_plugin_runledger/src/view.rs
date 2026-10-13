@@ -103,21 +103,12 @@ pub fn panel_tree(rows: &[PanelRow], now_unix_ms: u64, current_launch: LaunchId)
     tree.into()
 }
 
-/// Whole-tree node count, mirroring the host's budget check
-/// (`plugin_protocol::v2::measure`) without depending on the protocol crate.
-pub fn node_count(widget: &Widget) -> usize {
-    let children = match widget {
-        Widget::Col { children, .. } | Widget::Row { children, .. } => children.as_slice(),
-        _ => return 1,
-    };
-    1 + children.iter().map(node_count).sum::<usize>()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rows::rows_from_runs;
     use run_ledger::{Ledger, PaneKey, RunEvent, RunState};
+    use sleipnir_plugin::measure;
     use std::time::Duration;
 
     const TODAY: u64 = 1_700_000_000_000;
@@ -273,7 +264,8 @@ mod tests {
             .map(|i| panel_row(RunState::Failed, current, TODAY + i, Some(RunId::new_v4())))
             .collect();
         let tree = panel_tree(&rows, TODAY, current);
-        assert!(node_count(&tree) <= 500, "nodes: {}", node_count(&tree));
+        let stats = measure(&tree);
+        assert!(stats.within_budget(), "nodes: {}", stats.nodes);
         let (texts, _, _) = parts(&tree);
         assert!(
             texts.iter().any(|t| t.contains("200")),

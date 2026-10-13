@@ -1,5 +1,6 @@
 //! Git diff inspector: parse + flatten + overlay. Not a Pane.
 
+pub(crate) mod highlight;
 mod minimap;
 mod render;
 mod rows;

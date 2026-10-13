@@ -91,36 +91,38 @@ const ANCHOR_MAX: u32 = 0xF_FFFD - ANCHOR;
 const ANCHOR_COLUMN: u32 = 0x10_0000;
 const ANCHOR_COLUMN_MAX: u32 = 256;
 
-#[derive(Debug, Clone, Copy)]
-struct Placed {
-    image: u32,
-    placement: u32,
-    cols: u16,
-    rows: u16,
-    frame: Frame,
-    source: Source,
-    z: i32,
-}
-
-struct Virtual {
-    cols: u16,
-    rows: u16,
-    frame: Frame,
-    source: Source,
-    z: i32,
-}
-
-struct Relative {
-    parent: (u32, u32),
-    offset: (i32, i32),
-    cols: u16,
-    rows: u16,
-    frame: Frame,
-    source: Source,
-    z: i32,
-}
-
 const MAX_RELATIVE_DEPTH: usize = 8;
+
+/// Where a placement holds its pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Anchor {
+    /// Anchored to a grid cell carrying its mark, and numbered so the mark can
+    /// be walked back to it.
+    Grid(u32),
+    /// Held only where a [`PLACEHOLDER`] cell names it: no address of its own.
+    Virtual,
+    /// Drawn in cells from another placement's top-left corner.
+    Relative {
+        parent: (u32, u32),
+        offset: (i32, i32),
+    },
+}
+
+/// One placement, and the keys that say how it is drawn.
+///
+/// `(image, placement)` is one concept — a display of it is one placement
+/// whichever kind it is — so a single map holds them all and a display of one
+/// kind replaces the other kind under the same key.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    key: (u32, u32),
+    anchor: Anchor,
+    cols: u16,
+    rows: u16,
+    frame: Frame,
+    source: Source,
+    z: i32,
+}
 
 pub use crate::placeholder::PLACEHOLDER;
 
@@ -128,12 +130,22 @@ pub use crate::placeholder::PLACEHOLDER;
 #[derive(Default)]
 pub struct Graphics {
     store: kitty::Store,
-    placed: HashMap<u32, Placed>,
-    virtuals: HashMap<(u32, u32), Virtual>,
-    relatives: HashMap<(u32, u32), Relative>,
+    /// Every placement, by `(image, placement id)`.
+    held: HashMap<(u32, u32), Held>,
+    /// Grid anchor id to the placement key it names, for the reverse walk
+    /// from a cell mark.
+    anchors: HashMap<u32, (u32, u32)>,
     next_anchor: u32,
     cell: Option<(f32, f32)>,
-    decoded: HashMap<u32, (u64, usize, usize, Arc<gpui::RenderImage>)>,
+    /// One decoded frame, by `(image id, frame)`.
+    ///
+    /// Keyed by frame rather than by image: an animation that alternates
+    /// frames otherwise misses on every other step, and each miss re-decodes
+    /// the whole frame plus a per-pixel byte swap — 1080p is 8 MB each way.
+    /// What validates an entry is the frame's own revision from
+    /// [`kitty::Image::frame_revisions`], not the first frame's byte length,
+    /// which says nothing about any other frame.
+    decoded: HashMap<(u32, usize), (u64, u64, Arc<gpui::RenderImage>)>,
     clocks: HashMap<u32, AnimClock>,
 }
 
@@ -168,12 +180,19 @@ impl Graphics {
         let reply = match effect {
             Some(Effect::Display(display)) => match self.place(parser, term, display) {
                 Ok(()) => reply,
-                Err(error) => (display.quiet < 2).then(|| kitty::Reply {
-                    id: display.image,
-                    number: reply.as_ref().map_or(0, |reply| reply.number),
-                    placement: display.placement,
-                    error: Some(error),
-                }),
+                // A placement failure is the emulator's to report, and whether
+                // the client hears it is the store's policy, asked once.
+                Err(error) => {
+                    let failure = kitty::Reply {
+                        id: display.image,
+                        number: reply.as_ref().map_or(0, |reply| reply.number),
+                        placement: display.placement.id,
+                        error: Some(error),
+                    };
+                    failure
+                        .answers(display.placement.quiet, display.image)
+                        .then_some(failure)
+                }
             },
             Some(Effect::Delete(delete)) => {
                 self.delete(term, delete);
@@ -185,17 +204,10 @@ impl Graphics {
     }
 
     pub fn placements<L: EventListener>(&self, term: &Term<L>) -> Vec<Placement> {
-        let located = self.locate(term, term.grid().display_offset() as i32);
-        let mut out = Vec::new();
-        out.extend(located.anchored.into_iter().map(|(_, placement)| placement));
-        out.extend(located.pieces.into_iter().map(|(_, placement)| placement));
-        out.extend(
-            located
-                .relatives
-                .into_iter()
-                .map(|(_, placement)| placement),
-        );
-        out
+        self.locate(term, term.grid().display_offset() as i32)
+            .into_iter()
+            .map(|located| located.placement)
+            .collect()
     }
 
     /// Placements on screen, decoded into the BGRA buffer gpui paints.
@@ -203,16 +215,16 @@ impl Graphics {
     pub fn painted<L: EventListener>(&mut self, term: &Term<L>) -> Vec<PaintedImage> {
         let placements = self.placements(term);
         let mut out = Vec::with_capacity(placements.len());
+        // One clock read for the whole frame: the placements on screen are
+        // painted against the same instant, whether they animate or not.
+        let now = Instant::now();
         for placement in placements {
             let Some((width, height)) =
                 self.store.get(placement.image).and_then(kitty::Image::size)
             else {
                 continue;
             };
-            let frame = self
-                .frame_index(placement.image, Instant::now())
-                .map(|(index, _)| index)
-                .unwrap_or(0);
+            let frame = self.frame_index(placement.image, now).unwrap_or(0);
             let Some(decoded) = self.decoded(placement.image, frame) else {
                 continue;
             };
@@ -230,8 +242,13 @@ impl Graphics {
         out
     }
 
-    /// The frame `id` shows at `now`, and whether another frame is scheduled.
-    pub fn frame_index(&mut self, id: u32, now: Instant) -> Option<(usize, bool)> {
+    /// The frame `id` shows at `now`.
+    ///
+    /// Nothing but the paint path reads this, and it reads only the frame:
+    /// whether another one is scheduled was asked and thrown away at the one
+    /// production call site, so it is not returned any more. The clock still
+    /// tracks the answer, because a frame that repeats is what the gaps say.
+    pub fn frame_index(&mut self, id: u32, now: Instant) -> Option<usize> {
         use kitty::AnimationState;
         let (animation, count, gaps) = {
             let image = self.store.get(id)?;
@@ -258,22 +275,34 @@ impl Graphics {
             || count == 1
             || (0..count).all(|frame| gap_of(frame).is_zero())
         {
-            return Some((clock.frame, false));
+            return Some(clock.frame);
         }
-        for _ in 0..10_000 {
+        // Every advance consumes one frame's gap, so the elapsed time divided
+        // by the shortest gap bounds how many there can be — the arithmetic
+        // standing in for the round number this loop used to carry.
+        let shortest = gaps
+            .iter()
+            .copied()
+            .filter(|gap| *gap != 0)
+            .min()
+            .unwrap_or(1)
+            .max(1);
+        let steps = (now.saturating_duration_since(clock.shown_at).as_millis()
+            / u128::from(shortest)) as usize;
+        for _ in 0..=steps {
             let gap = gap_of(clock.frame);
             let due = clock.shown_at + gap;
             if !gap.is_zero() && now < due {
-                return Some((clock.frame, true));
+                return Some(clock.frame);
             }
             let mut next = clock.frame + 1;
             if next == count {
                 if animation.state == AnimationState::Loading {
                     clock.waiting = true;
-                    return Some((clock.frame, false));
+                    return Some(clock.frame);
                 }
                 if animation.loops != 0 && clock.loops + 1 >= animation.loops {
-                    return Some((clock.frame, false));
+                    return Some(clock.frame);
                 }
                 clock.loops += 1;
                 next = 0;
@@ -286,23 +315,42 @@ impl Graphics {
             };
         }
         clock.shown_at = now;
-        Some((clock.frame, true))
+        Some(clock.frame)
     }
 
     fn decoded(&mut self, id: u32, frame: usize) -> Option<Arc<gpui::RenderImage>> {
         let image = self.store.get(id)?;
-        let key = (image.revision, image.bytes.len(), frame);
-        if let Some((revision, len, cached_frame, cached)) = self.decoded.get(&id)
-            && *revision == key.0
-            && *len == key.1
-            && *cached_frame == key.2
+        // The frame's own revision, zero where it has never changed: a frame
+        // redrawn by `a=f` bumps it, and a new image under an existing id
+        // bumps the image's.
+        let frame_revision = image.frame_revisions.get(frame).copied().unwrap_or(0);
+        if let Some((revision, cached_frame, cached)) = self.decoded.get(&(id, frame))
+            && *revision == image.revision
+            && *cached_frame == frame_revision
         {
             return Some(cached.clone());
         }
         let decoded = decode_frame(image, frame)?;
-        self.decoded
-            .insert(id, (key.0, key.1, key.2, decoded.clone()));
+        self.decoded.insert(
+            (id, frame),
+            (image.revision, frame_revision, decoded.clone()),
+        );
         Some(decoded)
+    }
+
+    /// Put `held` where it belongs, replacing whatever the key held before.
+    ///
+    /// The grid anchor a replaced placement was carrying goes with it, so a
+    /// mark in the grid can never name a placement that no longer sits there.
+    fn insert(&mut self, held: Held) {
+        if let Some(was) = self.held.insert(held.key, held)
+            && let Anchor::Grid(anchor) = was.anchor
+        {
+            self.anchors.remove(&anchor);
+        }
+        if let Anchor::Grid(anchor) = held.anchor {
+            self.anchors.insert(anchor, held.key);
+        }
     }
 
     fn place<L: EventListener>(
@@ -311,27 +359,22 @@ impl Graphics {
         term: &mut Term<L>,
         display: kitty::Display,
     ) -> Result<(), &'static str> {
-        if display.parent_image != 0 {
+        if display.placement.parent_image != 0 {
             return self.relate(display);
         }
         let Some((cols, rows, frame, source)) = self.extent(&display) else {
             return Ok(());
         };
-        let key = (display.image, display.placement);
-        if display.unicode {
-            self.placed
-                .retain(|_, placed| (placed.image, placed.placement) != key);
-            self.relatives.remove(&key);
-            self.virtuals.insert(
-                key,
-                Virtual {
-                    cols: cols.max(1.0).min(u16::MAX as f32) as u16,
-                    rows: rows.max(1.0).min(u16::MAX as f32) as u16,
-                    frame,
-                    source,
-                    z: display.z,
-                },
-            );
+        if display.placement.unicode {
+            self.insert(Held {
+                key: (display.image, display.placement.id),
+                anchor: Anchor::Virtual,
+                cols: cols.max(1.0).min(u16::MAX as f32) as u16,
+                rows: rows.max(1.0).min(u16::MAX as f32) as u16,
+                frame,
+                source,
+                z: display.placement.z,
+            });
             return Ok(());
         }
         let cols = (cols as usize).clamp(1, term.columns()) as u16;
@@ -341,9 +384,12 @@ impl Graphics {
     }
 
     fn relate(&mut self, display: kitty::Display) -> Result<(), &'static str> {
-        let key = (display.image, display.placement);
-        let parent = (display.parent_image, display.parent_placement);
-        if display.unicode {
+        let key = (display.image, display.placement.id);
+        let parent = (
+            display.placement.parent_image,
+            display.placement.parent_placement,
+        );
+        if display.placement.unicode {
             return Err("EINVAL:a virtual placement cannot be relative");
         }
         if !self.exists(parent) {
@@ -351,69 +397,63 @@ impl Graphics {
         }
         let mut depth = 1;
         let mut at = parent;
-        loop {
+        while let Some(held) = self.held.get(&at) {
             if at == key {
                 return Err("ECYCLE");
             }
-            match self.relatives.get(&at) {
-                Some(relative) => {
-                    depth += 1;
-                    at = relative.parent;
-                }
-                None => break,
+            let Anchor::Relative { parent, .. } = held.anchor else {
+                break;
+            };
+            depth += 1;
+            if depth > MAX_RELATIVE_DEPTH {
+                return Err("ETOODEEP");
             }
-        }
-        if depth > MAX_RELATIVE_DEPTH {
-            return Err("ETOODEEP");
+            at = parent;
         }
         let Some((cols, rows, frame, source)) = self.extent(&display) else {
             return Ok(());
         };
-        self.placed
-            .retain(|_, placed| (placed.image, placed.placement) != key);
-        self.virtuals.remove(&key);
-        self.relatives.insert(
+        self.insert(Held {
             key,
-            Relative {
+            anchor: Anchor::Relative {
                 parent,
-                offset: (display.parent_offset_x, display.parent_offset_y),
-                cols: cols.clamp(1.0, u16::MAX as f32) as u16,
-                rows: rows.clamp(1.0, u16::MAX as f32) as u16,
-                frame,
-                source,
-                z: display.z,
+                offset: (
+                    display.placement.parent_offset_x,
+                    display.placement.parent_offset_y,
+                ),
             },
-        );
+            cols: cols.clamp(1.0, u16::MAX as f32) as u16,
+            rows: rows.clamp(1.0, u16::MAX as f32) as u16,
+            frame,
+            source,
+            z: display.placement.z,
+        });
         Ok(())
     }
 
+    /// Whether anything is held under `key`, whatever kind it is.
     fn exists(&self, key: (u32, u32)) -> bool {
-        self.placed
-            .values()
-            .any(|placed| (placed.image, placed.placement) == key)
-            || self.virtuals.contains_key(&key)
-            || self.relatives.contains_key(&key)
+        self.held.contains_key(&key)
     }
 
+    /// Whether `image` is held by any placement, whatever kind it is.
     fn shown(&self, image: u32) -> bool {
-        self.placed.values().any(|placed| placed.image == image)
-            || self.virtuals.keys().any(|held| held.0 == image)
-            || self.relatives.keys().any(|held| held.0 == image)
+        self.held.values().any(|held| held.key.0 == image)
     }
 
     fn extent(&self, display: &kitty::Display) -> Option<(f32, f32, Frame, Source)> {
         let (cell_w, cell_h) = self.cell?;
         let (width, height) = self.store.get(display.image).and_then(kitty::Image::size)?;
-        let x = display.source_x.min(width);
-        let y = display.source_y.min(height);
+        let x = display.placement.source.x.min(width);
+        let y = display.placement.source.y.min(height);
         let source = Source {
             x,
             y,
-            width: match display.source_width {
+            width: match display.placement.source.width {
                 0 => width - x,
                 w => w.min(width - x),
             },
-            height: match display.source_height {
+            height: match display.placement.source.height {
                 0 => height - y,
                 h => h.min(height - y),
             },
@@ -422,9 +462,13 @@ impl Graphics {
             return None;
         }
         let (source_w, source_h) = (source.width as f32, source.height as f32);
-        let offset_x = (display.offset_x as f32).min(cell_w - 1.0).max(0.0);
-        let offset_y = (display.offset_y as f32).min(cell_h - 1.0).max(0.0);
-        let (cols, rows, frame) = match (display.columns, display.rows) {
+        let offset_x = (display.placement.offset_x as f32)
+            .min(cell_w - 1.0)
+            .max(0.0);
+        let offset_y = (display.placement.offset_y as f32)
+            .min(cell_h - 1.0)
+            .max(0.0);
+        let (cols, rows, frame) = match (display.placement.columns, display.placement.rows) {
             (0, 0) => (
                 ((offset_x + source_w) / cell_w).ceil(),
                 ((offset_y + source_h) / cell_h).ceil(),
@@ -473,11 +517,14 @@ impl Graphics {
         source: Source,
     ) {
         let image = display.image;
-        self.placed
-            .retain(|_, placed| placed.image != image || placed.placement != display.placement);
+        let key = (image, display.placement.id);
         let anchor = self.next_anchor % ANCHOR_MAX;
         self.next_anchor = anchor.wrapping_add(1);
-        self.placed.remove(&anchor);
+        // An id is handed out again once the counter wraps, and whatever it
+        // was anchoring is gone with it.
+        if let Some(was) = self.anchors.remove(&anchor) {
+            self.held.remove(&was);
+        }
 
         let cursor = term.grid().cursor.point;
         let width = (cols as usize)
@@ -496,7 +543,7 @@ impl Graphics {
                     .filter(|&mark| !is_anchor(mark))
                     .collect();
                 for (live, column) in anchor_pairs(marks) {
-                    if !self.placed.contains_key(&live) {
+                    if !self.anchors.contains_key(&live) {
                         continue;
                     }
                     kept.extend(char::from_u32(ANCHOR + live));
@@ -515,70 +562,75 @@ impl Graphics {
                 }
             }
         }
-        self.placed.insert(
-            anchor,
-            Placed {
-                image,
-                placement: display.placement,
-                cols,
-                rows,
-                frame,
-                source,
-                z: display.z,
-            },
-        );
-        if display.cursor_movement == kitty::CursorMovement::After {
+        self.insert(Held {
+            key,
+            anchor: Anchor::Grid(anchor),
+            cols,
+            rows,
+            frame,
+            source,
+            z: display.placement.z,
+        });
+        if display.placement.cursor_movement == kitty::CursorMovement::After {
             for _ in 0..rows {
                 parser.advance(term, b"\n");
             }
         }
     }
 
-    fn locate<L: EventListener>(&self, term: &Term<L>, offset: i32) -> Located {
-        let mut anchored: Vec<(u32, Placement)> = Vec::new();
+    /// Every placement on screen, in the order the paint path draws them:
+    /// anchored first, then the virtual runs, then the relatives.
+    ///
+    /// One walk over the grid and one over the placements, answering one list.
+    fn locate<L: EventListener>(&self, term: &Term<L>, offset: i32) -> Vec<Located> {
+        let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut pieces: Vec<((u32, u32), Placement)> = Vec::new();
         let grid = term.grid();
         let rows = term.screen_lines();
         let cols = term.columns();
         for row in 0..rows {
             let line = Line(row as i32 - offset);
-            let mut decoder =
-                (!self.virtuals.is_empty()).then(crate::placeholder::RowDecoder::default);
+            let mut decoder = self
+                .virtuals()
+                .next()
+                .map(|_| crate::placeholder::RowDecoder::default());
             let mut run: Option<((u32, u32), crate::placeholder::Slot, usize)> = None;
             for col in 0..cols {
                 let cell = &grid[line][Column(col)];
                 let marks = cell.zerowidth().unwrap_or(&[]);
                 for (anchor, within) in anchor_pairs(marks) {
-                    let Some(placed) = self.placed.get(&anchor) else {
+                    let Some(&key) = self.anchors.get(&anchor) else {
+                        continue;
+                    };
+                    let Some(held) = self.held.get(&key) else {
                         continue;
                     };
                     if !seen.insert(anchor) {
                         continue;
                     }
                     let within = within.unwrap_or(0);
-                    anchored.push((
-                        anchor,
-                        Placement {
+                    out.push(Located {
+                        key,
+                        anchor: held.anchor,
+                        placement: Placement {
                             row,
                             col: col.saturating_sub(within),
-                            cols: placed.cols,
-                            rows: placed.rows,
-                            image: placed.image,
-                            frame: placed.frame,
-                            source: placed.source,
-                            z: placed.z,
+                            cols: held.cols,
+                            rows: held.rows,
+                            image: held.key.0,
+                            frame: held.frame,
+                            source: held.source,
+                            z: held.z,
                         },
-                    ));
+                    });
                 }
                 let Some(decoder) = decoder.as_mut() else {
                     continue;
                 };
-                let shown = decoder.cell(cell).and_then(|slot| {
-                    self.shown_by(slot)
-                        .map(|(key, virtual_)| (slot, key, virtual_))
-                });
-                let Some((slot, key, virtual_)) = shown else {
+                let shown = decoder
+                    .cell(cell)
+                    .and_then(|slot| self.shown_by(slot).map(|(key, held)| (slot, key, held)));
+                let Some((slot, key, held)) = shown else {
                     run = None;
                     continue;
                 };
@@ -587,78 +639,91 @@ impl Graphics {
                     && last.row == slot.row
                     && last.col + 1 == slot.col
                 {
-                    pieces[*at].1.cols += 1;
+                    out[*at].placement.cols += 1;
                     *last = slot;
                     continue;
                 }
-                run = Some((key, slot, pieces.len()));
-                pieces.push((
+                run = Some((key, slot, out.len()));
+                out.push(Located {
                     key,
-                    Placement {
+                    anchor: Anchor::Virtual,
+                    placement: Placement {
                         row,
                         col,
                         cols: 1,
                         rows: 1,
                         image: key.0,
                         frame: Frame {
-                            x: virtual_.frame.x - slot.col as f32,
-                            y: virtual_.frame.y - slot.row as f32,
-                            ..virtual_.frame
+                            x: held.frame.x - slot.col as f32,
+                            y: held.frame.y - slot.row as f32,
+                            ..held.frame
                         },
-                        source: virtual_.source,
-                        z: virtual_.z,
+                        source: held.source,
+                        z: held.z,
                     },
-                ));
+                });
             }
         }
-        let mut relatives = Vec::new();
-        if !self.relatives.is_empty() {
-            let mut at = HashMap::<(u32, u32), (i64, i64)>::new();
-            for (anchor, placement) in &anchored {
-                if let Some(placed) = self.placed.get(anchor) {
-                    at.insert(
-                        (placed.image, placed.placement),
-                        (placement.row as i64, placement.col as i64),
-                    );
-                }
-            }
-            for (key, placement) in &pieces {
-                let spot = at
-                    .entry(*key)
-                    .or_insert((placement.row as i64, placement.col as i64));
-                *spot = (
-                    spot.0.min(placement.row as i64),
-                    spot.1.min(placement.col as i64),
+        if self.relatives().next().is_none() {
+            return out;
+        }
+        let mut at = HashMap::<(u32, u32), (i64, i64)>::new();
+        for located in &out {
+            if let Anchor::Grid(_) = located.anchor {
+                at.insert(
+                    located.key,
+                    (located.placement.row as i64, located.placement.col as i64),
                 );
             }
-            for (&key, _) in &self.relatives {
-                let Some((row, col)) = self.relative_spot(key, &at) else {
-                    continue;
-                };
-                if row < 0 || col < 0 || row >= rows as i64 || col >= cols as i64 {
-                    continue;
-                }
-                let relative = &self.relatives[&key];
-                relatives.push((
-                    key,
-                    Placement {
-                        row: row as usize,
-                        col: col as usize,
-                        cols: relative.cols,
-                        rows: relative.rows,
-                        image: key.0,
-                        frame: relative.frame,
-                        source: relative.source,
-                        z: relative.z,
-                    },
-                ));
+        }
+        for located in &out {
+            if let Anchor::Virtual = located.anchor {
+                let spot = at
+                    .entry(located.key)
+                    .or_insert((located.placement.row as i64, located.placement.col as i64));
+                *spot = (
+                    spot.0.min(located.placement.row as i64),
+                    spot.1.min(located.placement.col as i64),
+                );
             }
         }
-        Located {
-            anchored,
-            pieces,
-            relatives,
+        for (&key, held) in self.relatives() {
+            let Some((row, col)) = self.relative_spot(key, &at) else {
+                continue;
+            };
+            if row < 0 || col < 0 || row >= rows as i64 || col >= cols as i64 {
+                continue;
+            }
+            out.push(Located {
+                key,
+                anchor: held.anchor,
+                placement: Placement {
+                    row: row as usize,
+                    col: col as usize,
+                    cols: held.cols,
+                    rows: held.rows,
+                    image: held.key.0,
+                    frame: held.frame,
+                    source: held.source,
+                    z: held.z,
+                },
+            });
         }
+        out
+    }
+
+    /// Every virtual placement, by key.
+    fn virtuals(&self) -> impl Iterator<Item = (&(u32, u32), &Held)> {
+        self.held
+            .iter()
+            .filter(|(_, held)| held.anchor == Anchor::Virtual)
+    }
+
+    /// Every relative placement, by key.
+    fn relatives(&self) -> impl Iterator<Item = (&(u32, u32), &Held)> {
+        self.held
+            .iter()
+            .filter(|(_, held)| matches!(held.anchor, Anchor::Relative { .. }))
     }
 
     fn relative_spot(
@@ -670,132 +735,119 @@ impl Graphics {
         let mut col = 0i64;
         let mut key = key;
         for _ in 0..=MAX_RELATIVE_DEPTH {
-            let Some(relative) = self.relatives.get(&key) else {
+            let Some(held) = self.held.get(&key) else {
                 return at.get(&key).map(|&(r, c)| (r + row, c + col));
             };
-            row += relative.offset.1 as i64;
-            col += relative.offset.0 as i64;
-            key = relative.parent;
+            let Anchor::Relative { parent, offset } = held.anchor else {
+                return at.get(&key).map(|&(r, c)| (r + row, c + col));
+            };
+            row += offset.1 as i64;
+            col += offset.0 as i64;
+            key = parent;
         }
         None
     }
 
-    fn shown_by(&self, slot: crate::placeholder::Slot) -> Option<((u32, u32), &Virtual)> {
+    /// The virtual placement a slot names, and the key it is held under.
+    fn shown_by(&self, slot: crate::placeholder::Slot) -> Option<((u32, u32), Held)> {
         let key = match slot.placement {
             0 => self
-                .virtuals
-                .keys()
-                .filter(|image| image.0 == slot.image)
-                .min()
-                .copied()?,
+                .virtuals()
+                .map(|(key, _)| *key)
+                .filter(|key| key.0 == slot.image)
+                .min()?,
             placement => (slot.image, placement),
         };
-        let virtual_ = self.virtuals.get(&key)?;
-        (slot.row < virtual_.rows as u32 && slot.col < virtual_.cols as u32)
-            .then_some((key, virtual_))
+        let held = *self.held.get(&key)?;
+        (held.anchor == Anchor::Virtual
+            && slot.row < held.rows as u32
+            && slot.col < held.cols as u32)
+            .then_some((key, held))
     }
 
     fn delete<L: EventListener>(&mut self, term: &Term<L>, delete: kitty::Delete) {
         use kitty::Target;
         if delete.target == Target::All && delete.free {
-            self.placed.clear();
-            self.virtuals.clear();
-            self.relatives.clear();
+            self.held.clear();
+            self.anchors.clear();
             self.decoded.clear();
             self.store.clear();
             return;
         }
-        let covers = |p: &Placement, col: u32, row: u32| {
-            let (col, row) = (col as usize, row as usize);
-            (p.col..p.col + p.cols as usize).contains(&col)
-                && (p.row..p.row + p.rows as usize).contains(&row)
-        };
-        let names = |image: u32, placement: u32, z: i32| match delete.target {
-            Target::Image { id, placement: p } => Some(image == id && (p == 0 || placement == p)),
-            Target::Range(low, high) => Some((low..=high).contains(&image)),
-            Target::Z(want) => Some(z == want),
-            _ => None,
-        };
-        let by_name = matches!(
-            delete.target,
-            Target::Image { .. } | Target::Range(..) | Target::Z(_)
-        );
-        let mut anchors = Vec::new();
-        let mut keys = Vec::new();
-        if by_name {
-            anchors.extend(
-                self.placed
-                    .iter()
-                    .filter(|(_, p)| names(p.image, p.placement, p.z) == Some(true))
-                    .map(|(&anchor, _)| anchor),
-            );
-            keys.extend(
-                self.relatives
-                    .iter()
-                    .filter(|(key, relative)| names(key.0, key.1, relative.z) == Some(true))
-                    .map(|(&key, _)| key),
-            );
+        // The keys this delete names: by image and placement, or by the cells
+        // they cover. A virtual placement has no position of its own, so a
+        // delete by position never reaches one.
+        let named: Vec<(u32, u32)> = if delete.target.names_images() {
+            self.held
+                .iter()
+                .filter(|(key, held)| {
+                    let z = match held.anchor {
+                        Anchor::Virtual => None,
+                        Anchor::Grid(_) | Anchor::Relative { .. } => Some(held.z),
+                    };
+                    delete.target.matches(key.0, key.1, z)
+                })
+                .map(|(key, _)| *key)
+                .collect()
         } else {
             let cursor = term.grid().cursor.point;
-            let hit = |p: &Placement| match delete.target {
-                Target::Cursor => covers(p, cursor.column.0 as u32, cursor.line.0.max(0) as u32),
-                Target::Cell { col, row, z } => covers(p, col, row) && z.is_none_or(|z| p.z == z),
-                Target::Column(col) => (p.col..p.col + p.cols as usize).contains(&(col as usize)),
-                Target::Row(row) => (p.row..p.row + p.rows as usize).contains(&(row as usize)),
-                _ => true,
-            };
-            let located = self.locate(term, 0);
-            anchors.extend(
-                located
-                    .anchored
-                    .into_iter()
-                    .filter(|(_, placement)| hit(placement))
-                    .map(|(anchor, _)| anchor),
-            );
-            keys.extend(
-                located
-                    .relatives
-                    .into_iter()
-                    .filter(|(_, placement)| hit(placement))
-                    .map(|(key, _)| key),
-            );
-        }
+            self.locate(term, 0)
+                .into_iter()
+                .filter(|located| located.anchor != Anchor::Virtual)
+                .filter(|located| {
+                    let p = &located.placement;
+                    match delete.target {
+                        Target::All => true,
+                        Target::Cursor => Target::covers(
+                            delete.target,
+                            p,
+                            cursor.column.0 as u32,
+                            cursor.line.0.max(0) as u32,
+                        ),
+                        Target::Cell { col, row, z } => {
+                            Target::covers(delete.target, p, col, row) && z.is_none_or(|z| p.z == z)
+                        }
+                        Target::Column(col) => {
+                            (p.col..p.col + p.cols as usize).contains(&(col as usize))
+                        }
+                        Target::Row(row) => {
+                            (p.row..p.row + p.rows as usize).contains(&(row as usize))
+                        }
+                        // By-name targets took the branch above; the arm
+                        // exists so the partition is stated on both sides.
+                        Target::Image { .. } | Target::Range(..) | Target::Z(_) => false,
+                    }
+                })
+                .map(|located| located.key)
+                .collect()
+        };
         let mut touched = Vec::new();
-        if !matches!(delete.target, Target::Z(_)) && by_name {
-            self.virtuals.retain(|&(image, placement), _| {
-                let hit = names(image, placement, 0) == Some(true);
-                if hit {
-                    touched.push(image);
+        for key in named {
+            if let Some(held) = self.held.remove(&key) {
+                touched.push(held.key.0);
+                if let Anchor::Grid(anchor) = held.anchor {
+                    self.anchors.remove(&anchor);
                 }
-                !hit
-            });
-        }
-        touched.extend(
-            anchors
-                .iter()
-                .filter_map(|anchor| self.placed.remove(anchor))
-                .map(|placed| placed.image),
-        );
-        for key in keys {
-            if self.relatives.remove(&key).is_some() {
-                touched.push(key.0);
             }
         }
+        // A relative whose parent is gone has nothing to be relative to.
         loop {
             let orphans: Vec<(u32, u32)> = self
-                .relatives
-                .iter()
-                .filter(|(_, relative)| !self.exists(relative.parent))
-                .map(|(&key, _)| key)
+                .relatives()
+                .filter(|(_, held)| {
+                    matches!(held.anchor, Anchor::Relative { parent, .. } if !self.exists(parent))
+                })
+                .map(|(key, _)| *key)
                 .collect();
             if orphans.is_empty() {
                 break;
             }
             for key in orphans {
-                self.relatives.remove(&key);
-                if !self.shown(key.0) {
-                    self.decoded.remove(&key.0);
-                    self.store.remove(key.0);
+                if let Some(held) = self.held.remove(&key)
+                    && !self.shown(held.key.0)
+                {
+                    self.decoded.retain(|(id, _), _| *id != held.key.0);
+                    self.store.remove(held.key.0);
                 }
             }
         }
@@ -807,11 +859,19 @@ impl Graphics {
         }
         for image in touched {
             if !self.shown(image) {
-                self.decoded.remove(&image);
+                self.decoded.retain(|(id, _), _| *id != image);
                 self.store.remove(image);
             }
         }
     }
+}
+
+/// One placement on screen, and the key it is held under.
+#[derive(Clone, Copy)]
+struct Located {
+    key: (u32, u32),
+    anchor: Anchor,
+    placement: Placement,
 }
 
 #[derive(Clone, Copy)]
@@ -821,12 +881,6 @@ struct AnimClock {
     shown_at: Instant,
     loops: u32,
     waiting: bool,
-}
-
-struct Located {
-    anchored: Vec<(u32, Placement)>,
-    pieces: Vec<((u32, u32), Placement)>,
-    relatives: Vec<((u32, u32), Placement)>,
 }
 
 /// What one chunk of pty output asked the host to do.
@@ -856,10 +910,6 @@ pub fn feed<L: EventListener>(
                 }
             }
             Segment::Sync(hold) => syncs.push(hold),
-            Segment::Sixel(_)
-            | Segment::Iterm(_)
-            | Segment::Directory(_)
-            | Segment::CellSizeQuery => {}
         }
     }
     Fed { replies, syncs }

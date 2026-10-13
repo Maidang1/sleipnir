@@ -29,6 +29,40 @@ pub struct Span {
 /// is read.
 const TEMP_MARKER: &str = "tty-graphics-protocol";
 
+/// The roots a payload is never read from: their files are not files, and
+/// opening one can do something.
+///
+/// `/dev/shm` is the exception, and it is a shared memory object's home
+/// rather than a device: [`read_shared`] reaches it by name, and a payload
+/// under it is the one thing in `/dev` worth reading.
+const SENSITIVE_ROOTS: &[&str] = &["/proc", "/sys", "/dev"];
+
+/// Whether `path` sits under `root`.
+///
+/// The roots are compared canonicalized — `/tmp` is a symlink on macOS, and
+/// `TMPDIR` is whatever the caller set — because a canonicalized payload path
+/// is what the check is asked about.
+fn is_under(root: &Path, path: &Path) -> bool {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    path.starts_with(root)
+}
+
+/// The roots a temporary file may be read from to be deleted after.
+///
+/// The temporary directory a reader cares about is the writer's, so it is
+/// gathered per read rather than held: `TMPDIR` is per process.
+fn temporary_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/dev/shm"),
+        std::env::temp_dir(),
+    ];
+    if let Some(dir) = std::env::var_os("TMPDIR") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots
+}
+
 /// Read the payload `name` stands for under `medium`, at most `max` bytes.
 pub fn read(medium: char, name: &[u8], span: Span, max: usize) -> Result<Vec<u8>, Unreadable> {
     let name = std::str::from_utf8(name).map_err(|_| Unreadable)?;
@@ -56,10 +90,11 @@ fn resolve(name: &str) -> Result<PathBuf, Unreadable> {
         return Err(Unreadable);
     }
     let path = path.canonicalize().map_err(|_| Unreadable)?;
-    let sensitive = ["/proc", "/sys", "/dev"]
+    let sensitive = SENSITIVE_ROOTS
         .iter()
-        .any(|root| path.starts_with(root));
-    if sensitive && !path.starts_with("/dev/shm") {
+        .map(Path::new)
+        .any(|root| is_under(root, &path));
+    if sensitive && !is_under(Path::new("/dev/shm"), &path) {
         return Err(Unreadable);
     }
     if !path.metadata().map_err(|_| Unreadable)?.is_file() {
@@ -89,19 +124,8 @@ fn read_file(path: &Path, span: Span, max: usize) -> Result<Vec<u8>, Unreadable>
 /// Whether a temporary file is one the terminal may delete: under a known
 /// temporary directory, with [`TEMP_MARKER`] in its path.
 fn is_temporary(path: &Path) -> bool {
-    let mut roots: Vec<PathBuf> = vec![
-        PathBuf::from("/tmp"),
-        PathBuf::from("/dev/shm"),
-        std::env::temp_dir(),
-    ];
-    if let Some(dir) = std::env::var_os("TMPDIR") {
-        roots.push(PathBuf::from(dir));
-    }
-    let under = roots.iter().any(|root| {
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        path.starts_with(root)
-    });
-    under && path.to_string_lossy().contains(TEMP_MARKER)
+    temporary_roots().iter().any(|root| is_under(root, path))
+        && path.to_string_lossy().contains(TEMP_MARKER)
 }
 
 /// A POSIX shared memory object, unlinked once read whether or not the read

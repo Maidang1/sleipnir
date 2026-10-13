@@ -10,7 +10,10 @@
 
 pub mod emulator;
 pub mod graphics;
-pub mod kitty;
+// The kitty modules are this crate's own: nothing outside it reaches them, and
+// keeping them `pub` let whatever dies inside stay invisible. The scanner
+// stays `pub` for the integration tests that pin its byte-level behavior.
+pub(crate) mod kitty;
 mod mappings;
 mod media;
 mod pixels;
@@ -28,6 +31,10 @@ mod scroll_follow;
 mod shell_semantics;
 pub mod terminal_settings;
 
+/// The store is public surface; the module that holds it is not. The types
+/// cross the boundary because [`crate::emulator::Emulator::graphics`] hands a
+/// [`Store`] out, and an image carries its format and its animation.
+pub use crate::kitty::{Animation, AnimationState, Format, Image, Store};
 pub use osc_notify::{OscNotify, scan_osc_notify};
 pub use osc133::{
     Osc133Kind, Osc133Marker, Osc133Scanner, absolute_to_display_line,

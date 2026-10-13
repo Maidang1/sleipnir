@@ -3,7 +3,7 @@
 
 use crate::HighlightKind;
 use std::{ops::Range, sync::Arc};
-use tree_sitter::Language;
+use tree_sitter::{Language, Query};
 use tree_sitter_highlight::HighlightConfiguration;
 use tree_sitter_language::LanguageFn;
 
@@ -174,6 +174,40 @@ impl Lang {
 /// it. [`crate::registry::of_tag`] answers for a tag it can only name.
 pub fn resolve(tag: &str) -> Option<&'static Lang> {
     crate::registry::of_tag(tag)?.lang()
+}
+
+/// What each of a query's captures paints, indexed as the query indexes them.
+///
+/// `None` is a capture [`kind_of`] does not answer to: it paints nothing, but
+/// it still claims its node, so a name inside it gets no chance.
+pub fn capture_kinds(query: &Query) -> Vec<Option<HighlightKind>> {
+    query
+        .capture_names()
+        .iter()
+        .map(|name| recognized(name).map(kind_of))
+        .collect()
+}
+
+/// The entry of [`NAMES`] a capture name paints as: the one with the most
+/// dot-separated parts, all of them among the capture's.
+///
+/// This is the rule `HighlightConfiguration::configure` applies when it is
+/// given `NAMES`, restated for a query built by hand — a [`crate::Document`]
+/// compiles its own, and a capture index means whatever the query that
+/// produced it decided.
+fn recognized(capture: &str) -> Option<&'static str> {
+    let parts: Vec<&str> = capture.split('.').collect();
+    // The first of the longest, as `configure` breaks a tie.
+    let mut best: Option<(&'static str, usize)> = None;
+    for name in NAMES {
+        let len = name.split('.').count();
+        if name.split('.').all(|part| parts.contains(&part))
+            && best.is_none_or(|(_, longest)| len > longest)
+        {
+            best = Some((name, len));
+        }
+    }
+    best.map(|(name, _)| name)
 }
 
 /// Map a tree-sitter highlight capture name onto [`HighlightKind`].

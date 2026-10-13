@@ -30,9 +30,6 @@ pub fn at_bottom(max_offset: usize, offset: usize, slack: usize) -> bool {
 pub struct ScrollFollow {
     pinned: bool,
     last_max: usize,
-    /// [`Self::follow`] asked for a snap on the next observe, before a stable
-    /// overflow would be read as a user scroll and clear the pin.
-    pending: bool,
 }
 
 impl Default for ScrollFollow {
@@ -41,25 +38,16 @@ impl Default for ScrollFollow {
         Self {
             pinned: true,
             last_max: 0,
-            pending: false,
         }
     }
 }
 
 impl ScrollFollow {
-    /// The pin, as the last observe left it. Production drives that through
-    /// [`Self::observe`]; this is what the state-machine tests read.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn following(&self) -> bool {
+    /// The pin, as the last observe left it. Tests only: production never asks
+    /// for the state, it only acts on [`Self::observe`]'s return value.
+    #[cfg(test)]
+    pub(crate) fn following(&self) -> bool {
         self.pinned
-    }
-
-    /// Re-pin. The next observe snaps to the bottom if the view is not there.
-    /// Callers that already scrolled to the bottom re-pin through [`Self::observe`].
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn follow(&mut self) {
-        self.pinned = true;
-        self.pending = true;
     }
 
     /// Update the pin from this frame's scrollback.
@@ -68,12 +56,6 @@ impl ScrollFollow {
     /// growth keeps the existing pin; a still overflow means the offset change
     /// was the user's, and only the bottom re-attaches.
     pub fn observe(&mut self, max_offset: usize, offset: usize) -> bool {
-        if self.pending {
-            self.pending = false;
-            self.pinned = true;
-            self.last_max = max_offset;
-            return !at_bottom(max_offset, offset, FOLLOW_SLACK_LINES);
-        }
         let content_changed = max_offset.abs_diff(self.last_max) > 0;
         if !content_changed {
             self.pinned = at_bottom(max_offset, offset, FOLLOW_SLACK_LINES);
@@ -118,13 +100,6 @@ mod tests {
 
         assert!(!follow.observe(55, 0));
         assert!(follow.following());
-
-        // Jump-to-latest re-pins even when the offset has not reached bottom yet.
-        assert!(!follow.observe(55, 4));
-        assert!(!follow.following());
-        follow.follow();
-        assert!(follow.following());
-        assert!(follow.observe(55, 4));
     }
 
     #[test]

@@ -25,17 +25,17 @@ impl Store {
             return Err("EINVAL:frame larger than the image");
         }
         let count = image.frame_count();
-        let edit = command.rows as usize;
+        let edit = command.placement.rows as usize;
         let mut canvas = if (1..=count).contains(&edit) {
             image.rgba(edit - 1)
-        } else if command.columns != 0 {
-            let base = command.columns as usize;
+        } else if command.placement.columns != 0 {
+            let base = command.placement.columns as usize;
             if base > count {
                 return Err("EINVAL:no such base frame");
             }
             image.rgba(base - 1)
         } else {
-            Rgba::filled(image.width, image.height, command.offset_y)
+            Rgba::filled(image.width, image.height, command.placement.offset_y)
         };
         if !(1..=count).contains(&edit) && held + canvas.bytes.len() > MAX_FRAME_BYTES {
             return Err("ENOSPC:frames");
@@ -48,13 +48,13 @@ impl Store {
         };
         draw(
             &mut canvas,
-            command.x,
-            command.y,
+            command.placement.source.x,
+            command.placement.source.y,
             &data,
             whole,
-            command.offset_x == 1,
+            command.placement.offset_x == 1,
         );
-        let gap = match command.z {
+        let gap = match command.placement.z {
             z if z > 0 => Some(z as u32),
             z if z < 0 => Some(0),
             _ => None,
@@ -79,12 +79,12 @@ impl Store {
         if image.gaps.is_empty() {
             image.gaps.push(0);
         }
-        let frame = command.rows as usize;
-        if (1..=count).contains(&frame) && command.z != 0 {
-            image.gaps[frame - 1] = command.z.max(0) as u32;
+        let frame = command.placement.rows as usize;
+        if (1..=count).contains(&frame) && command.placement.z != 0 {
+            image.gaps[frame - 1] = command.placement.z.max(0) as u32;
         }
         let animation = &mut image.animation;
-        let current = command.columns as usize;
+        let current = command.placement.columns as usize;
         if (1..=count).contains(&current) {
             animation.current = current - 1;
             animation.revision += 1;
@@ -112,21 +112,24 @@ impl Store {
         use crate::pixels::{Rect, draw};
         let image = self.images.get_mut(&id).ok_or("ENOENT:image")?;
         let count = image.frame_count();
-        let (from, onto) = (command.rows as usize, command.columns as usize);
+        let (from, onto) = (
+            command.placement.rows as usize,
+            command.placement.columns as usize,
+        );
         if !(1..=count).contains(&from) || !(1..=count).contains(&onto) {
             return Err("ENOENT:frame");
         }
         image.ensure_rgba()?;
         let size = |value: u32, whole: u32| if value == 0 { whole } else { value };
         let source = Rect {
-            x: command.offset_x,
-            y: command.offset_y,
-            width: size(command.source_width, image.width),
-            height: size(command.source_height, image.height),
+            x: command.placement.offset_x,
+            y: command.placement.offset_y,
+            width: size(command.placement.source.width, image.width),
+            height: size(command.placement.source.height, image.height),
         };
         let target = Rect {
-            x: command.x,
-            y: command.y,
+            x: command.placement.source.x,
+            y: command.placement.source.y,
             ..source
         };
         if !source.within(image.width, image.height) || !target.within(image.width, image.height) {
@@ -137,7 +140,7 @@ impl Store {
         }
         let over = image.rgba(from - 1);
         let mut canvas = image.rgba(onto - 1);
-        let replace = command.cursor_movement == CursorMovement::None;
+        let replace = command.placement.cursor_movement == CursorMovement::None;
         draw(&mut canvas, target.x, target.y, &over, source, replace);
         image.set_frame(onto - 1, canvas.bytes);
         Ok(())
@@ -153,7 +156,7 @@ impl Store {
             }
             return Ok(());
         }
-        let frame = (command.rows as usize).clamp(1, image.frame_count()) - 1;
+        let frame = (command.placement.rows as usize).clamp(1, image.frame_count()) - 1;
         if frame == 0 {
             image.bytes = image.frames.remove(0);
         } else {
@@ -193,18 +196,20 @@ impl Image {
 
     /// Decode the first frame into RGBA, once, and give it its gap.
     pub(super) fn ensure_rgba(&mut self) -> Result<(), &'static str> {
-        if self.gaps.is_empty() {
-            self.gaps.push(0);
-        }
         if self.format == Format::Rgba && !self.frames.is_empty() {
             return Ok(());
         }
+        // Decoded first: a payload that does not decode leaves the image as it
+        // was, rather than marked Rgba with no pixels to show.
         let rgba = crate::pixels::Rgba::decode(self.format, self.width, self.height, &self.bytes)
             .ok_or("EINVAL:image data")?;
         self.format = Format::Rgba;
         self.width = rgba.width;
         self.height = rgba.height;
         self.bytes = rgba.bytes;
+        if self.gaps.is_empty() {
+            self.gaps.push(0);
+        }
         Ok(())
     }
 

@@ -71,62 +71,20 @@ pub(super) const MAX_FRAME_BYTES: usize = 320 << 20;
 #[non_exhaustive]
 pub struct Display {
     pub image: u32,
-    /// `p`, zero when unset.
-    pub placement: u32,
-    /// `c`, `r`, zero when unset.
-    pub columns: u32,
-    pub rows: u32,
-    /// `x`, `y`, `w`, `h`, as the command carried them.
-    pub source_x: u32,
-    pub source_y: u32,
-    pub source_width: u32,
-    pub source_height: u32,
-    /// `X`, `Y`, as the command carried them.
-    pub offset_x: u32,
-    pub offset_y: u32,
-    pub z: i32,
-    pub cursor_movement: CursorMovement,
-    /// `U=1`.
-    pub unicode: bool,
-    /// `P`, `Q`, `H`, `V`, as the command carried them.
-    pub parent_image: u32,
-    pub parent_placement: u32,
-    pub parent_offset_x: i32,
-    pub parent_offset_y: i32,
-    /// `q`, for the errors only the emulator can find.
-    pub quiet: u8,
-    /// With both `c` and `r`, fill the box rather than fit inside it.
+    /// The display keys, carried as the command stated them.
+    pub placement: Placement,
+    /// With both `c` and `r`, fill the box rather than fit inside it. No
+    /// protocol key asks for it — it travels with the placement rather than
+    /// inside it, which is why [`Placement`] does not state it.
     pub stretch: bool,
 }
 
 impl Display {
-    /// `image` at the cursor, with every key at its default.
-    #[allow(dead_code)] // sixel and iTerm placement, deferred until those protocols land
-    pub(crate) fn at_cursor(image: u32) -> Self {
-        Self::of(image, &Command::default())
-    }
-
     /// The display keys a command carried, for the image `image`.
     fn of(image: u32, command: &Command) -> Self {
         Self {
             image,
             placement: command.placement,
-            columns: command.columns,
-            rows: command.rows,
-            source_x: command.x,
-            source_y: command.y,
-            source_width: command.source_width,
-            source_height: command.source_height,
-            offset_x: command.offset_x,
-            offset_y: command.offset_y,
-            z: command.z,
-            cursor_movement: command.cursor_movement,
-            unicode: command.unicode,
-            parent_image: command.parent_image,
-            parent_placement: command.parent_placement,
-            parent_offset_x: command.parent_offset_x,
-            parent_offset_y: command.parent_offset_y,
-            quiet: command.quiet,
             stretch: false,
         }
     }
@@ -144,6 +102,11 @@ pub struct Delete {
 
 /// Which placements a [`Delete`] removes. Cells are 0-based screen
 /// coordinates, already converted from the protocol's 1-based ones.
+///
+/// The two questions a delete asks — does this target name images, and does it
+/// match a placement — are answered by the enum rather than restated at each
+/// call site, and every arm answers both. A virtual placement has no `z`, so a
+/// `z` is passed as `None` for those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Target {
@@ -164,6 +127,38 @@ pub enum Target {
     Z(i32),
     /// `d=r`: the placements of every image id in the range, inclusive.
     Range(u32, u32),
+}
+
+impl Target {
+    /// Whether this target names images rather than places on the screen, and
+    /// so matches a placement by the identity it carries rather than by the
+    /// cells it covers.
+    pub fn names_images(self) -> bool {
+        match self {
+            Self::Image { .. } | Self::Range(..) | Self::Z(_) => true,
+            Self::All | Self::Cursor | Self::Cell { .. } | Self::Column(_) | Self::Row(_) => false,
+        }
+    }
+
+    /// Whether the placement of `image` under `placement`, stacked at `z`, is
+    /// one this target names. `z: None` is a placement that has no z-index to
+    /// match — a virtual one — which no `d=z` reaches.
+    pub fn matches(self, image: u32, placement: u32, z: Option<i32>) -> bool {
+        match self {
+            Self::Image { id, placement: p } => image == id && (p == 0 || placement == p),
+            Self::Range(low, high) => (low..=high).contains(&image),
+            Self::Z(want) => z == Some(want),
+            Self::All | Self::Cursor | Self::Cell { .. } | Self::Column(_) | Self::Row(_) => false,
+        }
+    }
+
+    /// Whether `p` covers `col`, `row` — the question every by-position target
+    /// asks, answered once for all of them.
+    pub fn covers(self, p: &crate::graphics::Placement, col: u32, row: u32) -> bool {
+        let (col, row) = (col as usize, row as usize);
+        (p.col..p.col + p.cols as usize).contains(&col)
+            && (p.row..p.row + p.rows as usize).contains(&row)
+    }
 }
 
 /// What the emulator has to carry out after the store has done its part.
@@ -189,6 +184,22 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// Whether this reply is sent at all.
+    ///
+    /// `q=1` silences a success, `q=2` silences a failure as well, and a
+    /// transmission with no id to name is not answered either: kitty's reply
+    /// grammar has nowhere to put the answer.
+    ///
+    /// Owned here rather than at each call site, because the emulator builds
+    /// an error reply of its own when a placement fails — one policy, stated
+    /// once, for both.
+    pub(crate) fn answers(&self, quiet: u8, id: u32) -> bool {
+        match self.error {
+            Some(_) => quiet < 2,
+            None => quiet < 1 && id != 0,
+        }
+    }
+
     /// The bytes of the reply, as an APC of its own.
     pub fn bytes(&self) -> Vec<u8> {
         let mut keys = format!("i={}", self.id);
@@ -242,16 +253,6 @@ impl Store {
     /// whichever machine the program sending them runs on.
     pub fn set_local_media(&mut self, allow: bool) {
         self.local_media = allow;
-    }
-
-    /// Hold an image that arrived by some other protocol, under an id of its
-    /// own.
-    #[allow(dead_code)] // sixel and iTerm images, deferred until those protocols land
-    pub(crate) fn hold(&mut self, image: Image) -> u32 {
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let id = self.next_id;
-        self.insert(id, image);
-        id
     }
 
     /// Free one image's data.
@@ -309,18 +310,19 @@ impl Store {
                     'a' => Target::All,
                     'i' | 'n' => Target::Image {
                         id,
-                        placement: command.placement,
+                        placement: command.placement.id,
                     },
                     'c' => Target::Cursor,
                     'p' | 'q' => Target::Cell {
-                        col: command.x.saturating_sub(1),
-                        row: command.y.saturating_sub(1),
-                        z: (command.delete.eq_ignore_ascii_case(&'q')).then_some(command.z),
+                        col: command.placement.source.x.saturating_sub(1),
+                        row: command.placement.source.y.saturating_sub(1),
+                        z: (command.delete.eq_ignore_ascii_case(&'q'))
+                            .then_some(command.placement.z),
                     },
-                    'x' => Target::Column(command.x.saturating_sub(1)),
-                    'y' => Target::Row(command.y.saturating_sub(1)),
-                    'z' => Target::Z(command.z),
-                    'r' => Target::Range(command.x, command.y),
+                    'x' => Target::Column(command.placement.source.x.saturating_sub(1)),
+                    'y' => Target::Row(command.placement.source.y.saturating_sub(1)),
+                    'z' => Target::Z(command.placement.z),
+                    'r' => Target::Range(command.placement.source.x, command.placement.source.y),
                     'f' => {
                         let outcome = self.delete_frame(&command, id);
                         return (None, self.reply_to(&command, id, outcome));
@@ -383,13 +385,15 @@ impl Store {
         if command.medium == 'd' && command.payload.is_empty() {
             return Ok(());
         }
-        let bytes = load(command, command.payload.clone())?;
-        let size = match command.format {
-            Format::Png => png_size(&bytes),
-            _ => Some((command.width, command.height)),
-        };
-        let image = Image::still(command.format, command.width, command.height, bytes);
-        match size {
+        let image = Image::still(
+            command.format,
+            command.width,
+            command.height,
+            load(command, command.payload.clone())?,
+        );
+        // The image states its own size — a PNG from its header, a raw payload
+        // from the stated dimensions — so one call answers for both.
+        match image.size() {
             Some(_) if image.format == Format::Png || raw_fits(&image) => Ok(()),
             _ => Err("EINVAL:dimensions"),
         }
@@ -429,46 +433,14 @@ impl Store {
             }
         };
         // Kitty states a transmission's control keys on its first chunk, and
-        // the chunk that ends it carries `m=0` and little else. `held` is
-        // where those keys live, so the silence the client asked for is read
-        // from there rather than from the chunk in hand.
-        command.quiet = command.quiet.max(held.quiet);
-        held.quiet = command.quiet;
+        // the chunk that ends it carries `m=0` and little else. The silence
+        // the client asked for is read across both, so the reply echoes the
+        // louder of the two.
+        command.placement.quiet = command.placement.quiet.max(held.placement.quiet);
         if held.payload.len() + command.payload.len() > MAX_IMAGE {
             return (None, self.reply(&command, id, Some("EFBIG:payload")));
         }
-        held.payload.extend_from_slice(&command.payload);
-        // The action lives on the first chunk in kitty's own client, and on
-        // the last in others. Either is a display, and the display keys ride
-        // whichever chunk carries it.
-        if command.action == Action::Display {
-            held.action = Action::Display;
-        }
-        held.columns = held.columns.max(command.columns);
-        held.rows = held.rows.max(command.rows);
-        held.placement = held.placement.max(command.placement);
-        held.x = held.x.max(command.x);
-        held.y = held.y.max(command.y);
-        held.source_width = held.source_width.max(command.source_width);
-        held.source_height = held.source_height.max(command.source_height);
-        held.offset_x = held.offset_x.max(command.offset_x);
-        held.offset_y = held.offset_y.max(command.offset_y);
-        held.number = held.number.max(command.number);
-        if command.z != 0 {
-            held.z = command.z;
-        }
-        if command.cursor_movement == CursorMovement::None {
-            held.cursor_movement = CursorMovement::None;
-        }
-        held.unicode |= command.unicode;
-        held.parent_image = held.parent_image.max(command.parent_image);
-        held.parent_placement = held.parent_placement.max(command.parent_placement);
-        if command.parent_offset_x != 0 {
-            held.parent_offset_x = command.parent_offset_x;
-        }
-        if command.parent_offset_y != 0 {
-            held.parent_offset_y = command.parent_offset_y;
-        }
+        held.absorb(&command);
         if command.more {
             self.pending = Some((id, held));
             return (None, None);
@@ -518,15 +490,10 @@ impl Store {
         let reply = Reply {
             id,
             number: command.number,
-            placement: command.placement,
+            placement: command.placement.id,
             error,
         };
-        match error {
-            Some(_) if command.quiet < 2 => Some(reply),
-            Some(_) => None,
-            None if command.quiet < 1 && id != 0 => Some(reply),
-            None => None,
-        }
+        reply.answers(command.placement.quiet, id).then_some(reply)
     }
 }
 

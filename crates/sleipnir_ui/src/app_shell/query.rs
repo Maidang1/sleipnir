@@ -65,9 +65,9 @@ pub(crate) fn clamped_byte_range(s: &str, range_utf16: Range<usize>) -> Range<us
 /// Replace `range_utf16` (clamped) with `text`. Returns the UTF-16 offset at
 /// which `text` was inserted.
 pub(crate) fn splice_utf16(s: &mut String, range_utf16: Range<usize>, text: &str) -> usize {
-    let start = clamped_byte_range(s, range_utf16.clone()).start;
-    let start_utf16 = byte_to_utf16(s, start);
-    s.replace_range(clamped_byte_range(s, range_utf16), text);
+    let range = clamped_byte_range(s, range_utf16);
+    let start_utf16 = byte_to_utf16(s, range.start);
+    s.replace_range(range, text);
     start_utf16
 }
 

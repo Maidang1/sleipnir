@@ -8,6 +8,7 @@ use gpui::{
     Window, canvas, deferred, div, fill, list, point, prelude::FluentBuilder as _, px, size,
 };
 use sleipnir_settings::TerminalPalette;
+use sleipnir_syntax::HighlightKind;
 
 use super::{Cell, DiffView, DisplayRow, LineKind, TreeEntry, file_index_at, row_height};
 use crate::app_shell::AppShell;
@@ -547,7 +548,7 @@ fn render_split_cell(
 
 fn wrapped_line_text(
     text: &str,
-    syntax: &[(Range<usize>, syntax::Token)],
+    syntax: &[(Range<usize>, HighlightKind)],
     intra: &[Range<usize>],
     word_bg: Option<gpui::Hsla>,
     palette: &TerminalPalette,
@@ -714,7 +715,7 @@ fn status_style(status: FileStatus, palette: &TerminalPalette) -> (&'static str,
 
 fn line_content(
     text: &str,
-    syntax: &[(Range<usize>, syntax::Token)],
+    syntax: &[(Range<usize>, HighlightKind)],
     intra: &[Range<usize>],
     word_bg: Option<gpui::Hsla>,
     palette: &TerminalPalette,
@@ -732,7 +733,7 @@ fn line_content(
 }
 
 fn merge_highlights(
-    syntax: &[(Range<usize>, syntax::Token)],
+    syntax: &[(Range<usize>, HighlightKind)],
     intra: &[Range<usize>],
     word_bg: Option<gpui::Hsla>,
     palette: &TerminalPalette,
@@ -779,21 +780,28 @@ fn merge_highlights(
     out
 }
 
+/// The color a syntax kind paints in.
+///
+/// The registry answers with more kinds than the palette has hues for, so they
+/// are grouped onto the ones it has: a type and its builtin cousin share a
+/// blue, a string and its escape sequence a green. A kind that maps nowhere
+/// still paints rather than losing the row's text.
 fn token_color(
-    token: syntax::Token,
+    kind: HighlightKind,
     palette: &TerminalPalette,
     tokens: &ChromeTokens,
 ) -> gpui::Hsla {
-    match token {
-        syntax::Token::Keyword => palette.ansi[5],
-        syntax::Token::Function => palette.ansi[4],
-        syntax::Token::Type => palette.ansi[3],
-        syntax::Token::String => palette.ansi[2],
-        syntax::Token::Number | syntax::Token::Constant => palette.ansi[3],
-        syntax::Token::Comment => tokens.fg_muted,
-        syntax::Token::Property => palette.ansi[6],
-        syntax::Token::Operator => palette.ansi[6],
-        syntax::Token::Punctuation => tokens.fg_muted,
+    use HighlightKind::*;
+    match kind {
+        Keyword | Boolean | MacroName => palette.ansi[5],
+        Function | FunctionBuiltin | Constructor => palette.ansi[4],
+        TypeName | TypeBuiltin | Tag | Attribute | Label => palette.ansi[3],
+        String | StringSpecial | Escape => palette.ansi[2],
+        Number | Constant => palette.ansi[3],
+        Comment => tokens.fg_muted,
+        Property | Parameter | Variable | VariableSpecial => palette.ansi[6],
+        Operator | Punctuation => palette.ansi[6],
+        Invalid => tokens.fg_disabled,
     }
 }
 

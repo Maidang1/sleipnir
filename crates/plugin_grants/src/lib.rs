@@ -33,11 +33,14 @@ pub const GRANTS_VERSION: u32 = 1;
 /// on a cross-platform sandbox.
 ///
 /// External installation does not ship before [`Tier::Sandboxed`] is real.
+///
+/// Deleting a variant is not a compatibility break for a hand-edited grant: a
+/// file naming an unknown tier fails to deserialize, and [`load`] is fail-closed
+/// — it quarantines the file to `.bak` and treats it as empty, which forces
+/// re-consent. That is this crate's contract, not a regression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
-    /// Built-in / first-party. Full capability; sandbox is n/a.
-    BuiltIn,
     /// Locally authored by the user. Full, labelled "unsandboxed, local" in the UI.
     Local,
     /// Externally installed. Grants only; sandbox required. No `exec`; no

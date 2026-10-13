@@ -7,7 +7,6 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::fmt::{self, Display, Formatter};
 use std::io::{self, ErrorKind, Read, Write};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -55,46 +54,21 @@ pub(super) struct ByteLoopSender {
 
 impl ByteLoopSender {
     pub(super) fn send(&self, msg: Msg) -> Result<(), ByteLoopSendError> {
-        self.sender.send(msg).map_err(ByteLoopSendError::send)?;
-        self.poller.notify().map_err(ByteLoopSendError::io)
+        self.sender.send(msg)?;
+        self.poller.notify()?;
+        Ok(())
     }
 }
 
-#[derive(Debug)]
-pub(super) struct ByteLoopSendError {
-    kind: ByteLoopSendErrorKind,
+/// What can go wrong writing to the reader: the bytes did not reach it, or
+/// they did and it would not wake up.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ByteLoopSendError {
+    #[error("{0}")]
+    Io(#[from] io::Error),
+    #[error("{0}")]
+    Send(#[from] mpsc::SendError<Msg>),
 }
-
-#[derive(Debug)]
-enum ByteLoopSendErrorKind {
-    Io(io::Error),
-    Send(mpsc::SendError<Msg>),
-}
-
-impl ByteLoopSendError {
-    fn io(err: io::Error) -> Self {
-        Self {
-            kind: ByteLoopSendErrorKind::Io(err),
-        }
-    }
-
-    fn send(err: mpsc::SendError<Msg>) -> Self {
-        Self {
-            kind: ByteLoopSendErrorKind::Send(err),
-        }
-    }
-}
-
-impl Display for ByteLoopSendError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            ByteLoopSendErrorKind::Io(err) => err.fmt(f),
-            ByteLoopSendErrorKind::Send(err) => err.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for ByteLoopSendError {}
 
 struct Writing {
     source: Cow<'static, [u8]>,

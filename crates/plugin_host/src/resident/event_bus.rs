@@ -73,11 +73,17 @@ impl BroadcastReport {
 /// Deliver `event` to every live session. Never blocks: a full queue is a
 /// drop, a dead connection is a skip, a missing grant is a filter.
 ///
-/// `SubscribeEvents` is checked per connection inside [`Session::receive_event`].
+/// `RunStarted.command` is redacted here, once, with
+/// [`plugin_protocol::redact_command`]: the dispatcher is the one place an
+/// event passes through on its way to the wire, so a session that is dead,
+/// shutting down, or without `SubscribeEvents` no longer pays for a redaction
+/// it would have discarded. The delivered payload is the same either way —
+/// the redaction is pure.
 pub fn fan_out(
     sessions: impl IntoIterator<Item = Arc<Session>>,
     event: HostEvent,
 ) -> BroadcastReport {
+    let event = redact_run_started(event);
     let mut sessions: Vec<Arc<Session>> = sessions.into_iter().collect();
     sessions.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
     let mut outcomes = Vec::with_capacity(sessions.len());
@@ -86,4 +92,55 @@ pub fn fan_out(
         outcomes.push((session.plugin_id.clone(), outcome));
     }
     BroadcastReport { outcomes }
+}
+
+/// The redaction every event carries on its way to the wire: `RunStarted`'s
+/// command line is the one field that can hold a secret, and rewriting it once
+/// here is cheaper than once per session that will throw the event away.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plugin_protocol::v2::HostEvent;
+    use uuid::Uuid;
+
+    #[test]
+    fn run_started_command_is_redacted_once_at_the_dispatcher() {
+        let event = HostEvent::RunStarted {
+            run_id: Uuid::nil(),
+            pane: Uuid::nil(),
+            command: "AWS_SECRET_ACCESS_KEY=supersecret aws s3 ls".into(),
+            cwd: None,
+            inferred: true,
+        };
+        let HostEvent::RunStarted {
+            command, inferred, ..
+        } = redact_run_started(event)
+        else {
+            panic!("expected RunStarted");
+        };
+        assert!(
+            !command.contains("supersecret"),
+            "raw secret must not survive redact: {command}"
+        );
+        assert!(inferred, "redaction must not rewrite the provenance flag");
+    }
+}
+
+fn redact_run_started(event: HostEvent) -> HostEvent {
+    match event {
+        HostEvent::RunStarted {
+            run_id,
+            pane,
+            command,
+            cwd,
+            inferred,
+        } => HostEvent::RunStarted {
+            run_id,
+            pane,
+            command: plugin_protocol::redact::redact_command(&command),
+            cwd,
+            inferred,
+        },
+        other => other,
+    }
 }

@@ -57,7 +57,6 @@
     "keep_selection_on_copy": true,
     "max_scroll_history_lines": 10000,
     "scroll_multiplier": 3.0,
-    "minimum_contrast": 45.0,
     "blinking": "terminal_controlled",
     "alternate_scroll": "on",
     "bell": "off",

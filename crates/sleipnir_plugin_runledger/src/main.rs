@@ -52,7 +52,7 @@ impl RunLedger {
         let rows: Vec<PanelRow> = rows_from_runs(&self.state.ledger.snapshot())
             .into_iter()
             .map(|row| PanelRow {
-                host_id: self.state.host_id_for(row.id),
+                host_id: self.state.is_jumpable(row.id),
                 row,
             })
             .collect();

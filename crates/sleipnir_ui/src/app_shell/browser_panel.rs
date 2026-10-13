@@ -70,6 +70,7 @@ impl AppShell {
     pub(super) fn browser_panel_is_open(&self) -> bool {
         self.browser_open
     }
+    #[cfg(feature = "browser-panel")]
     pub(super) fn render_browser_toggle(
         &self,
         tokens: &ChromeTokens,

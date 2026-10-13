@@ -117,7 +117,13 @@ impl Emulator {
     }
 
     /// Which frame `id` shows at `now`, and whether a later frame is due.
-    pub fn frame_at(&mut self, id: u32, now: std::time::Instant) -> Option<(usize, bool)> {
+    /// The frame `id` shows at `now`.
+    ///
+    /// Tests ask, and nothing in the app does: an animation's next frame is
+    /// the clock's business, and the paint path reads the current one. What
+    /// went with this is the "another frame is scheduled" half of the answer,
+    /// which had no reader that was not a test.
+    pub fn frame_at(&mut self, id: u32, now: std::time::Instant) -> Option<usize> {
         self.graphics.frame_index(id, now)
     }
 

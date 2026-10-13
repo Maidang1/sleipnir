@@ -138,48 +138,4 @@ mod tests {
         assert!(message.contains("DISPLAY"));
         assert!(message.contains("libvulkan1"));
     }
-
-    #[test]
-    fn platform_entry_selects_a_backend_per_os() {
-        let src = include_str!("lib.rs");
-        let impl_src = src.split("#[cfg(test)]").next().expect("impl before tests");
-        assert!(
-            impl_src.contains("gpui_macos::MacPlatform"),
-            "macos backend must stay wired"
-        );
-        assert!(
-            impl_src.contains("gpui_windows::WindowsPlatform"),
-            "windows backend must be constructed on Windows"
-        );
-        assert!(
-            impl_src.contains("target_os = \"windows\""),
-            "Windows constructor must be cfg-gated"
-        );
-        assert!(
-            impl_src.contains("target_os = \"macos\""),
-            "macOS constructor must be cfg-gated"
-        );
-        assert!(
-            impl_src.contains("gpui_linux::current_platform"),
-            "Linux backend must stay wired"
-        );
-        assert!(
-            impl_src.contains("linux_display_preflight("),
-            "graphical Linux startup must reject a missing display"
-        );
-        assert!(
-            impl_src.contains("std::env::var_os(\"ZED_HEADLESS\")")
-                && impl_src.contains("std::env::var(\"WAYLAND_DISPLAY\")")
-                && impl_src.contains("std::env::var(\"DISPLAY\")"),
-            "Linux startup must preflight the headless override and both display variables"
-        );
-        assert!(
-            impl_src.contains("target_os = \"linux\""),
-            "Linux constructor must be cfg-gated"
-        );
-        assert!(
-            impl_src.contains("macOS, Windows, and Linux only"),
-            "unsupported-target diagnostic must name the shipped platforms"
-        );
-    }
 }

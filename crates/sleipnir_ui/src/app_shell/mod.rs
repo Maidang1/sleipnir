@@ -2326,9 +2326,12 @@ impl Render for AppShell {
                     // macOS window-control and drag region.
                     .child(trailing_drag)
                     .when(
-                        cfg!(any(target_os = "macos", target_os = "windows"))
-                            && crate::BROWSER_PANEL_ENABLED,
-                        |el| el.child(self.render_browser_toggle(&tokens, cx)),
+                        cfg!(any(target_os = "macos", target_os = "windows")),
+                        |el| {
+                            #[cfg(feature = "browser-panel")]
+                            let el = el.child(self.render_browser_toggle(&tokens, cx));
+                            el
+                        },
                     )
                     .child(self.render_plugin_status_chip(&tokens, cx))
                     .child(self.render_plugin_chrome_status(&tokens, window, cx))

@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
 use std::fs::File;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
@@ -360,42 +360,6 @@ fn cancelled_io_error() -> io::Error {
 #[cfg(windows)]
 fn is_cancelled_io(err: &io::Error, cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::SeqCst) && err.raw_os_error() == Some(995)
-}
-
-/// Cap the frame while reading. Oversized returns immediately because the
-/// caller closes the session; there is no resync/discard path here.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn read_line_limited<R: BufRead>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> io::Result<RecvLine> {
-    let mut buf = Vec::new();
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            if buf.is_empty() {
-                return Ok(RecvLine::Eof);
-            }
-            return Ok(RecvLine::Line(String::from_utf8_lossy(&buf).into_owned()));
-        }
-        if let Some(i) = available.iter().position(|&b| b == b'\n') {
-            buf.extend_from_slice(&available[..i]);
-            reader.consume(i + 1);
-            if buf.len() > max_bytes {
-                return Ok(RecvLine::Oversized);
-            }
-            if buf.last() == Some(&b'\r') {
-                buf.pop();
-            }
-            return Ok(RecvLine::Line(String::from_utf8_lossy(&buf).into_owned()));
-        }
-        if buf.len().saturating_add(available.len()) > max_bytes {
-            return Ok(RecvLine::Oversized);
-        }
-        buf.extend_from_slice(available);
-        let n = available.len();
-        reader.consume(n);
-    }
 }
 
 struct ChildProcess {
@@ -1249,22 +1213,11 @@ mod pipe_tests {
     use super::*;
     use crate::PluginLifecycle;
     use std::collections::BTreeSet;
-    use std::io::Cursor;
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::thread;
     #[cfg(unix)]
     use std::time::Instant;
-
-    #[test]
-    fn read_line_limited_reports_oversized_without_discarding() {
-        let mut cur = Cursor::new(b"ok\nthis-is-too-long\nnext\n");
-        assert_eq!(
-            read_line_limited(&mut cur, 8).unwrap(),
-            RecvLine::Line("ok".into())
-        );
-        assert_eq!(read_line_limited(&mut cur, 8).unwrap(), RecvLine::Oversized);
-    }
 
     #[test]
     fn close_unblocks_recv() {

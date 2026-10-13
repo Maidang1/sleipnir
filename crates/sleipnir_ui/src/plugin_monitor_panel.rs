@@ -209,7 +209,6 @@ pub fn state_label(state: ConnectionState) -> &'static str {
 /// ADR-0016 §6: Local is labelled "unsandboxed, local" in the UI.
 pub fn tier_badge(tier: Tier) -> &'static str {
     match tier {
-        Tier::BuiltIn => "built-in",
         Tier::Local => "unsandboxed, local",
         Tier::Sandboxed => "sandboxed",
     }

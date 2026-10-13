@@ -396,25 +396,23 @@ pub(crate) fn apply_retention(runs: &mut Vec<Run>, retention: Retention, now_uni
         return;
     }
 
-    let protected: Vec<bool> = runs
+    // Running runs are outside the budget, so the budget for finished ones is
+    // the cap minus the running runs — zero when they fill it, which is what
+    // lets a current launch's running runs exceed the cap. What goes is the
+    // finished count over that budget, oldest first: `runs` is age-ordered.
+    let running = runs
         .iter()
-        .map(|run| run.state == RunState::Running)
-        .collect();
-    let protected_count = protected.iter().filter(|flag| **flag).count();
-    if protected_count >= retention.max_runs {
-        runs.retain(|run| run.state == RunState::Running);
-        return;
-    }
+        .filter(|run| run.state == RunState::Running)
+        .count();
+    let budget = retention.max_runs.saturating_sub(running);
+    let mut to_drop = (runs.len() - running).saturating_sub(budget);
 
-    let mut to_drop = runs.len() - retention.max_runs;
-    let mut idx = 0usize;
-    runs.retain(|_| {
-        let keep = protected[idx] || to_drop == 0;
-        if !keep {
-            to_drop -= 1;
+    runs.retain(|run| {
+        if run.state == RunState::Running || to_drop == 0 {
+            return true;
         }
-        idx += 1;
-        keep
+        to_drop -= 1;
+        false
     });
 }
 

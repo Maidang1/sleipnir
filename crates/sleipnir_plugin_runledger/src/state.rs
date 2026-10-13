@@ -110,21 +110,21 @@ impl LedgerState {
         self.ledger.mark_pane_seen(pane);
     }
 
-    pub fn host_id_for(&self, local: RunId) -> Option<RunId> {
-        self.jumpable_host_ids.contains(&local).then_some(local)
-    }
-
-    pub fn local_id_for(&self, host: RunId) -> Option<RunId> {
-        if self.jumpable_host_ids.contains(&host) && self.ledger.runs().any(|run| run.id == host) {
-            return Some(host);
-        }
-        None
+    /// The host id a jump may name: one the ledger is still holding.
+    ///
+    /// A panel jump and a local row ask the same question — is this id one the
+    /// panel can point at — so one predicate answers both. An id that was
+    /// pruned answers `None`, which is a stale tree from before a `clear`.
+    pub fn is_jumpable(&self, id: RunId) -> Option<RunId> {
+        let held =
+            self.jumpable_host_ids.contains(&id) && self.ledger.runs().any(|run| run.id == id);
+        held.then_some(id)
     }
 
     /// Mark the run behind a host id seen (panel jump). False when the id is
     /// unknown — e.g. a stale tree from before a `clear`.
     pub fn mark_host_seen(&mut self, host: RunId) -> bool {
-        let Some(local) = self.local_id_for(host) else {
+        let Some(local) = self.is_jumpable(host) else {
             return false;
         };
         self.ledger.mark_run_seen(local);
@@ -204,8 +204,8 @@ mod tests {
         let p = pane();
         let local = state.apply_started(host, p, "cargo test", None, false, 0);
         assert_eq!(local, host);
-        assert_eq!(state.host_id_for(local), Some(host));
-        assert_eq!(state.local_id_for(host), Some(local));
+        assert_eq!(state.is_jumpable(local), Some(host));
+        assert_eq!(state.is_jumpable(host), Some(local));
         assert_eq!(state.ledger.runs().next().unwrap().id, local);
     }
 
@@ -219,9 +219,9 @@ mod tests {
         let local_a = state.apply_started(host_a, p, "first", None, false, 0);
         let local_b = state.apply_started(host_b, p, "second", None, false, 10);
         assert_ne!(local_a, local_b);
-        assert_eq!(state.host_id_for(local_b), Some(host_b));
+        assert_eq!(state.is_jumpable(local_b), Some(host_b));
         assert_eq!(
-            state.host_id_for(local_a),
+            state.is_jumpable(local_a),
             Some(host_a),
             "same-pane predecessor stays jumpable until pane close, prune, or clear"
         );
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(run.id, host);
         assert_eq!(run.duration.as_millis(), 50);
         assert_eq!(
-            state.host_id_for(host),
+            state.is_jumpable(host),
             Some(host),
             "finished rows stay jumpable until pane close, prune, or clear"
         );
@@ -330,8 +330,8 @@ mod tests {
         let local_b = state.apply_started(host_b, pane(), "new", None, false, 10);
         state.prune_and_sync();
         assert_eq!(state.ledger.runs().count(), 1);
-        assert_eq!(state.local_id_for(host_b), Some(local_b));
-        assert_eq!(state.host_id_for(local_a), None);
+        assert_eq!(state.is_jumpable(host_b), Some(local_b));
+        assert_eq!(state.is_jumpable(local_a), None);
     }
 
     #[test]
@@ -347,7 +347,7 @@ mod tests {
         let loaded = LedgerState::load(path);
         let run = loaded.ledger.runs().next().unwrap();
         assert_eq!(run.id, host);
-        assert_eq!(loaded.host_id_for(host), None);
+        assert_eq!(loaded.is_jumpable(host), None);
     }
 
     #[test]
@@ -361,9 +361,9 @@ mod tests {
         state.apply_finished(first, Some(0), 10);
         state.apply_started(second, p, "second", None, false, 20);
 
-        assert_eq!(state.host_id_for(first), Some(first));
-        assert_eq!(state.local_id_for(first), Some(first));
-        assert_eq!(state.host_id_for(second), Some(second));
+        assert_eq!(state.is_jumpable(first), Some(first));
+        assert_eq!(state.is_jumpable(first), Some(first));
+        assert_eq!(state.is_jumpable(second), Some(second));
     }
 
     #[test]
@@ -382,9 +382,9 @@ mod tests {
 
         state.apply_pane_closed(p, 40);
 
-        assert_eq!(state.host_id_for(first), None);
-        assert_eq!(state.host_id_for(second), None);
-        assert_eq!(state.host_id_for(keep), Some(keep));
+        assert_eq!(state.is_jumpable(first), None);
+        assert_eq!(state.is_jumpable(second), None);
+        assert_eq!(state.is_jumpable(keep), Some(keep));
     }
 
     #[test]
@@ -408,8 +408,8 @@ mod tests {
         assert_eq!(runs.len(), 1, "historical duplicate start stays idempotent");
         assert_eq!(runs[0].id, host);
         assert_ne!(runs[0].launch_id, loaded.ledger.launch_id());
-        assert_eq!(loaded.host_id_for(host), None);
-        assert_eq!(loaded.local_id_for(host), None);
+        assert_eq!(loaded.is_jumpable(host), None);
+        assert_eq!(loaded.is_jumpable(host), None);
     }
 
     #[test]
@@ -438,7 +438,7 @@ mod tests {
         let runs: Vec<_> = state.ledger.runs().collect();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, host);
-        assert_eq!(state.host_id_for(host), Some(host));
+        assert_eq!(state.is_jumpable(host), Some(host));
     }
 
     #[test]

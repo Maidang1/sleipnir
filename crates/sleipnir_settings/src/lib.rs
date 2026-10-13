@@ -161,7 +161,6 @@ pub struct TerminalSettings {
     pub open_links_in_mouse_mode: bool,
     pub max_scroll_history_lines: Option<usize>,
     pub scroll_multiplier: f32,
-    pub minimum_contrast: f32,
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
     pub bell: TerminalBell,
@@ -192,9 +191,6 @@ pub struct TerminalSettings {
     pub inject_osc133: bool,
     /// Whether the Run Ledger collects runs in memory for core chrome.
     pub run_ledger: RunLedgerMode,
-    /// Legacy compatibility field; persistence and retention belong to the
-    /// Run Ledger plugin. This field has no effect in core.
-    pub run_ledger_max_runs: usize,
     /// Redact command lines at capture time (heuristic, not a guarantee).
     pub run_ledger_redact: bool,
     /// Default-off external control surface (ADR-0011).
@@ -203,8 +199,6 @@ pub struct TerminalSettings {
     pub pipe_selection_command: Option<String>,
     /// Built-in keymap overlay.
     pub keybinding_preset: KeybindingPreset,
-    /// Legacy compatibility field; session restore and its banner were removed.
-    pub show_tombstone: bool,
     /// Built-in service policy and external command plugin discovery.
     pub plugins: PluginSettings,
 }
@@ -298,7 +292,6 @@ impl Default for TerminalSettings {
             open_links_in_mouse_mode: true,
             max_scroll_history_lines: Some(10_000),
             scroll_multiplier: 3.0,
-            minimum_contrast: 45.0,
             path_hyperlink_regexes: Vec::new(),
             path_hyperlink_timeout_ms: 50,
             bell: TerminalBell::Off,
@@ -314,12 +307,10 @@ impl Default for TerminalSettings {
             notify_on_command_finish_mode: NotifyOnCommandFinish::Unfocused,
             inject_osc133: true,
             run_ledger: RunLedgerMode::Persist,
-            run_ledger_max_runs: 500,
             run_ledger_redact: true,
             control_surface: false,
             pipe_selection_command: None,
             keybinding_preset: KeybindingPreset::Default,
-            show_tombstone: true,
             plugins: PluginSettings::default(),
         }
     }
@@ -421,7 +412,7 @@ impl TerminalSettings {
 
     /// Set the interface language and persist it at the top level.
     pub fn set_language(language: Language, cx: &mut App) {
-        Self::update(
+        if Self::update(
             |s| s.language = language,
             |doc| {
                 if let Some(obj) = doc.as_object_mut() {
@@ -430,13 +421,14 @@ impl TerminalSettings {
             },
             cx,
             &format!("language -> {}", language.as_str()),
-        );
-        cx.refresh_windows();
+        ) {
+            cx.refresh_windows();
+        }
     }
 
     /// Toggle font ligatures and persist under `terminal.font_ligatures`.
     pub fn set_font_ligatures(enabled: bool, cx: &mut App) {
-        Self::update(
+        if Self::update(
             |s| {
                 s.font_ligatures = enabled;
                 s.font_features = Some(if enabled {
@@ -448,17 +440,23 @@ impl TerminalSettings {
             |doc| set_document_bool(doc, "terminal", "font_ligatures", enabled),
             cx,
             &format!("font_ligatures -> {enabled}"),
-        );
+        ) {
+            // Glyph runs are shaped at paint time, so the new ligature state
+            // is what the window has to draw.
+            cx.refresh_windows();
+        }
     }
 
     /// Toggle copy-on-select and persist under `terminal.copy_on_select`.
     pub fn set_copy_on_select(enabled: bool, cx: &mut App) {
-        Self::update(
+        if Self::update(
             |s| s.copy_on_select = enabled,
             |doc| set_document_bool(doc, "terminal", "copy_on_select", enabled),
             cx,
             &format!("copy_on_select -> {enabled}"),
-        );
+        ) {
+            cx.refresh_windows();
+        }
     }
 
     /// Toggle the starfield and persist under `terminal.starfield`.
@@ -583,8 +581,6 @@ struct SettingsFile {
     /// Run Ledger mode: off | memory | persist (default persist).
     #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
     run_ledger: Option<RunLedgerMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    run_ledger_max_runs: Option<usize>,
     #[serde(default)]
     run_ledger_redact: Option<bool>,
     #[serde(default)]
@@ -593,8 +589,6 @@ struct SettingsFile {
     pipe_selection_command: Option<String>,
     #[serde(default)]
     keybinding_preset: Option<KeybindingPreset>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    show_tombstone: Option<bool>,
     #[serde(default)]
     plugins: Option<PluginSettings>,
     #[serde(default)]
@@ -620,7 +614,6 @@ struct TerminalSettingsFile {
     keep_selection_on_copy: Option<bool>,
     max_scroll_history_lines: Option<usize>,
     scroll_multiplier: Option<f32>,
-    minimum_contrast: Option<f32>,
     cursor_shape: Option<CursorShape>,
     blinking: Option<TerminalBlink>,
     alternate_scroll: Option<AlternateScroll>,
@@ -632,8 +625,6 @@ struct TerminalSettingsFile {
     inject_osc133: Option<bool>,
     #[serde(default, deserialize_with = "lenient_opt_run_ledger_mode")]
     run_ledger: Option<RunLedgerMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    run_ledger_max_runs: Option<usize>,
     run_ledger_redact: Option<bool>,
 }
 
@@ -700,9 +691,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = file.run_ledger {
         settings.run_ledger = v;
     }
-    if let Some(v) = file.run_ledger_max_runs {
-        settings.run_ledger_max_runs = v;
-    }
     if let Some(v) = file.run_ledger_redact {
         settings.run_ledger_redact = v;
     }
@@ -715,9 +703,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
     if let Some(v) = file.keybinding_preset {
         settings.keybinding_preset = v;
-    }
-    if let Some(v) = file.show_tombstone {
-        settings.show_tombstone = v;
     }
     if let Some(v) = file.plugins {
         settings.plugins = v;
@@ -764,9 +749,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     if let Some(v) = t.scroll_multiplier {
         settings.scroll_multiplier = v;
     }
-    if let Some(v) = t.minimum_contrast {
-        settings.minimum_contrast = v;
-    }
     if let Some(v) = t.cursor_shape {
         settings.cursor_shape = v;
     }
@@ -787,9 +769,6 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
     if let Some(v) = t.run_ledger {
         settings.run_ledger = v;
-    }
-    if let Some(v) = t.run_ledger_max_runs {
-        settings.run_ledger_max_runs = v;
     }
     if let Some(v) = t.run_ledger_redact {
         settings.run_ledger_redact = v;
@@ -824,12 +803,10 @@ fn default_settings_file() -> SettingsFile {
         notify_on_command_finish_mode: Some(NotifyOnCommandFinish::Unfocused),
         inject_osc133: Some(true),
         run_ledger: Some(RunLedgerMode::Memory),
-        run_ledger_max_runs: None,
         run_ledger_redact: Some(true),
         control_surface: Some(false),
         pipe_selection_command: None,
         keybinding_preset: Some(KeybindingPreset::Default),
-        show_tombstone: None,
         plugins: None,
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
@@ -840,7 +817,6 @@ fn default_settings_file() -> SettingsFile {
             starfield: Some(false),
             max_scroll_history_lines: Some(10_000),
             scroll_multiplier: Some(3.0),
-            minimum_contrast: Some(45.0),
             cursor_shape: Some(CursorShape::Block),
             ..Default::default()
         },
@@ -1331,7 +1307,6 @@ mod tests {
     fn run_ledger_defaults_to_persist() {
         let s = TerminalSettings::default();
         assert_eq!(s.run_ledger, RunLedgerMode::Persist);
-        assert_eq!(s.run_ledger_max_runs, 500);
         assert!(s.run_ledger_redact);
     }
 
@@ -1340,8 +1315,6 @@ mod tests {
         let file = serde_json::to_value(default_settings_file()).unwrap();
         assert_eq!(file["run_ledger"], "memory");
         assert!(file.get("show_tombstone").is_none());
-        assert!(file.get("run_ledger_max_runs").is_none());
-        assert!(file["terminal"].get("run_ledger_max_runs").is_none());
         assert!(file.get("restore_session").is_none());
     }
 
@@ -1355,8 +1328,6 @@ mod tests {
         let mut settings = TerminalSettings::default();
         merge_file(&mut settings, file);
         assert_eq!(settings.run_ledger, RunLedgerMode::Persist);
-        assert_eq!(settings.run_ledger_max_runs, 120);
-        assert!(settings.show_tombstone);
     }
 
     #[test]

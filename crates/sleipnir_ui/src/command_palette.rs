@@ -149,7 +149,7 @@ pub fn commands() -> Vec<CommandItem> {
 /// Built-in command catalog localized for the selected interface language.
 pub fn commands_for(language: Language) -> Vec<CommandItem> {
     use crate::keymap::display_shortcut;
-    let mut items = vec![
+    let items = vec![
         CommandItem {
             id: CommandId::NewTab,
             title: language.text("command.new_tab").into(),
@@ -331,16 +331,17 @@ pub fn commands_for(language: Language) -> Vec<CommandItem> {
             keywords: "history fuzzy search histfile".into(),
         },
         CommandItem {
-            id: CommandId::ToggleBrowser,
-            title: language.text("command.toggle_browser").into(),
-            shortcut: "".into(),
-            keywords: "browser webview preview localhost".into(),
-        },
-        CommandItem {
             id: CommandId::TogglePluginMonitor,
             title: language.text("command.plugin_monitor").into(),
             shortcut: display_shortcut("toggle_plugin_monitor").into(),
             keywords: "plugin monitor process kill".into(),
+        },
+        #[cfg(feature = "browser-panel")]
+        CommandItem {
+            id: CommandId::ToggleBrowser,
+            title: language.text("command.toggle_browser").into(),
+            shortcut: "".into(),
+            keywords: "browser webview preview localhost".into(),
         },
         CommandItem {
             id: CommandId::ReopenClosedTab,
@@ -349,9 +350,6 @@ pub fn commands_for(language: Language) -> Vec<CommandItem> {
             keywords: "reopen closed tab undo".into(),
         },
     ];
-    if !crate::BROWSER_PANEL_ENABLED {
-        items.retain(|item| item.id != CommandId::ToggleBrowser);
-    }
     items
 }
 

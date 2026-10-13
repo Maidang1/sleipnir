@@ -24,12 +24,17 @@ pub enum Known {
     Named(&'static str),
 }
 
-/// `Ready` compares by identity: entries hold `&'static Lang`, and two rows
-/// with the same name are the same row.
+/// Compared by name, on the same side of the [`Self::Ready`] /
+/// [`Self::Named`] line.
+///
+/// Registering leaks the language for the process, so two rows naming one
+/// language are one row — comparing names rests on that rather than on the
+/// pointers the leak happens to produce, which is what a pointer comparison
+/// would have rested on.
 impl PartialEq for Known {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Ready(held), Self::Ready(other)) => std::ptr::eq(*held, *other),
+            (Self::Ready(held), Self::Ready(other)) => held.name == other.name,
             (Self::Named(held), Self::Named(other)) => held == other,
             _ => false,
         }
@@ -103,6 +108,18 @@ fn seeded() -> Vec<Entry> {
         .collect()
 }
 
+/// The registry, read. A poisoned lock recovers rather than emptying the
+/// registry: the rows are leaked `&'static` data, so a panic while one held
+/// the lock left them intact and leave them readable.
+fn read() -> std::sync::RwLockReadGuard<'static, Vec<Entry>> {
+    registry().read().unwrap_or_else(|err| err.into_inner())
+}
+
+/// The registry, written.
+fn write() -> std::sync::RwLockWriteGuard<'static, Vec<Entry>> {
+    registry().write().unwrap_or_else(|err| err.into_inner())
+}
+
 /// Put the registry back to the seeded name table.
 ///
 /// Integration tests share one process under `cargo test` (nextest would give
@@ -110,17 +127,13 @@ fn seeded() -> Vec<Entry> {
 /// needs the untouched table calls this while it holds [`crate::isolate_for_test`].
 #[doc(hidden)]
 pub fn reset() {
-    if let Ok(mut entries) = registry().write() {
-        *entries = seeded();
-    }
+    *write() = seeded();
 }
 
 /// Add a language, or replace the entry of the same name. Leaks: see the module
 /// note.
 pub fn register(entry: Entry) {
-    let Ok(mut entries) = registry().write() else {
-        return;
-    };
+    let mut entries = write();
     entries.retain(|held| held.name != entry.name);
     entries.push(entry);
 }
@@ -134,7 +147,7 @@ pub fn of_tag(tag: &str) -> Option<Known> {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    let entries = registry().read().ok()?;
+    let entries = read();
     entries
         .iter()
         .find(|entry| entry.aliases.contains(&tag.as_str()))
@@ -148,7 +161,7 @@ pub fn of_tag(tag: &str) -> Option<Known> {
 /// rather than racing it.
 pub fn of_path(path: &Path) -> Option<Known> {
     let name = path.file_name()?.to_str()?;
-    let entries = registry().read().ok()?;
+    let entries = read();
     entries
         .iter()
         .filter_map(|entry| {
@@ -164,10 +177,32 @@ pub fn of_path(path: &Path) -> Option<Known> {
 }
 
 fn matches(name: &str, candidate: &str) -> bool {
-    name.eq_ignore_ascii_case(candidate)
-        || name.len() > candidate.len()
-            && name[name.len() - candidate.len() - 1..]
-                .eq_ignore_ascii_case(&format!(".{candidate}"))
+    if name.eq_ignore_ascii_case(candidate) {
+        return true;
+    }
+    // `name` ends with `.{candidate}`, answered by byte arithmetic instead of
+    // string slicing: `candidate` and the dot are ASCII, so `start` lands on a
+    // boundary whenever it lands on a dot, and a non-ASCII file name such as
+    // `資料.rs` never indexes into the middle of a character.
+    match name.len().checked_sub(candidate.len() + 1) {
+        Some(start) if name.is_char_boundary(start) => {
+            name.as_bytes()[start] == b'.' && name[start + 1..].eq_ignore_ascii_case(candidate)
+        }
+        _ => false,
+    }
+}
+
+/// The file names and extensions the registry's name table holds for `name`.
+///
+/// Only seeded rows are answerable — a [`register`]ed entry may carry its own
+/// list, which this does not see. Standard's rows mirror this table, so they
+/// ask here instead of keeping a second copy of it.
+pub fn files_of(name: &str) -> &'static [&'static str] {
+    NAMED
+        .iter()
+        .find(|(held, _, _)| *held == name)
+        .map(|(_, _, files)| *files)
+        .unwrap_or(&[])
 }
 
 /// Every name the registry holds, painted or not.

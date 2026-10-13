@@ -43,11 +43,13 @@ const DIACRITICS: [u32; 297] = [
 ];
 
 /// The number a combining mark encodes, if it is one of [`DIACRITICS`].
+///
+/// The table is kitty's, in ascending order, so a mark is looked up by binary
+/// search: one of these per cell per paint, and a linear scan of 297 entries
+/// is a scan of a third of a thousand per painted cell.
 fn diacritic(mark: char) -> Option<u32> {
-    DIACRITICS
-        .iter()
-        .position(|&known| known == mark as u32)
-        .map(|at| at as u32)
+    let mark = mark as u32;
+    DIACRITICS.binary_search(&mark).ok().map(|at| at as u32)
 }
 
 /// A color read as an id: an indexed color is its index, a direct one its 24
@@ -98,28 +100,36 @@ impl RowDecoder {
             return None;
         };
         let placement = cell.underline_color().and_then(color_id).unwrap_or(0);
-        let marks: Vec<u32> = cell
+        // The marks are read through an iterator rather than collected: a cell
+        // carries at most four of them, and the row walker does this for every
+        // cell of every line it paints.
+        let mut marks = cell
             .zerowidth()
             .unwrap_or(&[])
             .iter()
-            .filter_map(|&mark| diacritic(mark))
-            .collect();
+            .copied()
+            .filter_map(diacritic);
         // The cell to the left counts only if it carries the same colors.
         let left = self
             .left
             .filter(|left| left.image == image && left.placement == placement);
-        let (row, col, high) = match marks[..] {
-            [] => left.map_or((0, 0, 0), |left| (left.row, left.col + 1, left.high)),
-            [row] => left
+        // A cell's marks are the row, then the column, then the id's high
+        // byte; a mark outside the table is not part of the encoding, and a
+        // cell carrying none continues the one to its left.
+        let (row, col, high) = match (marks.next(), marks.next()) {
+            (None, _) => left.map_or((0, 0, 0), |left| (left.row, left.col + 1, left.high)),
+            (Some(row), None) => left
                 .filter(|left| left.row == row)
                 .map_or((row, 0, 0), |left| (row, left.col + 1, left.high)),
-            [row, col] => {
-                let high = left
-                    .filter(|left| left.row == row && left.col + 1 == col)
-                    .map_or(0, |left| left.high);
-                (row, col, high)
-            }
-            [row, col, high, ..] => (row, col, high),
+            (Some(row), Some(col)) => match marks.next() {
+                None => (
+                    row,
+                    col,
+                    left.filter(|left| left.row == row && left.col + 1 == col)
+                        .map_or(0, |left| left.high),
+                ),
+                Some(high) => (row, col, high),
+            },
         };
         self.left = Some(Left {
             image,

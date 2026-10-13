@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Component, Path};
 use std::process::Command;
 
+use super::highlight;
 use super::rows::FileUpgrade;
 use diff_core::{DiffRow, FileStatus, Hunk};
 
@@ -111,9 +112,8 @@ pub fn upgrade_file(root: &Path, job: &UpgradeJob) -> Option<UpgradedFile> {
     // Keep the original source for highlighting. Line display uses the same
     // str::lines semantics as the patch parser, never to recompute the diff.
     let path = job.new_path.as_deref().or(job.old_path.as_deref())?;
-    let lang = syntax::language_for_path(path);
-    let spans = |text: &str| match lang {
-        Some(lang) if !text.is_empty() => syntax::highlight_lines(lang, text),
+    let spans = |text: &str| match highlight::language(path) {
+        Some(lang) if !text.is_empty() => highlight::highlight_lines(lang, text),
         _ => Vec::new(),
     };
     Some(UpgradedFile {

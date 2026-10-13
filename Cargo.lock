@@ -6493,8 +6493,8 @@ dependencies = [
  "sleipnir_ctl",
  "sleipnir_motion",
  "sleipnir_settings",
+ "sleipnir_syntax",
  "sleipnir_widget",
- "syntax",
  "sysinfo 0.37.2",
  "tempfile",
  "terminal",
@@ -6863,18 +6863,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "syntax"
-version = "0.1.0"
-dependencies = [
- "tree-sitter",
- "tree-sitter-highlight",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-python",
- "tree-sitter-rust",
 ]
 
 [[package]]
@@ -7413,16 +7401,6 @@ name = "tree-sitter-html"
 version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-javascript"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
 dependencies = [
  "cc",
  "tree-sitter-language",

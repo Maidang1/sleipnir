@@ -206,33 +206,6 @@ impl Run {
         self.started_at_mono_ms
     }
 
-    /// Build a Run for chrome helpers and tests. Not a live capture path.
-    pub fn for_display(
-        launch_id: LaunchId,
-        pane: PaneKey,
-        command: &str,
-        state: RunState,
-        exit_code: Option<i32>,
-        started_at_unix_ms: u64,
-        seen: bool,
-    ) -> Self {
-        Self {
-            id: RunId::new_v4(),
-            launch_id,
-            pane,
-            command: command.into(),
-            cwd: None,
-            started_at_unix_ms,
-            started_at_mono_ms: 0,
-            duration: Duration::from_millis(1200),
-            exit_code,
-            state,
-            inferred: false,
-            seen,
-            anchor: None,
-        }
-    }
-
     /// Elapsed millis for a still-running Run, using the caller's monotonic clock.
     pub fn elapsed_ms(&self, now_mono_ms: u64) -> u64 {
         now_mono_ms.saturating_sub(self.started_at_mono_ms)

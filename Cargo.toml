@@ -11,7 +11,6 @@ members = [
     "crates/update_helper",
     "crates/run_ledger",
     "crates/diff_core",
-    "crates/syntax",
     "crates/sleipnir_syntax",
     "crates/sleipnir_ctl",
     "crates/sleipnir_browser_control",

@@ -62,63 +62,61 @@ impl BrowserView {
         cx: &mut Context<Self>,
     ) {
         let id = window.window_handle().window_id().as_u64();
-        // `List` is authorized for any caller and needs no WebView host; every
-        // other operation must match the bound window, pass the access gate, and
-        // have a live host. Both are resolved once here, so no arm below
-        // re-derives them or assumes a host it never checked.
-        let host = if matches!(request, Request::List) {
-            None
-        } else {
-            match self.authorize(&request, id) {
-                Ok(host) => Some(host),
-                Err(response) => {
-                    let _ = reply.send(response);
-                    return;
-                }
-            }
-        };
+        // `List` names the windows an agent may talk to, and needs no WebView
+        // of its own; `Status` answers from what the view already holds. Both
+        // are authorized like any other request, and both are answered and out
+        // of the way before a host is bound, so the operations that work on a
+        // live WebView can hold one without asking for it again.
         match request {
             Request::List => {
                 let _ = reply.send(Response::Windows {
                     windows: vec![self.status_for_agent(id)],
                 });
+                return;
             }
             Request::Status { .. } => {
+                if let Err(response) = self.authorize(&request, id) {
+                    let _ = reply.send(response);
+                    return;
+                }
                 self.poll(window, cx);
                 let _ = reply.send(Response::Status {
                     browser: self.status_for_agent(id),
                 });
+                return;
             }
-            Request::Navigate { url, .. } => {
-                let Some(host) = host else {
-                    let _ = reply.send(Response::error("not_ready", "System WebView is not ready"));
-                    return;
-                };
-                match host.webview.load_url(&url) {
-                    Ok(()) => {
-                        self.invalidate_page();
-                        self.loading = true;
-                        self.error = None;
-                        self.address.update(cx, |input, cx| {
-                            input.dirty = false;
-                            input.set_url(url.clone(), window, cx);
-                        });
-                        cx.notify();
-                        let _ = reply.send(Response::NavigationAccepted {
-                            window: id,
-                            requested_url: url,
-                        });
-                    }
-                    Err(error) => {
-                        let _ = reply.send(Response::error("navigation_failed", error.to_string()));
-                    }
+            Request::Navigate { .. } | Request::ReadText { .. } => {}
+        }
+        let host = match self.authorize(&request, id) {
+            Ok(host) => host,
+            Err(response) => {
+                let _ = reply.send(response);
+                return;
+            }
+        };
+        match request {
+            // Both answered above, before a host is bound.
+            Request::List | Request::Status { .. } => {}
+            Request::Navigate { url, .. } => match host.webview.load_url(&url) {
+                Ok(()) => {
+                    self.invalidate_page();
+                    self.loading = true;
+                    self.error = None;
+                    self.address.update(cx, |input, cx| {
+                        input.dirty = false;
+                        input.set_url(url.clone(), window, cx);
+                    });
+                    cx.notify();
+                    let _ = reply.send(Response::NavigationAccepted {
+                        window: id,
+                        requested_url: url,
+                    });
                 }
-            }
+                Err(error) => {
+                    let _ = reply.send(Response::error("navigation_failed", error.to_string()));
+                }
+            },
             Request::ReadText { .. } => {
-                let Some(host) = host else {
-                    let _ = reply.send(Response::error("not_ready", "System WebView is not ready"));
-                    return;
-                };
                 if self.loading {
                     let _ = reply.send(Response::error(
                         "loading",

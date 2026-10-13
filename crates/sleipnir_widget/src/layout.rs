@@ -14,7 +14,7 @@ use crate::cells::{
     attribution_label, bar_filled, cell_cols, fit_cols, spark_levels, take_chars, wrap_text,
 };
 use crate::geom::{CellPos, CellRect};
-use plugin_protocol::v2::{MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Tone, TreeStats, Widget};
+use plugin_protocol::v2::{MAX_WIDGET_DEPTH, MAX_WIDGET_NODES, Tone, TreeStats, Widget, measure};
 
 pub struct ChromeLabel<'a> {
     pub label: String,
@@ -241,7 +241,7 @@ impl Budget {
 /// cannot be shown, and leaves must stay visible.
 pub fn layout(tree: &Widget, available_cols: u16, plugin_id: &str) -> Layout {
     let width = u32::from(available_cols).max(1);
-    let stats = bounded_measure(tree);
+    let stats = measure(tree);
     let mut budget = Budget::new();
     let root = layout_node(tree, CellPos::ORIGIN, width, MAX_WIDGET_DEPTH, &mut budget);
     let (plugin_id, label) = attribution_label(plugin_id, width);
@@ -259,27 +259,6 @@ pub fn layout(tree: &Widget, available_cols: u16, plugin_id: &str) -> Layout {
         stats,
         truncated: budget.truncated,
     }
-}
-
-fn bounded_measure(tree: &Widget) -> TreeStats {
-    fn visit(tree: &Widget, depth: usize, stats: &mut TreeStats) -> bool {
-        stats.nodes += 1;
-        stats.depth = stats.depth.max(depth);
-        if !stats.within_budget() {
-            return false;
-        }
-        if let Widget::Col { children, .. } | Widget::Row { children, .. } = tree {
-            for child in children {
-                if !visit(child, depth + 1, stats) {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-    let mut stats = TreeStats { nodes: 0, depth: 0 };
-    visit(tree, 1, &mut stats);
-    stats
 }
 
 fn layout_node(

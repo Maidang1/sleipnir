@@ -135,21 +135,13 @@ impl Supervisor {
         context: InvokeContext,
     ) -> Result<Output, SessionError> {
         let session = self.connect(spec)?;
-        if spec.lifecycle == PluginLifecycle::OnDemand {
-            if let Err(err) = self.register_active(Arc::clone(&session)) {
-                session.cancel();
-                session.teardown(self.config.shutdown_grace);
-                return Err(err);
-            }
-        }
+        self.connect_active(spec, &session)?;
         let result = session.invoke(command_id, context, self.config.request_timeout);
         match spec.lifecycle {
-            // OnDemand never enters the live map; dropping the Arc tears the
-            // session down. The explicit teardown bounds the shutdown grace.
-            PluginLifecycle::OnDemand => {
-                self.drop_active_by_instance(session.instance_id());
-                session.teardown(self.config.shutdown_grace);
-            }
+            // OnDemand is a temporary: it is retired on every exit, including
+            // this one, so the grace is bounded by an explicit teardown rather
+            // than by when the last Arc goes away.
+            PluginLifecycle::OnDemand => self.retire_active(&session),
             PluginLifecycle::Resident => {
                 if result.is_err() && session.is_dead() {
                     self.reap_dead(&spec.plugin_id);
@@ -166,19 +158,12 @@ impl Supervisor {
         context: InvokeContext,
     ) -> Result<PendingInvoke, SessionError> {
         let session = self.connect(spec)?;
-        if spec.lifecycle == PluginLifecycle::OnDemand {
-            if let Err(err) = self.register_active(Arc::clone(&session)) {
-                session.cancel();
-                session.teardown(self.config.shutdown_grace);
-                return Err(err);
-            }
-        }
+        self.connect_active(spec, &session)?;
         let pending = match session.begin_invoke(command_id, context) {
             Ok(pending) => pending,
             Err(err) => {
                 if spec.lifecycle == PluginLifecycle::OnDemand {
-                    self.drop_active_by_instance(session.instance_id());
-                    session.teardown(self.config.shutdown_grace);
+                    self.retire_active(&session);
                 }
                 return Err(err);
             }
@@ -485,6 +470,35 @@ impl Supervisor {
 
     fn drop_active_by_instance(&self, instance_id: Uuid) -> Option<Arc<Session>> {
         mutex_lock(&self.inner).instances.remove(&instance_id)
+    }
+
+    /// Put an OnDemand session in play. A resident one is already in the live
+    /// map from [`Self::connect`] and is left alone.
+    ///
+    /// A session that cannot be registered is retired here rather than by the
+    /// caller: there is one way out of this function, and every exit from an
+    /// OnDemand invoke retires the session.
+    fn connect_active(
+        &self,
+        spec: &LaunchSpec,
+        session: &Arc<Session>,
+    ) -> Result<(), SessionError> {
+        if spec.lifecycle != PluginLifecycle::OnDemand {
+            return Ok(());
+        }
+        if let Err(err) = self.register_active(Arc::clone(session)) {
+            self.retire_active(session);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Take a session out of play and tear it down. The cancel comes first so
+    /// the session stops taking new work while it is being retired.
+    fn retire_active(&self, session: &Arc<Session>) {
+        session.cancel();
+        self.drop_active_by_instance(session.instance_id());
+        session.teardown(self.config.shutdown_grace);
     }
 
     fn register_active(&self, session: Arc<Session>) -> Result<(), SessionError> {
