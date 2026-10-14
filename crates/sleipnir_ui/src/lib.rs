@@ -26,6 +26,7 @@ mod plugin_panel;
 mod plugin_runtime;
 mod plugin_surface;
 mod run_ledger_global;
+mod ssh;
 mod starfield;
 mod tab_convert;
 mod term_element;
@@ -36,7 +37,7 @@ mod workspace_commit;
 pub use blink::{BLINK_HALF_PERIOD, cursor_blink_alpha};
 
 pub use app_shell::{
-    ActivateTab, AppShell, CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize,
+    ActivateTab, AppShell, CheckForUpdates, CloseTab, ConnectHost, CycleTheme, DecreaseFontSize,
     ExportScrollback, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
@@ -111,6 +112,13 @@ pub enum TermViewEvent {
     },
     /// The user sent input to this pane (keystroke, paste, IME).
     UserTyped,
+    /// `ssh` in this pane asked for a password or key passphrase. The shell
+    /// shows a modal prompt and answers through `reply`; dropping the sender
+    /// (pane closed) makes `ssh` fail instead of hanging.
+    Askpass {
+        prompt: String,
+        reply: std::sync::mpsc::SyncSender<Option<String>>,
+    },
 }
 
 impl EventEmitter<TermViewEvent> for TermView {}
@@ -147,6 +155,9 @@ pub struct TermView {
     last_offscreen_notify_at: Option<Instant>,
     /// Host-owned Block surfaces for this pane (ADR-0018). Process-local.
     blocks: crate::plugin_block::BlockRegistry,
+    /// Askpass server kept alive for the lifetime of the pane; dropping the
+    /// pane stops the listener and removes its socket.
+    ssh_askpass: Option<crate::ssh::AskpassServer>,
     _spawn: Task<()>,
 }
 
@@ -196,6 +207,47 @@ impl TermView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::spawn_with(cwd, command, None, HashMap::default(), window, cx)
+    }
+
+    /// Spawn a pane over SSH. `ssh` is an ordinary child process in the PTY;
+    /// the plan carries the argv, the tab title, and the askpass wiring.
+    pub(crate) fn new_ssh(
+        plan: crate::ssh::SshConnectPlan,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let crate::ssh::SshConnectPlan {
+            program,
+            argv,
+            title,
+            env,
+            askpass,
+        } = plan;
+        let mut view = Self::spawn_with(
+            dirs::home_dir(),
+            Some((program, argv)),
+            title,
+            env,
+            window,
+            cx,
+        );
+        if let Some(server) = askpass {
+            view.start_askpass(server, cx);
+        }
+        view
+    }
+
+    /// Shared spawn path. `extra_env` is layered over the inherited
+    /// environment after every built-in injection.
+    fn spawn_with(
+        cwd: Option<PathBuf>,
+        command: Option<(String, Vec<String>)>,
+        title_override: Option<String>,
+        extra_env: HashMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings = TerminalSettings::get_global(cx).clone();
         let window_id = window.window_handle().window_id().as_u64();
         let cwd = cwd.or_else(dirs::home_dir);
@@ -213,11 +265,14 @@ impl TermView {
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         crate::browser_control::inject_environment(window_id, &mut env, cx);
+        for (k, v) in extra_env {
+            env.insert(k, v);
+        }
         let shell = match command {
             Some((program, args)) => Shell::WithArguments {
                 program,
                 args,
-                title_override: None,
+                title_override,
             },
             None => Shell::System,
         };
@@ -267,8 +322,39 @@ impl TermView {
             last_render_at: None,
             last_offscreen_notify_at: None,
             blocks: crate::plugin_block::BlockRegistry::new(),
+            ssh_askpass: None,
             _spawn: spawn,
         }
+    }
+
+    /// Route askpass requests from this pane's `ssh` child to the shell.
+    ///
+    /// The listener lives on an OS thread; this task is the bridge that turns
+    /// each pending request into a [`TermViewEvent::Askpass`] the window can
+    /// answer. If the pane is dropped, the sender side of `reply` dies with it
+    /// and `ssh` sees EOF instead of hanging.
+    fn start_askpass(&mut self, server: crate::ssh::AskpassServer, cx: &mut Context<Self>) {
+        let Some(requests) = server.requests() else {
+            return;
+        };
+        // Keep the server alive for as long as this pane exists.
+        self.ssh_askpass = Some(server);
+        cx.spawn(async move |this, cx| {
+            while let Ok(request) = requests.recv().await {
+                let handled = this
+                    .update(cx, |_, cx| {
+                        cx.emit(TermViewEvent::Askpass {
+                            prompt: request.prompt,
+                            reply: request.reply,
+                        });
+                    })
+                    .is_ok();
+                if !handled {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Whether this pane looks like it is on screen, judged by whether `render`
@@ -2189,6 +2275,8 @@ mod tests {
             "palette-overlay",
             "close-confirm-overlay",
             "diff-overlay",
+            "ssh-hosts-overlay",
+            "ssh-prompt-overlay",
         ] {
             let prefix = sources
                 .iter()

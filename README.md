@@ -21,6 +21,7 @@ Sleipnir is a standalone terminal built on [GPUI](https://gpui.rs), with a forke
 - GPU-rendered terminal with smooth redraw and scrollback
 - Tabs, splits, and multi-window sessions
 - Native PTY/ConPTY support; every new window starts with a fresh tab
+- Remote SSH connections: pick a host from `~/.ssh/config` or `ssh.hosts` settings, then open it in a new tab; passwords and key passphrases are collected in a Sleipnir prompt on Unix
 - Smart paste, path links, and system-aware themes
 - Drag files onto a pane to insert shell-quoted paths (bracketed paste)
 - Search in scrollback, diff inspection, and in-memory command status tracking

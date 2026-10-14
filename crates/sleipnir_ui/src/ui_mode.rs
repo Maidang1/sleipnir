@@ -12,7 +12,8 @@
 //! content and does not take the keyboard.
 
 use crate::app_shell::{
-    CloseConfirmState, PluginConsentPending, RenameState, TabMenuState, TerminalMenuState,
+    CloseConfirmState, PluginConsentPending, RenameState, SshPromptState, TabMenuState,
+    TerminalMenuState,
 };
 use crate::chrome::pane_facts::PaneFacts;
 use run_ledger::PaneKey;
@@ -31,6 +32,8 @@ pub(crate) enum OverlayKind {
     History,
     Diff,
     PluginMonitor,
+    /// Remote SSH host picker.
+    SshHosts,
 }
 
 /// Whether the browser panel must hide. Any modal keyboard owner, quick
@@ -65,6 +68,9 @@ pub(crate) enum InputMode {
     TerminalMenu(TerminalMenuState),
     Rename(RenameState),
     Find,
+    /// An `ssh` child in one of this window's panes is waiting for a password
+    /// or key passphrase (SSH_ASKPASS).
+    SshPrompt(SshPromptState),
     Overlay(OverlayKind),
 }
 
@@ -79,6 +85,7 @@ pub(crate) enum InputOwner {
     TerminalMenu,
     Rename,
     Find,
+    SshPrompt,
     Overlay(OverlayKind),
 }
 
@@ -110,6 +117,7 @@ impl InputMode {
             Self::TerminalMenu(_) => InputOwner::TerminalMenu,
             Self::Rename(_) => InputOwner::Rename,
             Self::Find => InputOwner::Find,
+            Self::SshPrompt(_) => InputOwner::SshPrompt,
             Self::Overlay(kind) => InputOwner::Overlay(*kind),
         }
     }
@@ -125,6 +133,13 @@ impl InputMode {
     pub fn confirm(&self) -> Option<&CloseConfirmState> {
         match self {
             Self::Confirm(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn ssh_prompt(&self) -> Option<&SshPromptState> {
+        match self {
+            Self::SshPrompt(state) => Some(state),
             _ => None,
         }
     }
@@ -214,6 +229,8 @@ impl InputMode {
     }
 
     take_variant!(take_rename, Rename, RenameState);
+
+    take_variant!(take_ssh_prompt, SshPrompt, SshPromptState);
 
     /// Replace the current owner, returning the old mode for teardown.
     pub fn replace(&mut self, next: InputMode) -> InputMode {
@@ -360,6 +377,7 @@ mod tests {
                 OverlayKind::History => "history",
                 OverlayKind::Diff => "diff",
                 OverlayKind::PluginMonitor => "monitor",
+                OverlayKind::SshHosts => "ssh_hosts",
             }
         }
         assert_eq!(name(OverlayKind::Settings), "settings");

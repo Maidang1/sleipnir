@@ -21,6 +21,7 @@ Sleipnir 是一个独立终端应用，基于 [GPUI](https://gpui.rs) 构建，�
 - GPU 渲染终端，滚动和重绘更流畅
 - 标签页、分屏和多窗口会话
 - 原生 PTY / ConPTY 支持；每个新窗口从一个新标签页开始
+- 远程 SSH 连接：可从 `~/.ssh/config` 或 `ssh.hosts` 设置中选择主机并在新标签页中打开；Unix 下口令与密钥口令短语在 Sleipnir 自己的输入框中收集
 - 智能粘贴、路径链接以及跟随系统的主题
 - 把文件拖到窗格上即可插入 shell 转义后的路径（走 bracketed paste）
 - 滚动历史搜索、Diff 检查和内存中的命令运行状态

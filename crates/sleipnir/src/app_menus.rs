@@ -6,11 +6,11 @@
 use gpui::{Menu, MenuItem, SystemMenuType, actions};
 use sleipnir_settings::Language;
 use sleipnir_ui::{
-    CheckForUpdates, CloseTab, CycleTheme, DecreaseFontSize, ExportScrollback, FocusPaneDown,
-    FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt,
-    MarkTabSeen, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings, PipeSelection,
-    PrevTab, ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
-    ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
+    CheckForUpdates, CloseTab, ConnectHost, CycleTheme, DecreaseFontSize, ExportScrollback,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, IncreaseFontSize, JumpNextPrompt,
+    JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow, NextTab, OpenQuickTerminal, OpenSettings,
+    PipeSelection, PrevTab, ReloadSettings, ResetFontSize, SendGitDiff, SendSelection, SplitDown,
+    SplitRight, ToggleBroadcast, ToggleDiff, ToggleHistorySearch, TogglePaneFacts, TogglePaneZoom,
     TogglePluginMonitor, ToggleQuickSelect,
 };
 use terminal::{Clear, Copy, Paste, PasteText, ToggleViMode};
@@ -126,6 +126,7 @@ fn macos_menus(language: Language) -> Vec<Menu> {
         Menu::new(tr(language, "menu.shell")).items([
             MenuItem::action(tr(language, "menu.new_window"), NewWindow),
             MenuItem::action(tr(language, "menu.new_tab"), NewTab),
+            MenuItem::action(tr(language, "menu.connect_host"), ConnectHost),
             MenuItem::action(tr(language, "menu.close"), CloseTab),
             MenuItem::separator(),
             MenuItem::action(tr(language, "menu.split_right"), SplitRight),
@@ -160,6 +161,7 @@ fn desktop_menus(language: Language) -> Vec<Menu> {
         Menu::new(tr(language, "menu.file")).items([
             MenuItem::action(tr(language, "menu.new_window"), NewWindow),
             MenuItem::action(tr(language, "menu.new_tab"), NewTab),
+            MenuItem::action(tr(language, "menu.connect_host"), ConnectHost),
             MenuItem::action(tr(language, "menu.close"), CloseTab),
             MenuItem::separator(),
             MenuItem::action(tr(language, "menu.split_right"), SplitRight),

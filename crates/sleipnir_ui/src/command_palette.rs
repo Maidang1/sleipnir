@@ -11,6 +11,8 @@ use sleipnir_settings::Language;
 pub enum CommandId {
     NewTab,
     ClosePane,
+    /// Open the remote SSH host picker.
+    ConnectHost,
     NextTab,
     PrevTab,
     SplitRight,
@@ -55,6 +57,7 @@ impl CommandId {
         match self {
             CommandId::NewTab => "new_tab",
             CommandId::ClosePane => "close_tab",
+            CommandId::ConnectHost => "connect_host",
             CommandId::NextTab => "next_tab",
             CommandId::PrevTab => "prev_tab",
             CommandId::SplitRight => "split_right",
@@ -95,6 +98,7 @@ impl CommandId {
         match s.trim() {
             "new_tab" => Some(CommandId::NewTab),
             "close_tab" | "close_pane" => Some(CommandId::ClosePane),
+            "connect_host" | "ssh" | "connect" => Some(CommandId::ConnectHost),
             "next_tab" => Some(CommandId::NextTab),
             "prev_tab" => Some(CommandId::PrevTab),
             "split_right" => Some(CommandId::SplitRight),
@@ -161,6 +165,12 @@ pub fn commands_for(language: Language) -> Vec<CommandItem> {
             title: language.text("command.close_pane").into(),
             shortcut: display_shortcut("close_tab").into(),
             keywords: "close pane tab".into(),
+        },
+        CommandItem {
+            id: CommandId::ConnectHost,
+            title: language.text("command.connect_host").into(),
+            shortcut: display_shortcut("connect_host").into(),
+            keywords: "ssh remote host connect server login".into(),
         },
         CommandItem {
             id: CommandId::NextTab,

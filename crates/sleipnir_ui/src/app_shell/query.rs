@@ -27,6 +27,10 @@ pub(crate) enum QuerySurface {
     Palette,
     Find,
     History,
+    /// Remote SSH host picker.
+    SshHosts,
+    /// SSH password / passphrase prompt (masked rendering).
+    SshPrompt,
 }
 
 /// Length of `s` in UTF-16 code units (what the platform IME counts in).
@@ -168,6 +172,8 @@ impl AppShell {
             QuerySurface::Palette => &self.palette.input,
             QuerySurface::Find => &self.find.input,
             QuerySurface::History => &self.history.input,
+            QuerySurface::SshHosts => &self.ssh_hosts_input,
+            QuerySurface::SshPrompt => &self.ssh_prompt_input,
         }
     }
 
@@ -176,6 +182,8 @@ impl AppShell {
             QuerySurface::Palette => &mut self.palette.input,
             QuerySurface::Find => &mut self.find.input,
             QuerySurface::History => &mut self.history.input,
+            QuerySurface::SshHosts => &mut self.ssh_hosts_input,
+            QuerySurface::SshPrompt => &mut self.ssh_prompt_input,
         }
     }
 
@@ -191,6 +199,12 @@ impl AppShell {
                 self.history.input.selected = 0;
                 cx.notify();
             }
+            QuerySurface::SshHosts => {
+                self.ssh_hosts_input.selected = 0;
+                self.refresh_ssh_host_matches();
+                cx.notify();
+            }
+            QuerySurface::SshPrompt => cx.notify(),
         }
     }
 

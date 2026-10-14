@@ -6348,6 +6348,7 @@ dependencies = [
  "serde_json",
  "sleipnir_browser_control",
  "sleipnir_settings",
+ "sleipnir_ssh",
  "sleipnir_ui",
  "tempfile",
  "terminal",
@@ -6443,7 +6444,24 @@ dependencies = [
  "serde",
  "serde_json",
  "sleipnir_paths",
+ "sleipnir_ssh",
  "tempfile",
+]
+
+[[package]]
+name = "sleipnir_ssh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "libc",
+ "log",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sleipnir_paths",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -6493,6 +6511,7 @@ dependencies = [
  "sleipnir_ctl",
  "sleipnir_motion",
  "sleipnir_settings",
+ "sleipnir_ssh",
  "sleipnir_syntax",
  "sleipnir_widget",
  "sysinfo 0.37.2",

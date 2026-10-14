@@ -31,6 +31,7 @@
   "menu.quit_sleipnir": "退出 Sleipnir",
   "menu.shell": "终端",
   "menu.new_tab": "新建标签页",
+  "menu.connect_host": "连接远程主机…",
   "menu.close": "关闭",
   "menu.split_right": "向右拆分",
   "menu.split_down": "向下拆分",
@@ -51,6 +52,7 @@
   "menu.exit": "退出",
 
   "command.new_tab": "新建标签页",
+  "command.connect_host": "连接远程主机",
   "command.close_pane": "关闭窗格或标签页",
   "command.next_tab": "下一个标签页",
   "command.previous_tab": "上一个标签页",

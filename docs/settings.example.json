@@ -15,6 +15,22 @@
     "enabled": false,
     "directories": []
   },
+  "ssh": {
+    "program": "ssh",
+    "read_ssh_config": true,
+    "askpass": true,
+    "hosts": [
+      {
+        "alias": "prod-01",
+        "host": "10.0.0.5",
+        "user": "deploy",
+        "port": 2222,
+        "identity_file": "~/.ssh/id_ed25519",
+        "proxy_jump": "bastion",
+        "extra_args": ["-o", "ServerAliveInterval=30"]
+      }
+    ]
+  },
   "custom_theme": {
     "background": "#0d1117",
     "foreground": "#e6edf3",

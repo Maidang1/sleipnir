@@ -2,6 +2,9 @@
 
 ## 0.6.9
 
+### Features
+- Add remote SSH connections: open the host picker from **Shell → Connect to Host** (⌘⇧H / Ctrl+Shift+H), the command palette, or a `connect_host` key binding, and launch a host in a new tab as an ordinary `ssh` child process so agent forwarding, jump hosts, and port forwarding keep working. Hosts merge from `~/.ssh/config` (parsed read-only, including `Include`) and the new `ssh.hosts` setting, with application hosts shadowing config aliases. On Unix, passwords and key passphrases are collected in a Sleipnir modal through a generated `SSH_ASKPASS` helper over a private socket; secrets are never written to disk or logged. See [docs/settings.md](docs/settings.md#remote-ssh).
+
 ### Removed
 - Remove the built-in Agents capability: the first-party Agents plugin, the `sleipnir agentctl` command, the agent coordination socket and protocol, the agent status panel and tab agent icons, and the agent hook installer. The terminal no longer launches, coordinates, or tracks coding agents; run your own agent CLI in a pane as any other command.
 - Remove the now-dead settings `agent_icons`, `plugins.builtin_agents`, and `plugins.agent_panel`. Unknown keys in `settings.json` are ignored, so existing configs keep working.

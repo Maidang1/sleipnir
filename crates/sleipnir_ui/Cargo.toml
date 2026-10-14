@@ -22,6 +22,7 @@ gpui.workspace = true
 terminal.workspace = true
 sleipnir_motion.workspace = true
 sleipnir_settings.workspace = true
+sleipnir_ssh.workspace = true
 release_channel.workspace = true
 updater.workspace = true
 itertools.workspace = true

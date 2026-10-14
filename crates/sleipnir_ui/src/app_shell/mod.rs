@@ -16,6 +16,8 @@ pub(crate) mod plugin_paint;
 mod plugins;
 pub(crate) mod query;
 mod settings;
+mod ssh_hosts;
+mod ssh_prompt;
 mod tabs;
 mod terminal_menu;
 mod update;
@@ -56,6 +58,8 @@ actions!(
         ReopenClosedTab,
         /// Close the active pane (or the tab, if it is the last pane).
         CloseTab,
+        /// Open the remote SSH host picker.
+        ConnectHost,
         /// Activate the next tab.
         NextTab,
         /// Activate the previous tab.
@@ -242,6 +246,30 @@ pub(crate) struct TerminalMenuState {
     pub(crate) selected: usize,
 }
 
+/// A pending SSH_ASKPASS request from one of this window's panes.
+///
+/// `reply` is the channel back to the `ssh` child; sending `Some(secret)`
+/// authenticates and `None` cancels. Dropping it (pane closed, window closed)
+/// makes `ssh` see EOF and fail instead of hanging.
+#[derive(Clone)]
+pub(crate) struct SshPromptState {
+    /// The prompt text `ssh` produced, shown verbatim in the modal.
+    pub(crate) prompt: String,
+    /// What the user has typed so far (masked when rendered).
+    pub(crate) secret: String,
+    pub(crate) reply: Option<std::sync::mpsc::SyncSender<Option<String>>>,
+}
+
+impl SshPromptState {
+    /// Answer the pending request and consume the state.
+    fn answer(self, secret: Option<String>) {
+        if let Some(reply) = self.reply {
+            // A closed channel means the pane is gone; nothing to do.
+            let _ = reply.try_send(secret);
+        }
+    }
+}
+
 pub(crate) struct ClosedTab {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) title: Option<SharedString>,
@@ -392,6 +420,15 @@ pub struct AppShell {
     /// snapshot timestamp and in-flight flag.
     facts: PaneFactsState,
     history: HistoryState,
+    /// Remote SSH host picker: resolved host list plus its filter query.
+    /// `None` whenever the picker is closed.
+    pub(crate) ssh_hosts: Option<crate::app_shell::ssh_hosts::SshHostsState>,
+    /// Filter query for the host picker (kept on the shell with the other
+    /// overlay query boxes so the IME path stays uniform).
+    ssh_hosts_input: crate::app_shell::query::QueryBox,
+    /// Masked query box for the SSH askpass modal (the prompt text itself
+    /// lives in `InputMode::SshPrompt`).
+    ssh_prompt_input: crate::app_shell::query::QueryBox,
     /// Git diff inspector (ADR-0012). Not a Pane.
     pub(crate) diff_view: Option<crate::diff::DiffView>,
     diff_gen: u64,
@@ -755,6 +792,12 @@ impl AppShell {
                     cx.stop_propagation();
                 }
             }
+            InputOwner::SshPrompt => self.ssh_prompt_key_down(event, cx),
+            InputOwner::Overlay(OverlayKind::SshHosts) => {
+                if self.ssh_hosts_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
             InputOwner::Terminal => {}
         }
     }
@@ -888,6 +931,9 @@ impl AppShell {
             bell_flash_tabs: std::collections::HashSet::new(),
             broadcast: false,
             history: HistoryState::default(),
+            ssh_hosts: None,
+            ssh_hosts_input: crate::app_shell::query::QueryBox::seeded(String::new()),
+            ssh_prompt_input: crate::app_shell::query::QueryBox::seeded(String::new()),
             diff_view: None,
             diff_gen: 0,
             facts: PaneFactsState::default(),
@@ -1041,6 +1087,9 @@ impl AppShell {
                     crate::TermViewEvent::Bell => {
                         this.on_term_bell(view, cx);
                     }
+                    crate::TermViewEvent::Askpass { prompt, reply } => {
+                        this.on_pane_askpass(prompt.clone(), reply.clone(), window, cx);
+                    }
                     crate::TermViewEvent::RunStarted {
                         command,
                         cwd,
@@ -1090,6 +1139,90 @@ impl AppShell {
             },
         )
         .detach();
+    }
+
+    /// `ssh` in one of this window's panes wants a password or passphrase.
+    ///
+    /// Any prompt already showing is cancelled first (the user can only look
+    /// at one), then this one takes the keyboard so the secret can be typed
+    /// into a Sleipnir modal instead of the raw terminal.
+    fn on_pane_askpass(
+        &mut self,
+        prompt: String,
+        reply: std::sync::mpsc::SyncSender<Option<String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pending) = self.input.take_ssh_prompt() {
+            pending.answer(None);
+        }
+        self.set_input(
+            InputMode::SshPrompt(SshPromptState {
+                prompt,
+                secret: String::new(),
+                reply: Some(reply),
+            }),
+            cx,
+        );
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Submit the typed secret to the waiting `ssh` child.
+    pub(crate) fn submit_ssh_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.input.take_ssh_prompt() {
+            let secret = state.secret.clone();
+            state.answer(Some(secret));
+        }
+        cx.notify();
+    }
+
+    /// Cancel the pending askpass request; `ssh` falls back to the terminal.
+    pub(crate) fn cancel_ssh_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.input.take_ssh_prompt() {
+            state.answer(None);
+        }
+        cx.notify();
+    }
+
+    /// Keyboard handling for the SSH askpass prompt. Enter submits, escape
+    /// cancels, everything else edits the masked secret.
+    fn ssh_prompt_key_down(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        match key {
+            "enter" => {
+                self.submit_ssh_prompt(cx);
+                cx.stop_propagation();
+            }
+            "escape" => {
+                self.cancel_ssh_prompt(cx);
+                cx.stop_propagation();
+            }
+            _ => {
+                let mut changed = false;
+                if let InputMode::SshPrompt(state) = &mut self.input {
+                    match key {
+                        "backspace" => {
+                            state.secret.pop();
+                            changed = true;
+                        }
+                        _ => match event.keystroke.key_char.as_ref() {
+                            Some(ch) if !ch.is_empty() && !ch.chars().any(char::is_control) => {
+                                state.secret.push_str(ch);
+                                changed = true;
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+                if changed {
+                    cx.notify();
+                }
+                // Swallow every other key so terminal shortcuts don't fire
+                // while a password is being typed.
+                cx.stop_propagation();
+            }
+        }
     }
 
     /// Flash the tab that owns `view` when visual bell is enabled.
@@ -1980,6 +2113,10 @@ impl AppShell {
         self.add_tab(window, cx);
     }
 
+    fn on_connect_host(&mut self, _: &ConnectHost, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_ssh_hosts(window, cx);
+    }
+
     fn on_reopen_closed_tab(
         &mut self,
         _: &ReopenClosedTab,
@@ -2259,6 +2396,7 @@ impl Render for AppShell {
                 },
             ))
             .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_connect_host))
             .on_action(cx.listener(Self::on_reopen_closed_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
@@ -2443,6 +2581,12 @@ impl Render for AppShell {
             })
             .when(self.input.is_overlay(OverlayKind::Diff), |el| {
                 el.child(self.render_diff_overlay(&tokens, &palette, window, cx))
+            })
+            .when(self.input.is_overlay(OverlayKind::SshHosts), |el| {
+                el.child(self.render_ssh_hosts(&tokens, cx))
+            })
+            .when(self.input.ssh_prompt().is_some(), |el| {
+                el.child(self.render_ssh_prompt(&tokens, cx))
             })
     }
 }

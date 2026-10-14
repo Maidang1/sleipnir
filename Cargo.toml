@@ -19,6 +19,7 @@ members = [
     "crates/plugin_grants",
     "crates/atomic_write",
     "crates/sleipnir_paths",
+    "crates/sleipnir_ssh",
     "crates/sleipnir_plugin_sdk",
     "crates/sleipnir_plugin_runledger",
     "crates/sleipnir_motion",
@@ -72,6 +73,7 @@ plugin_protocol = { path = "crates/plugin_protocol" }
 plugin_grants = { path = "crates/plugin_grants" }
 atomic_write = { path = "crates/atomic_write" }
 sleipnir_paths = { path = "crates/sleipnir_paths" }
+sleipnir_ssh = { path = "crates/sleipnir_ssh" }
 sleipnir-plugin = { path = "crates/sleipnir_plugin_sdk" }
 sleipnir_widget = { path = "crates/sleipnir_widget" }
 row_geometry = { path = "crates/row_geometry" }

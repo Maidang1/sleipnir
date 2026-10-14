@@ -16,7 +16,7 @@ use gpui_platform::application;
 use release_channel::AppVersion;
 use sleipnir_settings::{self, KeyBindingSpec, TerminalSettings};
 use sleipnir_ui::{
-    ActivateTab, BindingContext, BuiltinAction, CheckForUpdates, CloseTab, CycleTheme,
+    ActivateTab, BindingContext, BuiltinAction, CheckForUpdates, CloseTab, ConnectHost, CycleTheme,
     DecreaseFontSize, Find, FindNext, FindPrev, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
@@ -38,6 +38,15 @@ fn main() -> std::process::ExitCode {
     match args.next().as_deref() {
         Some(mode @ ("browser-mcp" | "browser-ctl" | "browser-agent")) => {
             return sleipnir_browser_control::cli::run(mode, args);
+        }
+        // Hidden helper mode: the generated SSH_ASKPASS script execs this
+        // binary with `ssh-askpass`. It talks to the pane that spawned `ssh`
+        // over a private Unix socket and prints the secret on stdout.
+        Some("ssh-askpass") => {
+            let _ =
+                env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+                    .try_init();
+            return std::process::ExitCode::from(sleipnir_ssh::askpass::run_askpass_client() as u8);
         }
         _ => {}
     }
@@ -199,6 +208,7 @@ fn bind_action(key: &str, action: BuiltinAction, context: Option<&str>) -> KeyBi
         BuiltinAction::NewTab => KeyBinding::new(key, NewTab, context),
         BuiltinAction::ReopenClosedTab => KeyBinding::new(key, ReopenClosedTab, context),
         BuiltinAction::CloseTab => KeyBinding::new(key, CloseTab, context),
+        BuiltinAction::ConnectHost => KeyBinding::new(key, ConnectHost, context),
         BuiltinAction::NewWindow => KeyBinding::new(key, NewWindow, context),
         BuiltinAction::NextTab => KeyBinding::new(key, NextTab, context),
         BuiltinAction::PrevTab => KeyBinding::new(key, PrevTab, context),

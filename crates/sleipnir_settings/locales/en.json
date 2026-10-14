@@ -31,6 +31,7 @@
   "menu.quit_sleipnir": "Quit Sleipnir",
   "menu.shell": "Shell",
   "menu.new_tab": "New Tab",
+  "menu.connect_host": "Connect to Host…",
   "menu.close": "Close",
   "menu.split_right": "Split Right",
   "menu.split_down": "Split Down",
@@ -51,6 +52,7 @@
   "menu.exit": "Exit",
 
   "command.new_tab": "New Tab",
+  "command.connect_host": "Connect to Host…",
   "command.close_pane": "Close Pane / Tab",
   "command.next_tab": "Next Tab",
   "command.previous_tab": "Previous Tab",

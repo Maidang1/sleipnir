@@ -201,7 +201,43 @@ pub struct TerminalSettings {
     pub keybinding_preset: KeybindingPreset,
     /// Built-in service policy and external command plugin discovery.
     pub plugins: PluginSettings,
+    /// Remote SSH connection hosts and behavior.
+    pub ssh: SshSettings,
 }
+
+/// Remote SSH settings: how connections are launched and which hosts the user
+/// configured inside Sleipnir.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct SshSettings {
+    /// Program used to open a connection. Empty/blank means `ssh` from PATH.
+    pub program: Option<String>,
+    /// Merge hosts from `~/.ssh/config` into the connection list. Default true.
+    pub read_ssh_config: bool,
+    /// Collect passwords/passphrases in a Sleipnir prompt via SSH_ASKPASS.
+    /// Unix only; elsewhere the terminal stays the input surface. Default true.
+    pub askpass: bool,
+    /// Hosts configured in `settings.json`.
+    pub hosts: Vec<SshHostSettings>,
+}
+
+impl Default for SshSettings {
+    fn default() -> Self {
+        Self {
+            program: None,
+            read_ssh_config: true,
+            askpass: true,
+            hosts: Vec::new(),
+        }
+    }
+}
+
+/// One application-defined SSH host (`settings.json` → `ssh.hosts`).
+///
+/// The struct lives in `sleipnir_ssh` so the connection UI and the settings
+/// schema share a single definition; it is re-exported here under its
+/// settings-facing name.
+pub use sleipnir_ssh::AppHost as SshHostSettings;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default)]
@@ -312,6 +348,7 @@ impl Default for TerminalSettings {
             pipe_selection_command: None,
             keybinding_preset: KeybindingPreset::Default,
             plugins: PluginSettings::default(),
+            ssh: SshSettings::default(),
         }
     }
 }
@@ -472,6 +509,38 @@ impl TerminalSettings {
         }
     }
 
+    /// Replace the application-defined SSH hosts and persist them under `ssh.hosts`.
+    ///
+    /// The whole array is rewritten (unknown keys elsewhere in the document are
+    /// preserved), which keeps the settings file the single source of truth for
+    /// hosts the user added inside Sleipnir.
+    pub fn set_ssh_hosts(hosts: Vec<SshHostSettings>, cx: &mut App) {
+        if Self::update(
+            |s| {
+                s.ssh.hosts = merge_ssh_settings(SshSettings {
+                    hosts: hosts.clone(),
+                    ..Default::default()
+                })
+                .hosts
+            },
+            |doc| {
+                if !doc.get("ssh").is_some_and(|s| s.is_object()) {
+                    doc["ssh"] = serde_json::json!({});
+                }
+                if let Some(obj) = doc.get_mut("ssh").and_then(|s| s.as_object_mut()) {
+                    obj.insert(
+                        "hosts".into(),
+                        serde_json::to_value(&hosts).unwrap_or_default(),
+                    );
+                }
+            },
+            cx,
+            &format!("ssh hosts -> {} entries", hosts.len()),
+        ) {
+            cx.refresh_windows();
+        }
+    }
+
     /// Record a new system appearance and re-resolve the palette (for `Auto`).
     pub fn set_appearance(appearance: Appearance, cx: &mut App) {
         cx.set_global(AppearanceGlobal(appearance));
@@ -591,6 +660,9 @@ struct SettingsFile {
     keybinding_preset: Option<KeybindingPreset>,
     #[serde(default)]
     plugins: Option<PluginSettings>,
+    /// Remote SSH connection hosts and behavior.
+    #[serde(default)]
+    ssh: Option<SshSettings>,
     #[serde(default)]
     terminal: TerminalSettingsFile,
 }
@@ -635,6 +707,31 @@ where
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// Normalize the `ssh` section: a blank program means "use PATH", and
+/// unconnectable hosts are dropped so the connection list never shows an entry
+/// that cannot be launched.
+fn merge_ssh_settings(ssh: SshSettings) -> SshSettings {
+    SshSettings {
+        program: ssh
+            .program
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty()),
+        read_ssh_config: ssh.read_ssh_config,
+        askpass: ssh.askpass,
+        hosts: ssh
+            .hosts
+            .into_iter()
+            .filter(|host| host.is_connectable())
+            .map(|mut host| {
+                host.alias = host.alias.trim().to_string();
+                host.host = host.host.trim().to_string();
+                host.extra_args = sleipnir_ssh::sanitize_extra_args(&host.extra_args);
+                host
+            })
+            .collect(),
+    }
 }
 
 pub use sleipnir_paths::{config_dir, config_path};
@@ -706,6 +803,9 @@ fn merge_file(settings: &mut TerminalSettings, file: SettingsFile) {
     }
     if let Some(v) = file.plugins {
         settings.plugins = v;
+    }
+    if let Some(ssh) = file.ssh {
+        settings.ssh = merge_ssh_settings(ssh);
     }
     let t = file.terminal;
     if let Some(size) = t.font_size {
@@ -808,6 +908,7 @@ fn default_settings_file() -> SettingsFile {
         pipe_selection_command: None,
         keybinding_preset: Some(KeybindingPreset::Default),
         plugins: None,
+        ssh: None,
         terminal: TerminalSettingsFile {
             font_size: Some(14.0),
             font_family: Some(default_font_family().into()),
@@ -1402,6 +1503,126 @@ mod tests {
             settings.plugins.directories,
             vec![PathBuf::from("/opt/sleipnir-plugins")]
         );
+    }
+
+    #[test]
+    fn ssh_defaults_are_opt_in_and_read_the_user_config() {
+        let settings = TerminalSettings::default();
+        assert_eq!(settings.ssh.program, None);
+        assert!(settings.ssh.read_ssh_config);
+        assert!(settings.ssh.askpass);
+        assert!(settings.ssh.hosts.is_empty());
+    }
+
+    #[test]
+    fn ssh_hosts_parse_from_settings_json() {
+        let raw = r#"{
+  "ssh": {
+    "program": "/usr/bin/ssh",
+    "read_ssh_config": false,
+    "askpass": false,
+    "hosts": [
+      {
+        "alias": "prod-01",
+        "host": "10.0.0.5",
+        "user": "deploy",
+        "port": 2222,
+        "identity_file": "~/.ssh/id_ed25519",
+        "proxy_jump": "bastion",
+        "extra_args": ["-o", "ServerAliveInterval=30"]
+      }
+    ]
+  }
+}"#;
+        let file: SettingsFile = serde_json::from_str(raw).expect("parse ssh");
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.ssh.program.as_deref(), Some("/usr/bin/ssh"));
+        assert!(!settings.ssh.read_ssh_config);
+        assert!(!settings.ssh.askpass);
+        let host = &settings.ssh.hosts[0];
+        assert_eq!(host.alias, "prod-01");
+        assert_eq!(host.host, "10.0.0.5");
+        assert_eq!(host.user.as_deref(), Some("deploy"));
+        assert_eq!(host.port, Some(2222));
+        assert_eq!(host.identity_file.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert_eq!(host.proxy_jump.as_deref(), Some("bastion"));
+        assert_eq!(host.extra_args, vec!["-o", "ServerAliveInterval=30"]);
+    }
+
+    #[test]
+    fn ssh_section_normalizes_blank_program_and_drops_unusable_hosts() {
+        let raw = r#"{
+  "ssh": {
+    "program": "   ",
+    "hosts": [
+      {"alias": "  ", "host": "10.0.0.5"},
+      {"alias": "ok", "host": "  "},
+      {"alias": " trimmed ", "host": " 10.0.0.9 ", "extra_args": ["-A", "  "]}
+    ]
+  }
+}"#;
+        let file: SettingsFile = serde_json::from_str(raw).expect("parse ssh");
+        let mut settings = TerminalSettings::default();
+        merge_file(&mut settings, file);
+        assert_eq!(settings.ssh.program, None);
+        assert_eq!(settings.ssh.hosts.len(), 1);
+        assert_eq!(settings.ssh.hosts[0].alias, "trimmed");
+        assert_eq!(settings.ssh.hosts[0].host, "10.0.0.9");
+        assert_eq!(settings.ssh.hosts[0].extra_args, vec!["-A"]);
+    }
+
+    #[test]
+    fn ssh_hosts_patch_roundtrips_and_preserves_other_settings() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = r#"{
+  "theme": "nord",
+  "terminal": { "font_size": 15.0 },
+  "ssh": { "hosts": [{ "alias": "old", "host": "10.0.0.1" }] }
+}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let hosts = vec![SshHostSettings {
+            alias: "prod-01".into(),
+            host: "10.0.0.5".into(),
+            user: Some("deploy".into()),
+            ..Default::default()
+        }];
+        patch_settings_file_at_path(&path, |doc| {
+            if !doc.get("ssh").is_some_and(|s| s.is_object()) {
+                doc["ssh"] = serde_json::json!({});
+            }
+            if let Some(obj) = doc.get_mut("ssh").and_then(|s| s.as_object_mut()) {
+                obj.insert(
+                    "hosts".into(),
+                    serde_json::to_value(&hosts).unwrap_or_default(),
+                );
+            }
+        })
+        .expect("patch ssh hosts");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["theme"], serde_json::json!("nord"));
+        assert_eq!(value["terminal"]["font_size"], serde_json::json!(15.0));
+        assert_eq!(
+            value["ssh"]["hosts"][0]["alias"],
+            serde_json::json!("prod-01")
+        );
+        assert_eq!(
+            value["ssh"]["hosts"][0]["user"],
+            serde_json::json!("deploy")
+        );
+        assert_eq!(value["ssh"]["hosts"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ssh_settings_are_schema_serializable() {
+        // The generated settings document must stay valid JSON with the section.
+        let file = default_settings_file();
+        let json = serde_json::to_value(&file).unwrap();
+        assert!(json.get("ssh").is_some(), "{json}");
     }
 
     #[test]

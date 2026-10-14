@@ -35,6 +35,8 @@ pub enum BuiltinAction {
     NewTab,
     ReopenClosedTab,
     CloseTab,
+    /// Open the remote SSH host picker.
+    ConnectHost,
     NewWindow,
     NextTab,
     PrevTab,
@@ -191,6 +193,7 @@ fn macos_static_bindings() -> Vec<BuiltinBinding> {
         ),
         b("cmd-t", BuiltinAction::NewTab, Both),
         b("cmd-shift-t", BuiltinAction::ReopenClosedTab, Both),
+        b("cmd-shift-h", BuiltinAction::ConnectHost, Both),
         b("cmd-w", BuiltinAction::CloseTab, Both),
         b("cmd-n", BuiltinAction::NewWindow, Both),
         b("cmd-shift-]", BuiltinAction::NextTab, Both),
@@ -261,6 +264,7 @@ fn desktop_static_bindings() -> Vec<BuiltinBinding> {
         // Tabs & windows
         b("ctrl-shift-t", BuiltinAction::NewTab, Both),
         b("ctrl-shift-w", BuiltinAction::CloseTab, Both),
+        b("ctrl-shift-h", BuiltinAction::ConnectHost, Both),
         b("ctrl-shift-n", BuiltinAction::NewWindow, Both),
         b("ctrl-tab", BuiltinAction::NextTab, Both),
         b("ctrl-shift-tab", BuiltinAction::PrevTab, Both),
@@ -349,6 +353,8 @@ pub fn display_shortcut_for(id: &str, non_macos: bool) -> &'static str {
         ("new_tab", true) => "Ctrl+Shift+T",
         ("reopen_closed_tab", false) => "⌘⇧T",
         ("reopen_closed_tab", true) => "",
+        ("connect_host", false) => "⌘⇧H",
+        ("connect_host", true) => "Ctrl+Shift+H",
         ("close_tab", false) => "⌘W",
         ("close_tab", true) => "Ctrl+Shift+W",
         ("next_tab", _) => "⌃Tab",

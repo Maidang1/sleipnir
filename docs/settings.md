@@ -53,6 +53,58 @@ ignored. Do not rely on either key to limit persistent history.
 `run_ledger_redact` controls capture-time command redaction. Redaction is a
 heuristic, not a guarantee that every secret will be removed.
 
+## Remote SSH
+
+The `ssh` section configures remote connections. Open the host picker with
+**Shell → Connect to Host** (⌘⇧H / Ctrl+Shift+H), the command palette, or
+`"action": "connect_host"` in a user key binding. Selecting a host opens a new
+tab running `ssh` as an ordinary child process, so every ssh feature — agent
+forwarding, jump hosts, port forwarding, `ControlMaster` — keeps working exactly
+as it does on the command line.
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `ssh.program` | `"ssh"` | Program used to open a connection. Blank falls back to `ssh` from `PATH` |
+| `ssh.read_ssh_config` | `true` | Merge hosts from `~/.ssh/config` into the picker |
+| `ssh.askpass` | `true` | Collect passwords/passphrases in a Sleipnir prompt (Unix only) |
+| `ssh.hosts` | `[]` | Hosts configured inside Sleipnir |
+
+Each `ssh.hosts` entry takes `alias` (connection name, also the tab title),
+`host`, and optionally `user`, `port`, `identity_file`, `proxy_jump`, and
+`extra_args`. Application hosts win when their `alias` collides with a
+`~/.ssh/config` entry, so an explicit entry always shadows the ssh config.
+
+```json
+"ssh": {
+  "hosts": [
+    {
+      "alias": "prod-01",
+      "host": "10.0.0.5",
+      "user": "deploy",
+      "port": 2222,
+      "identity_file": "~/.ssh/id_ed25519",
+      "proxy_jump": "bastion",
+      "extra_args": ["-o", "ServerAliveInterval=30"]
+    }
+  ]
+}
+```
+
+Notes:
+
+- Hosts that come from `~/.ssh/config` are launched as `ssh <alias>`, so ssh
+  re-reads your configuration itself. Application hosts get explicit `-p`, `-l`,
+  `-i`, and `-J` options, and the destination is always the **last** argument so
+  `extra_args` can never be run as a remote command.
+- With `ssh.askpass` enabled, Sleipnir writes a small helper script next to its
+  config and sets `SSH_ASKPASS` / `SSH_ASKPASS_REQUIRE=force` for the child, so
+  passwords are typed into a Sleipnir modal instead of the raw terminal. This
+  needs OpenSSH 8.4 or newer; on older builds, or on Windows, type the password
+  in the terminal as usual. Secrets are never written to disk or logged.
+- Remote shells do not receive the OSC 133 shell-integration script, so the Run
+  Ledger does not track individual commands inside an SSH session.
+- Editing `~/.ssh/config` is picked up the next time the picker opens.
+
 ## Optional local extensions
 
 - `plugins.enabled` defaults to `false`. Enabled plugins run as local,
