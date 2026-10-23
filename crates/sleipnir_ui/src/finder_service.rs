@@ -1,7 +1,9 @@
 //! macOS Finder Services: "New Sleipnir Tab Here" / "New Sleipnir Window Here".
 
 use gpui::App;
+#[cfg(any(target_os = "macos", test))]
 use std::collections::HashSet;
+#[cfg(any(target_os = "macos", test))]
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
@@ -29,11 +31,13 @@ pub fn install_finder_services(cx: &mut App) {
 ///
 /// File URLs are decoded; trailing slashes are stripped except for `/`.
 /// Directories are used as-is; files use their parent; missing paths are ignored.
+#[cfg(any(target_os = "macos", test))]
 pub fn cwd_from_service_input(raw: &str) -> Option<PathBuf> {
     cwd_from_parsed_path(&parse_service_path(raw))
 }
 
 /// Parse a pasteboard string into a filesystem path. Does not consult the disk.
+#[cfg(any(target_os = "macos", test))]
 pub fn parse_service_path(raw: &str) -> PathBuf {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("file://") {
@@ -54,6 +58,7 @@ pub fn parse_service_path(raw: &str) -> PathBuf {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn strip_trailing_slashes(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     if s == "/" {
@@ -62,6 +67,7 @@ fn strip_trailing_slashes(path: &Path) -> PathBuf {
     PathBuf::from(s.trim_end_matches('/'))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn cwd_from_parsed_path(path: &Path) -> Option<PathBuf> {
     let path = strip_trailing_slashes(path);
     if path.as_os_str().is_empty() {
@@ -80,6 +86,7 @@ fn cwd_from_parsed_path(path: &Path) -> Option<PathBuf> {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn unique_cwds(raws: &[String]) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -425,6 +432,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "macos", test))]
     fn unique_cwds_dedupes_and_skips_missing() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.txt");

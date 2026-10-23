@@ -1,27 +1,15 @@
 use gpui::{App, Global};
 
-#[derive(Clone, Debug)]
-pub struct AvailableUpdate {
-    pub version: String,
-    pub tag: String,
-    pub notes: String,
-    pub artifact_url: String,
-    pub sha256_url: String,
-    pub expected_sha256: Option<String>,
-    pub expected_size: Option<u64>,
-    pub minimum_macos: String,
-}
-
 #[derive(Clone, Debug, Default)]
 pub enum UpdateUiState {
     #[default]
     Idle,
     Checking,
     UpToDate,
-    Available(AvailableUpdate),
-    Downloading(AvailableUpdate),
-    ReadyToRestart(AvailableUpdate),
-    WaitingForHelper(AvailableUpdate),
+    Available(updater::ReleaseInfo),
+    Downloading(updater::ReleaseInfo),
+    ReadyToRestart(updater::ReleaseInfo),
+    WaitingForHelper(updater::ReleaseInfo),
     Updated {
         version: String,
     },
@@ -114,14 +102,13 @@ mod tests {
 
     #[test]
     fn update_state_can_wait_for_helper_without_claiming_success() {
-        let update = AvailableUpdate {
-            version: "0.3.2".into(),
+        let update = updater::ReleaseInfo {
+            version: updater::parse_tag("v0.3.2").unwrap(),
             tag: "v0.3.2".into(),
             notes: String::new(),
             artifact_url: "https://example.invalid/app.dmg".into(),
-            sha256_url: String::new(),
-            expected_sha256: Some("a".repeat(64)),
-            expected_size: Some(42),
+            expected_sha256: "a".repeat(64),
+            expected_size: 42,
             minimum_macos: "14.0".into(),
         };
         let model = UpdateModel {

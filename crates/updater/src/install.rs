@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
 use std::{error::Error as StdError, fmt};
 
-use crate::transaction::{HealthMarker, Phase, Transaction, TransactionError, save_atomic};
+use crate::transaction::{HealthMarker, Phase, Transaction, save_atomic};
 #[cfg(target_os = "macos")]
 use rand::RngCore as _;
 #[cfg(target_os = "macos")]
@@ -31,6 +32,7 @@ pub struct UpdateLock(File);
 
 #[cfg(unix)]
 impl UpdateLock {
+    #[cfg(target_os = "macos")]
     fn acquire(root: &Path) -> Result<Self, String> {
         Self::acquire_with(root, false)
     }
@@ -183,10 +185,6 @@ pub fn write_active_pointer(root: &Path, transaction_path: &Path) -> Result<(), 
 
 pub fn read_active_pointer(root: &Path) -> Result<Option<PathBuf>, String> {
     read_active_pointer_unlocked(root)
-}
-
-pub fn persist_prepared(path: &Path, transaction: &Transaction) -> Result<(), TransactionError> {
-    save_atomic(path, transaction)
 }
 
 pub fn updates_root() -> Result<PathBuf, String> {
@@ -679,9 +677,10 @@ pub fn write_health_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use std::io::{BufRead, BufReader};
-    use std::process::Command;
-    use std::process::Stdio;
+    #[cfg(target_os = "macos")]
+    use std::process::{Command, Stdio};
     use tempfile::tempdir;
 
     #[test]

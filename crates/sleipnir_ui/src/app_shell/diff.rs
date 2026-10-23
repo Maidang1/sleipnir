@@ -80,7 +80,7 @@ impl AppShell {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
-        self.diff_view = Some(crate::diff::DiffView::Loading { title, generation });
+        self.diff_view = Some(crate::diff::DiffView::Loading { title });
         self.open_overlay(OverlayKind::Diff, cx);
         cx.spawn(async move |this, cx| {
             let outcome = cx

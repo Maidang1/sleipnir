@@ -37,7 +37,6 @@ async-channel.workspace = true
 futures.workspace = true
 regex.workspace = true
 percent-encoding.workspace = true
-unicode-segmentation = "1.12"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

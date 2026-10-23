@@ -165,11 +165,6 @@ impl ChromeTokens {
 
         tokens
     }
-
-    /// Active tab fill — connected to terminal content.
-    pub fn active_tab_bg(&self) -> Hsla {
-        self.content_bg
-    }
 }
 
 /// WCAG 2.1 contrast ratio between two opaque colors (1.0 .. 21.0).
@@ -204,8 +199,7 @@ mod tests {
                 t.surface.l,
                 t.content_bg.l
             );
-            assert_eq!(t.active_tab_bg().l, t.content_bg.l);
-            assert!((t.active_tab_bg().a - 1.0).abs() < 1e-5);
+            assert!((t.content_bg.a - 1.0).abs() < 1e-5);
         }
     }
 
@@ -219,7 +213,6 @@ mod tests {
             t.surface.l,
             t.content_bg.l
         );
-        assert_eq!(t.active_tab_bg().l, t.content_bg.l);
     }
 
     #[test]

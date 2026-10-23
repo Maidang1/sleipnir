@@ -56,7 +56,7 @@ pub use pane_tree::{
 };
 pub use run_ledger_global::RunLedgerGlobal;
 pub use term_element::TermElement;
-pub use update_model::{AvailableUpdate, UpdateModel, UpdateUiState};
+pub use update_model::{UpdateModel, UpdateUiState};
 
 use collections::HashMap;
 use gpui::Pixels;

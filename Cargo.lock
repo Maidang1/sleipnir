@@ -6129,10 +6129,8 @@ dependencies = [
 name = "sleipnir-update-helper"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "block2 0.6.2",
  "libc",
- "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "serde",
@@ -6183,7 +6181,6 @@ dependencies = [
  "anyhow",
  "atomic_write",
  "collections",
- "dirs",
  "gpui",
  "log",
  "schemars",
@@ -6242,7 +6239,6 @@ dependencies = [
  "sysinfo 0.37.2",
  "tempfile",
  "terminal",
- "unicode-segmentation",
  "updater",
  "util",
  "uuid",
@@ -7284,7 +7280,6 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "libc",
- "log",
  "rand 0.9.5",
  "semver",
  "serde",

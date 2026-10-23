@@ -4,7 +4,7 @@ mod launch;
 mod log;
 #[cfg(target_os = "macos")]
 mod process;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 mod supervisor;
 #[cfg(target_os = "macos")]
 mod swap;
