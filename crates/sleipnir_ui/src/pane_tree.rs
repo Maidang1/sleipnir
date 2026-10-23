@@ -56,33 +56,12 @@ use crate::plugin_panel::PanelSurface;
 /// wrapper newtype — the surface *is* the leaf content.
 ///
 impl LeafContent {
-    pub fn as_terminal(&self) -> Option<&Entity<TermView>> {
-        match self {
-            Self::Terminal(view) => Some(view),
-            Self::Panel(_) => None,
-        }
-    }
-
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Terminal(_))
     }
 
     pub fn is_panel(&self) -> bool {
         matches!(self, Self::Panel(_))
-    }
-
-    pub fn as_panel(&self) -> Option<&PanelSurface> {
-        match self {
-            Self::Panel(surface) => Some(surface),
-            Self::Terminal(_) => None,
-        }
-    }
-
-    pub fn as_panel_mut(&mut self) -> Option<&mut PanelSurface> {
-        match self {
-            Self::Panel(surface) => Some(surface),
-            Self::Terminal(_) => None,
-        }
     }
 }
 
@@ -523,13 +502,6 @@ impl PaneNode {
     ) {
         if let Some(existing) = self.find_panel_mut(pane_key) {
             *existing = surface;
-        }
-    }
-
-    /// Mark a panel leaf's surface as stale.
-    pub fn mark_panel_stale(&mut self, pane_key: PaneKey) {
-        if let Some(surface) = self.find_panel_mut(pane_key) {
-            surface.stale = true;
         }
     }
 

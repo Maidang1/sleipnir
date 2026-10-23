@@ -8,13 +8,6 @@ license.workspace = true
 [lints]
 workspace = true
 
-[features]
-# Compiles the browser panel's user-facing entries back in: the toolbar
-# toggle, the command palette item, and the app menu item. The WebView
-# implementation is in the crate either way; without it nothing registers
-# an entry, so no shared path has to remember to hide one.
-browser-panel = []
-
 [dependencies]
 collections.workspace = true
 dirs.workspace = true
@@ -34,7 +27,6 @@ run_ledger.workspace = true
 diff_core.workspace = true
 sleipnir_syntax.workspace = true
 sleipnir_ctl.workspace = true
-sleipnir_browser_control.workspace = true
 plugin_host.workspace = true
 plugin_grants.workspace = true
 plugin_protocol.workspace = true
@@ -45,19 +37,10 @@ async-channel.workspace = true
 futures.workspace = true
 regex.workspace = true
 percent-encoding.workspace = true
-url.workspace = true
 unicode-segmentation = "1.12"
-
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-wry = { version = "=0.55.1", default-features = false }
-raw-window-handle = "0.6"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
-objc2 = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true

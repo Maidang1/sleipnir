@@ -12,10 +12,6 @@ workspace = true
 name = "sleipnir"
 path = "src/main.rs"
 
-[features]
-# The browser panel's user-facing entries; forwards to `sleipnir_ui`.
-browser-panel = ["sleipnir_ui/browser-panel"]
-
 [dependencies]
 env_logger.workspace = true
 gpui = { workspace = true, features = ["font-kit"] }
@@ -26,7 +22,6 @@ release_channel.workspace = true
 terminal.workspace = true
 updater.workspace = true
 log.workspace = true
-sleipnir_browser_control.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
