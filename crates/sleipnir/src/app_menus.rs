@@ -79,11 +79,6 @@ fn shared_edit_view_window(language: Language) -> [Menu; 3] {
         MenuItem::action(tr(language, "menu.pane_facts"), TogglePaneFacts),
         MenuItem::action(tr(language, "menu.diff_inspector"), ToggleDiff),
     ];
-    #[cfg(feature = "browser-panel")]
-    view_items.push(MenuItem::action(
-        tr(language, "menu.browser_panel"),
-        crate::ToggleBrowser,
-    ));
     view_items.push(MenuItem::separator());
     view_items.push(MenuItem::action(
         tr(language, "menu.toggle_vi_mode"),

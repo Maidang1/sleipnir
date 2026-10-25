@@ -1,14 +1,16 @@
 //! Non-macOS caption buttons (min / max / close) for the custom titlebar.
 //!
 //! GPUI hides the OS title bar when `appears_transparent` is set. Native
-//! caption buttons are not drawn; hit-testing via [`WindowControlArea`] is
+//! caption buttons are not drawn; hit-testing via [`gpui::WindowControlArea`] is
 //! what actually minimizes, maximizes, and closes.
 
+#[cfg(windows)]
+use gpui::WindowControlArea;
 use gpui::{Context, IntoElement, Window, div, px};
 #[cfg(any(windows, target_os = "linux"))]
 use gpui::{
     InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
-    WindowControlArea, prelude::FluentBuilder as _, rgb,
+    prelude::FluentBuilder as _, rgb,
 };
 
 use crate::app_shell::AppShell;
@@ -17,27 +19,6 @@ use crate::chrome::ChromeTokens;
 /// Width of one desktop caption button. Three of them are 138px, matching
 /// the trailing pad reserved for custom window controls.
 pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn caption_bar_width() -> gpui::Pixels {
-    px(CAPTION_BUTTON_WIDTH * 3.0)
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CaptionButtonStrategy {
-    PlatformHitTest,
-    ExplicitClick,
-}
-
-#[cfg(test)]
-fn caption_button_strategy_for(linux: bool) -> CaptionButtonStrategy {
-    if linux {
-        CaptionButtonStrategy::ExplicitClick
-    } else {
-        CaptionButtonStrategy::PlatformHitTest
-    }
-}
 
 #[cfg(any(windows, target_os = "linux"))]
 #[derive(Clone, Copy)]
@@ -249,18 +230,6 @@ mod tests {
     use crate::chrome::geometry::trailing_pad_for;
 
     #[test]
-    fn caption_button_strategy_is_platform_specific() {
-        assert_eq!(
-            caption_button_strategy_for(false),
-            CaptionButtonStrategy::PlatformHitTest
-        );
-        assert_eq!(
-            caption_button_strategy_for(true),
-            CaptionButtonStrategy::ExplicitClick
-        );
-    }
-
-    #[test]
     fn linux_buttons_use_explicit_clicks_and_windows_keep_hit_tests() {
         let src = include_str!("desktop_window_controls.rs");
         let linux = src
@@ -286,6 +255,6 @@ mod tests {
 
     #[test]
     fn caption_bar_matches_desktop_trailing_pad() {
-        assert_eq!(caption_bar_width(), trailing_pad_for(true));
+        assert_eq!(px(CAPTION_BUTTON_WIDTH * 3.0), trailing_pad_for(true));
     }
 }

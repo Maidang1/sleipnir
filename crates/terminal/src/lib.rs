@@ -90,21 +90,21 @@ pub use vte::ansi::{Color, NamedColor, Rgb};
 
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Bounds, ClipboardItem, Context, EventEmitter,
-    Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point as GpuiPoint, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, px,
 };
 
 #[cfg(not(windows))]
 use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
-    AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
-    AlacrittyTermConfig, AlacrittyTermLock, DamageKind, HyperlinkMatch, PtySender, RegexSearches,
-    clear_saved_screen, content_text, display_offset, find_from_terminal_point, grid_text_range,
-    is_alt_screen, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
-    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
-    set_selection as set_term_selection, spawn_event_loop, take_damage_kind,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    AlacrittyCell, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm, AlacrittyTermConfig,
+    AlacrittyTermLock, DamageKind, HyperlinkMatch, PtySender, RegexSearches, clear_saved_screen,
+    content_text, display_offset, find_from_terminal_point, grid_text_range, is_alt_screen,
+    make_content, new_term, open_pty, pty_options, pty_term_config, resize, scroll_display,
+    scroll_to_point, search_matches, selection_text, set_selection as set_term_selection,
+    spawn_event_loop, take_damage_kind, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
     visible_screen_text as term_visible_screen_text,
 };
 use crate::mappings::colors::to_vte_rgb;
@@ -253,10 +253,6 @@ enum HyperlinkData {
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 pub struct Cell {
     cell: AlacrittyCell,
-}
-
-pub struct RenderableCells<'a> {
-    cells: AlacrittyGridIterator<'a>,
 }
 
 #[derive(Debug, Clone)]
@@ -1633,21 +1629,8 @@ impl Terminal {
         &self.viewport.geometry
     }
 
-    pub fn row_geometry_mut(&mut self) -> &mut RowGeometry {
-        &mut self.viewport.geometry
-    }
-
     pub fn viewport_sub(&self) -> f32 {
         self.viewport.position.sub
-    }
-
-    /// Flush the remainder so a jump lands a Block against the viewport edge.
-    pub fn set_viewport_sub(&mut self, sub: f32) {
-        self.viewport.position.sub = if sub.is_finite() && sub >= 0.0 {
-            sub
-        } else {
-            0.0
-        };
     }
 
     pub fn set_blocks_frozen(&mut self, frozen: bool) {
@@ -1921,10 +1904,6 @@ impl Terminal {
         term_visible_screen_text(&self.term.lock_unfair())
     }
 
-    pub fn viewport_lines(&self) -> usize {
-        screen_lines(&self.term.lock_unfair())
-    }
-
     //To test:
     //- Activate match on terminal (scrolling and selection)
     //- Editor search snapping behavior
@@ -1970,19 +1949,9 @@ impl Terminal {
             .push_back(InternalEvent::Scroll(Scroll::Delta(1)));
     }
 
-    pub fn scroll_up_by(&mut self, lines: usize) {
-        self.events
-            .push_back(InternalEvent::Scroll(Scroll::Delta(lines as i32)));
-    }
-
     pub fn scroll_line_down(&mut self) {
         self.events
             .push_back(InternalEvent::Scroll(Scroll::Delta(-1)));
-    }
-
-    pub fn scroll_down_by(&mut self, lines: usize) {
-        self.events
-            .push_back(InternalEvent::Scroll(Scroll::Delta(-(lines as i32))));
     }
 
     pub fn scroll_page_up(&mut self) {
@@ -2215,24 +2184,6 @@ impl Terminal {
         }
     }
 
-    pub fn try_modifiers_change(
-        &mut self,
-        modifiers: &Modifiers,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .last_content
-            .terminal_bounds
-            .bounds
-            .contains(&window.mouse_position())
-            && modifiers.secondary()
-        {
-            self.refresh_hovered_word(window);
-        }
-        cx.notify();
-    }
-
     ///Paste text into the terminal
     pub fn paste(&mut self, text: &str) {
         let paste_text = if self.last_content.mode.contains(Modes::BRACKETED_PASTE) {
@@ -2313,24 +2264,6 @@ impl Terminal {
             self.invalidate_terminal_anchors();
         }
         self.semantics.pending_backend_wakeup = false;
-    }
-
-    pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
-        let term = self.term.lock_unfair();
-        let content = term.renderable_content();
-        f(RenderableCells::new(content.display_iter))
-    }
-
-    pub fn focus_in(&self) {
-        if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
-            self.write_to_pty("\x1b[I".as_bytes());
-        }
-    }
-
-    pub fn focus_out(&mut self) {
-        if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
-            self.write_to_pty("\x1b[O".as_bytes());
-        }
     }
 
     fn mouse_changed(&mut self, point: Point, side: SelectionSide) -> bool {

@@ -1,14 +1,17 @@
 //! Lightweight self-updater for Sleipnir.
 //!
 //! Queries GitHub Releases for the latest version, downloads the macOS `.dmg`
-//! artifact, verifies its SHA-256 against the published `.sha256` sidecar, then
-//! atomically replaces the running `.app` bundle via a detached helper script
-//! and relaunches through a bundled transactional Rust supervisor.
+//! artifact, verifies its SHA-256 and size against a signed manifest, then
+//! atomically replaces the running `.app` bundle and relaunches through a
+//! bundled transactional Rust supervisor.
 //!
 //! No Sparkle or OpenSSL runtime dependency: network verification uses rustls,
 //! Ed25519, and SHA-256.
 
-use anyhow::{Context as _, Result, anyhow, bail};
+#[cfg(target_os = "macos")]
+use anyhow::anyhow;
+use anyhow::{Context as _, Result, bail};
+#[cfg(target_os = "macos")]
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -57,13 +60,11 @@ pub struct ReleaseInfo {
     pub notes: String,
     /// Direct download URL for the macOS `.dmg` artifact.
     pub artifact_url: String,
-    /// Direct download URL for the `.dmg.sha256` sidecar (legacy bootstrap only).
-    pub sha256_url: String,
-    /// Signed manifest digest, when available.
-    pub expected_sha256: Option<String>,
-    /// Signed manifest byte count, when available.
-    pub expected_size: Option<u64>,
-    /// Minimum macOS version required by the signed manifest, if known.
+    /// Artifact digest from the verified signed manifest.
+    pub expected_sha256: String,
+    /// Artifact byte count from the verified signed manifest.
+    pub expected_size: u64,
+    /// Minimum macOS version required by the signed manifest.
     pub minimum_macos: String,
 }
 
@@ -101,88 +102,6 @@ pub fn is_newer(current: &str, latest: &semver::Version) -> bool {
         Ok(cur) => *latest > cur,
         Err(_) => true,
     }
-}
-
-/// Asset filename marker and file extension for the macOS release artifact.
-/// macOS ships `*-macos.dmg`; the SHA-256 sidecar is `<artifact>.sha256`.
-///
-/// In-place updates are macOS-only by design, so this exists only on macOS:
-/// other platforms cannot reach dmg matching at compile time.
-#[cfg(target_os = "macos")]
-pub fn platform_asset_markers() -> (&'static str, &'static str) {
-    ("-macos", ".dmg")
-}
-
-/// Select the release artifact and its `.sha256` sidecar for the current OS.
-///
-/// Returns `(artifact_url, sha256_url)`.
-#[cfg(target_os = "macos")]
-pub fn pick_asset(release: &Value) -> Result<(String, String)> {
-    let (marker, extension) = platform_asset_markers();
-    pick_asset_for(release, marker, extension)
-}
-
-/// Select a release artifact matching `marker` + `extension` (and its sidecar).
-/// Testable for any OS by passing explicit markers.
-pub fn pick_asset_for(release: &Value, marker: &str, extension: &str) -> Result<(String, String)> {
-    let assets = release
-        .get("assets")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("release JSON missing `assets` array"))?;
-
-    let mut artifact_url = None;
-    let mut sha_url = None;
-    for asset in assets {
-        let name = asset
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let url = asset
-            .get("browser_download_url")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if url.is_empty() || !name.contains(marker) {
-            continue;
-        }
-        if name.ends_with(".sha256") {
-            sha_url = Some(url.to_string());
-        } else if name.ends_with(extension) {
-            artifact_url = Some(url.to_string());
-        }
-    }
-
-    let artifact_url =
-        artifact_url.ok_or_else(|| anyhow!("no `*{marker}*{extension}` asset in release"))?;
-    let sha256_url =
-        sha_url.ok_or_else(|| anyhow!("no `*{marker}*{extension}.sha256` asset in release"))?;
-    Ok((artifact_url, sha256_url))
-}
-
-/// Parse a full release JSON document into a [`ReleaseInfo`].
-#[cfg(target_os = "macos")]
-pub fn parse_release(release: &Value) -> Result<ReleaseInfo> {
-    let tag = release
-        .get("tag_name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("release JSON missing `tag_name`"))?
-        .to_string();
-    let version = parse_tag(&tag)?;
-    let notes = release
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let (artifact_url, sha256_url) = pick_asset(release)?;
-    Ok(ReleaseInfo {
-        version,
-        tag,
-        notes,
-        artifact_url,
-        sha256_url,
-        expected_sha256: None,
-        expected_size: None,
-        minimum_macos: String::new(),
-    })
 }
 
 // ── network / IO (synchronous; run on a background thread) ──────────────────
@@ -298,9 +217,8 @@ fn fetch_latest_macos(current_version: &str) -> Result<UpdateStatus> {
         tag: manifest.tag,
         notes,
         artifact_url: urls.artifact,
-        sha256_url: String::new(),
-        expected_sha256: Some(manifest.sha256),
-        expected_size: Some(manifest.size),
+        expected_sha256: manifest.sha256,
+        expected_size: manifest.size,
         minimum_macos: manifest.minimum_macos,
     }))
 }
@@ -327,13 +245,7 @@ fn download_and_verify_macos(info: &ReleaseInfo, dest_dir: &Path) -> Result<Veri
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("create staging dir {}", dest_dir.display()))?;
 
-    let expected = info
-        .expected_sha256
-        .clone()
-        .ok_or_else(|| anyhow!("release is missing signed SHA-256 metadata"))?;
-    let expected_size = info
-        .expected_size
-        .ok_or_else(|| anyhow!("release is missing signed size metadata"))?;
+    let expected_size = info.expected_size;
     if expected_size > MAX_ARTIFACT_BYTES {
         bail!("release artifact exceeds maximum size");
     }
@@ -341,12 +253,11 @@ fn download_and_verify_macos(info: &ReleaseInfo, dest_dir: &Path) -> Result<Veri
         .header("User-Agent", USER_AGENT)
         .call()
         .context("download release dmg")?;
-    let (_, extension) = platform_asset_markers();
-    let file_name = format!("Sleipnir-{}-downloaded{}", info.version, extension);
+    let file_name = format!("Sleipnir-{}-downloaded.dmg", info.version);
     let path = crate::download::download_verified(
         response.body_mut().as_reader(),
         expected_size,
-        &expected,
+        &info.expected_sha256,
         dest_dir,
         &file_name,
     )
@@ -817,7 +728,6 @@ fn ensure_host_meets_minimum_macos(minimum: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use std::path::PathBuf;
 
     #[test]
@@ -847,60 +757,6 @@ mod tests {
         let latest = semver::Version::parse("0.2.0").unwrap();
         // A stable release is newer than the same-number prerelease.
         assert!(is_newer("0.2.0-beta.1", &latest));
-    }
-
-    #[test]
-    fn pick_asset_selects_dmg_and_sidecar() {
-        let release = json!({
-            "assets": [
-                {"name": "Sleipnir-0.2.0-windows-x64.exe",
-                 "browser_download_url": "https://x/exe"},
-                {"name": "Sleipnir-0.2.0-macos.dmg",
-                 "browser_download_url": "https://x/dmg"},
-                {"name": "Sleipnir-0.2.0-macos.dmg.sha256",
-                 "browser_download_url": "https://x/sha"}
-            ]
-        });
-        let (dmg, sha) = pick_asset_for(&release, "-macos", ".dmg").unwrap();
-        assert_eq!(dmg, "https://x/dmg");
-        assert_eq!(sha, "https://x/sha");
-    }
-
-    #[test]
-    fn pick_asset_errors_without_dmg() {
-        let release = json!({
-            "assets": [
-                {"name": "Sleipnir-0.2.0-windows-x64.exe",
-                 "browser_download_url": "https://x/exe"}
-            ]
-        });
-        assert!(pick_asset_for(&release, "-macos", ".dmg").is_err());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn parse_release_full() {
-        let (marker, extension) = platform_asset_markers();
-        let asset_name = format!("Sleipnir-0.2.0{marker}myarch{extension}");
-        let release = json!({
-            "tag_name": "v0.2.0",
-            "body": "notes here",
-            "assets": [
-                {"name": asset_name,
-                 "browser_download_url": "https://x/zip"},
-                {"name": format!("{asset_name}.sha256"),
-                 "browser_download_url": "https://x/sha"}
-            ]
-        });
-        let info = parse_release(&release).unwrap();
-        assert_eq!(info.version, semver::Version::new(0, 2, 0));
-        assert_eq!(info.tag, "v0.2.0");
-        assert_eq!(info.notes, "notes here");
-        assert_eq!(info.artifact_url, "https://x/zip");
-        assert_eq!(info.sha256_url, "https://x/sha");
-        assert_eq!(info.expected_sha256, None);
-        assert_eq!(info.expected_size, None);
-        assert_eq!(info.minimum_macos, "");
     }
 
     #[test]

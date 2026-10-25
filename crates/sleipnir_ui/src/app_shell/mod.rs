@@ -2,10 +2,6 @@
 
 /// Maps `CommandId` to canonical shell actions. A child module so it can reach
 /// `AppShell`'s private methods without widening them to the whole crate.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod browser_panel;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-mod browser_panel_stub;
 mod command_dispatch;
 mod diff;
 mod find;
@@ -126,8 +122,6 @@ actions!(
         ToggleDiff,
         /// Toggle the Plugin Monitor overlay (ADR-0016 §7).
         TogglePluginMonitor,
-        /// Toggle the native right-side browser (macOS / Windows).
-        ToggleBrowser,
     ]
 );
 
@@ -406,14 +400,6 @@ pub struct AppShell {
     /// Panel surfaces are owned by the pane tree (`LeafContent::Panel`).
     plugin_chrome: crate::plugin_chrome::ChromeRegistry,
     plugin_watch: crate::plugin_event_watch::PluginEventWatch,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    browser: Option<Entity<crate::browser::BrowserView>>,
-    /// Read through `browser_panel_is_open()` so the render path stays
-    /// platform-independent.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    browser_open: bool,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    _browser_bridge: Option<crate::browser_control::WindowBridge>,
 }
 
 /// What the shared confirm dialog is asking about.
@@ -463,7 +449,6 @@ impl AppShell {
         let old = self.input.owner();
         self.input.replace(next);
         self.teardown_input(old, cx);
-        self.sync_browser_presentation(cx);
     }
 
     pub(crate) fn open_overlay(&mut self, kind: OverlayKind, cx: &mut Context<Self>) {
@@ -895,12 +880,6 @@ impl AppShell {
             _housekeeping: gpui::Task::ready(()),
             plugin_chrome: crate::plugin_chrome::ChromeRegistry::default(),
             plugin_watch: crate::plugin_event_watch::PluginEventWatch::default(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            browser: None,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            browser_open: false,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            _browser_bridge: crate::browser_control::start(window, cx),
         };
         // Seed appearance state from this window and follow OS changes.
         // `Auto` resolves through AppearanceState; a pinned mode ignores the
@@ -935,7 +914,6 @@ impl AppShell {
                 if this
                     .update_in(cx, |this, window, cx| {
                         this.sync_ledger_focus(window, cx);
-                        this.poll_browser(window, cx);
                         this.refresh_pane_facts_if_stale(cx);
                     })
                     .is_err()
@@ -2226,7 +2204,6 @@ impl Render for AppShell {
         let chrome_h = geo.height;
         let banner_top = chrome_h;
         let show_tab_strip = self.tabs.len() > 1;
-        self.sync_browser_presentation(cx);
 
         div()
             .size_full()
@@ -2250,7 +2227,6 @@ impl Render for AppShell {
             // in-progress rename.
             .capture_any_mouse_down(cx.listener(
                 |this, event: &gpui::MouseDownEvent, window, cx| {
-                    this.reclaim_browser_focus(cx);
                     if matches!(this.input, InputMode::Rename(_))
                         && event.button == MouseButton::Left
                     {
@@ -2290,7 +2266,6 @@ impl Render for AppShell {
             .on_action(cx.listener(Self::on_open_quick_terminal))
             .on_action(cx.listener(Self::on_export_scrollback))
             .on_action(cx.listener(Self::on_toggle_plugin_monitor))
-            .on_action(cx.listener(Self::on_toggle_browser))
             .on_action(cx.listener(Self::on_mark_tab_seen))
             .on_action(cx.listener(Self::on_toggle_pane_facts))
             .on_action(cx.listener(Self::on_send_selection))
@@ -2325,14 +2300,6 @@ impl Render for AppShell {
                     // is `None`, so anything placed here collapses left into the
                     // macOS window-control and drag region.
                     .child(trailing_drag)
-                    .when(
-                        cfg!(any(target_os = "macos", target_os = "windows")),
-                        |el| {
-                            #[cfg(feature = "browser-panel")]
-                            let el = el.child(self.render_browser_toggle(&tokens, cx));
-                            el
-                        },
-                    )
                     .child(self.render_plugin_status_chip(&tokens, cx))
                     .child(self.render_plugin_chrome_status(&tokens, window, cx))
                     .when(!fullscreen, |el| {
@@ -2346,21 +2313,7 @@ impl Render for AppShell {
                     .when(self.input.is_find(), |el| {
                         el.child(self.render_find_bar(&tokens, cx))
                     })
-                    .child({
-                        let content = self.render_content(&tokens, window, cx);
-                        if self.browser_panel_is_open() {
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .flex()
-                                .flex_row()
-                                .child(div().flex_1().min_w_0().size_full().child(content))
-                                .child(self.render_browser_panel(&tokens, window, cx))
-                                .into_any_element()
-                        } else {
-                            content
-                        }
-                    })
+                    .child(self.render_content(&tokens, window, cx))
             })
             .when(self.broadcast, |el| {
                 el.child(

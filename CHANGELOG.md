@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+- Remove the embedded browser panel and browser Agent capability, including the WebView, per-window control service, `browser-mcp`, `browser-ctl`, `browser-agent`, and browser menu, command palette, and key binding actions. Existing custom browser key bindings are ignored.
+
 ## 0.6.9
 
 ### Removed

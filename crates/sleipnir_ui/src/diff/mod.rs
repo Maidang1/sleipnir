@@ -20,16 +20,9 @@ pub(crate) const SESSION_TTL: std::time::Duration = std::time::Duration::from_se
 
 /// Window-level inspector state. Lives on AppShell; never on a Pane.
 pub(crate) enum DiffView {
-    Loading {
-        title: String,
-        #[allow(dead_code)]
-        generation: u64,
-    },
+    Loading { title: String },
     Ready(DiffSession),
-    Message {
-        title: String,
-        body: String,
-    },
+    Message { title: String, body: String },
 }
 
 pub(crate) struct DiffSession {

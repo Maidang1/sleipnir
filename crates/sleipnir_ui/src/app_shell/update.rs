@@ -13,7 +13,7 @@ use super::{AppShell, CheckForUpdates};
 use crate::chrome::ChromeTokens;
 use crate::chrome::pixel;
 use crate::ui_mode::OverlayKind;
-use crate::{AvailableUpdate, UpdateModel, UpdateUiState};
+use crate::{UpdateModel, UpdateUiState};
 
 impl AppShell {
     pub(super) fn on_check_for_updates(
@@ -80,17 +80,7 @@ impl AppShell {
             this.update(cx, |_this, cx| {
                 match result {
                     Ok(updater::UpdateStatus::Available(info)) => {
-                        cx.global_mut::<UpdateModel>().state =
-                            UpdateUiState::Available(AvailableUpdate {
-                                version: info.version.to_string(),
-                                tag: info.tag,
-                                notes: info.notes,
-                                artifact_url: info.artifact_url,
-                                sha256_url: info.sha256_url,
-                                expected_sha256: info.expected_sha256,
-                                expected_size: info.expected_size,
-                                minimum_macos: info.minimum_macos,
-                            });
+                        cx.global_mut::<UpdateModel>().state = UpdateUiState::Available(info);
                     }
                     Ok(updater::UpdateStatus::UpToDate) => {
                         cx.global_mut::<UpdateModel>().state = UpdateUiState::UpToDate;
@@ -117,23 +107,7 @@ impl AppShell {
         cx.global_mut::<UpdateModel>().state = UpdateUiState::Downloading(update.clone());
         cx.notify();
 
-        let info = updater::ReleaseInfo {
-            version: match updater::parse_tag(&update.tag) {
-                Ok(v) => v,
-                Err(err) => {
-                    cx.global_mut::<UpdateModel>().state = UpdateUiState::Failed(format!("{err}"));
-                    cx.notify();
-                    return;
-                }
-            },
-            tag: update.tag.clone(),
-            notes: update.notes.clone(),
-            artifact_url: update.artifact_url.clone(),
-            sha256_url: update.sha256_url.clone(),
-            expected_sha256: update.expected_sha256.clone(),
-            expected_size: update.expected_size,
-            minimum_macos: update.minimum_macos.clone(),
-        };
+        let info = update.clone();
         let dest = std::env::temp_dir().join(format!("sleipnir-update-{}", std::process::id()));
 
         cx.spawn_in(window, async move |this, cx| {

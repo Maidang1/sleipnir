@@ -10,7 +10,7 @@ mod hyperlinks;
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener, WindowSize},
     event_loop::Msg,
-    grid::{Dimensions, GridIterator, Scroll as AlacScroll},
+    grid::{Dimensions, Scroll as AlacScroll},
     index::{Boundary, Column, Direction as AlacDirection, Line, Point as AlacPoint},
     selection::{
         Selection as AlacSelection, SelectionRange as AlacSelectionRange,
@@ -38,8 +38,8 @@ use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use crate::{
     Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
-    PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange, SelectionSide,
-    SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
+    PtyEvent, Range, Scroll, Search, Selection, SelectionRange, SelectionSide, SelectionType,
+    TerminalBackendEvent, TerminalBounds, ViMotion,
     pty_info::ProcessIdGetter,
     terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
 };
@@ -51,7 +51,6 @@ pub(super) type AlacrittyTerm = Term<ZedListener>;
 pub(super) type AlacrittyTermConfig = Config;
 pub(super) type AlacrittyTermLock = FairMutex<AlacrittyTerm>;
 pub(super) type AlacrittyCell = AlacCell;
-pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
 pub(super) type AlacrittyHyperlink = AlacHyperlink;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -519,34 +518,6 @@ impl Cell {
     pub fn is_italic(&self) -> bool {
         self.cell.flags.intersects(Flags::ITALIC)
     }
-
-    #[inline]
-    pub fn has_visible_style_modifier(&self) -> bool {
-        self.cell
-            .flags
-            .intersects(Flags::ALL_UNDERLINES | Flags::INVERSE | Flags::STRIKEOUT)
-    }
-}
-
-impl<'a> RenderableCells<'a> {
-    pub(super) fn new(cells: GridIterator<'a, AlacCell>) -> Self {
-        Self { cells }
-    }
-}
-
-impl Iterator for RenderableCells<'_> {
-    type Item = IndexedCell;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.cells.next().map(|cell| IndexedCell {
-            point: terminal_point_from_alacritty(cell.point),
-            cell: terminal_cell_from_alacritty(cell.cell),
-        })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.cells.size_hint()
-    }
 }
 
 impl Modes {
@@ -869,10 +840,6 @@ pub(super) fn take_damage_kind(term: &mut Term<ZedListener>) -> DamageKind {
     };
     term.reset_damage();
     kind
-}
-
-pub(super) fn screen_lines(term: &Term<ZedListener>) -> usize {
-    term.screen_lines()
 }
 
 pub(super) fn update_vi_cursor_for_scroll(term: &mut Term<ZedListener>, scroll: Scroll) {

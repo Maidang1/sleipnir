@@ -157,13 +157,6 @@ impl RunLedgerGlobal {
         self.core.ledger.failed_attention_count()
     }
 
-    pub fn attention_count(&self) -> usize {
-        if self.core.mode == RunLedgerMode::Off {
-            return 0;
-        }
-        self.core.ledger.attention().count()
-    }
-
     pub fn pane_has_attention(&self, pane: PaneKey) -> bool {
         if self.core.mode == RunLedgerMode::Off {
             return false;
@@ -218,32 +211,11 @@ impl RunLedgerGlobal {
         self.core.ledger.mark_pane_seen(pane);
     }
 
-    pub fn apply_in(cx: &mut App, event: RunEvent) {
-        if !cx.has_global::<Self>() {
-            return;
-        }
-        cx.update_global(|this: &mut RunLedgerGlobal, _cx| this.apply(event));
-    }
-
     pub fn reload_settings_in(cx: &mut App) {
         if !cx.has_global::<Self>() {
             return;
         }
         cx.update_global(|this: &mut RunLedgerGlobal, cx| this.reload_settings(cx));
-    }
-
-    pub fn rebase_anchors_in(cx: &mut App, pane: PaneKey, removed: i32) {
-        if !cx.has_global::<Self>() {
-            return;
-        }
-        cx.update_global(|this: &mut RunLedgerGlobal, _cx| this.rebase_anchors(pane, removed));
-    }
-
-    pub fn clear_anchors_in(cx: &mut App, pane: PaneKey) {
-        if !cx.has_global::<Self>() {
-            return;
-        }
-        cx.update_global(|this: &mut RunLedgerGlobal, _cx| this.clear_anchors(pane));
     }
 
     pub fn apply_block_anchor_change_in(

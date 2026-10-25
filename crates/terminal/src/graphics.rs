@@ -936,11 +936,6 @@ fn anchor_pairs(marks: &[char]) -> impl Iterator<Item = (u32, Option<usize>)> + 
     })
 }
 
-/// One still frame as the BGRA picture [`gpui::RenderImage`] stores.
-pub fn decode_image(image: &kitty::Image) -> Option<Arc<gpui::RenderImage>> {
-    decode_frame(image, 0)
-}
-
 fn decode_frame(image: &kitty::Image, index: usize) -> Option<Arc<gpui::RenderImage>> {
     let rgba = if index == 0 {
         crate::pixels::Rgba::decode(image.format, image.width, image.height, &image.bytes)?

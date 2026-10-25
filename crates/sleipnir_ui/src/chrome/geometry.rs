@@ -72,12 +72,6 @@ impl ChromeGeometry {
 }
 
 #[inline]
-#[allow(dead_code)]
-pub fn traffic_light_leading_pad() -> Pixels {
-    leading_pad_for(cfg!(not(target_os = "macos")))
-}
-
-#[inline]
 pub fn leading_pad_for(desktop_controls: bool) -> Pixels {
     if desktop_controls {
         px(8.0)
@@ -113,7 +107,7 @@ mod tests {
         assert_eq!(g.traffic_light_position, point(px(12.0), px(8.0)));
         assert_eq!(g.close_hit, px(24.0));
         assert_eq!(g.new_tab_hit, px(28.0));
-        let pad = traffic_light_leading_pad();
+        let pad = g.leading_pad;
         if cfg!(target_os = "macos") {
             assert!(pad == px(71.0) || pad == px(78.0));
             assert_eq!(g.trailing_pad, px(8.0));

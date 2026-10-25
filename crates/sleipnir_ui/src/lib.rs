@@ -4,10 +4,6 @@ mod app_shell;
 pub mod appearance;
 mod attention_chrome;
 mod blink;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod browser;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod browser_control;
 mod chrome;
 mod command_palette;
 mod control_surface;
@@ -41,8 +37,8 @@ pub use app_shell::{
     FocusPaneUp, IncreaseFontSize, JumpNextPrompt, JumpPrevPrompt, MarkTabSeen, NewTab, NewWindow,
     NextTab, OpenQuickTerminal, OpenSettings, PipeSelection, PrevTab, ReloadSettings,
     ReopenClosedTab, ResetFontSize, SendGitDiff, SendSelection, SplitDown, SplitRight,
-    ToggleBroadcast, ToggleBrowser, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch,
-    TogglePaneFacts, TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, open_sleipnir_window,
+    ToggleBroadcast, ToggleCommandPalette, ToggleDiff, ToggleHistorySearch, TogglePaneFacts,
+    TogglePaneZoom, TogglePluginMonitor, ToggleQuickSelect, open_sleipnir_window,
     try_open_sleipnir_window,
 };
 pub use chrome::{ChromeGeometry, ChromeTokens, active_after_close, contrast_ratio};
@@ -60,7 +56,7 @@ pub use pane_tree::{
 };
 pub use run_ledger_global::RunLedgerGlobal;
 pub use term_element::TermElement;
-pub use update_model::{AvailableUpdate, UpdateModel, UpdateUiState};
+pub use update_model::{UpdateModel, UpdateUiState};
 
 use collections::HashMap;
 use gpui::Pixels;
@@ -71,9 +67,7 @@ use gpui::{
     Keystroke, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Task, Window, div, rgb,
 };
-use sleipnir_settings::{
-    NotifyOnCommandFinish, TerminalBell, TerminalBlink, TerminalPalette, TerminalSettings,
-};
+use sleipnir_settings::{NotifyOnCommandFinish, TerminalBell, TerminalPalette, TerminalSettings};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -175,19 +169,6 @@ impl Focusable for TermView {
 }
 
 impl TermView {
-    /// Spawn a local interactive shell PTY and attach UI when ready.
-    pub fn new_local(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::new_local_with_cwd(None, window, cx)
-    }
-
-    pub(crate) fn new_local_with_cwd(
-        cwd: Option<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_local_with(cwd, None, window, cx)
-    }
-
     /// Spawn a pane. `command` is program + argv, never a shell line
     /// (ADR-0013 / HostCall::OpenPane).
     pub(crate) fn new_local_with(
@@ -203,16 +184,6 @@ impl TermView {
         for (k, v) in &settings.env {
             env.insert(k.clone(), v.clone());
         }
-        // Works even when a GUI launch did not put the app bundle on PATH.
-        // No shell startup files or global environment are rewritten.
-        if let Ok(executable) = std::env::current_exe() {
-            env.insert(
-                "SLEIPNIR_BIN".into(),
-                executable.to_string_lossy().into_owned(),
-            );
-        }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        crate::browser_control::inject_environment(window_id, &mut env, cx);
         let shell = match command {
             Some((program, args)) => Shell::WithArguments {
                 program,
@@ -712,15 +683,6 @@ impl TermView {
         }
         crate::plugin_runtime::push_action(surface.owner_instance_id, id, hit.action, hit.arg, cx);
         true
-    }
-
-    /// Whether the cursor animation should keep requesting frames.
-    pub fn blink_needs_animation(&self, cx: &App) -> bool {
-        match TerminalSettings::get_global(cx).blinking {
-            TerminalBlink::Off => false,
-            TerminalBlink::On => true,
-            TerminalBlink::TerminalControlled => self.terminal_wants_blink,
-        }
     }
 
     /// Show a brief bottom toast after text lands on the clipboard.
